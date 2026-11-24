@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Hashable
+from collections.abc import Callable, Hashable
 from typing import Any
 
 import numpy as np
@@ -81,6 +81,7 @@ def _ordered_piecewise_structural_rows(
     is_sandwich: bool = False,
     sandwich_penalized: bool = False,
     wald_df_limit: int | None = None,
+    determines: Callable[[NDArray], NDArray[np.bool_]] | None = None,
 ) -> list[_CoefRow]:
     """Structural contrast rows for an OrderedCategorical Piecewise basis.
 
@@ -91,6 +92,9 @@ def _ordered_piecewise_structural_rows(
     honest vocabulary under C0 seams, where per-segment orthogonal per-power
     z-statistics do not exist (the segments share their joint values, so
     within-segment components are not free parameters).
+
+    ``determines`` (a robust covariance's, over the block's coefficients) leaves a
+    row it does not determine its estimate alone, with no error or test.
     """
     from scipy.stats import chi2 as chi2_dist
 
@@ -101,16 +105,23 @@ def _ordered_piecewise_structural_rows(
     def _level_at(knot_index: int) -> str:
         return str(levels[int(round(float(knots[knot_index])))])
 
+    def undetermined(contrasts: NDArray) -> bool:
+        return determines is not None and not bool(np.all(determines(np.atleast_2d(contrasts))))
+
     rows: list[_CoefRow] = []
     for structural in inner.ordered_structural_rows():
         if structural.kind == "slope_change":
             contrast = structural.contrast
             estimate = float(contrast @ b_main)
+            name = f"{feature_name}[slope-change @ {_level_at(structural.index)}]"
+            if undetermined(contrast):
+                rows.append(_CoefRow(name=name, group=feature_label, coef=estimate))
+                continue
             se_val = covariance_contrast_se(V_b_main, contrast)
             z, p, ci_lo, ci_hi = _compute_coef_stats(estimate, se_val, alpha)
             rows.append(
                 _CoefRow(
-                    name=f"{feature_name}[slope-change @ {_level_at(structural.index)}]",
+                    name=name,
                     group=feature_label,
                     coef=estimate,
                     se=se_val,
@@ -128,6 +139,15 @@ def _ordered_piecewise_structural_rows(
             coef_val = float(b_main[indices[0]])
             contrast = np.zeros(len(b_main))
             contrast[indices[0]] = 1.0
+            if undetermined(contrast):
+                rows.append(
+                    _CoefRow(
+                        name=f"{feature_name}[curvature {segment_label}]",
+                        group=feature_label,
+                        coef=coef_val,
+                    )
+                )
+                continue
             se_val = covariance_contrast_se(V_b_main, contrast)
             z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
             rows.append(
@@ -154,7 +174,7 @@ def _ordered_piecewise_structural_rows(
         p_val: float | None = float("nan")
         ref_df: float | None = float(indices.size)
         if is_sandwich:
-            if sandwich_penalized:
+            if sandwich_penalized or undetermined(np.eye(len(b_main))[indices]):
                 stat = p_val = ref_df = None
             else:
                 from superglm.inference._sandwich_core import wald_block_statistic
@@ -427,6 +447,19 @@ def build_coef_rows(
 
     def moves(column: int) -> bool:
         return separated is not None and bool(separated[column])
+
+    def _block_determines(start: int) -> Callable[[NDArray], NDArray[np.bool_]] | None:
+        """``determines`` of a robust covariance for contrasts of the block at ``start``, or none."""
+        covariance = sandwich_covariance
+        if covariance is None:
+            return None
+
+        def determines(contrasts: NDArray) -> NDArray[np.bool_]:
+            rows = np.zeros((len(contrasts), covariance.n_params))
+            rows[:, start : start + contrasts.shape[1]] = contrasts
+            return covariance.determines(rows)
+
+        return determines
 
     def _block_wald_for(
         b_block: NDArray,
@@ -775,6 +808,7 @@ def build_coef_rows(
                 p_val = None if is_sandwich else float("nan")
                 ref_df = None if is_sandwich else float(main_group.size)
                 V_b_main: NDArray | None = None
+                main_determines = None
                 if smooth_active:
                     ag = next(
                         (a for a in active_groups if a.name == main_group.name),
@@ -782,6 +816,7 @@ def build_coef_rows(
                     )
                     if ag is not None:
                         V_b_main = _augmented_group_block(ag)
+                        main_determines = _block_determines(1 + ag.start)
                         stat, p_val, ref_df = _block_wald_for(
                             b_main, V_b_main, main_group.sl, main_group.name
                         )
@@ -843,6 +878,7 @@ def build_coef_rows(
                             is_sandwich=is_sandwich,
                             sandwich_penalized=main_group.name in sandwich_penalized_groups,
                             wald_df_limit=wald_df_limit,
+                            determines=main_determines,
                         )
                     )
 

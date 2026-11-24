@@ -1758,6 +1758,71 @@ class TestCoefficientsTheFitDoesNotDetermine:
             intercept.se, math.sqrt(contrast @ cov.covariance @ contrast), rtol=1e-10
         )
 
+    @pytest.mark.parametrize("degrees", [None, [2, 2], [3, 2]])
+    def test_structural_rows_of_twin_ordered_piecewise_terms_carry_no_error(self, degrees):
+        """Two piecewise ordered terms on one column: no slope change or curvature is determined.
+
+        Each structural contrast of either term raises the design's rank when appended,
+        so its row keeps its estimate and gives no error, interval or test: the
+        slope-change row, a one-freedom curvature row (degree 2) and a curvature family
+        (degree 3).  The same contrast of a single such term keeps ``sqrt(t' V t)``.
+        """
+        labels = list("abcdefgh")
+        z = np.tile(labels, 20)
+        y = np.tile(np.arange(8.0) ** 2, 20) + np.sin(np.arange(160.0))
+        settings = {} if degrees is None else {"degrees": degrees}
+
+        def fitted(names):
+            features = {
+                name: OrderedCategorical(
+                    order=labels, base="a", basis=Piecewise(breaks=["d"], **settings)
+                )
+                for name in names
+            }
+            model = SuperGLM(family="gaussian", features=features).fit(
+                pd.DataFrame({name: z for name in names}), y
+            )
+            return model, model.sandwich_covariance()
+
+        def structural(model, cov, name):
+            group = next(g for g in model._groups if g.feature_name == name)
+            contrasts = []
+            for row in model._specs[name]._basis_spline.ordered_structural_rows():
+                if row.kind == "slope_change":
+                    block = row.contrast[None, :]
+                else:
+                    block = np.eye(group.size)[np.asarray(row.column_indices, dtype=np.intp)]
+                full = np.zeros((len(block), cov.n_params))
+                full[:, 1 + group.start : 1 + group.end] = block
+                contrasts.append(full)
+            return np.vstack(contrasts)
+
+        model, cov = fitted(["a", "b"])
+        assert cov.n_params == 1 + len(model.result.beta)
+        for name in ("a", "b"):
+            for contrast in structural(model, cov, name):
+                assert self._rank_gain(model, contrast) == 1
+                assert not cov.determines(contrast)[0]
+        rows = [
+            r
+            for r in model.summary(covariance=cov)._coef_rows
+            if "slope-change" in r.name or "curvature" in r.name
+        ]
+        assert {r.name.split("[")[0] for r in rows} == {"a", "b"}
+        for row in rows:
+            assert row.se is None and row.p is None and row.ci_low is None, row.name
+            assert row.wald_chi2 is None and row.wald_p is None, row.name
+
+        single, single_cov = fitted(["a"])
+        slope_change = structural(single, single_cov, "a")[0]
+        row = next(
+            r for r in single.summary(covariance=single_cov)._coef_rows if "slope-change" in r.name
+        )
+        np.testing.assert_allclose(
+            row.se, math.sqrt(slope_change @ single_cov.covariance @ slope_change), rtol=1e-10
+        )
+        assert np.isfinite(row.p)
+
 
 class TestWaldTestsACovarianceCanCarry:
     def test_two_clusters_carry_no_two_df_test_and_three_carry_it(self):
