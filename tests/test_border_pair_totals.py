@@ -445,8 +445,9 @@ def test_the_pair_scratch_is_sized_by_the_chunk_not_by_a_leafs_levels(
     ``cut``: one leaf of 768 rows, each on its own level of a 768-level
     effect, beside a 2-level effect and 112 dense columns.  A 16-row chunk
     takes 16 of that leaf's 768 pairs and sums those alone (a signed pass
-    reads the other 752 from the stored mean), and with the leaf in one chunk
-    the two effects' joint table is 769 by 3.  ``short``: 4,096 leaves of two
+    reads the other 752 from the stored mean, in vectors of the border's
+    width), and with the leaf in one chunk the two effects' joint table is
+    769 by 3.  ``short``: 4,096 leaves of two
     rows on three levels beside 90 dense columns.  The step holds the pair
     sums (a row for each pair the chunk's rows take, at most ``rows + 1``) and
     the scratch that centres them (the longest segment's pairs), ``width + 3``
@@ -475,7 +476,14 @@ def test_the_pair_scratch_is_sized_by_the_chunk_not_by_a_leafs_levels(
         (weights, {}),
         (rng.normal(size=n) * weights, dict(mean=data.mean, center=data.center)),
     )
-    step, excess = moments._indicator_pairs, []
+    step, untaken, excess = moments._indicator_pairs, moments._absent_pairs, []
+
+    def traced_untaken(*args):
+        held = tracemalloc.get_traced_memory()[0]
+        tracemalloc.reset_peak()
+        pairs = untaken(*args)
+        excess.append(tracemalloc.get_traced_memory()[1] - held - 8 * 32 * (len(args[7]) + q))
+        return pairs
 
     def traced(*args):
         held = tracemalloc.get_traced_memory()[0]
@@ -489,6 +497,7 @@ def test_the_pair_scratch_is_sized_by_the_chunk_not_by_a_leafs_levels(
         return scatter, *pairs
 
     monkeypatch.setattr(moments, "_indicator_pairs", traced)
+    monkeypatch.setattr(moments, "_absent_pairs", traced_untaken)
     for a, options in passes:  # the kernels compile, or load, outside the trace
         build_nested_leaf_statistics(layout, matrices, a, chunk_size=chunk_size, **options)
     excess.clear()

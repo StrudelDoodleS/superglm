@@ -468,6 +468,20 @@ def _centered_leaf_pass(
         scatter, owner, column, pair_deviation, mass = _indicator_pairs(
             indicators, mean, width, lo, leaves, bounds, a, error_chunk, weighted
         )
+        if indicators and not data_pass:
+            # a cut piece may miss levels of its leaf that the given mean is not zero on
+            owner, column, pair_deviation, mass = _absent_pairs(
+                scatter,
+                mean,
+                width,
+                leaves,
+                bounds,
+                np.flatnonzero(cut),
+                (owner, column, pair_deviation, mass),
+                a,
+                error_chunk,
+                weighted,
+            )
         _compensated_add(within, compensation, _chunk_scatter(dense, scatter))
         absolute[width:] += np.bincount(column, weights=mass, minlength=q - width)
         if not data_pass:
@@ -616,7 +630,7 @@ def _indicator_pairs(
     term (``leaf_kernels``): no row is written once per level its leaf meets.
     The pairs are those the chunk's rows take, so the dense scratch has at
     most a row per row of the chunk; a level of a cut leaf that its piece
-    does not meet enters through the stored mean alone (``_absent_pairs``).
+    does not meet is the caller's (``_absent_pairs``).
     Returns ``scatter`` ``(indicator columns, q)``, their rows of ``sum_r a_r
     (x_r - m)(x_r - m)'``, and per pair its segment ``owner``, its ``column``
     among the indicator columns, ``deviation`` ``(pairs, 3)`` the segment's
@@ -636,7 +650,7 @@ def _indicator_pairs(
         cell = np.maximum(cells.row_cell[lo : lo + len(a)] - first, -1)
         taken = np.zeros(span[-1] + 1, dtype=bool)
         taken[cell] = True
-        taken[-1] = False
+        none, taken[-1] = taken[-1], False
         position = np.cumsum(taken) - 1
         position[-1] = -1
         own, pair_bounds = position[cell], position[span - 1] + 1
@@ -644,9 +658,11 @@ def _indicator_pairs(
         column = offset + cells.level[first + np.flatnonzero(taken)]
         m = mean[leaves[owner], width + column]
         # a spare row for each segment with rows of no level; the others share a row of zeros
-        lacking = np.logical_or.reduceat(own < 0, bounds[:-1])
-        spares = int(np.count_nonzero(lacking))
-        spare = len(column) + np.where(lacking, np.cumsum(lacking) - 1, spares)
+        spares, spare = 0, np.full(len(leaves), len(column))
+        if none:
+            lacking = np.logical_or.reduceat(own < 0, bounds[:-1])
+            spares = int(np.count_nonzero(lacking))
+            spare = len(column) + np.where(lacking, np.cumsum(lacking) - 1, spares)
         sums = np.zeros((len(column) + spares + 1, width + 3))
         _pair_sums(own, bounds, spare, a, error, weighted, sums)
         deviation, mass = np.empty((len(column), 3)), np.empty(len(column))
@@ -659,26 +675,6 @@ def _indicator_pairs(
         parts.append((owner, column, deviation, mass))
         offset += len(cells.columns)
     owner, column, deviation, mass = (np.concatenate(values) for values in zip(*parts, strict=True))
-    # only a chunk's first and last segments can be pieces of a cut leaf
-    for index in {0, len(leaves) - 1}:
-        mine = owner == index
-        rows = slice(bounds[index], bounds[index + 1])
-        absent = _absent_pairs(
-            scatter,
-            mean[leaves[index]],
-            width,
-            index,
-            column[mine],
-            deviation[mine, 0],
-            a[rows],
-            error[rows],
-            weighted[rows],
-        )
-        if absent is not None:
-            owner, column, deviation, mass = (
-                np.concatenate(both)
-                for both in zip((owner, column, deviation, mass), absent, strict=True)
-            )
     return scatter, owner, column, deviation, mass
 
 
@@ -686,38 +682,46 @@ def _absent_pairs(
     scatter: NDArray,
     mean: NDArray,
     width: int,
-    index: int,
-    taken: NDArray,
-    taken_deviation: NDArray,
+    leaves: NDArray,
+    bounds: NDArray,
+    pieces: NDArray,
+    pairs: tuple[NDArray, NDArray, NDArray, NDArray],
     a: NDArray,
     error: NDArray,
     weighted: NDArray,
-) -> tuple[NDArray, NDArray, NDArray, NDArray] | None:
-    """The pairs of one segment's indicator columns that none of its rows takes.
+) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+    """Add to a chunk's ``pairs`` the indicator columns that none of a cut piece's rows takes.
 
-    Such a column has ``x = 0`` on every row, so its centred value is the
-    stored ``-m``: the pair's sums are ``-m`` times the piece's own (``sum a``,
-    ``sum error``, ``sum max(-a, 0)``), its mass ``m^2 sum error``, and its
-    row and column of the scatter ``-m`` times the piece's ``sum_r a_r (x_r -
-    m)`` (``leaf_kernels._absent_levels``).  Only a signed pass about given
-    means has any: a data pass centres a piece on its own rows, whose mean is
-    zero there.  ``taken`` are the columns the segment's rows do take and
-    ``taken_deviation`` their ``sum_r a_r (x_rj - m_j)``.  Adds to ``scatter``
-    and returns the pairs as ``_indicator_pairs`` does, ``None`` without any.
+    Such a column has ``x = 0`` on every row of the piece, so its centred
+    value is the stored ``-m``: the pair's sums are ``-m`` times the piece's
+    own (``sum a``, ``sum error``, ``sum max(-a, 0)``), its mass ``m^2 sum
+    error``, and its row and column of the scatter ``-m`` times the piece's
+    ``sum_r a_r (x_r - m)`` (``leaf_kernels._absent_levels``), each product
+    weight first.  ``pieces`` are the segments a chunk edge cut, and ``pairs``
+    what ``_indicator_pairs`` returned after ``scatter``, which gains the
+    rows and columns.  For a signed pass about given means: a data pass
+    centres a piece on its own rows, whose mean is zero on such a column.
     """
-    shift = -mean[width:]
-    shift[taken] = 0.0
-    absent = np.flatnonzero(shift)
-    if not absent.size:
-        return None
-    totals = np.array([np.sum(a), np.sum(error), np.sum(np.maximum(-a, 0.0))])
-    piece = np.zeros(len(mean))
-    piece[:width] = np.sum(weighted, axis=0)
-    piece[width + taken] = taken_deviation
-    piece[width + absent] = totals[0] * shift[absent]
-    _absent_levels(absent, shift, piece, width, scatter)
-    mass = totals[1] * shift[absent] * shift[absent]
-    return np.full(len(absent), index), absent, np.outer(shift[absent], totals), mass
+    owner, column, deviation, mass = pairs
+    for index in pieces:
+        mine = owner == index
+        shift = -mean[leaves[index], width:]
+        shift[column[mine]] = 0.0
+        absent = np.flatnonzero(shift)
+        if not absent.size:
+            continue
+        rows = slice(bounds[index], bounds[index + 1])
+        totals = np.array([np.sum(a[rows]), np.sum(error[rows]), np.sum(np.maximum(-a[rows], 0.0))])
+        piece = np.zeros(mean.shape[1])
+        piece[:width] = np.sum(weighted[rows], axis=0)
+        piece[width + column[mine]] = deviation[mine, 0]
+        piece[width + absent] = totals[0] * shift[absent]
+        _absent_levels(absent, shift, piece, width, scatter)
+        owner = np.concatenate((owner, np.full(len(absent), index)))
+        column = np.concatenate((column, absent))
+        deviation = np.concatenate((deviation, np.outer(shift[absent], totals)))
+        mass = np.concatenate((mass, totals[1] * shift[absent] * shift[absent]))
+    return owner, column, deviation, mass
 
 
 def _combine_leaf_pieces(
