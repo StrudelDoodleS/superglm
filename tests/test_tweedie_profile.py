@@ -1153,8 +1153,10 @@ class TestMaximumLikelihoodPhi:
         x = rng.uniform(0.0, 1.0, 800)
         y = generate_tweedie_cpg(800, np.exp(0.3 + 0.5 * np.sin(4 * x)), 1.3, 1.5, rng=rng)
         model = SuperGLM(family=TweedieDistribution(p=1.5), features={"x": Spline(n_knots=8)})
-        with pytest.warns(UserWarning, match="search_fit_mode='fit'"):
+        with pytest.warns(UserWarning, match="smoothing parameters did not converge"):
             result = model.estimate_p(pd.DataFrame({"x": x}), y, fit_mode="reml", ci_alpha=0.05)
+        assert sum("smoothing parameters did not converge" in msg for msg in result.warnings) >= 2
+        assert not any("budget" in message for message in result.warnings)
         assert not any("max_iter" in message for message in result.warnings)
         # Disclosed, not refused: the interval exists.
         assert 0.05 in result._ci_cache

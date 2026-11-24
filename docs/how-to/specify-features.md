@@ -183,6 +183,36 @@ the [migration note](../development/migrations/general-pspline-penalty.md).
 is the REML-native way to let a smooth shrink toward linear or zero while
 staying in the `fit_reml()` workflow.
 
+### Cardinal cubic regression splines
+
+`Spline(kind="cr_cardinal")` uses the same parameterisation as
+[mgcv's `bs="cr"`](https://stat.ethz.ch/R-manual/R-devel/library/mgcv/html/smooth.construct.cr.smooth.spec.html),
+which represents the spline by its values at the knots. SuperGLM's
+`kind="cr"` uses a B-spline basis with natural boundary conditions.
+
+For example, fit a cardinal spline to a curved response and predict at two
+points within the observed range:
+
+```python
+import numpy as np
+import pandas as pd
+from superglm import Spline, SuperGLM
+
+x = np.linspace(0, 1, 100)
+X = pd.DataFrame({"x": x})
+y = np.sin(2 * np.pi * x) + np.random.default_rng(42).normal(0, 0.1, len(x))
+model = SuperGLM(
+    family="gaussian",
+    selection_penalty=0,
+    features={"x": Spline(kind="cr_cardinal", k=8, m=2)},
+)
+model.fit_reml(X, y)
+prediction = model.predict(pd.DataFrame({"x": [0.25, 0.75]}))
+```
+
+The cardinal basis supports only the second-order penalty (`m=2`) and has
+no fit-time shape constraints.
+
 ### Multi-order penalties with `m=`
 
 `m` can be a single integer or a tuple. With a tuple, the spline emits
@@ -203,7 +233,6 @@ Current limitations:
   components, each with its own REML lambda. Per-class order limits still
   apply.
 - tensor interactions with multi-order spline parents are not yet supported
-- `kind="cr_cardinal"` currently supports only `m=2`
 
 ### Polynomial ranges (`polynomial_ranges=`)
 
