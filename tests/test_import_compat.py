@@ -87,6 +87,9 @@ _LAZY_PACKAGES = (
     "superglm.profiling",
     "superglm.plotting",
     "superglm.export",
+    "superglm.editor",
+    "superglm.editor.lss",
+    "superglm.screening",
 )
 _LIBRARIES = (
     "numpy",
@@ -444,8 +447,20 @@ os._exit(0)
         ("profiling", "_scalar", "nb"),
         ("plotting", "common", "comparison"),
         ("export", "_ppform", "rating_tables"),
+        ("editor", "errors", "collapse"),
+        ("editor.lss", "view", "display"),
+        ("screening", "_factor_kernels", "_pair_factor"),
     ],
-    ids=["penalties", "stats", "profiling", "plotting", "export"],
+    ids=[
+        "penalties",
+        "stats",
+        "profiling",
+        "plotting",
+        "export",
+        "editor",
+        "editor-lss",
+        "screening",
+    ],
 )
 def test_a_package_whose_child_is_imported_cold_never_waits_on_a_sibling(package, held, waiting):
     """A cold import of ``package.held`` holds that child's lock while the package body runs.
@@ -574,17 +589,24 @@ def test_no_two_module_bodies_a_cold_import_runs_can_wait_on_each_other():
     reads, and, when it imports ``a.b`` cold, the lock of ``a`` while it holds ``a.b``'s: a
     package body that imports its children closes a cycle with any child imported by path.
     Two threads on a cycle are what CPython breaks with ``_DeadlockError`` or a half-built
-    module. Recorded from every body that reading each root export, and each module the
-    six-submodule test imports, runs. The root's own cycle with ``superglm._lazy`` and
+    module. Recorded from every body that reading each root export, each module the
+    six-submodule test imports, and each module of the editor and of screening, runs. The root's own cycle with ``superglm._lazy`` and
     ``superglm._numba_cache`` stays: its body must import the loader, and it closes only for a
     thread whose first import is one of those private modules by path. Mutation check: any
-    ``penalties``, ``stats``, ``profiling``, ``plotting`` or ``export`` body importing its
-    children again fails this.
+    ``penalties``, ``stats``, ``profiling``, ``plotting``, ``export``, ``editor``, ``editor.lss``
+    or ``screening`` body importing its children again fails this.
     """
     six = ("terms", "model.api", "inference._term_covariance", "inference._term_ops")
     six += ("features.categorical", "features.interaction")
+    src = Path(__file__).resolve().parents[1] / "src"
+    packages = [src / "superglm" / "editor", src / "superglm" / "screening"]
+    modules = sorted(
+        ".".join(path.relative_to(src).with_suffix("").parts).removesuffix(".__init__")
+        for package in packages
+        for path in package.rglob("*.py")
+    )
     completed = subprocess.run(
-        [sys.executable, "-c", _LOCK_WAITS, *(f"superglm.{path}" for path in six)],
+        [sys.executable, "-c", _LOCK_WAITS, *(f"superglm.{path}" for path in six), *modules],
         capture_output=True,
         text=True,
     )
