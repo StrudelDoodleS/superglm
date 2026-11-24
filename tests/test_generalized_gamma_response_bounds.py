@@ -71,7 +71,7 @@ from superglm.distributional.weights import (
     WeightContract,
     resolve_likelihood_weights,
 )
-from superglm.links import IdentityLink
+from superglm.links import IdentityLink, LogLink
 
 mp = pytest.importorskip("mpmath")
 
@@ -671,6 +671,100 @@ def test_generalized_gamma_windows_keep_signed_zero_and_invalid_rows(monkeypatch
 
 
 # -- smoothing parameters -----------------------------------------------------
+
+
+@pytest.mark.parametrize("form", _FORMS)
+@pytest.mark.parametrize("order", [3, 4])
+def test_stacked_curvature_reads_each_bounded_jet_once(monkeypatch, form, order):
+    # Include both tail engines, either sign of Q and the log-normal limit.
+    rows = [_ORACLE_ROWS[i] for i in (0, 3, 5, 8)]
+    y, lo, hi, side, mu, sigma, q = np.asarray(rows).T
+    family = GeneralizedGammaLSS(parametrisation=form)
+    first = mean_of_location(mu, sigma, q) if form == "mean" else mu
+    eta = np.column_stack((np.log(first), sigma, q))
+    links = (LogLink(), IdentityLink(), IdentityLink())
+    weights = resolve_likelihood_weights(
+        None, n_observations=len(y), contract=WeightContract("prior")
+    )
+    plan = family.bind_likelihood(
+        y, weights, bounded_observation(ResponseBounds.from_arrays(lo, hi, side))
+    )
+    window = GeneralizedGammaLSS._window_jets
+    orders = []
+
+    def counted(self, lower, upper, theta, order):
+        orders.append(order)
+        return window(self, lower, upper, theta, order)
+
+    monkeypatch.setattr(GeneralizedGammaLSS, "_window_jets", counted)
+    direction = np.zeros((2, len(y), 3))
+    direction[:, :, 0] = np.array([[1.0], [-2.0]])
+    if order == 3:
+        result = family.predictor_curvature_directional_derivative(y, eta, direction, links, plan)
+        coefficients = (1, 3, 1)
+    else:
+        result = family.predictor_curvature_second_directional_derivative(
+            y, eta, direction, direction, links, plan
+        )
+        coefficients = (1, 7, 6, 1)
+
+    # The first predictor's inverse link is exp. Its repeated derivatives
+    # combine the oracle's natural derivatives with Stirling numbers.
+    for i, row in enumerate(rows):
+        partials, scales = ROW_ORACLE(form, row)
+        factors = [c * first[i] ** k for k, c in enumerate(coefficients, start=1)]
+        reference = sum(v * float(partials[k][0]) for k, v in enumerate(factors, start=1))
+        scale = sum(v * float(scales[k]) for k, v in enumerate(factors, start=1))
+        d = direction[:, i, 0] ** (order - 2)
+        np.testing.assert_allclose(
+            result[:, i, 0] / d, -reference, atol=_TAIL_TOLERANCE[order] * scale, rtol=0
+        )
+    assert orders == [order, order]  # observed numerator and truncation denominator
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("order", [3, 4])
+def test_bounded_curvature_preserves_separate_order_validity(monkeypatch, order):
+    """Pin independent lower-order recovery and high-order rejection for neighbouring rows."""
+    family = GeneralizedGammaLSS()
+    y = np.array([1.0, 1.5, 2.0])
+    bounds = ResponseBounds.from_arrays(np.full(3, -_INF), np.full(3, _INF), np.ones(3))
+    weights = resolve_likelihood_weights(
+        None, n_observations=len(y), contract=WeightContract("prior")
+    )
+    plan = family.bind_likelihood(y, weights, bounded_observation(bounds))
+    links = (LogLink(), IdentityLink(), IdentityLink())
+    eta = np.tile([0.1, 0.7, -0.5], (len(y), 1))
+    direction = np.ones_like(eta)
+
+    def evaluate():
+        if order == 3:
+            return family.predictor_curvature_directional_derivative(y, eta, direction, links, plan)
+        return family.predictor_curvature_second_directional_derivative(
+            y, eta, direction, direction, links, plan
+        )
+
+    regular = evaluate()
+    window = GeneralizedGammaLSS._window_jets
+
+    def unresolved(self, lower, upper, theta, order):
+        jets = window(self, lower, upper, theta, order)
+        if order > 2:
+            # High-order evaluation loses the score on one row. Another
+            # row has a representable score but an unusable highest order.
+            jets[1][lower == y[0]] = np.nan
+            jets[-1][lower == y[1]] = np.nan
+        return jets
+
+    monkeypatch.setattr(GeneralizedGammaLSS, "_window_jets", unresolved)
+    got = evaluate()
+    assert np.any(regular[0]) and np.any(regular[1])
+    # The recovery can stop the incomplete-gamma iteration earlier than the
+    # regular high-order jet. Allow the score/Hessian oracle tolerance.
+    scale = np.max(np.abs(regular[0]))
+    np.testing.assert_allclose(got[0], regular[0], rtol=0, atol=_TAIL_TOLERANCE[2] * scale)
+    np.testing.assert_array_equal(got[1], 0.0)
+    np.testing.assert_array_equal(got[2], regular[2])
 
 
 def test_fit_reml_with_censored_rows_takes_the_analytic_laml_derivatives(monkeypatch):
