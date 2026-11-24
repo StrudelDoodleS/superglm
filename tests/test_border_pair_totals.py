@@ -128,13 +128,14 @@ def test_pair_sums_are_within_the_row_sums_bound_of_the_exact_scatter(chunk_size
     ``test_signed_pass_scatter_matches_exact_rational_sums`` holds the dense
     columns: within ``(n + 5 + 2 chunks) eps`` of the scatter of the rounded
     ``d``, whose entries are within ``delta = 2 eps (|x - c| + |d|)`` of the
-    exact ones.  The bound is the absolute mass the factor charges the pass
-    with (§8), entry by entry, so it holds where a pair dominates its leaf:
-    in leaf 4 the diagonal entry of level 7 is 1e-13 of its weight, and a
-    form that subtracts leaf totals (``diag(c) - c m' - m c' + A m m'``, or
-    the other rows' weight as the total less the pair's) misses it by ``eps``
-    times the weight.  A data pass is held uncut: a cut leaf's pieces are
-    centred on their own means, which this bound does not describe.  The
+    exact ones; an indicator column has ``c = 0``, so its ``d = x - m`` takes
+    one rounding, ``delta = eps |d|``.  The bound is the absolute mass the
+    factor charges the pass with (§8), entry by entry, so it holds where a pair
+    dominates its leaf: in leaf 4 the entries of level 7 are 1e-13 of its
+    weight, and a form that subtracts leaf totals (``diag(c) - c m' - m c' + A
+    m m'``, or the other rows' sums as the total less the pair's) misses them
+    by ``eps`` times the weight.  A data pass is held uncut: a cut leaf's pieces
+    are centred on their own means, which this bound does not describe.  The
     absolute mass takes a caller's error scale that charges the rows of zero
     weight and the leaf with none, and the deviation ``sum_r a_r d_r`` (a
     signed pass) or ``-2 sum_{a_r < 0} |a_r| d_r`` (a data pass) is held to
@@ -161,6 +162,7 @@ def test_pair_sums_are_within_the_row_sums_bound_of_the_exact_scatter(chunk_size
         d = X - c - stats.mean[leaf]
         exact = _exact_scatter(d, a)
         delta = 2 * EPS * (np.abs(X - c) + np.abs(d))
+        delta[:, 2:] = EPS * np.abs(d[:, 2:])
         weight = np.abs(a)[:, None]
         rounded = (np.abs(d) + delta).T @ (weight * (np.abs(d) + delta))
         moved = np.abs(d).T @ (weight * delta)
@@ -372,8 +374,8 @@ def test_a_border_without_a_random_effect_never_enters_the_pair_kernels(chain, m
 
 
 def _crossed_frame(seed: int = 5, n: int = 2400):
-    """A Poisson response on one spline, a 60-level effect and two effects crossed with it,
-    one of which most leaves meet on a single level."""
+    """A Poisson response on one spline, a 60-level effect nested in a 10-level one, and
+    two effects crossed with both, one of which most leaves meet on a single level."""
     rng = np.random.default_rng(seed)
     leaf = rng.integers(0, 60, n)
     partner = np.where(rng.random(n) < 0.9, leaf % 7, rng.integers(0, 7, n))
@@ -390,6 +392,7 @@ def _crossed_frame(seed: int = 5, n: int = 2400):
         {
             "x": x,
             "leaf": np.array([f"l{v:02d}" for v in leaf], dtype=object),
+            "group": np.array([f"g{v}" for v in leaf // 6], dtype=object),
             "partner": np.array([f"p{v}" for v in partner], dtype=object),
             "free": np.array([f"f{v}" for v in free], dtype=object),
         }
@@ -404,6 +407,7 @@ def _crossed_fit(discrete: bool):
         features={
             "x": Spline(kind="cr", k=8),
             "leaf": RandomEffect(),
+            "group": RandomEffect(),
             "partner": RandomEffect(),
             "free": RandomEffect(),
         },
@@ -413,7 +417,9 @@ def _crossed_fit(discrete: bool):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model.fit_reml(frame, y, sample_weight=exposure)
-    assert isinstance(model._linear_system_state.profiled_factor, ProfiledNestedSchurFactor)
+    factor = model._linear_system_state.profiled_factor
+    assert isinstance(factor, ProfiledNestedSchurFactor)
+    assert factor.chain_group_names == ("group", "leaf")
     return model
 
 
@@ -421,7 +427,8 @@ def _crossed_fit(discrete: bool):
 def test_a_fit_with_crossed_border_effects_is_the_expanded_rows_fit(discrete, monkeypatch) -> None:
     """``fit_reml`` on the pair sums against the same fit on the expanded rows.
 
-    Binned, and exact (whose weight-derivative passes are signed, about the
+    A nested chain of two levels with two crossed effects in its border,
+    binned and exact (whose weight-derivative passes are signed, about the
     factor's means).  The two passes differ by rounding in the border Schur
     complement ``Q``: ``gamma_Q = (n + k + q + 10) eps`` componentwise (§8),
     and one pass through ``Q^-1`` multiplies it by ``q kappa_s(Q)``.  Both
@@ -436,10 +443,11 @@ def test_a_fit_with_crossed_border_effects_is_the_expanded_rows_fit(discrete, mo
     assert written
     profile = pairs._reml_profile
     n, p = pairs._dm.n, pairs._dm.p
-    q = p + 1 - 60
+    nodes = 60 + 10
+    q = p + 1 - nodes
     kappa = profile["structured_schur_condition"]
     solves = profile["irls_iters"] + profile["n_reml_iter"]
-    gamma_border = solves * q * kappa * (n + 60 + q + 10) * EPS
+    gamma_border = solves * q * kappa * (n + nodes + q + 10) * EPS
     assert np.isfinite(kappa) and gamma_border < 1e-7
     assert pairs.result.converged and rows.result.converged
     for name in ("n_reml_iter", "irls_iters", "structured_border_rank"):

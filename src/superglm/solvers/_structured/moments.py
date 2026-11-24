@@ -621,7 +621,7 @@ def _indicator_pairs(
     """
     scatter = np.zeros((mean.shape[1] - width, mean.shape[1]))
     segments = np.arange(len(leaves))
-    held: list[tuple] = []
+    held: list[tuple[NDArray, NDArray, NDArray, NDArray]] = []
     parts = [(np.empty(0, np.intp), np.empty(0, np.intp), np.empty((0, 3)), np.empty(0))]
     offset = 0
     for cells in indicators:

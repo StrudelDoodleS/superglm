@@ -950,19 +950,14 @@ def _lone_level_data(extra: str | None = None, seed: int = 3):
 
 
 def _lone_level_fit(
-    extra, direct_solve, lam, weight_scale=1.0, *, data=None, link=None, parents=False
+    extra, direct_solve, lam, weight_scale=1.0, *, data=None, link=None, effects=()
 ):
     """A fit of ``_lone_level_data(extra)``, or of ``data``, a binary response
-    under ``link``.  ``parents`` adds two random effects the levels nest in,
-    crossed with each other and at the same fixed lambda: one joins the
-    chain, the other is a border block every leaf meets on one level."""
+    under ``link``.  ``effects`` names more columns of ``data`` to fit as random
+    effects at the same fixed lambda."""
     frame, y, weight = _lone_level_data(extra) if data is None else data
-    numerics = [name for name in frame.columns if name not in ("cat", "g")]
-    grouping = {}
-    if parents:
-        code = frame["g"].str[1:].astype(int)
-        frame = frame.assign(ga=(code % 5).astype(str), gb=(code // 6).astype(str))
-        grouping = dict.fromkeys(("ga", "gb"), RandomEffect(lambda_policy=LambdaPolicy.fixed(lam)))
+    numerics = [name for name in frame.columns if name not in ("cat", "g", *effects)]
+    grouping = dict.fromkeys(effects, RandomEffect(lambda_policy=LambdaPolicy.fixed(lam)))
     model = SuperGLM(
         family="gaussian" if link is None else "binomial",
         link=link,
@@ -1221,23 +1216,35 @@ def test_a_chain_of_one_is_exact_at_a_tiny_lambda_under_large_weights() -> None:
 
 
 @pytest.mark.pins_behaviour
-def test_a_border_effect_constant_within_leaves_is_exact_at_a_tiny_lambda() -> None:
-    """The fit above with two more random effects the 30 levels nest in, at lambda = 1e-8.
+def test_a_border_effect_one_row_from_nested_is_exact_at_a_tiny_lambda() -> None:
+    """The fit above with two more random effects at lambda = 1e-8, one of them in the border.
 
-    They are crossed with each other, so one joins the chain and the other
-    stays in the border, where every leaf meets it on one level.  Its
-    within-leaf scatter is exactly zero, and its Schur entries are sums of
-    ``w_l lambda / (w_l + lambda)`` terms, on the lambda scale like the
-    intercept's.  A pair form that leaves ``eps`` times a leaf's weight there
-    (``diag(D2) - C' D1^-1 C``, a difference of raw masses) is off by a
-    relative 1e-3 in those entries.  Bounds as above, with ``kappa_s`` of the
+    ``ga`` is a parent of the 30 levels and joins the chain.  ``gb`` is a
+    parent too but for one row, which carries 1e-13 of a row's weight and
+    takes another of its levels: so it is crossed, a border block that every
+    leaf but one meets on a single level.  Its within-leaf scatter is exactly
+    zero in those leaves and 1e-13 of the leaf's weight in that one, the
+    scale of its other Schur entries (sums of ``w_l lambda / (w_l +
+    lambda)``, like the intercept's).  A pair form that subtracts raw masses
+    (``diag(c) - c m' - m c' + A m m'``) leaves ``eps`` times the leaf's
+    weight there, a relative 1e-3.  Bounds as above, with ``kappa_s`` of the
     centred Schur complement after the 30 levels alone.
     """
-    chain = _lone_level_fit(None, "auto", 1e-8, weight_scale=1e4, parents=True)
+    frame, y, weight = _lone_level_data(None)
+    code = frame["g"].str[1:].astype(int).to_numpy()
+    row = int(np.flatnonzero(weight)[5])
+    assert np.count_nonzero(weight[code == code[row]]) > 10
+    parent = code // 6
+    parent[row] = (parent[row] + 1) % 5
+    weight = weight.copy()
+    weight[row] = 1e-13
+    frame = frame.assign(ga=(code % 5).astype(str), gb=parent.astype(str))
+    chain = _lone_level_fit(
+        None, "auto", 1e-8, weight_scale=1e4, data=(frame, y, weight), effects=("ga", "gb")
+    )
     factor = chain._linear_system_state.profiled_factor
     assert isinstance(factor, ProfiledNestedSchurFactor)
     assert factor.chain_group_names == ("ga", "g")
-    frame, _, weight = _lone_level_data(None)
     logdet, edf, kappa = _exact_logdet_and_edf(chain, weight * 1e4)
     n, size = len(frame), chain._dm.shape[1] + 1
     q = size - LONE_LEVELS
