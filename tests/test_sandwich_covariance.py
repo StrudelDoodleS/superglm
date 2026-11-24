@@ -1126,6 +1126,58 @@ class TestFitBindingAndRoundTrip:
             with pytest.raises(ValueError, match="different fit"):
                 fits[own].summary(covariance=covs[other])
 
+    def test_a_terms_encoding_is_part_of_the_fit(self, monkeypatch):
+        """Equal coefficients on the same rows, two encodings: two covariances.
+
+        Bases ``A`` and ``B`` with responses ``+-1``, ``+-2``, ``+-3`` within ``A``,
+        ``B``, ``C`` publish zero coefficients, and the intercept is level ``A``'s or
+        ``B``'s mean: HC0 errors ``0.5`` and ``1.0``.  So do ``Numeric`` and
+        ``Categorical(base=-1.0)`` on ``x = [-1, -1, 1, 1]``, ``y = [1, -1, 1, -1]``:
+        intercept errors ``0.5`` and ``sqrt(1/2)``.  No reader takes the other's
+        covariance, and a default fit never digests its terms.
+        """
+        from superglm.inference import sandwich
+
+        digests = []
+        digest_terms = getattr(sandwich, "_terms_digest", None)
+        monkeypatch.setattr(
+            sandwich,
+            "_terms_digest",
+            lambda model: digests.append(1) or digest_terms(model),
+            raising=False,
+        )
+
+        levels = pd.DataFrame({"x": np.repeat(list("ABC"), 4)})
+        spread = np.repeat([1.0, 2.0, 3.0], 4) * np.tile([-1.0, 1.0], 6)
+        x = pd.DataFrame({"x": [-1.0, -1.0, 1.0, 1.0]})
+        y = np.array([1.0, -1.0, 1.0, -1.0])
+        pairs = {
+            "reference level": (
+                [(levels, spread, {"x": Categorical(base=base)}) for base in ("A", "B")],
+                (0.5, 1.0),
+            ),
+            "kind of term": (
+                [(x, y, {"x": Numeric()}), (x, y, {"x": Categorical(base=-1.0)})],
+                (0.5, math.sqrt(0.5)),
+            ),
+        }
+        for (first_rows, second_rows), intercept_se in pairs.values():
+            fits = [
+                SuperGLM(family="gaussian", features=features).fit(frame, response)
+                for frame, response, features in (first_rows, second_rows)
+            ]
+            fits[0].summary()
+            assert not digests
+            assert np.all(fits[0].result.beta == 0.0) and np.all(fits[1].result.beta == 0.0)
+            covs = [fit.sandwich_covariance() for fit in fits]
+            np.testing.assert_allclose([cov.se[0] for cov in covs], intercept_se, rtol=1e-12)
+            assert covs[0].binding.data_digest == covs[1].binding.data_digest
+            for own, other in ((0, 1), (1, 0)):
+                with pytest.raises(ValueError, match="different fit"):
+                    fits[own].summary(covariance=covs[other])
+            assert digests
+            digests.clear()
+
     def test_a_model_rescored_on_other_rows_replays_no_scores(self):
         """``to_model(X=, y=)`` keeps the fitted design beside the supplied response."""
         from superglm.editor import EditorSession

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from collections.abc import Mapping
 from typing import Any, Literal
 
 import numpy as np
@@ -149,14 +150,72 @@ def _settings(obj: Any) -> str:
     return f"{cls.__module__}.{cls.__qualname__}({', '.join(items)})"
 
 
+def _feed_state(digest: Any, value: Any, enclosing: frozenset[int] = frozenset()) -> None:
+    """Feed ``value``'s content to ``digest``, the same bytes for the same content in any process.
+
+    Scalars by type and ``repr``; arrays by dtype, shape and bytes; sequences and
+    mappings in order; sets by their members' sorted digests (string hashing, which
+    orders a set, varies between processes); any other object by its class and
+    attributes, with a marker for a reference back to an object that encloses it.
+    """
+    if value is None or isinstance(value, bool | int | float | complex | str | bytes | np.generic):
+        digest.update(f"{type(value).__qualname__}:{value!r};".encode())
+    elif isinstance(value, np.ndarray) and not value.dtype.hasobject:
+        digest.update(f"{value.dtype.str}{value.shape};".encode())
+        digest.update(np.ascontiguousarray(value).tobytes())
+    elif isinstance(value, set | frozenset):
+        members = []
+        for member in value:
+            inner = hashlib.blake2b(digest_size=16)
+            _feed_state(inner, member, enclosing)
+            members.append(inner.digest())
+        digest.update(f"set{len(members)};".encode() + b"".join(sorted(members)))
+    elif isinstance(value, Mapping | list | tuple | np.ndarray):
+        items = list(value.items()) if isinstance(value, Mapping) else list(value)
+        digest.update(f"{type(value).__qualname__}{len(items)}[".encode())
+        for item in items:
+            _feed_state(digest, item, enclosing)
+        digest.update(b"]")
+    else:
+        cls = type(value)
+        digest.update(f"<{cls.__module__}.{cls.__qualname__}".encode())
+        if id(value) in enclosing:
+            digest.update(b"^")
+        elif not isinstance(value, type):
+            inner_enclosing = enclosing | {id(value)}
+            for key, attribute in sorted(getattr(value, "__dict__", {}).items()):
+                digest.update(f"{key}=".encode())
+                _feed_state(digest, attribute, inner_enclosing)
+        digest.update(b">")
+
+
+def _terms_digest(model: Any) -> bytes:
+    """A digest of how the fit turns its frame into design columns.
+
+    Every term's fitted state (its kind, levels and their order, reference level,
+    knots, basis and constraint projections, which fix what each coefficient and
+    each row and column of a covariance mean) and the model's binning settings.
+    """
+    digest = hashlib.blake2b(digest_size=16)
+    for state in (
+        model._specs,
+        getattr(model, "_interaction_specs", None),
+        getattr(model, "_discrete", None),
+        getattr(model, "_n_bins", None),
+    ):
+        _feed_state(digest, state)
+    return digest.digest()
+
+
 def _specification_digest(model: Any) -> bytes:
     """A digest of what turns the fit's rows and coefficients into its covariance.
 
     The weight contract (``"prior"`` rows are one unit each, ``"frequency"`` rows ``w``
     units: different meats on the same rows), the family and link with their
-    parameters, the penalty and the fitted smoothing parameters (the bread), and the
-    coefficient layout.  The basis a term spans is not read: two designs give bit-equal
-    coefficients on the same rows only where the response is exactly orthogonal to both.
+    parameters, the penalty and the fitted smoothing parameters (the bread), the
+    coefficient layout, and each term's fitted encoding (``_terms_digest``), so two
+    fits publishing equal coefficients on the same rows bind apart when one codes a
+    term differently: another reference level, another kind of term, other knots.
     """
     lambda2 = fitted_lambda2(model)
     if isinstance(lambda2, dict):
@@ -172,6 +231,7 @@ def _specification_digest(model: Any) -> bytes:
         repr(lambda2),
         repr(reml),
         repr([(g.name, g.start, g.end, g.subgroup_type) for g in model._groups]),
+        _terms_digest(model).hex(),
     )
     return hashlib.blake2b("\x1f".join(parts).encode(), digest_size=16).digest()
 
