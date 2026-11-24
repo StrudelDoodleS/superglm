@@ -6,6 +6,7 @@ from typing import Any, Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy import sparse
 
 from superglm._group_matrix import _group_matrix_support as row_supports
 from superglm.features._spline_config import (
@@ -16,13 +17,14 @@ from superglm.features._spline_config import (
 from superglm.features._spline_identifiability import (
     apply_identifiability_for_spec,
     build_identifiability_projection_for_spec,
+    term_null_basis,
 )
 from superglm.features._spline_multi_penalty import build_multi_m_components
-from superglm.features._spline_penalties import structural_penalty_ranks
+from superglm.features._spline_penalties import _gapped_rank, structural_penalty_ranks
 from superglm.features._spline_select import build_select
 from superglm.features._spline_subclass_ops import prepare_shape_rules
 from superglm.features.constraint import postfit_token, rules_of
-from superglm.types import GroupInfo, LinearConstraintSet, TensorMarginalInfo
+from superglm.types import GroupInfo, LinearConstraintSet, NullCoordinates, TensorMarginalInfo
 
 
 def _uses_fit_time_shape_constraints(spec: Any) -> bool:
@@ -241,6 +243,7 @@ def build_group_info(
     sample_weight: NDArray | None = None,
     *,
     find_row_support: bool = False,
+    precision_weight: NDArray | None = None,
     feature_name: str | None = None,
 ) -> GroupInfo | list[GroupInfo]:
     """Build the main GroupInfo payload for a spline spec.
@@ -325,14 +328,23 @@ def build_group_info(
         monotone_engine=monotone_engine,
         raw_to_solver_map=raw_to_solver_map,
     )
-    return _with_row_support(finish_penalties(spec, info), value_rows, index, full)
+    # Knots and centring use geometry weights. Visibility asks whether the
+    # solver's weighted observations identify the unpenalised columns.
+    weights = sample_weight if precision_weight is None else precision_weight
+    if distinct is None:
+        finish_penalties(spec, info, full, weights)
+    else:
+        counts = np.bincount(distinct[1], weights=weights, minlength=len(distinct[0]))
+        finish_penalties(spec, info, value_rows, counts)
+    return _with_row_support(info, value_rows, index, full)
 
 
-def finish_penalties(spec: Any, info: GroupInfo) -> GroupInfo:
-    """``info`` with the spec's lambda policies, then the rank of each named penalty.
+def finish_penalties(spec: Any, info: GroupInfo, basis, weights: NDArray | None) -> GroupInfo:
+    """``info`` with the spec's lambda policies, the rank of each named penalty and its null basis.
 
     A ``lambda_policy`` names a one-penalty term's penalty ``"wiggle"``, and the
-    ranks are keyed by penalty name, so they are found after it.
+    ranks are keyed by penalty name, so they are found after it. Each raw design
+    row in ``basis`` carries the combined weight of the observations it represents.
     """
     if (
         spec._lambda_policy is not None
@@ -343,7 +355,127 @@ def finish_penalties(spec: Any, info: GroupInfo) -> GroupInfo:
         info.component_types = {"wiggle": "difference"}
     info.lambda_policies = spec._resolve_lambda_policies(info)
     info.structural_ranks = structural_penalty_ranks(spec, info)
+    info.null_coordinates = declared_null_coordinates(spec, info, basis, weights)
     return info
+
+
+def declared_null_coordinates(
+    spec: Any, info: GroupInfo, basis, weights: NDArray | None
+) -> NullCoordinates | None:
+    """The term's exact penalty null spaces and penalty roots in ``info``'s coordinates, if stated.
+
+    A built-in kind states, for each penalty order, the raw polynomials the
+    penalty annihilates (``_penalty_null_basis``) and its square root
+    (``_penalty_root_for_order``). ``term_null_basis`` keeps the polynomials
+    the constraints and centring leave, which must account for the whole
+    null space each penalty's rank leaves: the structural rank where the
+    kind declares one, else the penalty's own rank across a gap (a
+    difference penalty's spectrum resolves it). A multi-order term's null
+    spaces nest, the polynomials of lower degree inside those of higher, so
+    its penalties share one basis (``_nested_null_basis``). A subclass may
+    build other penalties, so it states none.
+
+    The null directions are unpenalised, so only the rows can identify them:
+    ``d`` centred polynomial directions need ``d + 1`` distinct values among
+    the rows of positive weight. With fewer, a null coordinate's column is
+    zero but for rounding, and an exactly unpenalised one would be fitted to
+    that rounding; such a term states none.
+
+    A basis function that no row of positive weight reaches has an exactly
+    zero data column, and where the penalty does not reach it either (a zero
+    lambda) the fit's rank counts it exactly. No orthogonal ``T`` keeps both
+    that column and the null basis on coordinate axes, because the
+    polynomials have coefficients inside and outside the empty support (their
+    projectors do not commute), so a rotation would leave that count to
+    rounding; such a term states none and keeps the data's coordinates.
+
+    Centring cancels a null direction whose polynomial is nearly constant on
+    the rows (``x`` clustered within a small share of the knot span). Each
+    basis value is a rounded float, so a unit coefficient vector's column
+    ``B m`` carries rounding of order ``u ||W^(1/2) B||_2``, which centring
+    (an exact or once-rounded subtraction, Higham 2002, sec. 2.2 and 3.1)
+    does not reduce. When the centred null columns' smallest weighted norm,
+    ``sigma_min(W^(1/2) B M)`` for the orthonormal null members ``M``, falls
+    below ``sqrt(u) ||W^(1/2) B||_2``, that rounding exceeds ``sqrt(u)`` of
+    the column: more than half its digits are lost, the order of the fit's
+    ``sqrt(eps) = sqrt(2 u)`` rank cut, so the fit's rank would count the
+    direction's rounding. Such a term states none.
+    """
+    from superglm.features.spline import _BUILT_IN_SPLINES
+
+    if type(spec) not in _BUILT_IN_SPLINES or info.penalty_matrix is None:
+        return None
+    named = info.penalty_components or [("", info.penalty_matrix)]
+    orders = spec._m_orders if len(named) > 1 else spec._m_orders[:1]
+    thetas, roots = [], []
+    for (suffix, omega), order in zip(named, orders, strict=True):
+        null_raw, root = spec._penalty_null_basis(order), spec._penalty_root_for_order(order)
+        rank = (info.structural_ranks or {}).get(suffix)
+        if rank is None:
+            rank = _gapped_rank(np.linalg.eigvalsh(omega))
+        if null_raw is None or root is None or rank is None:
+            return None
+        theta = term_null_basis(null_raw, info.projection, info.n_cols - rank)
+        if theta is None:
+            return None
+        thetas.append(theta)
+        roots.append(root if info.projection is None else root @ info.projection)
+    null_basis = _nested_null_basis(thetas)
+    if null_basis is None:
+        return None
+    nullity = null_basis.shape[1]
+    occupied = basis.shape[0] if weights is None else np.count_nonzero(weights > 0)
+    if occupied <= nullity:
+        return None
+    rows = basis
+    if weights is not None:
+        scale = (np.sqrt(weights) / np.sqrt(np.max(weights)))[:, None]
+        rows = basis.multiply(scale) if sparse.issparse(basis) else scale * basis
+    if sparse.issparse(rows):
+        column_squares = np.asarray(rows.multiply(rows).sum(axis=0)).ravel()
+    else:
+        column_squares = np.einsum("ij,ij->j", rows, rows)
+    if not np.all(column_squares > 0.0):
+        return None
+    if nullity:
+        members = null_basis if info.projection is None else info.projection @ null_basis
+        smallest = np.linalg.svd(rows @ members, compute_uv=False)[-1]
+        # The Frobenius norm bounds the spectral norm from above, so most
+        # terms pass without a Gram. Only its largest eigenvalue is needed
+        # for the original cutoff; the small singular value uses B M itself.
+        resolution = np.sqrt(2.0**-53)
+        if smallest < resolution * np.sqrt(column_squares.sum()):
+            gram = rows.T @ rows
+            if sparse.issparse(gram):
+                gram = gram.toarray()
+            if smallest < resolution * np.sqrt(np.linalg.eigvalsh(gram)[-1]):
+                return None
+    return NullCoordinates(null_basis, tuple(t.shape[1] for t in thetas), tuple(roots))
+
+
+def _nested_null_basis(thetas: list[NDArray]) -> NDArray | None:
+    """One orthonormal basis whose leading columns span each of the null bases ``thetas``.
+
+    Taken from the narrowest up, each must hold the basis so far, which is
+    then extended by its own directions orthogonal to it. A narrower null
+    space inside a wider one leaves it a residual of rounding, ``O(u)``; one
+    outside leaves at least the share of a polynomial the wider kind does
+    not annihilate, so the shared factor resolution ``sqrt(eps)`` decides, as
+    in ``term_null_basis``. Null spaces that do not nest share no such
+    basis, and the term declares none.
+    """
+    from superglm.solvers.rank import SHARED_RANK_POLICY
+
+    basis = thetas[0][:, :0]
+    for theta in sorted(thetas, key=lambda t: t.shape[1]):
+        width = basis.shape[1]
+        if width:
+            inside = theta.T @ basis
+            if np.linalg.norm(basis - theta @ inside, 2) > SHARED_RANK_POLICY.factor_rcond:
+                return None
+            theta = theta @ np.linalg.qr(inside, mode="complete")[0][:, width:]
+        basis = np.hstack([basis, theta])
+    return basis
 
 
 def build_knots_and_penalty(

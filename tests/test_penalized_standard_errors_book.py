@@ -10,10 +10,8 @@ alone leave them undetermined (``VehAge``'s sparse upper tail); the penalised He
 positive definite (Cholesky, scaled condition 576), which the fit's own record certifies
 (``state_ops.standard_error_mask``).
 
-The refit is the book's own REML fit, which reproduces the exported solver coordinates and
-lambdas.  A fit at the pinned lambdas reparametrises the splines there, so its solver
-coordinates are not the exported ones.  Anchored to the freMTPL2 book: it skips without both
-parquet files and fails under ``SUPERGLM_REQUIRE_DATA=1``.
+The original main-spline solver-to-B-spline maps accompany the fixture, so a refit can be
+compared in the coordinates mgcv actually fitted. Both freMTPL2 parquet files are required.
 """
 
 from __future__ import annotations
@@ -53,6 +51,7 @@ def _books():
     return module
 
 
+@pytest.mark.pins_behaviour
 def test_every_severity_book_coefficient_has_mgcvs_bayesian_standard_error() -> None:
     """All 614 standard errors are printed and are mgcv's ``Vp`` ones.
 
@@ -61,7 +60,8 @@ def test_every_severity_book_coefficient_has_mgcvs_bayesian_standard_error() -> 
     than the coefficients' 2.4e-9); the coefficients to 1e-6 of the largest and the EDF to
     1e-8.  The raw standard errors are also the dense inverse's of ``[1 X]' W [1 X] + S`` built
     from the design and penalty (``kappa u`` about 6e-14; rtol 1e-9).  On master 398
-    coefficients and the 10 ``VehBrand`` rows are blank.
+    coefficients and the 10 ``VehBrand`` rows were blank before #681. A rotation changes
+    a spline coefficient's own SE. Its original linear contrast and variance are invariant.
     """
     fixture = json.loads(_FIXTURE.read_text(encoding="utf-8"))
     books = _books()
@@ -85,7 +85,20 @@ def test_every_severity_book_coefficient_has_mgcvs_bayesian_standard_error() -> 
     assert not np.any(np.isnan(se)), f"{int(np.isnan(se).sum())} standard errors blank"
     phi = model.result.phi
     vp = np.asarray(fixture["mgcv_se_vp"]) ** 2 / fixture["phi"]
-    np.testing.assert_allclose(se**2 / phi, vp, rtol=fixture["tolerances"]["se_relative"])
+    observed_vp = se**2 / phi
+    beta = np.r_[model.result.intercept, model.result.beta]
+    maps = json.loads((_FIXTURE.parent / "mgcv_gamma_severity_spline_maps.json").read_text("utf-8"))
+    for g, gm in zip(model._groups, model._dm.group_matrices, strict=True):
+        if g.name in maps:
+            original = np.asarray(maps[g.name])
+            to_original = np.linalg.lstsq(original, gm.R_inv, rcond=None)[0]
+            np.testing.assert_allclose(original @ to_original, gm.R_inv, rtol=1e-10, atol=1e-12)
+            sl = slice(1 + g.start, 1 + g.end)
+            cov = metrics._active_info[3][sl, sl]
+            np.testing.assert_allclose(observed_vp[sl], np.diag(cov), rtol=1e-9)
+            observed_vp[sl] = np.diag(to_original @ cov @ to_original.T)
+            beta[sl] = to_original @ beta[sl]
+    np.testing.assert_allclose(observed_vp, vp, rtol=fixture["tolerances"]["se_relative"])
     raw = np.concatenate([np.atleast_1d(metrics.coefficient_se_raw[g.name]) for g in model._groups])
     np.testing.assert_allclose(raw, dense_raw_standard_errors(model, X), rtol=1e-9)
 
@@ -98,7 +111,6 @@ def test_every_severity_book_coefficient_has_mgcvs_bayesian_standard_error() -> 
     expected = np.sqrt(vp[1 + brand.start : 1 + brand.end] * phi)
     np.testing.assert_allclose(printed, expected, rtol=fixture["tolerances"]["se_relative"])
 
-    beta = np.r_[model.result.intercept, model.result.beta]
     mgcv = np.asarray(fixture["mgcv_coef"])
     assert np.max(np.abs(beta - mgcv)) <= 1e-6 * np.max(np.abs(mgcv))
     assert model.result.effective_df == pytest.approx(fixture["measured"]["edf_mgcv"], rel=1e-8)

@@ -35,6 +35,9 @@ from ._group_matrix._group_matrix_core import (
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
 )
+from ._group_matrix._group_matrix_core import (
+    penalty_coordinate_map as penalty_coordinate_map,
+)
 from ._group_matrix._group_matrix_discretized import (
     DiscretizedSCOPGroupMatrix,
     DiscretizedSplineCategoricalGroupMatrix,

@@ -20,7 +20,22 @@ import math
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._roundoff import UNIT_ROUNDOFF
 from superglm.stats.davies import psum_chisq, satterthwaite
+from superglm.types import GroupSlice
+
+_RANK_RTOL = np.finfo(float).eps ** 0.9
+
+
+def term_test_basis(group: GroupSlice, matrix) -> NDArray | None:
+    """Express the term's constrained basis in its final solver coordinates."""
+    basis = group.term_test_basis
+    transform = getattr(matrix, "R_inv", None)
+    if basis is None or transform is None:
+        return basis
+    if np.array_equal(basis, transform):
+        return np.eye(transform.shape[1])
+    return np.linalg.lstsq(transform, basis, rcond=None)[0]
 
 
 def _ordered_eigensystem(matrix: NDArray) -> tuple[NDArray, NDArray]:
@@ -31,12 +46,71 @@ def _ordered_eigensystem(matrix: NDArray) -> tuple[NDArray, NDArray]:
     evecs = evecs[:, order]
 
     if evals.size:
-        # Eigenvectors are sign-indeterminate; fix the sign for stability.
+        # Historical orientation retained by saved fits without a term basis.
         signs = np.sign(evecs[0])
         signs[signs == 0.0] = 1.0
         evecs = evecs * signs
 
     return evals, evecs
+
+
+def _orient_boundary(vectors: NDArray, r_factor: NDArray, piv: NDArray, basis: NDArray) -> None:
+    """Orient Wood's two boundary eigenvectors in the constrained term basis."""
+    # The first axis of an unpivoted QR is the first column, up to a common
+    # sign. If it is orthogonal to an eigenvector at the Wood test's
+    # numerical resolution, use the next resolved column for that vector.
+    pending = np.ones(2, dtype=bool)
+    for direction in basis.T:
+        column = r_factor @ direction[piv]
+        scale = np.max(np.abs(column))
+        if scale:
+            column /= scale
+            overlaps = column @ vectors
+            resolved = pending & (np.abs(overlaps) > _RANK_RTOL * np.linalg.norm(column))
+            vectors[:, resolved] *= np.sign(overlaps[resolved])
+            pending[resolved] = False
+            if not np.any(pending):
+                break
+
+
+def _frame_tied_boundary(
+    evals: NDArray,
+    evecs: NDArray,
+    first: int,
+    stop: int,
+    r_factor: NDArray,
+    piv: NDArray,
+    basis: NDArray,
+) -> None:
+    """Resolve a repeated eigenvalue touched by the cutoff in the declared column order."""
+    # Allow a few ulps of the spectral radius for the symmetric eigensolve.
+    # The rank cutoff decides which axes to retain, not which ones can rotate.
+    tolerance = 16 * UNIT_ROUNDOFF * evals[0]
+    retained = evals > _RANK_RTOL * evals[0]
+    i = first
+    while i < stop:
+        # Include the whole resolved eigenspace, also across the truncation.
+        tied = np.flatnonzero((np.abs(evals - evals[i]) <= tolerance) & retained)
+        i = int(tied[-1]) + 1
+        if tied.size == 1:
+            continue
+        space = evecs[:, tied]
+        frame: list[NDArray] = []
+        for direction in basis.T:
+            column = r_factor @ direction[piv]
+            candidate = space.T @ column
+            # Reorthogonalized Gram-Schmidt on the projected term columns.
+            # A rotation in 'space' counter-rotates all their coordinates.
+            if frame:
+                axes = np.column_stack(frame)
+                for _ in range(2):
+                    candidate -= axes @ (axes.T @ candidate)
+            size = np.linalg.norm(candidate)
+            if size > _RANK_RTOL * np.linalg.norm(column):
+                frame.append(candidate / size)
+                if len(frame) == tied.size:
+                    evecs[:, tied] = space @ np.column_stack(frame)
+                    break
 
 
 def _pivoted_test_space(X_j: NDArray, V_b_j: NDArray) -> tuple[NDArray, NDArray, NDArray]:
@@ -62,7 +136,7 @@ def _effective_rank(evals: NDArray, requested_rank: float) -> tuple[int, float, 
     frac = abs(requested_rank - rank_floor)
     working_dim = rank_floor + 1 if frac > 0.0 else rank_floor
 
-    numerical_rank = int(np.sum(evals > evals[0] * np.finfo(float).eps ** 0.9))
+    numerical_rank = int(np.sum(evals > evals[0] * _RANK_RTOL))
     if numerical_rank < working_dim:
         working_dim = numerical_rank
         rank_floor = min(rank_floor, numerical_rank)
@@ -189,8 +263,16 @@ def wood_test_smooth(
     V_b_j: NDArray,
     edf1_j: float,
     res_df: float = -1.0,
+    *,
+    term_basis: NDArray | None = None,
 ) -> tuple[float, float, float]:
-    """Smooth-term significance test from Wood (2013)."""
+    """Wood (2013) test of the fitted term in the column space of ``X_j``.
+
+    ``X_j @ term_basis`` holds the term's columns after its identifiability
+    constraint. Their order orients the two boundary eigenvectors
+    for the reported statistic. Omitting it uses the historical pivoted-QR
+    orientation. The p-value averages the tails of both signs in either case.
+    """
     from superglm.inference.covariance import BinaryScaledCovariance
 
     if isinstance(V_b_j, BinaryScaledCovariance):
@@ -211,6 +293,11 @@ def wood_test_smooth(
         return 0.0, 1.0, 0.0
 
     if frac > 0.0:
+        if term_basis is not None:
+            first = max(rank_floor - 1, 0)
+            _frame_tied_boundary(evals, evecs, first, working_dim, r_factor, piv, term_basis)
+            if working_dim >= 2:
+                _orient_boundary(evecs[:, first:working_dim], r_factor, piv, term_basis)
         pos_map, neg_map, weights, ref_df = _fractional_rank_maps(
             evecs, evals, rank_floor, frac, working_dim, target_rank
         )

@@ -155,6 +155,31 @@ _UNIT_ROUNDOFF = np.finfo(float).eps / 2.0
 _WALL_ETAS = (-36.0, -30.0, -20.0, -10.0, -3.0, -0.7, 0.4, 3.0, 10.0, 20.0, 30.0, 36.0)
 
 
+@pytest.mark.parametrize(("lower", "upper"), [(-0.9, 0.9), (0.2, 0.3)])
+@pytest.mark.parametrize(
+    ("order", "method"), [(1, "deriv_inverse"), (2, "deriv2_inverse"), (3, "deriv3_inverse")]
+)
+def test_bounded_logit_derivatives_keep_relative_accuracy_at_both_walls(
+    lower, upper, order, method
+):
+    mp = pytest.importorskip("mpmath")
+    eta = np.array([-40.0, *_WALL_ETAS, 40.0])
+    link = BoundedLogitLink(lower, upper)
+    with mp.workdps(80):
+        lo, hi = mp.mpf(lower), mp.mpf(upper)
+
+        def inverse(t):
+            return lo + (hi - lo) / (1 + mp.exp(-t))
+
+        expected = [float(mp.diff(inverse, mp.mpf(float(t)), order)) for t in eta]
+
+    # At these points the derivative factors are away from their zeros, so
+    # roundoff is on the scale of the derivative itself.
+    np.testing.assert_allclose(
+        getattr(link, method)(eta), expected, rtol=16 * _UNIT_ROUNDOFF, atol=0
+    )
+
+
 @pytest.mark.parametrize(
     "link",
     [

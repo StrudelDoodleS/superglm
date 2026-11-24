@@ -31,6 +31,7 @@ _SPLINE_CATEGORY = (
     SupportCompressedSplineCategoricalGroupMatrix,
 )
 _METADATA = ("omega", "projection", "omega_components", "component_types", "structural_ranks")
+_SUPPORT_METADATA = (*_METADATA, "R_inv_local", "term_roots")
 _CATEGORY_METADATA = (
     *_METADATA,
     "lambda_policies",
@@ -171,7 +172,7 @@ def group_row_range(group, start: int, stop: int, *, copy: bool = True):
     if kind in _SUPPORT:
         bins = group.bin_idx[start:stop]
         sub = kind(group.B_unique, group.R_inv, bins.copy() if copy else bins)
-        metadata = _METADATA
+        metadata = _SUPPORT_METADATA
     else:
         rows = _category_rows(group, start, stop)
         if rows is None:

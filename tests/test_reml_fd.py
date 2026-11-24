@@ -11,7 +11,7 @@ import pytest
 from superglm import SuperGLM, generate_tweedie_cpg
 from superglm.distributions import Gamma, NegativeBinomial, Tweedie
 from superglm.features.spline import CubicRegressionSpline
-from superglm.group_matrix import SparseSSPGroupMatrix
+from superglm.group_matrix import SparseSSPGroupMatrix, penalty_coordinate_map
 from superglm.reml import compute_dW_deta
 from tests._reml_adapters import (
     reml_direct_gradient,
@@ -81,7 +81,8 @@ class TestREMLFiniteDifference:
         for i, (gm, g) in enumerate(zip(m._dm.group_matrices, m._groups)):
             if g.penalized and isinstance(gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
                 reml_groups.append((i, g))
-                omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+                C = penalty_coordinate_map(gm)
+                omega_ssp = C.T @ gm.omega @ C
                 eigv = np.linalg.eigvalsh(omega_ssp)
                 penalty_ranks[g.name] = float(np.sum(eigv > 1e-8 * max(eigv.max(), 1e-12)))
 

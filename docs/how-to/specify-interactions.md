@@ -214,10 +214,13 @@ prior, is determined and never warns. As in `predict.lm`, a row the fit's rank
 decision treats as determined only up to its cut, a near alias it truncated,
 can warn too, a training row included.
 
-Only a dense, unbinned fit is tested. These fits are silent, as they were
-before the test existed:
+The check covers dense fits, including fits with binned splines. A new binned fit
+(`discrete=True` or `Spline(discrete=True)`) checks the exact prediction row
+against the space determined by its fitted bin rows and the penalty. A coarse
+grid can leave an exact quote outside that space, even at a training value.
+These fits are silent:
 
-- a binned fit (`discrete=True`, or a `Spline(discrete=True)`);
+- a binned model saved before binned fits recorded this diagnostic;
 - a fit with a `FactorSmooth` term, `basis="sz"` or `"fs"`, whose held and
   population levels have their own rules (described below);
 - a structured fit, and any model that does not carry the fit's two rank
@@ -428,7 +431,7 @@ model = SuperGLM(
   where the fit stopped, not an estimate. The base-rate figure is what
   `predict` gives those rows with the level set to the base (both parents to
   their base for a cell); it is left out when the base is itself separated,
-  or when the move takes a row into a crossed cell no training row occupies,
+  or when the move takes a row into an empty or separated crossed cell,
   whose rate the data do not set. Both totals weight each row by its
   `sample_weight`, whatever `weight_semantics` says, and the line says so when
   the weights are not all one. On a log link, a level no crossed term
@@ -452,9 +455,11 @@ intercept then, a parent's main effect beside a separated cell in its base
 row or column. The test is Lenth's estimability test (as `predict` reads its
 rows) on the term, its categorical parents and the intercept. Every other
 number is unchanged. `centering="mean"` centres on the levels whose contrast
-against the base is determined. With a separated base, every centred level
-stays blank: their covariance is the difference of entries the walk has grown
-to about `1e14`. The default base, the most exposed level, avoids this. A
+against the base is determined. With a separated base, every level — native
+and centred — stays blank because their covariance is measured through the
+walked base (entries around `1e14`). Choose a healthy base with responses
+off the boundary (such as the default `base="most_exposed"`) to get the
+other levels' standard errors; the post-fit warning names this remedy. A
 rating-table block notes the factors `summary()` flags (a factor fixed at 1
 is never one) and the separated levels or cells they move with, and
 `predict` warns once per call that reaches one, a row an `unseen="base"`
@@ -476,7 +481,10 @@ or bound a main effect with a fit-time cap (`Constraint.fit.cap`) or the term
 with a selection penalty. Penalised terms, and capped levels in `fit` and
 `fit_reml`, are exempt from the check because their optima are finite;
 `fit_path` fits without its caps, so it reports a capped level as separated.
-A crossed cell bounded only through a capped parent is still reported.
+A crossed cell whose separating directions are all blocked by capped or
+penalised parents (or a selection penalty on the crossed term) is exempt as
+well; a cell that can still separate through unpenalised, uncapped parents or
+its own free cross column is still reported.
 That exemption covers these categorical cells only: the spline-by-factor hold
 described below applies to a term whatever penalty bounds it.
 A cell with few rows but at least one positive response is *not* separated

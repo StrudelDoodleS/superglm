@@ -459,11 +459,18 @@ def test_sz_lambda_derivatives_match_central_finite_differences() -> None:
     )
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("discrete", [False, True])
 def test_sz_structured_fit_uses_tabmat_small_partition_without_dense_dominant(
     monkeypatch: pytest.MonkeyPatch,
     discrete: bool,
 ) -> None:
+    """Pins that the structured sz path never densifies or selects a support for its dominant term.
+
+    Only the small penalties pass through the support selection: the main
+    effect's (8, rank 7) block, or none when its root is carried to REML, and
+    the (6, rank 4) one. A support of the dominant 30-column term would fail.
+    """
     X, y, weights, offset = _data("gaussian")
     dense_penalty_shapes = set()
     support_dimensions = set()
@@ -513,7 +520,8 @@ def test_sz_structured_fit_uses_tabmat_small_partition_without_dense_dominant(
     assert layout.leaf_count == layout.n_levels + 1
     assert model.result.direct_backend == "structured"
     assert dense_penalty_shapes <= {(8, 8)}
-    assert support_dimensions == {(8, 7), (6, 4)}
+    assert (6, 4) in support_dimensions
+    assert support_dimensions <= {(8, 7), (6, 4)}
     dominant = next(
         component for component in model._reml_penalties if component.group_name == "x:group:sz"
     )
