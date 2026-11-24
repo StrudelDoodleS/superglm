@@ -763,20 +763,30 @@ def compute_superglm_sandwich_covariance(
             mu = np.exp(eta)
         clip_held = False
     else:
-        # The solver holds a binomial mean off 0 and 1 at clip_mu's 1e-7, and its working
-        # weight there is no longer the likelihood's curvature.  Score and bread are read
-        # at the mean the fitted predictor gives, so both are derivatives of the one
-        # log-likelihood (A = -dpsi/dtheta and B = psi psi' of the same psi: Stefanski &
-        # Boos, The Calculus of M-Estimation, Am. Stat. 56(1), 2002), and a fit holding
-        # such a row forms its own bread below.
+        # The solver holds a binomial predictor inside the link's band (logit's +-20) and
+        # its mean off 0 and 1 at clip_mu's 1e-7; past either clip its working score is
+        # constant in eta while its working weight is not, so the two are derivatives of
+        # no one function.  Score and bread are read from the log-likelihood at the fitted
+        # predictor, so both are derivatives of the same psi (A = -dpsi/dtheta and
+        # B = psi psi': Stefanski & Boos, The Calculus of M-Estimation, Am. Stat. 56(1),
+        # 2002): logit, probit and cloglog in closed forms in the unclipped eta, accurate
+        # in both tails, and the other links at the unclipped mean of their band.  A fit
+        # holding such a row forms its own bread below.
         eta = stabilize_eta(eta_raw, model._link)
         mu = np.asarray(model._link.inverse(eta), dtype=np.float64)
         clipped = clip_mu(mu, model._distribution)
-        clip_held = isinstance(model._distribution, Binomial) and bool(
-            np.any((clipped != mu) & pos)
-        )
-        if not isinstance(model._distribution, Binomial):
+        binomial = isinstance(model._distribution, Binomial)
+        clip_held = binomial and bool(np.any(((clipped != mu) | (eta != eta_raw)) & pos))
+        if not binomial:
             mu = clipped
+        elif type(model._distribution) is Binomial and type(model._link) in (
+            LogitLink,
+            ProbitLink,
+            CloglogLink,
+        ):
+            eta = np.asarray(eta_raw, dtype=np.float64)
+            with np.errstate(over="ignore", under="ignore"):
+                mu = np.asarray(model._link.inverse(eta), dtype=np.float64)
 
     row_bundle = _observed_score_and_curvature(model._distribution, model._link, y, mu, eta)
     if row_bundle is None:

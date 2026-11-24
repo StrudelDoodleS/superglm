@@ -1380,6 +1380,38 @@ class TestRowScoresInTheTails:
         if not clustered:
             np.testing.assert_allclose(cov.se[0], 1.0 / math.sqrt(n), rtol=1e-6)
 
+    @pytest.mark.parametrize("clustered", [False, True])
+    def test_binomial_logit_rows_past_the_predictor_clip_read_the_fitted_predictor(self, clustered):
+        """Offsets of +-35 sit past the solver's logit band of +-20.
+
+        The estimate is the likelihood's root (its score at the fit is rounding), so the
+        reference is the likelihood's sandwich at the fitted predictor, unclipped:
+        ``sum g^2 / (sum p (1 - p))^2`` with ``p = expit(eta)``.  Read at the band's edge
+        the intercept's error would be 0.174180 instead of 0.223607.
+        """
+        from scipy.special import expit
+
+        offset = np.tile([-19.0, 19.0, -35.0, 35.0], 10)
+        y = (offset > 0.0).astype(float)
+        model = SuperGLM(family="binomial", link="logit", features={}).fit(
+            pd.DataFrame(index=range(len(y))), y, offset=offset
+        )
+        assert model.result.converged
+        eta = model.result.intercept + offset
+        assert np.sum(np.abs(eta) > 20.0) == 20
+        score = np.where(y == 1.0, expit(-eta), -expit(eta))
+        assert abs(score.sum()) < 1e-12
+        cluster = np.arange(len(y)) // 3 if clustered else None
+        units = score if cluster is None else np.bincount(cluster, weights=score)
+        reference = float(units @ units) / float(np.sum(expit(eta) * expit(-eta))) ** 2
+
+        cov = model.sandwich_covariance(cluster=cluster)
+        assert cov.available
+        np.testing.assert_allclose(cov.covariance[0, 0], reference, rtol=1e-10)
+        if not clustered:
+            # the twenty rows at +-19 carry the information, those at +-35 1e-7 of it
+            np.testing.assert_allclose(cov.se[0], 1.0 / math.sqrt(20.0), rtol=1e-6)
+
     def test_negative_binomial_log_at_a_huge_theta_is_the_poisson_sandwich(self):
         """``theta**2`` overflows at 1e200; the rows are Poisson's ``y - mu`` and ``mu``."""
         X = pd.DataFrame({"x": np.tile([-1.0, 1.0, 1.0, -1.0, 0.5], 8)})
