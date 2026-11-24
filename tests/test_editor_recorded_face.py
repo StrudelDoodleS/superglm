@@ -78,6 +78,46 @@ def test_saved_face_rank_survives_opening_with_a_different_rank_cut(selected_col
     np.testing.assert_allclose(move(contrast), contrast, rtol=1e-6, atol=1e-12)
 
 
+@pytest.mark.parametrize("case", ["pivot-trap", "micro-units", "discarded-slant"])
+def test_gap_variance_recovers_the_better_conditioned_binding_rows(case):
+    d = 1.2e-5
+    rows = np.array([[1.0, 0.0, 0.0], [2.0, 2 * d, 0.0], [2.0, -2 * d, 0.0]])
+    units = np.ones(3)
+    if case == "micro-units":
+        units[1] = 1e6
+        rows *= np.array([1.0, 1e-6, 4e-6])[:, None]
+        rows /= units
+    if case == "discarded-slant":
+        # The fit discards the third singular direction. Curvature magnifies
+        # the difference between its saved free direction and any raw pair's.
+        rows[0, 2] = 1e-16
+        units[2] = 1e12
+    inverse = np.diag(units**2)
+    face = _active_face_basis(rows)
+    assert face.shape == (3, 1)
+    precision_on_face = face.T @ np.linalg.solve(inverse, face)
+    for order in permutations(range(3)):
+        move = _restriction(rows[list(order)], face, inverse)
+        assert move is not None
+        # The free coordinate of the original pivot trap has variance one;
+        # the mixed probe also sees either held direction being wrongly freed.
+        for contrast in np.array([[0, 0, 1], [1, 1, 1], [0, 1, 0]]) / units:
+            on_face = face.T @ contrast
+            expected = on_face @ np.linalg.solve(precision_on_face, on_face)
+            tolerance = 1e-6 * (contrast @ inverse @ contrast)
+            assert abs(contrast @ move(contrast) - expected) <= tolerance
+
+
+@pytest.mark.pins_behaviour
+def test_gap_variance_stays_unmeasured_when_even_the_widest_pair_is_unresolved():
+    """Pin the refusal when every full-rank basis misses the interval's accuracy."""
+    d = 3e-6
+    rows = np.array([[1.0, 0.0, 0.0], [1.0, d, 0.0], [1.0, -d, 0.0]])
+    face = _active_face_basis(rows)
+    assert face.shape == (3, 1)
+    assert _restriction(rows, face, np.eye(3)) is None
+
+
 def test_tied_rows_keep_the_saved_subspace_in_every_row_order():
     """A strict observable check replaces the old conditional expected failure."""
     d = 2.0**-51
