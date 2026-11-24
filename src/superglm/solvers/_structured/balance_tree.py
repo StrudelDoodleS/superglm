@@ -1570,6 +1570,8 @@ class SumToZeroTreeFactor:
         formed = np.diag(S_rest)[lead:]
         null = np.flatnonzero((np.diag(Q_rest)[lead:] <= rest_bound[lead:]) & (formed > 0.0))
         if roots is not None and len(null):
+            from superglm.solvers.centered_system import penalty_null_columns
+
             unit = np.zeros((q, len(null)))
             unit[null, np.arange(len(null))] = 1.0
             accounted, flat = np.zeros(len(null)), np.ones(len(null), dtype=bool)
@@ -1577,6 +1579,19 @@ class SumToZeroTreeFactor:
                 accounted += lam * (image + 2.0 * rounding) ** 2
                 flat &= image <= rounding + slack + _ALIAS_RESOLUTION * size
             flat &= formed[null] <= accounted
+            # A small root image only makes a column a candidate. Its mapped
+            # coefficients must also lie in each raw penalty's null space.
+            # For a unit column the map is read directly. A rootless part
+            # was already judged on the unit column itself.
+            for positions, omega, coordinate_map, _ in roots:
+                if omega is not None:
+                    local, candidate = np.nonzero(unit[positions] * flat)
+                    if len(candidate):
+                        flat[candidate] = penalty_null_columns(
+                            np.asarray(omega, dtype=np.float64),
+                            np.asarray(coordinate_map, dtype=np.float64)[:, local],
+                            _ALIAS_RESOLUTION,
+                        )
             cleared = lead + null[flat]
             S_rest[cleared, :] = S_rest[:, cleared] = 0.0
         border = factor_border(

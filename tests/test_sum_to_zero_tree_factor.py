@@ -859,6 +859,24 @@ def _alias_null(case, f, border=None) -> np.ndarray:
 _EFFECT = (np.array([2, 3, 4]), None, None, 0.5)  # the random effect's ridge: no raw root
 
 
+@pytest.mark.parametrize("with_null", [False, True], ids=["full_rank", "beside_a_null"])
+def test_graded_raw_penalty_keeps_unit_curvature_on_a_data_null_column(with_null) -> None:
+    """SSP scaling maps the weak and strong directions of the raw penalty to unit curvature."""
+    s = 2.0**-50
+    strong, weak = np.array([1.0, -1.0]), np.ones(2)
+    C = np.array([[2.0**24, 0.5], [2.0**24, -0.5]])
+    if with_null:
+        strong, weak = np.append(strong, 1.0), np.append(weak, 0.0)
+        C = np.vstack((C, [0.0, 0.0]))
+    omega = np.outer(strong, strong) + s * np.outer(weak, weak)
+    np.testing.assert_array_equal(C.T @ omega @ C, np.eye(2))
+    S_b = scipy.linalg.block_diag(np.eye(2), 0.5 * np.eye(3))
+    factor, case = _alias_beside_a_random_effect(
+        S_b, thin_row=(0.0, 1.0), border_roots=((np.arange(2), omega, C, 1.0), _EFFECT)
+    )
+    _matches_dense(factor, case)
+
+
 @pytest.mark.parametrize("shown", [1.0, 0.6])
 def test_a_representation_error_the_data_barely_see_does_not_certify_a_null_alias(
     monkeypatch, shown

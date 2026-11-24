@@ -725,6 +725,38 @@ def penalty_factor_tilt(penalty: NDArray) -> tuple[NDArray, NDArray, NDArray]:
     return np.vstack(rows), full, tilt
 
 
+def penalty_null_columns(penalty: NDArray, coefficients: NDArray, resolution: float) -> NDArray:
+    """Test raw coefficient columns for membership in each penalty block's null space.
+
+    In its Jacobi metric the root rows are the retained orthonormal eigenvectors
+    times sqrt(w_i). Removing those weights measures distance to the null space.
+    A weak positive direction can have a small image while lying wholly in the
+    range. A full-rank block admits only the zero vector.
+    """
+    from superglm.reml.multi_penalty import _certifies_rank_at_least
+    from superglm.solvers.rank import _scaled_coordinate_columns
+
+    flat = np.ones(coefficients.shape[1], dtype=bool)
+    for positions, root, metric, block in _root_blocks(penalty):
+        part = coefficients[positions]
+        active = flat & np.any(part != 0.0, axis=0)
+        if not np.any(active):
+            continue
+        rank = len(root)
+        if rank == len(positions) or _certifies_rank_at_least(block, rank + 1):
+            # A cut that missed certified curvature cannot establish a null.
+            flat[active] = False
+        elif rank:
+            assert metric is not None  # the diagonal blocks have full rank
+            scaled, _ = _scaled_coordinate_columns(part[:, active], metric, inverse=False)
+            rows, _ = _scaled_coordinate_columns(root.T, metric)
+            basis = rows / np.linalg.norm(rows, axis=0)
+            flat[active] = np.linalg.norm(basis.T @ scaled, axis=0) <= resolution * np.linalg.norm(
+                scaled, axis=0
+            )
+    return flat
+
+
 def _block_root(block: NDArray) -> NDArray:
     """The eigenpairs of ``block`` above ``n eps ||block||_2``, as a root."""
     from superglm.solvers.rank import _eigensolver_relative_bar
