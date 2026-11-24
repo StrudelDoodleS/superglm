@@ -1038,6 +1038,7 @@ def render(derived: Derived, primitives_text: str) -> str:
         "from math import exp, expm1, lgamma, log, log1p, sqrt",
         "",
         "import numpy as np",
+        "import numpy.random",
         "from numba import njit",
         "",
     ]
