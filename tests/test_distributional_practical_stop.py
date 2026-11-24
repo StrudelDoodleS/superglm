@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 import sympy
 
+from superglm import ConvergenceWarning, SuperLSS, s, term
 from superglm.distributional import GaussianLS, Predictor
 from superglm.distributional import fit_diagnostics as diagnostics_module
 from superglm.distributional.fit_diagnostics import diagnose_distributional_fit
@@ -19,7 +20,7 @@ from superglm.distributional.serialization import pickle_state
 from superglm.distributional.smoothing.evidence import _FreshRawEvidence, _lower_bound_pressure
 from superglm.distributional.smoothing.objective import _stable_isolated_gfs_update
 from superglm.distributional.smoothing.proposals import _accelerated_proposal, _scaled_proposal
-from superglm.features import RandomEffect, Spline
+from superglm.features import Numeric, RandomEffect, Spline
 from superglm.reml.efs_update import EFSComponentState, wood_fasiolo_update
 from superglm.solvers.rank import decompose_symmetric_deflated
 from superglm.types import LambdaPolicy
@@ -311,6 +312,112 @@ def test_practical_window_replays_non_increasing_steps(monkeypatch) -> None:
         steps = scripted(jump)
         assert steps[jump] == 10.0
         assert len(steps) == jump + 1 + window, (jump, steps)
+
+
+def _backtracked_gaussian(monkeypatch, *, score_longer_trials):
+    from superglm.distributional.smoothing import loop
+
+    rng = np.random.default_rng(4)
+    u = np.repeat(rng.uniform(-1, 1, 256), 4)
+    x = np.repeat(rng.normal(size=256), 4)
+    z = x + 1e-7 * np.tile([1, 1, -1, -1], 256)
+    y = 2 * u + np.sin(3 * u) + np.tile([1, -1, -1, 1], 256)
+    frame = pd.DataFrame({"u": u, "x": x, "z": z})
+    family = GaussianLS(scale_floor=0)
+    model = SuperLSS(
+        family,
+        family.location(s("u", kind="cr", k=8), term("x", Numeric()), term("z", Numeric())),
+        family.scale(),
+        discrete=False,
+    )
+    raw, objective = loop._scaled_proposal, loop._trial_laplace_objective
+    trial_scale = 1.0
+
+    def proposal(current, steps, names, scale, config):
+        nonlocal trial_scale
+        trial_scale = scale
+        return raw(current, steps, names, scale, config)
+
+    def trial_objective(*args, **kwargs):
+        if trial_scale > 1 / 256:
+            if not score_longer_trials:
+                return None
+            score = objective(*args, **kwargs)
+            assert score is not None
+            return score + 10.0
+        return objective(*args, **kwargs)
+
+    monkeypatch.setattr(loop, "_scaled_proposal", proposal)
+    monkeypatch.setattr(loop, "_trial_laplace_objective", trial_objective)
+    return model.fit_reml(
+        frame, y, initial_lambda=2.45, max_lambda=1e12, max_reml_iter=4, outer="efs"
+    )
+
+
+def test_refused_longer_trials_do_not_make_a_practical_plateau(monkeypatch, recwarn):
+    """Only the 1/256 trials have a score. The outer search must disclose its residual."""
+    model = _backtracked_gaussian(monkeypatch, score_longer_trials=False)
+
+    smoothing = model._require_fitted().smoothing
+    assert model.result_.coefficient_converged
+    assert model.result_.smoothing_converged is False
+    assert model.smoothing_convergence_reason_ == "max_iterations"
+    assert smoothing.iterations == 4
+    assert all(item.accepted and item.raw_backtracks == 8 for item in smoothing.history)
+    assert smoothing.history[-1].max_proposed_log_step > 0.075
+    assert "max_iterations" in str(recwarn.pop(ConvergenceWarning).message)
+
+
+@pytest.mark.pins_behaviour
+def test_scored_backtracking_can_still_support_a_practical_plateau(monkeypatch):
+    """Pin the practical plateau after longer trials are scored and have worse objectives."""
+    model = _backtracked_gaussian(monkeypatch, score_longer_trials=True)
+
+    smoothing = model._require_fitted().smoothing
+    assert model.result_.smoothing_converged is True
+    assert model.smoothing_convergence_reason_ == "practical_plateau"
+    assert smoothing.iterations == smoothing.config.plateau_iterations
+    assert all(item.accepted and item.raw_backtracks == 8 for item in smoothing.history)
+
+
+def test_outward_plateau_requires_a_window_of_scorable_trials(monkeypatch, recwarn):
+    """A refused trial breaks the window even when the accepted moves span a factor of e."""
+    from superglm.distributional.smoothing import loop
+
+    first_trial = True
+    objective = loop._trial_laplace_objective
+
+    def trial_objective(*args, **kwargs):
+        nonlocal first_trial
+        if first_trial:
+            first_trial = False
+            return None
+        return objective(*args, **kwargs)
+
+    monkeypatch.setattr(loop, "_trial_laplace_objective", trial_objective)
+    frame, y = _preempt_fixture()
+    model = model_from_templates(
+        family=GaussianLS(scale_floor=1.0e-4),
+        predictors=(Predictor("location", {"effect": RandomEffect()}), Predictor("scale", {})),
+    )
+    model.fit_reml(
+        frame,
+        y,
+        initial_lambda=1.0e6,
+        max_lambda=1.0e6 * math.exp(1.5),
+        max_log_step=0.6,
+        max_reml_iter=3,
+        reml_tol=1.0e-8,
+        inner_tol=1.0e-10,
+        reml_plateau_tol=1.0e-6,
+        outer="efs",
+    )
+
+    smoothing = model._require_fitted().smoothing
+    assert [item.raw_backtracks for item in smoothing.history] == [1, 0, 0]
+    assert model.result_.smoothing_converged is False
+    assert model.smoothing_convergence_reason_ == "lambda_cap_unresolved"
+    assert "lambda_cap_unresolved" in str(recwarn.pop(ConvergenceWarning).message)
 
 
 def test_lower_bound_pressure_names_components_pinned_at_the_minimum() -> None:

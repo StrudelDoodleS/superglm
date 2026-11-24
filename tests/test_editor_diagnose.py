@@ -13,6 +13,7 @@ from sklearn.model_selection import KFold
 
 from superglm import GammaLS, SuperGLM, SuperLSS, cat, cross_validate, re, s
 from superglm._lambda_box import fitted_lambda_box
+from superglm.editor import diagnose as editor_diagnose
 from superglm.editor import edit
 from superglm.editor.cv import capture_cv_run, run_cv
 from superglm.editor.diagnose import (
@@ -266,6 +267,31 @@ def test_a_fit_with_no_search_says_so():
 )
 def test_every_stop_reason_is_worded_not_respelled(reason):
     assert _stop_text(reason) != reason.replace("_", " ")
+
+
+@pytest.mark.parametrize(
+    ("reason", "authority"),
+    [
+        ("lambda_change", "Fellner–Schall update met its fixed-point tolerance"),
+        ("objective_plateau", "Fellner–Schall update met its fixed-point tolerance"),
+        ("practical_plateau", "fitted distribution parameters reached an approximate plateau"),
+    ],
+)
+def test_lss_stop_text_describes_the_stopping_rule(monkeypatch, reason, authority):
+    monkeypatch.setattr(editor_diagnose, "is_lss", lambda model: True)
+    monkeypatch.setattr(
+        editor_diagnose,
+        "_lss_trace",
+        lambda model: {
+            "rounds": 1,
+            "stop": reason,
+            "path": [1.0, 0.99],
+            "rows": 2,
+            "seconds": None,
+        },
+    )
+    trace = fit_trace(object(), fit_id="model", label="All rows")
+    assert authority in trace["stop_text"]
 
 
 def test_a_budget_stop_names_the_rounds_and_the_argument():

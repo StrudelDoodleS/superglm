@@ -58,6 +58,14 @@ _GLM_EDITED = "The coefficients were edited by hand after fitting, so they are n
 # A quoted term of a finding: ``'mean:power'``, or one of its penalties, ``'mean:power#wiggle'``.
 _QUOTED_TERM = re.compile(r"'([^':#]+:[^'#]+)(?:#[^']*)?'")
 _NO_SEARCH = "no smoothing search ran"
+_LSS_STOP_TEXT = {
+    **dict.fromkeys(
+        ("lambda_change", "objective_plateau"),
+        "the Fellner–Schall update met its fixed-point tolerance",
+    ),
+    "practical_plateau": "the REML objective and fitted distribution parameters reached an "
+    "approximate plateau",
+}
 _STOP_TEXT = {
     **dict.fromkeys(_FIXED_STOPS, _NO_SEARCH),
     "lambda_change": "the smoothing parameters stopped changing",
@@ -91,10 +99,12 @@ _STOP_TEXT = {
 }
 
 
-def _stop_text(reason: str | None, rounds: int | None = None) -> str:
+def _stop_text(reason: str | None, rounds: int | None = None, *, lss: bool = False) -> str:
     """The stop in words after "Stopped because"; ``rounds`` names the budget a cap ran out of."""
     if reason is None:
         return _NO_SEARCH
+    if lss and reason in _LSS_STOP_TEXT:
+        return _LSS_STOP_TEXT[reason]
     if reason in {"max_iterations", "max_reml_iter"}:
         count = (
             "its smoothing rounds"
@@ -342,13 +352,14 @@ def fit_trace(
     seconds: float | None = None,
 ) -> dict[str, Any]:
     """How the search behind one fit went, as the tab draws it."""
-    trace = _lss_trace(getattr(model, "lss", model)) if is_lss(model) else _glm_trace(model)
+    distributional = is_lss(model)
+    trace = _lss_trace(getattr(model, "lss", model)) if distributional else _glm_trace(model)
     path = trace["path"]
     final = path[-1] if path else None
     trace.update(
         id=fit_id,
         label=label,
-        stop_text=_stop_text(trace["stop"], trace["rounds"]),
+        stop_text=_stop_text(trace["stop"], trace["rounds"], lss=distributional),
         rows=trace["rows"] if n_rows is None else n_rows,
         seconds=trace["seconds"] if seconds is None else seconds,
         late_gain=path[len(path) // 2] - final if len(path) >= 2 else None,
