@@ -766,7 +766,7 @@ def _process_info(
             use_discrete_spline_cat = False
         if info.projection is not None:
             P = info.projection
-            if info.reparametrize and info.penalty_matrix is not None:
+            if info.uses_ssp:
                 lam, omega = _applied_penalty(info, group_name, lambda2)
                 R_inv_local = compute_projected_R_inv(B_for, P, omega, level_weight, lam)
                 R_inv = P @ R_inv_local
@@ -774,7 +774,7 @@ def _process_info(
                 R_inv = P
                 R_inv_local = None
             omega_full = P @ info.penalty_matrix @ P.T if info.penalty_matrix is not None else None
-        elif info.reparametrize and info.penalty_matrix is not None:
+        elif info.uses_ssp:
             lam, omega = _applied_penalty(info, group_name, lambda2)
             R_inv = compute_R_inv(B_for, omega, level_weight, lam)
             R_inv_local = R_inv
@@ -820,7 +820,7 @@ def _process_info(
 
     elif info.projection is not None:
         P = info.projection
-        if info.reparametrize and info.penalty_matrix is not None:
+        if info.uses_ssp:
             B_for = B_unique if use_discrete else info.columns
             exp_for = exposure_agg if use_discrete else sample_weight
             lam, omega = _applied_penalty(info, group_name, lambda2)
@@ -875,7 +875,7 @@ def _process_info(
             if info.lambda_policies is not None:
                 gm.lambda_policies = info.lambda_policies
 
-    elif info.reparametrize and info.penalty_matrix is not None:
+    elif info.uses_ssp:
         B_for = B_unique if use_discrete else info.columns
         exp_for = exposure_agg if use_discrete else sample_weight
         lam, omega = _applied_penalty(info, group_name, lambda2)
