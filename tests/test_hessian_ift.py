@@ -11,7 +11,11 @@ import pandas as pd
 import pytest
 
 from superglm.features.spline import CubicRegressionSpline
-from superglm.group_matrix import DiscretizedSSPGroupMatrix, SparseSSPGroupMatrix
+from superglm.group_matrix import (
+    DiscretizedSSPGroupMatrix,
+    SparseSSPGroupMatrix,
+    penalty_coordinate_map,
+)
 from superglm.model import SuperGLM
 from superglm.reml import build_penalty_caches
 from superglm.solvers.irls_direct import _build_penalty_matrix, fit_irls_direct
@@ -51,7 +55,8 @@ def _setup(family, seed=42):
     for i, (gm, g) in enumerate(zip(m._dm.group_matrices, m._groups)):
         if g.penalized and isinstance(gm, SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix):
             reml_groups.append((i, g))
-            omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+            C = penalty_coordinate_map(gm)
+            omega_ssp = C.T @ gm.omega @ C
             eigv = np.linalg.eigvalsh(omega_ssp)
             penalty_ranks[g.name] = float(np.sum(eigv > 1e-8 * max(eigv.max(), 1e-12)))
 

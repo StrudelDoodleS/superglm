@@ -23,9 +23,9 @@ import numpy as np
 import pandas as pd
 
 from superglm import SuperGLM
-from superglm.dm_builder import compute_projected_R_inv, compute_R_inv
+from superglm.dm_builder import _projected_penalty, compute_projected_R_inv, compute_R_inv
 from superglm.features.spline import CubicRegressionSpline
-from superglm.group_matrix import DesignMatrix, SparseSSPGroupMatrix
+from superglm.group_matrix import DesignMatrix, SparseSSPGroupMatrix, penalty_coordinate_map
 from superglm.reml import (
     build_penalty_caches,
     reml_direct_gradient,
@@ -84,12 +84,13 @@ def _equivalent_ssp_dm(
         if not isinstance(gm, SparseSSPGroupMatrix):
             raise TypeError(f"Expected SparseSSPGroupMatrix, got {type(gm).__name__}")
 
+        r_inv_local = gm.R_inv_local
         if basis_lambda is None:
             r_inv_new = gm.R_inv.copy()
         else:
             if gm.projection is not None:
                 projection = gm.projection
-                omega_proj = projection.T @ gm.omega @ projection
+                omega_proj = _projected_penalty(gm, gm.omega)
                 r_inv_local = compute_projected_R_inv(
                     gm.B,
                     projection,
@@ -104,10 +105,12 @@ def _equivalent_ssp_dm(
         if rotate_seed is not None:
             q = _orthogonal_matrix(r_inv_new.shape[1], rotate_seed + idx)
             r_inv_new = r_inv_new @ q
+            r_inv_local = None if r_inv_local is None else r_inv_local @ q
 
         gm_new = SparseSSPGroupMatrix(gm.B, r_inv_new)
         gm_new.omega = gm.omega
         gm_new.projection = gm.projection
+        gm_new.R_inv_local = None if gm.R_inv_local is None else r_inv_local
         new_gms.append(gm_new)
 
     return DesignMatrix(new_gms, dm.n, dm.p)
@@ -118,7 +121,8 @@ def _reml_metadata(dm: DesignMatrix, groups: list) -> tuple[list, dict[str, floa
     reml_groups = []
     penalty_ranks = {}
     for i, (gm, g) in enumerate(zip(dm.group_matrices, groups, strict=False)):
-        omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+        C = penalty_coordinate_map(gm)
+        omega_ssp = C.T @ gm.omega @ C
         eigvals = np.linalg.eigvalsh(omega_ssp)
         threshold = 1e-8 * max(eigvals.max(), 1e-12)
         penalty_ranks[g.name] = float(np.sum(eigvals > threshold))

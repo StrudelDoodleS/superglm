@@ -15,6 +15,7 @@ from superglm.group_matrix import (
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
 )
+from superglm.types import PenaltyComponent
 
 _SSP_LIKE = (
     SparseSSPGroupMatrix
@@ -36,6 +37,7 @@ class PenaltyCache:
     log_det_omega_plus: float  # log|Ω|₊ (constant across lambda iterations)
     rank: float  # rank(Ω) = r_j
     eigvals_omega: NDArray | None  # positive eigenvalues of Ω_ssp
+    _source: PenaltyComponent | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass

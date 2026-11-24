@@ -107,7 +107,7 @@ from superglm.distributional.prediction_design import (
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import _numeric_values
 from superglm.links import _is_shifted_log_link
-from superglm.stats.wood_pvalue import wood_test_smooth
+from superglm.stats.wood_pvalue import term_test_basis, wood_test_smooth
 from superglm.terms import resolve_label
 
 TermKind = Literal["spline", "categorical", "numeric", "other"]
@@ -292,6 +292,7 @@ class _PreparedTermTest:
     design: NDArray[np.float64] | None
     alternative_edf: float | None
     reconciliation_tolerance: float
+    term_basis: NDArray | None = None
     withheld: bool = False
     identified: NDArray[np.intp] | None = None
     separation_note: str = ""
@@ -1148,12 +1149,18 @@ def _prepare_term_test(
             "reliable; refit the model to check."
         )
     design: NDArray[np.float64] | None = None
+    basis = None
     if not level_term:
         if spec is None:
             evaluation: FrameLike | EagerFrame = frame
         else:
             evaluation, _, _ = _sweep(fitted, frame, parameter, term, points)
         design = _term_design(fitted, evaluation, state, term_slice)
+        compiled = _compiled_predictor(fitted, parameter).compiled
+        for group, matrix in zip(compiled.groups, compiled.design.group_matrices, strict=True):
+            if group.name == str(term):
+                basis = term_test_basis(group, matrix)
+                break
 
     return _PreparedTermTest(
         qualified=qualified,
@@ -1166,6 +1173,7 @@ def _prepare_term_test(
         design=design,
         alternative_edf=None if level_term else _alternative_edf(fitted, term_slice, edf),
         reconciliation_tolerance=float(fitted.inference.reconciliation_tolerance),
+        term_basis=basis,
         withheld=_inference_withheld(fitted, qualified),
         identified=identified,
         separation_note=separation_note,
@@ -1216,6 +1224,7 @@ def _term_test_from_covariance(
             block,
             prepared.alternative_edf,
             _SCALE_MODELLED_RESIDUAL_DF,
+            term_basis=prepared.term_basis,
         )
 
     return TermTest(

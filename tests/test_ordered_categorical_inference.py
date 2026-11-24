@@ -360,9 +360,11 @@ def test_whole_smooth_test_sees_only_the_spline_block(monkeypatch):
     real_wood_test = wood_pvalue.wood_test_smooth
     calls = []
 
-    def recording_wood_test(beta_j, X_j, V_b_j, edf1_j, res_df=-1.0):
+    def recording_wood_test(beta_j, X_j, V_b_j, edf1_j, res_df=-1.0, **kwargs):
         calls.append((np.shape(beta_j), np.shape(X_j), np.shape(V_b_j)))
-        return real_wood_test(beta_j, X_j, V_b_j, edf1_j, res_df)
+        # The term basis that orients the statistic also excludes the free level.
+        assert np.shape(kwargs.get("term_basis")) == (spline_group.size, spline_group.size)
+        return real_wood_test(beta_j, X_j, V_b_j, edf1_j, res_df, **kwargs)
 
     monkeypatch.setattr(wood_pvalue, "wood_test_smooth", recording_wood_test)
     summary = model.summary()

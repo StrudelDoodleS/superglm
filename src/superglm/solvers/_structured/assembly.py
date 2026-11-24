@@ -11,9 +11,7 @@ from typing import Literal, NamedTuple
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.group_matrix import (
-    GroupMatrix,
-)
+from superglm.group_matrix import GroupMatrix
 from superglm.solvers._structured.balance_tree import (
     ProfiledSumToZeroTreeFactor,
     SumToZeroLeafSystem,
@@ -89,10 +87,9 @@ def _dense_component_omega(
         return np.asarray(component.omega_ssp, dtype=np.float64)
     if component.omega_raw is None or not hasattr(group_matrix, "R_inv"):
         raise ValueError(f"Dense penalty component {component.name!r} has no solver-space matrix.")
-    return np.asarray(
-        group_matrix.R_inv.T @ component.omega_raw @ group_matrix.R_inv,
-        dtype=np.float64,
-    )
+    from superglm.reml.penalty_algebra import _penalty_component_omega_ssp
+
+    return np.asarray(_penalty_component_omega_ssp(component, group_matrix), dtype=np.float64)
 
 
 def _leaf_penalty_parts(

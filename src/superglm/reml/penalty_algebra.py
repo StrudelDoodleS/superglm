@@ -41,6 +41,7 @@ from superglm.group_matrix import (
     RandomEffectGroupMatrix,
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
+    penalty_coordinate_map,
 )
 from superglm.reml.result import PenaltyCache
 from superglm.types import GroupSlice, PenaltyComponent
@@ -534,6 +535,9 @@ class _PenaltyGroupGeometry:
     raw_refused: bool = False
     # The plain evaluator's weight-independent pieces and last evaluation.
     plain: _PlainBlock | None = None
+    # Factors used to form the stored solver matrices, distinct from the
+    # certified raw-support route's enclosed approximations to those matrices.
+    solver_roots: tuple[NDArray, ...] = ()
 
     def __getstate__(self) -> dict:
         # The plain block is derived from the support and map; a reloaded
@@ -568,6 +572,7 @@ class _PenaltyGroupGeometry:
             *self.matrix_error_bounds,
             *self.ssp_roots,
             *self.ssp_root_errors,
+            *self.solver_roots,
         ):
             if array is not None:
                 array.setflags(write=False)
@@ -576,7 +581,11 @@ class _PenaltyGroupGeometry:
         from superglm.reml.penalty_support import _penalty_support
 
         if self.support is None:
-            self.support = _penalty_support(self.matrices)
+            self.support = (
+                _penalty_support(self.matrices, roots=self.solver_roots)
+                if self.solver_roots
+                else _penalty_support(self.matrices)
+            )
         return self.support
 
     def evaluate(self, values: NDArray):
@@ -700,7 +709,25 @@ class _PenaltyGroupGeometry:
 
 def _context_geometry(grouped: list[PenaltyComponent]) -> _PenaltyGroupGeometry | None:
     geometry = getattr(grouped[0], "_penalty_geometry", None)
-    if geometry is None or len(grouped) != len(geometry.matrices):
+    if geometry is None:
+        return None
+    if len(grouped) < len(geometry.matrices):
+        # A zero smoothing weight can remove some components from a rank
+        # query. Keep each remaining component's own factor on that face.
+        roots, matrices = [], []
+        for component in grouped:
+            root = stored_component_root(component)
+            if root is None or component.omega_ssp is None:
+                return None
+            roots.append(root)
+            matrices.append(component.omega_ssp)
+        return _PenaltyGroupGeometry(
+            tuple(matrices),
+            tuple(_component_geometry_key(c) for c in grouped),
+            1,
+            solver_roots=tuple(roots),
+        )
+    if len(grouped) != len(geometry.matrices):
         return None
     if any(
         getattr(component, "_penalty_geometry", None) is not geometry
@@ -727,6 +754,7 @@ def _attach_context_geometry(
     raw_support=None,
     raw_refused: bool = False,
     plain: _PlainBlock | None = None,
+    solver_roots=(),
 ) -> None:
     if not grouped or any(component.omega_ssp is None for component in grouped):
         return
@@ -752,6 +780,7 @@ def _attach_context_geometry(
         raw_support=raw_support,
         raw_refused=raw_refused,
         plain=plain,
+        solver_roots=tuple(_frozen_array(root) for root in solver_roots),
     )
     if coordinate_map is not None and certified:
         # Rank queries also rely on injectivity; certify it before exposing
@@ -1106,6 +1135,7 @@ def _rebind_penalty_context(
             volume_activity=geometry.volume_activity,
             volume=geometry.volume,
             certified=geometry.certified,
+            solver_roots=geometry.solver_roots,
         )
         for component in targets:
             component._penalty_geometry = owner
@@ -1114,6 +1144,8 @@ def _rebind_penalty_context(
 def _penalty_component_omega_ssp(
     component: PenaltyComponent,
     group_matrix: GroupMatrix | None = None,
+    *,
+    stable_congruence: bool = False,
 ) -> NDArray | None:
     """Return a dense solver-space penalty only for non-identity components."""
     if component.penalty_kind == "identity":
@@ -1122,7 +1154,36 @@ def _penalty_component_omega_ssp(
         return component.omega_ssp
     if group_matrix is None or component.omega_raw is None:
         raise ValueError(f"Dense penalty component {component.name!r} has no solver-space matrix.")
-    return group_matrix.R_inv.T @ component.omega_raw @ group_matrix.R_inv
+    if getattr(group_matrix, "term_roots", None) or stable_congruence:
+        suffix = (
+            component.name.removeprefix(component.group_name + ":")
+            if component.name != component.group_name
+            else ""
+        )
+        return group_penalty_matrix(group_matrix, component.omega_raw, suffix)
+    coordinate_map = penalty_coordinate_map(group_matrix)
+    return coordinate_map.T @ component.omega_raw @ coordinate_map
+
+
+def stored_component_root(component: PenaltyComponent) -> NDArray | None:
+    """The transported factor belonging to this exact frozen solver-space penalty."""
+    geometry = getattr(component, "_penalty_geometry", None)
+    if geometry is not None and component.penalty_kind == "dense":
+        for key, matrix, root in zip(geometry.keys, geometry.matrices, geometry.solver_roots):
+            if (
+                component.omega_ssp is matrix
+                and not matrix.flags.writeable
+                and key == _component_geometry_key(component)
+            ):
+                return root
+    return None
+
+
+def _cached_component_root(cache: PenaltyCache):
+    source = getattr(cache, "_source", None)
+    if source is not None and source.omega_ssp is cache.omega_ssp:
+        return stored_component_root(source)
+    return None
 
 
 def _repeated_penalty_geometry(
@@ -1854,6 +1915,22 @@ def ssp_penalty_matrix(coordinate_map: NDArray, omega: NDArray) -> NDArray:
     return np.ldexp(0.5 * (gram + gram.T), 2 * (half + shift))
 
 
+def group_penalty_matrix(gm, omega: NDArray, suffix: str = "", *, factor: bool = False) -> NDArray:
+    """The solver-space penalty or its factor, transporting a declared term root directly."""
+    from superglm.solvers.centered_system import penalty_factor
+
+    coordinate_map = penalty_coordinate_map(gm)
+    roots = getattr(gm, "term_roots", None)
+    if roots is not None and suffix in roots:
+        declared = getattr(gm, "omega_components", None)
+        source = dict(declared).get(suffix) if declared else gm.omega
+        if source is omega:
+            root = roots[suffix] @ coordinate_map
+            return root if factor else root.T @ root
+    matrix = ssp_penalty_matrix(coordinate_map, omega)
+    return penalty_factor(matrix) if factor else matrix
+
+
 def build_penalty_matrix(
     group_matrices: list[GroupMatrix],
     groups: list[GroupSlice],
@@ -1887,11 +1964,8 @@ def build_penalty_matrix(
             if pc.penalty_kind in ("repeated", "sum_to_zero"):
                 S[pc.group_sl, pc.group_sl] += lam * penalty_component_dense_matrix(pc, gm)
                 continue
-            omega_ssp = (
-                pc.omega_ssp
-                if pc.omega_ssp is not None
-                else ssp_penalty_matrix(gm.R_inv, pc.omega_raw)
-            )
+            omega_ssp = _penalty_component_omega_ssp(pc, gm, stable_congruence=True)
+            assert omega_ssp is not None  # identity components were handled above
             S[pc.group_sl, pc.group_sl] += lam * omega_ssp
 
         for group_index, (gm, g) in enumerate(zip(group_matrices, groups)):
@@ -1921,7 +1995,7 @@ def build_penalty_matrix(
                     lam_j = resolve_component_lambda(lambda2, g.name, suffix)
                     if lam_j == 0:
                         continue
-                    S[g.sl, g.sl] += lam_j * ssp_penalty_matrix(gm.R_inv, omega_j)
+                    S[g.sl, g.sl] += lam_j * group_penalty_matrix(gm, omega_j, suffix)
                 continue
             lam_g = resolve_group_lambda(lambda2, g.name)
             if lam_g == 0:
@@ -1929,7 +2003,7 @@ def build_penalty_matrix(
             omega = gm.omega
             if omega is None:
                 continue
-            S[g.sl, g.sl] += lam_g * ssp_penalty_matrix(gm.R_inv, omega)
+            S[g.sl, g.sl] += lam_g * group_penalty_matrix(gm, omega)
         elif g.scop_reparameterization is not None:
             lam_g = resolve_group_lambda(lambda2, g.name)
             if lam_g == 0:
@@ -2016,6 +2090,7 @@ def build_penalty_components(
         *,
         force_solver_rank: bool = False,
         structural_rank: int | None = None,
+        solver_root: NDArray | None = None,
     ) -> tuple[float, float, NDArray, NDArray]:
         """Compute basis-invariant rank from raw penalty, log|Ω|₊ from SSP.
 
@@ -2045,6 +2120,14 @@ def build_penalty_components(
         solver-space count, where the raw count agrees with it.
         """
         from superglm.reml.multi_penalty import _certifies_rank_at_least
+
+        if solver_root is not None:
+            # A declared range has one row per direction; take its singular
+            # values before squaring. A cutoff on the squared spectrum can
+            # erase real curvature, even when the null rows are exact zeros.
+            singular = scipy.linalg.svdvals(solver_root, check_finite=False)
+            singular = singular[singular > 0]
+            return len(singular), 2 * math.fsum(map(math.log, singular)), singular**2, omega_ssp
 
         # Rank from raw penalty (basis-invariant)
         raw_eigvals = np.linalg.eigvalsh(omega_raw)
@@ -2102,6 +2185,21 @@ def build_penalty_components(
 
         group_components: list[PenaltyComponent] = []
         structural_ranks = getattr(gm, "structural_ranks", None) or {}
+        term_roots = getattr(gm, "term_roots", None)
+        declared_roots = tuple(term_roots.values()) if term_roots else None
+        solver_roots = {}
+        solver_errors = ()
+        if term_roots:
+            coordinate_map = penalty_coordinate_map(gm)
+            if certified:
+                products = [
+                    _context_product(root, coordinate_map, refine=False)
+                    for root in term_roots.values()
+                ]
+                solver_roots = dict(zip(term_roots, (root for root, _ in products), strict=True))
+                solver_errors = tuple(error for _, error in products)
+            else:
+                solver_roots = {key: root @ coordinate_map for key, root in term_roots.items()}
         raw_support = None
         raw_coordinate_map = None
         raw_volume = raw_inputs = raw_selected = plain_block = None
@@ -2208,7 +2306,7 @@ def build_penalty_components(
             ct_map = getattr(gm, "component_types", None) or {}
             lp_map = getattr(gm, "lambda_policies", None) or {}
             if len(gm.omega_components) > 1 and not isinstance(gm, DiscretizedTensorGroupMatrix):
-                coordinate_map = np.asarray(gm.R_inv, dtype=float)
+                coordinate_map = np.asarray(penalty_coordinate_map(gm), dtype=float)
                 raw_width = gm.omega_components[0][1].shape[0]
                 if coordinate_map.shape == (raw_width, raw_width):
                     from superglm.reml.penalty_support import _penalty_support
@@ -2216,24 +2314,38 @@ def build_penalty_components(
                     if not np.all(np.isfinite(coordinate_map)):
                         raise ValueError("SSP coordinate map must be finite")
                     raw_coordinate_map = coordinate_map
+                    matrices = [omega for _, omega in gm.omega_components]
+                    reused = None
+                    if not certified:
+                        raw_inputs = tuple(
+                            _frozen_array(value) for value in (declared_roots or matrices)
+                        )
+                        reused = _reusable_raw_context(prior, raw_inputs)
+                    if reused is not None:
+                        raw_support = reused.raw_support
+                    elif declared_roots is None:
+                        raw_support = _penalty_support(matrices)
+                    else:
+                        raw_support = _penalty_support(matrices, roots=declared_roots)
                     if certified:
-                        raw_support = _penalty_support([omega for _, omega in gm.omega_components])
-                        group_ssp_roots, group_ssp_errors = _ssp_component_roots(
+                        if solver_roots:
+                            group_ssp_roots, group_ssp_errors = (
+                                tuple(solver_roots.values()),
+                                solver_errors,
+                            )
+                        else:
+                            group_ssp_roots, group_ssp_errors = _ssp_component_roots(
+                                raw_support, coordinate_map
+                            )
+                    else:
+                        raw_selected = raw_support
+                        group_ssp_roots = tuple(solver_roots.values()) or _transported_roots(
                             raw_support, coordinate_map
                         )
-                    else:
-                        raw_inputs = tuple(_frozen_array(omega) for _, omega in gm.omega_components)
-                        reused = _reusable_raw_context(prior, raw_inputs)
-                        raw_support = raw_selected = (
-                            _penalty_support(list(raw_inputs))
-                            if reused is None
-                            else reused.raw_support
-                        )
-                        group_ssp_roots = _transported_roots(raw_support, coordinate_map)
                         plain_block = _plain_multi_block(
                             raw_support,
                             coordinate_map,
-                            raw_inputs,
+                            None if declared_roots else raw_inputs,
                             previous=None if reused is None else reused.plain,
                         )
             for component_index, (suffix, omega_j) in enumerate(gm.omega_components):
@@ -2267,7 +2379,12 @@ def build_penalty_components(
                     rank, log_det, pos_eigvals = tensor_summary
                     omega_ssp_j = _canonicalize_ssp_penalty(omega_j, rank)
                 else:
-                    omega_ssp_j = ssp_penalty_matrix(gm.R_inv, omega_j)
+                    solver_root = solver_roots.get(suffix)
+                    omega_ssp_j = (
+                        ssp_penalty_matrix(penalty_coordinate_map(gm), omega_j)
+                        if solver_root is None
+                        else solver_root.T @ solver_root
+                    )
                     force_solver_rank = (
                         isinstance(gm, DiscretizedTensorGroupMatrix)
                         and getattr(gm, "projection", None) is not None
@@ -2277,6 +2394,7 @@ def build_penalty_components(
                         omega_ssp_j,
                         force_solver_rank=force_solver_rank,
                         structural_rank=structural_ranks.get(suffix),
+                        solver_root=solver_root,
                     )
                 group_components.append(
                     PenaltyComponent(
@@ -2296,7 +2414,12 @@ def build_penalty_components(
         else:
             # Single-penalty path.
             lp_map = getattr(gm, "lambda_policies", None) or {}
-            omega_ssp = ssp_penalty_matrix(gm.R_inv, gm.omega)
+            solver_root = solver_roots.get("")
+            omega_ssp = (
+                ssp_penalty_matrix(penalty_coordinate_map(gm), gm.omega)
+                if solver_root is None
+                else solver_root.T @ solver_root
+            )
             force_solver_rank = (
                 isinstance(gm, DiscretizedTensorGroupMatrix)
                 and getattr(gm, "projection", None) is not None
@@ -2306,6 +2429,7 @@ def build_penalty_components(
                 omega_ssp,
                 force_solver_rank=force_solver_rank,
                 structural_rank=structural_ranks.get(""),
+                solver_root=solver_root,
             )
             group_components.append(
                 PenaltyComponent(
@@ -2359,12 +2483,22 @@ def build_penalty_components(
             reused = _reusable_solver_context(prior, group_components)
             if reused is not None:
                 raw_support, plain_block = reused.support, reused.plain
+        if solver_roots and raw_support is None and plain_block is None:
+            from superglm.reml.penalty_support import _penalty_support_from_roots
+
+            roots = tuple(solver_roots.values())
+            raw_support = _penalty_support_from_roots(
+                roots,
+                resolution_limited=[False] * len(roots),
+                input_error_bounds=solver_errors or tuple(np.zeros_like(root) for root in roots),
+            )
         _attach_context_geometry(
             group_components,
             support=raw_support,
             coordinate_map=raw_coordinate_map,
             matrix_errors=matrix_errors,
             ssp_roots=group_ssp_roots if certified else (),
+            solver_roots=tuple(solver_roots.values()),
             ssp_errors=group_ssp_errors,
             volume=raw_volume,
             certified=certified,
@@ -2399,12 +2533,14 @@ def coerce_reml_penalties(
         log_det = 0.0
         eigvals = None
         omega_raw = None
+        combined_root = None
         if penalty_caches is not None and g.name in penalty_caches:
             cache = penalty_caches[g.name]
             omega_ssp = cache.omega_ssp
             rank = cache.rank
             log_det = cache.log_det_omega_plus
             eigvals = cache.eigvals_omega
+            combined_root = _cached_component_root(cache)
         elif (
             gm is not None
             and hasattr(gm, "R_inv")
@@ -2420,7 +2556,21 @@ def coerce_reml_penalties(
                 # A raw rounded congruence can contaminate its exact nullspace.
                 components.extend(build_penalty_components(group_matrices, [(idx, g)]))
                 continue
-            omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
+            coordinate_map = penalty_coordinate_map(gm)
+            term_roots = getattr(gm, "term_roots", None)
+            if term_roots:
+                # In the declared coordinates the common polynomial null
+                # space is exactly the leading zero columns of every root.
+                stacked = np.vstack(tuple(term_roots.values()))
+                active = np.any(stacked != 0, axis=0)
+                combined_root = np.linalg.qr(stacked[:, active], mode="r") @ coordinate_map[active]
+                omega_ssp = combined_root.T @ combined_root
+                singular = np.linalg.svd(combined_root, compute_uv=False)
+                eigvals = singular**2
+                rank = float(len(eigvals))
+                log_det = math.fsum(2 * math.log(value) for value in singular)
+            else:
+                omega_ssp = coordinate_map.T @ gm.omega @ coordinate_map
         if gm is not None and hasattr(gm, "omega"):
             omega_raw = gm.omega
         components.append(
@@ -2436,6 +2586,8 @@ def coerce_reml_penalties(
                 eigvals_omega=eigvals,
             )
         )
+        if combined_root is not None:
+            _attach_context_geometry([components[-1]], solver_roots=(combined_root,))
     return components
 
 
@@ -2450,15 +2602,7 @@ def build_penalty_caches(
     build_penalty_components directly.
     """
     components = build_penalty_components(group_matrices, reml_groups, cache=cache)
-    return {
-        c.name: PenaltyCache(
-            omega_ssp=c.omega_ssp,
-            log_det_omega_plus=c.log_det_omega_plus,
-            rank=c.rank,
-            eigvals_omega=c.eigvals_omega,
-        )
-        for c in components
-    }
+    return _component_caches(components)
 
 
 def build_penalty_context(
@@ -2475,17 +2619,22 @@ def build_penalty_context(
         cache=cache,
         _reuse_raw_from=_reuse_raw_from,
     )
-    caches = {
+    caches = _component_caches(components)
+    ranks = {c.name: c.rank for c in components}
+    return components, caches, ranks
+
+
+def _component_caches(components):
+    return {
         c.name: PenaltyCache(
             omega_ssp=c.omega_ssp,
             log_det_omega_plus=c.log_det_omega_plus,
             rank=c.rank,
             eigvals_omega=c.eigvals_omega,
+            _source=c if stored_component_root(c) is not None else None,
         )
         for c in components
     }
-    ranks = {c.name: c.rank for c in components}
-    return components, caches, ranks
 
 
 def cached_logdet_s_plus(
@@ -2522,6 +2671,9 @@ def cached_logdet_s_plus(
                 penalty_kind="identity" if identity else "dense",
             )
         )
+        root = _cached_component_root(cache)
+        if root is not None:
+            _attach_context_geometry([penalties[-1]], solver_roots=(root,))
     return penalty_logdet(lambdas, penalties).logdet
 
 
@@ -2844,7 +2996,7 @@ def _single_penalty_raw_family(gm, grouped, declared_rank, *, rank_rcond=None):
     from superglm.reml.penalty_support import PenaltyNumericalError, _penalty_support
 
     omega = getattr(gm, "omega", None)
-    coordinate_map = getattr(gm, "R_inv", None)
+    coordinate_map = penalty_coordinate_map(gm) if hasattr(gm, "R_inv") else None
     if omega is None or coordinate_map is None or len(grouped) != 1:
         return None
     omega, coordinate_map = np.asarray(omega), np.asarray(coordinate_map)
@@ -2858,7 +3010,10 @@ def _single_penalty_raw_family(gm, grouped, declared_rank, *, rank_rcond=None):
     ):
         return None
     try:
-        support = _penalty_support([omega], rcond=rank_rcond)
+        term_roots = getattr(gm, "term_roots", None)
+        support = _penalty_support(
+            [omega], rcond=rank_rcond, roots=(term_roots[""],) if term_roots else None
+        )
     except (PenaltyNumericalError, ValueError):
         # Its ValueErrors are the raw matrix's own admissibility checks
         # (symmetry, semidefiniteness), which the solver-space path never
@@ -3014,7 +3169,7 @@ def _plain_single_raw_route(gm, grouped, declared_rank, prior, *, rank_rcond):
     from superglm.solvers.rank import SHARED_RANK_POLICY, _eigensolver_relative_bar
 
     omega = getattr(gm, "omega", None)
-    coordinate_map = getattr(gm, "R_inv", None)
+    coordinate_map = penalty_coordinate_map(gm) if hasattr(gm, "R_inv") else None
     if omega is None or coordinate_map is None or len(grouped) != 1:
         return None
     omega, coordinate_map = np.asarray(omega), np.asarray(coordinate_map)
@@ -3027,7 +3182,8 @@ def _plain_single_raw_route(gm, grouped, declared_rank, prior, *, rank_rcond):
         or np.array_equal(coordinate_map, np.eye(*coordinate_map.shape))
     ):
         return None
-    inputs = (_frozen_array(omega),)
+    term_roots = getattr(gm, "term_roots", None)
+    inputs = (_frozen_array(term_roots[""] if term_roots else omega),)
     reused = _reusable_raw_context(prior, inputs)
     if reused is not None and reused.raw_refused:
         return inputs, None, None, None
@@ -3035,7 +3191,9 @@ def _plain_single_raw_route(gm, grouped, declared_rank, prior, *, rank_rcond):
         support = reused.raw_support
     else:
         try:
-            support = _penalty_support([omega], rcond=rank_rcond)
+            support = _penalty_support(
+                [omega], rcond=rank_rcond, roots=(term_roots[""],) if term_roots else None
+            )
         except (PenaltyNumericalError, ValueError):
             # The raw matrix's own admissibility checks refuse the route; the
             # solver-space path never applies them to the raw penalty.
@@ -3212,7 +3370,18 @@ def _compute_penalty_logdet_evaluation(
         extra_volume = 0.0
         geometry = _context_geometry(grouped)
         if geometry is not None and not geometry.certified:
-            geometry = None
+            # The plain context has no certificate. Build one on its
+            # solver-space roots before evaluating the supplied weights.
+            geometry = (
+                _PenaltyGroupGeometry(
+                    geometry.matrices,
+                    geometry.keys,
+                    geometry.repeat,
+                    _penalty_support(geometry.matrices, roots=geometry.solver_roots),
+                )
+                if geometry.solver_roots
+                else None
+            )
         if len(grouped) == 1 and component.penalty_kind == "sum_to_zero":
             levels, _ = _sum_to_zero_penalty_geometry(component)
             matrices = [_penalty_component_omega_ssp(component)]

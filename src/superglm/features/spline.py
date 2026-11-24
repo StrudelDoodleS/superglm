@@ -396,6 +396,27 @@ class _SplineBase:
         del order
         return None
 
+    def _penalty_null_basis(self, order: int) -> NDArray | None:
+        """Raw coefficients of the polynomials the order-``order`` penalty annihilates, if known.
+
+        A kind states the null space its penalty's construction gives it, as
+        it states its rank (mgcv ``smooth.construct``'s ``null.space.dim``,
+        with the basis itself), so the term's null space is exact rather than
+        read from the rounded penalty's spectrum (``term_null_basis``).
+        """
+        del order
+        return None
+
+    def _penalty_root_for_order(self, order: int) -> NDArray | None:
+        """A factor ``R`` with ``R' R`` the order-``order`` penalty, if the kind builds one.
+
+        The penalty is formed as its Gram, which squares the root's
+        conditioning; the term's null-explicit coordinates form their range
+        block from the root instead (``_spline_build.declared_null_coordinates``).
+        """
+        del order
+        return None
+
     def _resolve_lambda_policies(self, info: GroupInfo) -> dict[str, LambdaPolicy] | None:
         """Resolve lambda_policy parameter into a per-component dict."""
         return _spline_select.resolve_lambda_policies(
@@ -409,7 +430,12 @@ class _SplineBase:
         return _spline_build.build_group_info(self, x, sample_weight, feature_name=feature_name)
 
     def _build_with_row_support(
-        self, x: NDArray, sample_weight: NDArray | None = None, *, feature_name: str | None = None
+        self,
+        x: NDArray,
+        sample_weight: NDArray | None = None,
+        *,
+        precision_weight: NDArray,
+        feature_name: str | None = None,
     ) -> GroupInfo | list[GroupInfo]:
         """``build``, with the basis's row support found on its rows per value.
 
@@ -417,7 +443,12 @@ class _SplineBase:
         place of scanning the basis.
         """
         return _spline_build.build_group_info(
-            self, x, sample_weight, find_row_support=True, feature_name=feature_name
+            self,
+            x,
+            sample_weight,
+            find_row_support=True,
+            precision_weight=precision_weight,
+            feature_name=feature_name,
         )
 
     def build_knots_and_penalty(
@@ -538,6 +569,17 @@ class _IntegratedPenaltySpline(_SplineBase):
             structural = self._structural_penalty_for_order(order)
             _spline_ranges.certify_penalty_rank(omega, structural, self._constraint_rows())
         return omega
+
+    def _penalty_null_basis(self, order: int) -> NDArray:
+        """The polynomials of degree below ``order``, which every interval's block annihilates."""
+        return _spline_penalties._polynomial_coefficients(self._knots, self.degree, order)
+
+    def _penalty_root_for_order(self, order: int) -> NDArray:
+        """The quadrature root over the unpinned intervals (``integrated_derivative_root``)."""
+        excluded = _spline_ranges.pinned_intervals(self._polynomial_ranges, self._lo, self._hi)
+        return _spline_penalties.integrated_derivative_root(
+            self._knots, self.degree, order, excluded=excluded, intervals=self._penalty_intervals()
+        )
 
     def _structural_penalty_for_order(self, order: int) -> NDArray:
         """Each unpinned knot interval's block at unit norm (``structural_derivative_penalty``)."""
@@ -691,6 +733,12 @@ class PSpline(_BSplineBase):
 
     def _build_penalty_for_order(self, order: int) -> NDArray:
         return _spline_penalties.difference_penalty_for(self, order)
+
+    def _penalty_null_basis(self, order: int) -> NDArray | None:
+        return _spline_penalties.difference_null_basis(self, order)
+
+    def _penalty_root_for_order(self, order: int) -> NDArray:
+        return _spline_penalties.difference_penalty_root(self, order)
 
     def _build_penalty(self) -> NDArray:
         return self._build_penalty_for_order(self._m_orders[0])
@@ -1113,6 +1161,19 @@ class CardinalCRSpline(_SplineBase):
         """The fixed penalty's null space without its spread (``structural_cr_penalty``)."""
         del order
         return _spline_cardinal_spec.structural_penalty(self)
+
+    def _penalty_null_basis(self, order: int) -> NDArray:
+        """The straight lines: a cardinal coefficient is the curve's value at its knot."""
+        del order
+        knots = cast(NDArray, self._cr_knots)
+        return np.column_stack(
+            [np.ones_like(knots), _spline_penalties.normalized_knots(knots, 0, -1)]
+        )
+
+    def _penalty_root_for_order(self, order: int) -> NDArray:
+        """The fixed penalty's factor ``L^{-1} B_u`` (``cr_penalty_root``)."""
+        del order
+        return _spline_cardinal_spec.penalty_root(self)
 
     def _basis_matrix(self, x: NDArray):
         """Evaluate the cardinal CR basis at data points."""

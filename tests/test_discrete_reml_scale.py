@@ -8,6 +8,7 @@ import pytest
 
 from superglm import SuperGLM
 from superglm.features import Categorical, Spline
+from superglm.group_matrix import penalty_coordinate_map
 from superglm.reml.scale import (
     prepare_gamma_reml_scale_data,
     profile_gamma_reml_scale,
@@ -29,7 +30,8 @@ def _penalized_deviance(result, group_matrices, lambdas, penalties) -> float:
         omega = component.omega_ssp
         if omega is None:
             gm = group_matrices[component.group_index]
-            omega = gm.R_inv.T @ gm.omega @ gm.R_inv
+            C = penalty_coordinate_map(gm)
+            omega = C.T @ gm.omega @ C
         beta = result.beta[component.group_sl]
         penalty_quad += float(lambdas[component.name]) * float(beta @ omega @ beta)
     return float(result.deviance + penalty_quad)

@@ -61,11 +61,11 @@ class _IRLSDirectQRStep(_IRLSDirectStep):
     reference to the fit.
     """
 
-    __slots__ = ("_X_full", "_L_aug", "_held_rank")
+    __slots__ = ("_X_full", "_penalty_root", "_held_rank")
     backend = "qr"
     finalise = _finalise_centred
 
-    def __init__(self, gms: list[GroupMatrix], S: NDArray, p: int) -> None:
+    def __init__(self, gms: list[GroupMatrix], S: NDArray, p: int, penalty_rows=None) -> None:
         has_disc = any(
             isinstance(gm, DiscretizedSSPGroupMatrix | DiscretizedSplineCategoricalGroupMatrix)
             for gm in gms
@@ -77,7 +77,8 @@ class _IRLSDirectQRStep(_IRLSDirectStep):
                 "benefit.  Consider direct_solve='auto' for large-n discrete fits."
             )
         self._X_full = np.hstack([gm.toarray() for gm in gms])  # (n, p)
-        self._L_aug = _sqrt_penalty_augmented(S, p)  # (p+1, p+1)
+        root = None if penalty_rows is None else penalty_rows()
+        self._penalty_root = _sqrt_penalty_augmented(S, p)[1:, 1:] if root is None else root
         self._held_rank: RankDecomposition | None = None
 
     def propose(self, fit: _IRLSDirectFit, it: int) -> None:
@@ -89,8 +90,10 @@ class _IRLSDirectQRStep(_IRLSDirectStep):
         centered = fit.get_centered_system(W, z_off)
         fit._last_working_centered = centered
         A_data = sqrtW[:, None] * _centred_rows(self._X_full, centered)
-        A = np.vstack([A_data, self._L_aug[1:, 1:]])
-        rhs_qr = np.concatenate([sqrtW * (z_off - centered.mean_z), np.zeros(fit.p)])
+        A = np.vstack([A_data, self._penalty_root])
+        rhs_qr = np.concatenate(
+            [sqrtW * (z_off - centered.mean_z), np.zeros(len(self._penalty_root))]
+        )
         iteration_rank = decompose_factor(A, retain_factor_solve=True)
         beta = iteration_rank.solve_factor_rhs(rhs_qr)
         _commit_centred_slopes(fit, centered, beta, iteration_rank, _t0)
