@@ -64,6 +64,29 @@ def test_a_discarded_shifted_slope_must_be_fitted_or_disclosed(discrete):
         assert any(issubclass(item.category, ConvergenceWarning) for item in caught)
 
 
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
+@pytest.mark.pins_behaviour
+def test_a_joint_gain_in_discarded_directions_must_be_fitted_or_disclosed(discrete):
+    """Pin disclosure when the Gaussian group means jointly gain more than the fit tolerance."""
+    z = np.tile([-1.0, -1.0, 1.0, 1.0], 16)
+    v = np.repeat([-1.0, 1.0], 32)
+    noise = np.tile([-1.0, 1.0], 32)
+    X = pd.DataFrame({"x": 1e10 * (3e7 + z), "v": 1e10 * (3e7 + v)})
+    y = 1e7 * (1 + 0.0023 * z + noise)
+    family = GaussianLS(scale_floor=0)
+    model = SuperLSS(family, family.location("x", "v"), family.scale(), discrete=discrete)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ConvergenceWarning)
+        model.fit(X, y)
+    if model.result_.converged:
+        # The balanced noise has mean zero in each group and fitted scale 1e7.
+        optimum = -len(y) * (np.log(1e7) + 0.5 * (1 + np.log(2 * np.pi)))
+        fitted = model.result_.log_likelihood
+        assert optimum - fitted <= 1e-7 * (1 + abs(fitted))
+    else:
+        assert any(issubclass(item.category, ConvergenceWarning) for item in caught)
+
+
 @pytest.mark.parametrize("force_fallback", [False, True], ids=["observed", "fisher"])
 def test_a_material_gain_is_measured_with_the_accepted_factor(monkeypatch, force_fallback):
     """A weakly weighted Gaussian can still gain 0.5. On fallback give the

@@ -1808,16 +1808,16 @@ def _terminal_step_improves_objective(
         return trial is not None and trial.penalized_optimizing_log_likelihood - objective > limit
 
     if discarded is not None:
-        # No Newton curvature remains along these contrasts. A step whose linear
-        # gain is twice the limit gains at least the limit on a concave quadratic
-        # whenever its maximum gain exceeds the limit. Judge the family likelihood
-        # itself: a link wall or a limiting distribution can flatten that slope.
-        for direction in discarded.T:
-            slope = float(direction @ score)
-            if slope != 0.0:
-                with np.errstate(over="ignore", invalid="ignore"):
-                    if improves(state.coefficients + (2.0 * limit / slope) * direction):
-                        return True
+        # Follow the score jointly in the discarded coordinates. Scale the trial
+        # to a linear gain of twice the limit, then measure the actual gain since
+        # a link wall or limiting distribution can flatten the likelihood.
+        with np.errstate(over="ignore", invalid="ignore"):
+            slopes = discarded.T @ score
+            slope = np.hypot.reduce(slopes)
+            if slope > 0.0 and np.isfinite(slope):
+                direction = discarded @ (slopes / slope)
+                if improves(state.coefficients + (2.0 * limit / slope) * direction):
+                    return True
     if not telemetry.certified:
         return False
     if rank.cholesky_factor is not None and telemetry.actual_source == "observed":
