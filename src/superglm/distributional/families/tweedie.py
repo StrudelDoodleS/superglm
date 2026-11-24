@@ -788,6 +788,8 @@ class TweedieLSS(TweediePredictors):
             ),
         )
 
+    default_prediction_parameters: ClassVar[tuple[str, ...]] = ("mean",)
+
     @property
     def default_prediction_name(self) -> str:
         return "conditional_mean"

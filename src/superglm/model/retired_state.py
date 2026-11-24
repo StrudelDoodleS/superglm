@@ -90,11 +90,13 @@ def release_capped_separation_records(model) -> None:
     """
     if (model.__dict__.get("_last_fit_meta") or {}).get("method") == "fit_path":
         return
+    from superglm.model.separated_levels import record_separated_levels
+
     for spec in (model.__dict__.get("_specs") or {}).values():
         if getattr(spec, "_constraint_rules", None) and getattr(
             spec, "_separated_levels_at_fit", ()
         ):
-            spec._separated_levels_at_fit = ()
+            record_separated_levels(spec)
 
 
 def release_separated_level_summaries(model) -> None:

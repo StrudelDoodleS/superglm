@@ -496,12 +496,12 @@ def _predict_eta(
         score(term)
         held = getattr(term["spec"], "_separated_levels_at_fit", ())
         if held and not fitted and warn:
-            # the level each row is scored at: raw values go through the spec's
-            # grouping and unseen policy, as ``score`` reads them
-            met = term["spec"]._predicted_levels(frame.column_array(term["name"]))
-            named = [label for label in held if label in met]
+            from superglm.model.separated_levels import predicted_separated_levels
+
+            name = term["name"]
+            named = predicted_separated_levels(name, term["spec"], frame.column_array(name))
             if named:
-                separated_levels.append(f"{term['name']!r} levels {', '.join(map(str, named))}")
+                separated_levels.append(named)
     if not fitted:
         from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
 
@@ -543,17 +543,9 @@ def _predict_eta(
         warn_caller(SZ_POPULATION_PREDICTION + "; ".join(unidentified) + ".")
     # A prediction warning names the caller of ``predict``, however deep the call.
     if separated_levels:
-        from superglm.diagnostics.separation import SeparationWarning
+        from superglm.model.separated_levels import warn_separated_predictions
 
-        warn_caller(
-            "These rows reach categorical levels or crossed cells whose training rows all had "
-            "a response of 0, or all of 1, so the data give their effect no finite estimate: "
-            + "; ".join(separated_levels)
-            + ". Their predictions use the fitted value, which is where the fit stopped, not "
-            "an estimate. Group those levels with similar levels, or fit the term as a "
-            "RandomEffect, and refit to price them.",
-            SeparationWarning,
-        )
+        warn_separated_predictions(separated_levels)
 
     total = eta.finish(consume=True)
     if offset is not None:
