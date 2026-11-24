@@ -49,7 +49,8 @@ REPAIR_NEEDS_THE_ROWS = (
 )
 # The search for the re-estimated intercept runs in units of the parameter's own scale on its
 # link (``_intercept_scale``), so that the response's units do not change it. It is Newton's
-# method on the likelihood's slope in the shift, kept inside a bracket (``_newton_minimum``).
+# method on the likelihood's slope in the shift, kept inside a bracket (``_newton_minimum``);
+# points level to the objective's rounding are ordered by their slopes, never their last bits.
 # Where the family or link gives no derivatives there, a derivative-free search decides
 # (``_derivative_free_minimum``): bracket, then Brent (Brent, *Algorithms for Minimization
 # without Derivatives*, 1973, ch. 5; Press et al., *Numerical Recipes*, 3rd ed., section 10.1).
@@ -420,11 +421,19 @@ def _newton_minimum(
     curvature is not positive, where the open bracket would leave float64's range in ``unit``s,
     or after ``_NEWTON_STEPS``. Every other stop is a minimum: a positive curvature with a
     decrement within rounding, or a bracket closed on the best point.
+
+    Two values within the rounding of their sums give no order: which is lower in its last bits
+    depends on the BLAS build that formed the linear predictor. Their slopes are resolved
+    there, since a slope is not a difference of values, so the search moves to a trial level
+    with the lowest value found and reads its slope (Hager and Zhang, *SIAM J. Optim.* 16(1),
+    2005, section 4: the interval update with the function value's error). A saturated link's
+    plateau is left that way, downhill by its slope.
     """
     x = start
     value, derivatives = probe(x)
     # The minimum lies above a point of negative slope, below one of positive slope, and on the
-    # best point's side of a point no lower than it or invalid (a wall).
+    # best point's side of a trial the search does not move to (a wall): one invalid, higher
+    # than the lowest value found beyond rounding, or no lower and without a slope.
     lower, upper = -np.inf, np.inf
     before = last = np.inf  # the last two step lengths, as rtsafe keeps them
     for _ in range(_NEWTON_STEPS):
@@ -468,8 +477,13 @@ def _newton_minimum(
                     return None
         before, last = last, abs(trial - x)
         trial_value, trial_derivatives = probe(trial)
-        if trial_value < value:
-            x, value, derivatives = trial, trial_value, trial_derivatives
+        # Level with the lowest value found, to the rounding either sum can carry (Higham,
+        # section 3.1): the values give no order, and the trial's slope, read next, does.
+        level = trial_derivatives is not None and trial_value <= value + max(
+            rounding, 4.0 * rows * _UNIT_ROUNDOFF * trial_derivatives[2]
+        )
+        if trial_value < value or level:
+            x, value, derivatives = trial, min(value, trial_value), trial_derivatives
         elif trial > x:
             upper = trial
         else:

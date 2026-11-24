@@ -1071,6 +1071,31 @@ def test_the_intercept_search_leaves_a_plateau_by_more_than_its_rounding(lowest)
     assert best == pytest.approx(-40.0, abs=1e-6)
 
 
+@pytest.mark.parametrize("last_bit", ["rises", "falls"])
+def test_newtons_search_leaves_a_plateau_by_its_slope_whatever_its_last_bit(last_bit):
+    # A saturated logit link holds the likelihood level in the intercept to its rounding,
+    # while the link's derivative there (about exp(-eta) since dc993a120, where it was 0) keeps
+    # a slope that points off the plateau. At ee8758965 a first trial higher in its last bit
+    # ended its side as a wall, the bracket closed on the start and the held intercept was
+    # published: under OpenBLAS's Haswell kernel the trial came out 2e-15 higher (37.638 for
+    # -2.3367 in test_a_continued_repair_at_the_zero_curve_takes_the_dropped_terms_intercept),
+    # under SkylakeX 7e-15 lower, and the walk found the optimum. Forced: off the start the
+    # plateau is one bit higher, or one bit lower; below -30 units the objective is a
+    # parabola, with its minimum at -40.
+    from superglm.distributional.shape_repair import _newton_minimum
+
+    level, rows = 100.0, 300
+    bit = np.spacing(level) * (1.0 if last_bit == "rises" else -1.0)
+
+    def probe(t: float) -> tuple[float, tuple[float, float, float]]:
+        if t < -30.0:
+            return level + (t + 40.0) ** 2 / 10.0 - 10.0, ((t + 40.0) / 5.0, 0.2, level)
+        # Downhill towards the parabola and concave, as a saturated logit's shoulder is.
+        return (level if t == 0.0 else level + bit), (1e-15, -1e-15, level)
+
+    assert _newton_minimum(probe, 0.0, 1.0, rows) == pytest.approx(-40.0, abs=1e-6)
+
+
 def test_a_probe_whose_likelihood_overflows_is_a_wall_of_the_intercept_search():
     # Sol's case: the scale's offset runs from -100 to 0, so a trial shift of the scale
     # intercept far enough down overflows the Gaussian likelihood. At 19a6ab028 that raised
@@ -1774,7 +1799,8 @@ def test_a_continued_projection_at_the_apex_to_rounding_is_published_as_the_zero
     assert record.intercept_shift == pytest.approx(4.55323, abs=1e-4)
 
 
-def test_a_continued_repair_at_the_zero_curve_takes_the_dropped_terms_intercept():
+@pytest.mark.parametrize("past", [40.0, -40.0])
+def test_a_continued_repair_at_the_zero_curve_takes_the_dropped_terms_intercept(past):
     # A generalized gamma's shape under the logit link, its term edited to a falling curve and
     # its intercept to 40 past the fit's, where the link is saturated and the likelihood flat in
     # the intercept. The continuation reaches the zero curve, the dropped term. At ddda43d45 the
@@ -1782,6 +1808,9 @@ def test_a_continued_repair_at_the_zero_curve_takes_the_dropped_terms_intercept(
     # merit -27.709; at 6a5120117 the dropped term's profile reached -27.908 but the zero
     # curve's, from the continued repair's scale, stopped on the plateau at -5.77, and the tie
     # was refused. The zero curve takes the dropped term's profile, the minimum SciPy finds.
+    # 40 below the fit's, the plateau is level to the last bit with a slope of 4e-19 off it:
+    # at ee8758965 Newton's search took its first trial, no lower, for a wall, and the held
+    # intercept was published on every kernel, under SkylakeX with a term of norm 1.03.
     from scipy.optimize import minimize_scalar
 
     rng = np.random.default_rng(814672207)
@@ -1807,7 +1836,7 @@ def test_a_continued_repair_at_the_zero_curve_takes_the_dropped_terms_intercept(
     falling = -0.3 * (x - 0.5) + 0.03 * np.sin(12.0 * x)
     beta[columns] = np.linalg.lstsq(_term_of(fitted, "shape").transform(x), falling, rcond=None)[0]
     fitted_intercept = float(beta[index])
-    beta[index] = fitted_intercept + 40.0
+    beta[index] = fitted_intercept + past
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", EditedCoefficientsWarning)
         revised = model._with_revised_coefficients(beta, edited_terms=["shape:x"])
@@ -1835,6 +1864,64 @@ def test_a_continued_repair_at_the_zero_curve_takes_the_dropped_terms_intercept(
     assert published[index] == pytest.approx(least.x, abs=1e-5)
     rounding = 4.0 * len(y) * np.finfo(np.float64).eps / 2.0 * abs(least.fun)
     assert score(published[index]) <= least.fun + rounding
+
+
+# The revision of test_a_continued_repair_at_the_zero_curve_takes_the_dropped_terms_intercept,
+# 40 above and 40 below the fit's intercept, repaired: each line is the published shape
+# intercept and the largest published coefficient of the term.
+_SATURATED_INTERCEPT_FIXTURE = """
+import warnings
+
+import numpy as np
+import pandas as pd
+
+from superglm import Constraint, SuperLSS, s
+from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
+
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(814672207)
+x = rng.uniform(0.0, 1.0, 300)
+shape = 2.0 + 6.0 * x
+y = rng.gamma(shape, np.exp(0.5 - 0.8 * x + 0.25 * np.sin(12.0 * x)) / shape)
+X = pd.DataFrame({"x": x})
+family = GeneralizedGammaLSS()
+term = s("x", kind="bs", k=6, constraint=Constraint.postfit.increasing)
+model = SuperLSS(family, family.mean(), family.scale(), family.shape(term, link="logit"))
+model.fit(X, y, lambdas={"shape:x#wiggle": 1.0})
+fitted = model._model
+columns = fitted.layout.term_slices["shape:x"]
+index = fitted.layout.predictor("shape").intercept_index
+basis = next(p for p in fitted.compiled_predictors if p.name == "shape").compiled.specs["x"]
+falling = -0.3 * (x - 0.5) + 0.03 * np.sin(12.0 * x)
+for past in (40.0, -40.0):
+    beta = np.array(fitted.coefficients, dtype=np.float64)
+    beta[columns] = np.linalg.lstsq(basis.transform(x), falling, rcond=None)[0]
+    beta[index] += past
+    revised = model._with_revised_coefficients(beta, edited_terms=["shape:x"])
+    revised.apply_shape_postfit()
+    published = np.asarray(revised._model.coefficients, dtype=np.float64)
+    print(repr(float(published[index])), repr(float(np.max(np.abs(published[columns])))))
+"""
+
+
+@pytest.mark.slow
+def test_a_repair_from_a_saturated_intercept_is_the_same_on_every_blas_kernel():
+    """A term repaired from an intercept on a saturated link's plateau, 40 above or 40 below
+    the fit's, is published dropped at one intercept, whichever OpenBLAS kernel runs it.
+
+    The plateau's last bits differ by kernel, and the dropped term's profile has one optimum.
+    """
+    from tests.test_shape_postfit import _kernel_outcomes
+
+    outcomes = _kernel_outcomes(
+        _SATURATED_INTERCEPT_FIXTURE, ("Haswell", "Zen", "SkylakeX", "Sandybridge")
+    )
+    published = {kernel: np.array(lines, dtype=np.float64) for kernel, lines in outcomes.items()}
+    for kernel, rows in published.items():
+        assert rows.shape == (2, 2) and not rows[:, 1].any(), (kernel, rows)
+    intercepts = np.array([rows[:, 0] for rows in published.values()])
+    # Newton's search locates the optimum to sqrt(u) of the shape's scale on its link.
+    assert np.ptp(intercepts) <= 1e-6, published
 
 
 def test_a_session_follows_a_refit_in_place_that_changed_a_categorical_reference():
