@@ -1271,8 +1271,9 @@ def _exact_and_direct_groups():
     return n, groups
 
 
+@pytest.mark.pins_behaviour
 def test_absolute_designs_dominate_exact_sparse_and_scop_groups():
-    """Each group's absolute design and squared statistic dominate its rows, on row ranges too."""
+    """Pin absolute products and squared bounds for exact, sparse and SCOP groups."""
     n, groups = _exact_and_direct_groups()
     kinds = [type(group).__name__ for group in groups]
     for kind in ("SparseSSPGroupMatrix", "SplineCategoricalGroupMatrix", "SparseGroupMatrix"):
@@ -1305,11 +1306,12 @@ def test_absolute_designs_dominate_exact_sparse_and_scop_groups():
             )
         else:
             # |B| |R_inv| on the group's own rows, through Cauchy-Schwarz for the statistic.
-            basis = np.abs(group.B.toarray())
             if hasattr(group, "row_idx"):
-                mask = np.zeros(n, dtype=bool)
-                mask[np.asarray(group.row_idx)] = True
-                basis = basis * mask[:, None]
+                level = group.B_level.toarray()
+                basis = np.zeros((n, level.shape[1]))
+                basis[group.row_idx] = np.abs(level)
+            else:
+                basis = np.abs(group.B.toarray())
             transform = np.abs(np.asarray(group.R_inv))
             expected = ((weights * basis.sum(axis=1)) @ basis) @ (transform * transform)
             np.testing.assert_allclose(absolute.square_close(partial), expected, rtol=1e-12)

@@ -141,6 +141,7 @@ def _data_magnitude_power(group_matrices, response, offset, *, mean=None):
         DenseGroupMatrix,
         RandomEffectGroupMatrix,
         SparseGroupMatrix,
+        SplineCategoricalGroupMatrix,
     )
 
     def power(values):
@@ -164,6 +165,9 @@ def _data_magnitude_power(group_matrices, response, offset, *, mean=None):
                 largest = max(largest, power(block))
         elif hasattr(matrix, "R_inv") and (hasattr(matrix, "B_unique") or hasattr(matrix, "B")):
             basis = matrix.B_unique if hasattr(matrix, "B_unique") else matrix.B
+            if isinstance(matrix, SplineCategoricalGroupMatrix) and basis is None:
+                # Outside this level the represented rows are zero.
+                basis = matrix.B_level
             # |B R|_max <= q |B|_max |R|_max; inspect stored factors only.
             largest = max(
                 largest,

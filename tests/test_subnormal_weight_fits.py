@@ -4,7 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, Constraint, Numeric, Piecewise, PSpline, SuperGLM, Tweedie
+from superglm import Categorical, Constraint, Numeric, Piecewise, PSpline, Spline, SuperGLM, Tweedie
+from superglm.group_matrix import SplineCategoricalGroupMatrix
 
 U = np.finfo(np.float64).eps / 2
 
@@ -86,6 +87,34 @@ def test_subnormal_penalty_keeps_its_ratio_to_the_data_information():
         reference.term_inference("x").se_log_relativity,
         rtol=2e-12,
     )
+
+
+@pytest.mark.pins_behaviour
+def test_subnormal_weights_keep_the_exact_spline_category_fit():
+    """Pin the invariance of predictions and EDF under a common objective rescaling."""
+    x = np.linspace(0, 1, 120)
+    level = np.arange(x.size) % 3
+    frame = pd.DataFrame({"x": x, "f": np.array(["a", "b", "c"])[level]})
+    y = np.sin(7 * x) + level * x + 0.1 * np.cos(31 * x)
+
+    def fit(exponent):
+        model = SuperGLM(
+            family="gaussian",
+            features={"x": Spline(k=6), "f": Categorical()},
+            interactions=[("x", "f")],
+            discrete=False,
+            selection_penalty=0,
+            spline_penalty=np.ldexp(0.125, exponent),
+        ).fit(frame, y, sample_weight=np.full(x.size, np.ldexp(1.0, exponent)))
+        assert any(
+            type(matrix) is SplineCategoricalGroupMatrix for matrix in model._dm.group_matrices
+        )
+        assert model.result.converged
+        return model
+
+    tiny, reference = fit(-1040), fit(0)
+    np.testing.assert_allclose(tiny.predict(frame), reference.predict(frame), atol=2e-12, rtol=0)
+    assert tiny.result.effective_df == pytest.approx(reference.result.effective_df, rel=2e-12)
 
 
 def test_subnormal_poisson_weights_keep_known_scale_and_representable_standard_errors():

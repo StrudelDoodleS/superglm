@@ -347,7 +347,7 @@ def _gm_facts(gm, y_nonzero=None) -> dict:
     if rows is not None and y_nonzero is not None and len(y_nonzero) == n:
         rows = np.asarray(rows)
         out["zero_response_cells"] = int(rows.size > 0 and not y_nonzero[rows].any())
-    # An exact spline-by-factor level holds the full basis in B and its own rows in B_level.
+    # Exact spline-by-factor blocks contribute their level rows to sparsity.
     B = getattr(gm, "B_level", None)
     if B is None:
         B = getattr(gm, "B", None)

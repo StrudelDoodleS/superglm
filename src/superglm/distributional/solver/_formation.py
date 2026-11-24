@@ -55,7 +55,7 @@ from superglm._group_matrix._group_matrix_discretized import (
     SupportCompressedSplineCategoricalGroupMatrix,
     SupportCompressedSSPGroupMatrix,
 )
-from superglm._group_matrix._group_matrix_range import _category_rows
+from superglm._group_matrix._group_matrix_range import _category_rows, _exact_category_basis
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.solver.packing import packed_pairs
 from superglm.group_matrix import DesignMatrix
@@ -269,10 +269,13 @@ class _AbsFactoredCSR:
         located = _category_rows(group, start, stop)
         if located is None:
             row_idx = np.asarray(group.row_idx, dtype=np.intp)
-            local = np.sort(row_idx[(row_idx >= start) & (row_idx < stop)]) - start
-        else:
-            local = located[0]
-        return local, _abs_csr(group.B[local + start])
+            level_rows = np.flatnonzero((row_idx >= start) & (row_idx < stop))
+            rows = row_idx[level_rows]
+            if group.B is not None:
+                rows.sort()
+            located = rows - start, level_rows
+        local, level_rows = located
+        return local, _abs_csr(_exact_category_basis(group, start, local, level_rows))
 
     def square_partial(self, start, stop, weights):
         local, basis = self._basis(start, stop)

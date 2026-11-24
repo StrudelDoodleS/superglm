@@ -1,8 +1,7 @@
 """Bounded contiguous group operations for exact built-in representations.
 
 ``None`` declines dispatch: callers retain their ordinary ``row_subset`` path.
-No transformed basis or predictor values survive a call. Sparse category
-extraction deliberately reads ``B``, matching ``row_subset``, not ``B_level``.
+No transformed basis or predictor values survive a call.
 """
 
 from __future__ import annotations
@@ -57,39 +56,53 @@ def _supported(group, start, stop):
     if not _plain_array(group.R_inv, np.float64, 2):
         return False
     if kind is SplineCategoricalGroupMatrix:
+        if not _plain_array(group.row_idx, np.intp, 1):
+            return False
+        basis = group.B if group.B is not None else group.B_level
+        n_basis_rows = group.shape[0] if group.B is not None else group.row_idx.size
         if (
-            type(group.B) is not sp.csr_matrix
-            or not _plain_array(group.B.data, np.float64, 1)
-            or group.B.shape[0] != group.shape[0]
+            type(basis) is not sp.csr_matrix
+            or not _plain_array(basis.data, np.float64, 1)
+            or basis.shape[0] != n_basis_rows
         ):
             return False
         if any(
             type(array) is not np.ndarray or array.dtype.kind != "i" or array.ndim != 1
-            for array in (group.B.indices, group.B.indptr)
+            for array in (basis.indices, basis.indptr)
         ):
             return False
     elif not _plain_array(group.B_unique, np.float64, 2):
         return False
     if kind in _SUPPORT:
         return _plain_array(group.bin_idx, np.intp, 1) and group.bin_idx.size == group.shape[0]
-    return _plain_array(group.row_idx, np.intp, 1) and (
-        kind is SplineCategoricalGroupMatrix or _plain_array(group.bin_idx_level, np.intp, 1)
+    return kind is SplineCategoricalGroupMatrix or (
+        _plain_array(group.row_idx, np.intp, 1) and _plain_array(group.bin_idx_level, np.intp, 1)
     )
 
 
 def _category_rows(group, start, stop):
-    """Return local rows and live level bins, without searching each chunk row."""
+    """Return local rows and their level CSR slice or support bins."""
     exact = type(group) is SplineCategoricalGroupMatrix
     if not group.row_idx.size or start == stop:
         empty = np.empty(0, dtype=np.intp)
+        if exact and group.B is None:
+            return empty, slice(0, 0)
         return empty, None if exact else empty
     bounds = certified_row_bounds(group, start, stop, with_order=not exact)
     if bounds is None:
         return None
     lo, hi = bounds
     local_rows = group._sorted_rows[lo:hi] - start
-    bins = None if exact else group.bin_idx_level[group._row_order[lo:hi]]
-    return local_rows, bins
+    if exact:
+        return local_rows, slice(lo, hi) if group.B is None else None
+    return local_rows, group.bin_idx_level[group._row_order[lo:hi]]
+
+
+def _exact_category_basis(group, start, local_rows, level_rows):
+    """Gather exact category rows from the same source as generic subsets."""
+    if group.B is None:
+        return group.B_level[level_rows]
+    return group.B[local_rows + start]
 
 
 def group_range_matvec(group, start: int, stop: int, beta, support_prediction=None):
@@ -119,19 +132,20 @@ def group_range_matvec(group, start: int, stop: int, beta, support_prediction=No
     rows = _category_rows(group, start, stop)
     if rows is None:
         return None
-    local_rows, bins = rows
+    local_rows, level_rows = rows
     out = np.zeros(stop - start, dtype=np.float64)
     if local_rows.size:
         if kind is SplineCategoricalGroupMatrix:
             raw_beta = group.R_inv @ beta
-            out[local_rows] = np.asarray(group.B[local_rows + start] @ raw_beta).ravel()
+            basis = _exact_category_basis(group, start, local_rows, level_rows)
+            out[local_rows] = np.asarray(basis @ raw_beta).ravel()
         else:
             values = (
                 group.B_unique @ (group.R_inv @ beta)
                 if support_prediction is None
                 else support_prediction(group, beta)
             )
-            out[local_rows] = values[bins]
+            out[local_rows] = values[level_rows]
     return out
 
 
@@ -162,14 +176,19 @@ def group_row_range(group, start: int, stop: int, *, copy: bool = True):
         rows = _category_rows(group, start, stop)
         if rows is None:
             return None
-        local_rows, bins = rows
+        local_rows, level_rows = rows
         if kind is SplineCategoricalGroupMatrix:
-            sub = kind(group.B[start:stop], group.R_inv, local_rows)
+            if group.B is None:
+                sub = kind._from_level_rows(
+                    group.B_level[level_rows], group.R_inv, local_rows, stop - start
+                )
+            else:
+                sub = kind(group.B[start:stop], group.R_inv, local_rows)
         else:
             sub = kind(
                 group.B_unique,
                 group.R_inv,
-                bins,
+                level_rows,
                 local_rows,
                 n_rows=stop - start,
                 bin_idx_is_level=True,
