@@ -172,11 +172,12 @@ def bounded_channels(
     response: NDArray,
     bounds: ResponseBounds,
     multiplier: NDArray,
-    window: WindowFunction,
+    window: WindowFunction | Callable[[NDArray, NDArray, NDArray[np.intp]], Jet],
     derivative_order: int,
     normalized_rows: NDArray | None = None,
     normalized: NormalizedFunction | None = None,
     carrier: NDArray | None = None,
+    higher: tuple[NDArray, ...] = (),
 ) -> tuple[NDArray[np.float64], NDArray | None, NDArray | None, NDArray[np.bool_]]:
     """Adjust complete-row channels, optionally replacing selected normalized rows.
 
@@ -191,6 +192,11 @@ def bounded_channels(
     Overrides require an explicitly supplied row-shaped ``carrier`` exactly
     zero on selected rows. No carrier is subtracted or added to the callback's
     complete contribution. Defaults preserve the existing continuous path.
+
+    For a curvature direction, ``higher`` contains caller-owned packed
+    third and optionally fourth derivatives. The same window call supplies
+    these extra channels and adjusts them in place. Their representability
+    is checked separately from the order-two likelihood by the caller.
     """
     optimizing = np.array(optimizing, dtype=np.float64, copy=True)
     score = None if score is None else np.array(score, dtype=np.float64, copy=True)
@@ -200,6 +206,8 @@ def bounded_channels(
     override = None
     selected = np.empty(0, dtype=np.intp)
     if normalized_rows is not None or normalized is not None:
+        if higher:
+            raise ValueError("normalized row overrides supply derivatives only through order two")
         if normalized_rows is None or normalized is None:
             raise ValueError("normalized_rows and normalized must be supplied together")
         if (
@@ -231,28 +239,24 @@ def bounded_channels(
         censored = censored[~override[censored]]
     if len(censored):
         low, high = bounds.observed_window(response, censored)
-        value, row_score, row_hessian = window(low, high, censored)
+        value, *partials = window(low, high, censored)
         m = mass[censored]
         optimizing[censored] = m * value
-        if score is not None and row_score is not None:
-            score[censored] = m[:, None] * row_score
-        if hessian is not None and row_hessian is not None:
-            hessian[censored] = m[:, None] * row_hessian
+        for target, derivative in zip((score, hessian, *higher), partials, strict=True):
+            if target is not None and derivative is not None:
+                target[censored] = m[:, None] * derivative
         valid[censored] = np.isfinite(value)
 
     truncated = bounds.truncated_rows()
     if override is not None:
         truncated = truncated[~override[truncated]]
     if len(truncated):
-        value, row_score, row_hessian = window(
-            bounds.lower[truncated], bounds.upper[truncated], truncated
-        )
+        value, *partials = window(bounds.lower[truncated], bounds.upper[truncated], truncated)
         m = mass[truncated]
         optimizing[truncated] -= m * value
-        if score is not None and row_score is not None:
-            score[truncated] -= m[:, None] * row_score
-        if hessian is not None and row_hessian is not None:
-            hessian[truncated] -= m[:, None] * row_hessian
+        for target, derivative in zip((score, hessian, *higher), partials, strict=True):
+            if target is not None and derivative is not None:
+                target[truncated] -= m[:, None] * derivative
         valid[truncated] &= np.isfinite(value)
 
     if len(selected):
@@ -314,10 +318,10 @@ def bounded_higher_derivatives(
         None if a is None else np.array(a, dtype=np.float64, copy=True) for a in (third, fourth)
     ]
     valid = np.array(valid, dtype=bool, copy=True)
-    present = [index for index, values in enumerate(arrays) if values is not None]
+    present = [(degree, channel) for degree, channel in enumerate(arrays, 3) if channel is not None]
     if not present:
         return None, None, valid
-    order = 3 + max(present)
+    order = present[-1][0]
     mass = np.asarray(multiplier, dtype=np.float64)
 
     censored = bounds.censored_rows()
@@ -325,24 +329,29 @@ def bounded_higher_derivatives(
         low, high = bounds.observed_window(response, censored)
         jets = window_jets(low, high, censored, order)
         m = mass[censored][:, None]
-        for index in present:
-            arrays[index][censored] = m * jets[3 + index]
+        for degree, channel in present:
+            channel[censored] = m * jets[degree]
 
     truncated = bounds.truncated_rows()
     if len(truncated):
         jets = window_jets(bounds.lower[truncated], bounds.upper[truncated], truncated, order)
         m = mass[truncated][:, None]
-        for index in present:
-            arrays[index][truncated] -= m * jets[3 + index]
+        for degree, channel in present:
+            channel[truncated] -= m * jets[degree]
 
-    finite = np.ones(len(valid), dtype=bool)
-    for index in present:
-        finite &= np.all(np.isfinite(arrays[index]), axis=1)
-    if not np.all(finite):
-        valid &= finite
-        for index in present:
-            arrays[index][~finite] = 0.0
+    valid &= finite_higher_derivatives(tuple(channel for _, channel in present))
     return arrays[0], arrays[1], valid
+
+
+def finite_higher_derivatives(channels: tuple[NDArray, ...]) -> NDArray[np.bool_]:
+    """Zero unrepresentable higher derivatives and return their row validity."""
+    finite = np.all(np.isfinite(channels[0]), axis=1)
+    for channel in channels[1:]:
+        finite &= np.all(np.isfinite(channel), axis=1)
+    if not np.all(finite):
+        for channel in channels:
+            channel[~finite] = 0.0
+    return finite
 
 
 def bounded_share(
@@ -409,6 +418,7 @@ __all__ = [
     "bounded_share",
     "censored_carrier",
     "contract_third",
+    "finite_higher_derivatives",
     "log_window_values",
     "refuse_bounded",
 ]
