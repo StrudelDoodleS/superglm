@@ -57,6 +57,9 @@ jobs:
             os: ubuntu-latest
             suffix: ""
             hang-limit: 15
+            # The other x86-64 runtime keeps the runner's own kernel; this one pins Haswell, which every
+            # x86-64 runner can execute, so a decision that rests on the kernel fails on one of the two.
+            openblas-coretype: Haswell
           - python-version: "3.13"
             os: windows-2025
             suffix: " · Windows"
@@ -87,6 +90,10 @@ jobs:
 
       - name: Set up Python ${{ matrix.runtime.python-version }}
         run: uv python install ${{ matrix.runtime.python-version }}
+
+      - name: Pin the OpenBLAS kernel
+        if: matrix.runtime.openblas-coretype
+        run: echo "OPENBLAS_CORETYPE=${{ matrix.runtime.openblas-coretype }}" >> "$GITHUB_ENV"
 
       - name: Install all tested optional dependencies
         run: >-
