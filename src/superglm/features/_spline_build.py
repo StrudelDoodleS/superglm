@@ -469,6 +469,41 @@ def _rows_identify(basis, weights: NDArray | None, members: NDArray) -> bool:
     return True
 
 
+def _rows_identify_null_products(
+    rows1: NDArray,
+    rows2: NDArray,
+    nullities: tuple[int, int],
+    weights: NDArray | None,
+) -> bool:
+    """Whether the weighted rows identify a tensor's null coordinates beside the intercept.
+
+    ``rows1`` and ``rows2`` are the two margins' bases on the rows (or the
+    occupied cells) the fit reads, each with its ``nullities`` null
+    coordinates first, and ``weights`` are the solver's precision weights on
+    them. The tensor's null coordinates are the row-wise products of the
+    margins'. Each margin's rows identify its own (``_rows_identify``), but a
+    product is not centred, and rows on which it is constant (``x z = 1``)
+    alias it with the intercept: removing its weighted mean leaves the
+    column its rounding. An entry of the design is a product of two rounded
+    basis values, so that rounding is of order ``u`` times the design's
+    weighted Frobenius norm. When the centred products' smallest weighted
+    singular value falls below ``sqrt(u)`` of that norm, more than half the
+    column's digits are lost, as for a margin, and an exactly unpenalised
+    coordinate would be fitted to the rest.
+    """
+    if weights is None:
+        scale = np.ones(rows1.shape[0])
+    else:
+        scale = np.sqrt(weights) / np.sqrt(np.max(weights))
+    products = np.einsum(
+        "i,ij,ik->ijk", scale, rows1[:, : nullities[0]], rows2[:, : nullities[1]]
+    ).reshape(scale.size, -1)
+    products -= np.outer(scale, (scale @ products) / (scale @ scale))
+    row_squares = np.einsum("ij,ij->i", rows1, rows1) * np.einsum("ij,ij->i", rows2, rows2)
+    smallest = np.linalg.svd(products, compute_uv=False)[-1]
+    return bool(smallest >= np.sqrt(2.0**-53) * np.sqrt((scale * scale) @ row_squares))
+
+
 def _nested_null_basis(thetas: list[NDArray]) -> NDArray | None:
     """One orthonormal basis whose leading columns span each of the null bases ``thetas``.
 

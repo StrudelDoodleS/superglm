@@ -29,7 +29,11 @@ from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_bins import discretize_positive_support
 from superglm.features import _basis_kernels
-from superglm.features._spline_build import declared_null_coordinates, tensor_marginal_info
+from superglm.features._spline_build import (
+    _rows_identify_null_products,
+    declared_null_coordinates,
+    tensor_marginal_info,
+)
 from superglm.features._spline_config import SplineOptionWarning
 from superglm.features._spline_penalties import _gapped_rank, structural_penalty_ranks
 from superglm.features._spline_runtime import bin_knots
@@ -2509,13 +2513,15 @@ class TensorInteraction:
         geometry_weight: NDArray | None = None,
         discrete_n_bins: tuple[int, int] | None = None,
         precision_weight: NDArray | None = None,
+        root_coordinates: bool = True,
     ) -> tuple[TensorMarginalInfo, TensorMarginalInfo, tuple | None]:
         """Both margins' ingredients, binned on their own knots when ``discrete_n_bins`` is set.
 
         The third value is ``((support1, idx1), (support2, idx2))`` for a binned
         build (``discretize_column`` with each margin's knots), else None.
         ``precision_weight`` is the fit's weight on each row where it is not
-        ``geometry_weight`` (``_marginal_ingredients``).
+        ``geometry_weight``, and ``root_coordinates=False`` keeps both margins'
+        formed penalties in the data's coordinates (``_marginal_ingredients``).
         """
         from superglm.features.spline import _SplineBase
 
@@ -2557,6 +2563,7 @@ class TensorInteraction:
                 counts=counts,
                 geometry_weight=geometry_weight,
                 precision=precision,
+                root_coordinates=root_coordinates,
             )
             if cardinal:
                 _normalize_cardinal_margin(info)
@@ -2574,6 +2581,7 @@ class TensorInteraction:
         parent_specs: dict,
         geometry_weight: NDArray | None,
         precision_weight: NDArray | None = None,
+        root_coordinates: bool = True,
     ) -> tuple[NDArray, NDArray, NDArray, NDArray, Any, Any]:
         """The centred margin bases on the rows, their penalties, and each margin's ``distinct``."""
         m1, m2, _ = self._prepare_marginal_infos(
@@ -2582,6 +2590,7 @@ class TensorInteraction:
             parent_specs,
             geometry_weight=geometry_weight,
             precision_weight=precision_weight,
+            root_coordinates=root_coordinates,
         )
 
         B1 = np.asarray(m1.basis, dtype=np.float64)
@@ -2774,15 +2783,23 @@ class TensorInteraction:
         support found, ``columns`` stays ``None`` and the product over every
         row is never formed. It passes the fit's ``precision_weight`` where
         that is not ``sample_weight``, the weight the margins' knots and
-        centring follow.
+        centring follow. Margins whose null coordinates' products those rows
+        do not identify (``_rows_identify_null_products``) keep the data's
+        coordinates and their formed penalties.
         """
-        B1, B2, S1, S2, distinct1, distinct2 = self._prepare_centered_marginals(
-            x1,
-            x2,
-            parent_specs,
-            sample_weight,
-            precision_weight,
-        )
+
+        def centred_margins(root_coordinates: bool):
+            return self._prepare_centered_marginals(
+                x1, x2, parent_specs, sample_weight, precision_weight, root_coordinates
+            )
+
+        B1, B2, S1, S2, distinct1, distinct2 = centred_margins(True)
+        m1, m2 = self._marginal1, self._marginal2
+        assert m1 is not None and m2 is not None
+        n1, n2 = m1.penalty_nullity, m2.penalty_nullity
+        weights = sample_weight if precision_weight is None else precision_weight
+        if n1 and n2 and not _rows_identify_null_products(B1, B2, (n1, n2), weights):
+            B1, B2, S1, S2, distinct1, distinct2 = centred_margins(False)
         support = _tensor_cell_support(B1, distinct1, B2, distinct2) if on_cells else None
         # The row-wise Kronecker product, unless the support stands in for it.
         T = None if isinstance(support, tuple) else _row_kron(sp.csr_matrix(B1), sp.csr_matrix(B2))
@@ -2806,22 +2823,28 @@ class TensorInteraction:
         *,
         precision_weight: NDArray | None = None,
     ) -> DiscreteTensorBuildResult:
-        """Build a discretized tensor basis on observed joint support pairs."""
-        m1, m2, bins = self._prepare_marginal_infos(
-            x1,
-            x2,
-            parent_specs,
-            geometry_weight=sample_weight,
-            discrete_n_bins=(int(n_bins[0]), int(n_bins[1])),
-            precision_weight=precision_weight,
-        )
+        """Build a discretized tensor basis on observed joint support pairs.
+
+        Margins whose null coordinates' products the occupied cells do not
+        identify (``_rows_identify_null_products``) keep the data's coordinates
+        and their formed penalties.
+        """
+
+        def margins(root_coordinates: bool):
+            return self._prepare_marginal_infos(
+                x1,
+                x2,
+                parent_specs,
+                geometry_weight=sample_weight,
+                discrete_n_bins=(int(n_bins[0]), int(n_bins[1])),
+                precision_weight=precision_weight,
+                root_coordinates=root_coordinates,
+            )
+
+        m1, m2, bins = margins(True)
         if bins is None:  # pragma: no cover - set by discrete_n_bins
             raise RuntimeError("tensor margins were not binned")
         (support1, idx1), (support2, idx2) = bins
-        S1 = _normalize_tensor_penalty(m1.penalty) if m1.normalize_penalty else m1.penalty
-        S2 = _normalize_tensor_penalty(m2.penalty) if m2.normalize_penalty else m2.penalty
-        B1_unique = np.asarray(m1.basis, dtype=np.float64)
-        B2_unique = np.asarray(m2.basis, dtype=np.float64)
 
         # Encode joint support pairs into one integer to avoid the much slower
         # np.unique(..., axis=0) path on large observation arrays.
@@ -2830,6 +2853,17 @@ class TensorInteraction:
         observed_codes, pair_idx = np.unique(pair_codes, return_inverse=True)
         observed_i1 = (observed_codes // n_support2).astype(np.intp)
         observed_i2 = (observed_codes % n_support2).astype(np.intp)
+        n1, n2 = m1.penalty_nullity, m2.penalty_nullity
+        if n1 and n2:
+            weights = sample_weight if precision_weight is None else precision_weight
+            cells = np.bincount(pair_idx, weights=weights, minlength=observed_codes.size)
+            rows = m1.basis[observed_i1], m2.basis[observed_i2]
+            if not _rows_identify_null_products(*rows, (n1, n2), cells):
+                m1, m2, _ = margins(False)
+        S1 = _normalize_tensor_penalty(m1.penalty) if m1.normalize_penalty else m1.penalty
+        S2 = _normalize_tensor_penalty(m2.penalty) if m2.normalize_penalty else m2.penalty
+        B1_unique = np.asarray(m1.basis, dtype=np.float64)
+        B2_unique = np.asarray(m2.basis, dtype=np.float64)
         B_joint = _row_kron_dense(
             B1_unique[observed_i1],
             B2_unique[observed_i2],

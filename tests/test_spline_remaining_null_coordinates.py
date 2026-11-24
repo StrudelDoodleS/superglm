@@ -147,6 +147,79 @@ def test_tensor_margin_its_rows_cannot_identify_keeps_the_formed_penalty(kind, b
     np.testing.assert_array_equal(info.penalty, formed)
 
 
+def _reciprocal_rows():
+    """Rows with ``x z = 1`` on values symmetric about zero, and a response linear in both."""
+    x = np.tile(np.r_[-np.linspace(1, 4, 12), np.linspace(1, 4, 12)], 3)
+    z = 1 / x
+    y = 2 + x / 4 + z + 0.2 * np.random.default_rng(3).normal(size=72)
+    return x, z, y
+
+
+def _stiff_tensor_fit(kind, discrete, x, z, y, weights=None):
+    return SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        spline_penalty=1e13,
+        discrete=discrete,
+        features={"x": Spline(kind=kind, n_knots=3), "z": Spline(kind=kind, n_knots=3)},
+        interactions=[("x", "z")],
+    ).fit(pd.DataFrame({"x": x, "z": z}), y, sample_weight=weights)
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("discrete", [False, True])
+@pytest.mark.parametrize("weightless_rows", [False, True])
+def test_tensor_null_product_the_intercept_takes_is_not_fitted(discrete, weightless_rows):
+    """Pin the rank, EDF and least-squares line where the margins' lines multiply to a constant.
+
+    Each ``cr`` margin's rows identify its line, but the tensor's bilinear
+    direction is ``x z = 1``, the intercept. Stated as an exact null
+    coordinate, its column is the rounding centring leaves, fitted as a 25th
+    direction with a coefficient near 1e15 and fitted values up to 8e-2 off.
+    Such a tensor keeps the data's coordinates and its formed penalty, where
+    the fit's rank drops the direction as it did before those coordinates.
+    Two rows off the curve at weight zero identify nothing more.
+    """
+    x, z, y = _reciprocal_rows()
+    rows = pd.DataFrame({"x": x, "z": z})
+    design = np.column_stack([np.ones_like(x), x, z])
+    line = design @ np.linalg.lstsq(design, y, rcond=None)[0]
+    weights = None
+    if weightless_rows:
+        x, z, y = np.r_[x, -2.0, 3.0], np.r_[z, 0.75, 0.5], np.r_[y, 0.0, 5.0]
+        weights = np.r_[np.ones(72), 0.0, 0.0]
+    model = _stiff_tensor_fit("cr", discrete, x, z, y, weights)
+    np.testing.assert_allclose(model.predict(rows), line, atol=1e-9, rtol=0)
+    assert model.result.reml_hessian_rank == 24
+    assert model.result.effective_df == pytest.approx(3, abs=1e-7)
+
+
+@pytest.mark.parametrize("discrete", [False, True])
+def test_tensor_null_product_its_rows_nearly_cancel_stays_an_exact_coordinate(discrete):
+    """A null product within 1.4e-4 of a constant is still identified, and fitted.
+
+    A ``ps`` margin's null curve is the spline of a linear coefficient
+    sequence, not a line on quantile knots, so on the same rows the product
+    of the two curves varies by 1.4e-4 of its size: four digits lost, not the
+    eight that would leave rounding. It stays an exact null coordinate, and a
+    stiff penalty leaves least squares on the intercept, both curves and
+    their product, a fourth direction the formed penalty loses.
+    """
+    x, z, y = _reciprocal_rows()
+    model = _stiff_tensor_fit("ps", discrete, x, z, y)
+    curves = []
+    for name, values in (("x", x), ("z", z)):
+        raw = np.asarray(model._specs[name]._raw_basis_matrix(values))
+        curves.append(raw @ np.arange(raw.shape[1], dtype=float))
+    design = np.column_stack([np.ones_like(x), *curves, curves[0] * curves[1]])
+    surface = design @ np.linalg.lstsq(design, y, rcond=None)[0]
+    np.testing.assert_allclose(
+        model.predict(pd.DataFrame({"x": x, "z": z})), surface, atol=1e-8, rtol=0
+    )
+    assert model.result.reml_hessian_rank == 49
+    assert model.result.effective_df == pytest.approx(4, abs=1e-7)
+
+
 @pytest.mark.pins_behaviour
 @pytest.mark.parametrize("discrete", [False, True])
 def test_precision_weights_decide_whether_a_tensor_margin_states_its_null_direction(discrete):
