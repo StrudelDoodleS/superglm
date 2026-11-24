@@ -343,13 +343,27 @@ for path, module in zip(paths, modules, strict=True):
     [
         ("terms", "model.api"),
         ("terms", "inference._term_covariance"),
-        (
-            "terms",
-            "model.api",
-            "inference._term_covariance",
-            "inference._term_ops",
-            "features.categorical",
-            "features.interaction",
+        pytest.param(
+            (
+                "terms",
+                "model.api",
+                "inference._term_covariance",
+                "inference._term_ops",
+                "features.categorical",
+                "features.interaction",
+            ),
+            marks=pytest.mark.xfail(
+                sys.version_info >= (3, 13, 16),
+                reason=(
+                    "CPython 3.13.16+ and 3.14 make a submodule import wait on its parent while "
+                    "holding its own lock (python/cpython#160045), which closes a cycle inside "
+                    "SciPy (scipy.linalg against scipy.special) when two threads enter it by "
+                    "different submodules. superglm's own cycles are covered by the two forced "
+                    "tests; taking SciPy's locks in a fixed order is the #600 follow-up."
+                ),
+                strict=False,
+            ),
+            id="six-submodules",
         ),
     ],
     ids=["model-api", "term-covariance", "six-submodules"],
