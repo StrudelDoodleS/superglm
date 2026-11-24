@@ -236,7 +236,8 @@ def test_pair_sums_give_the_expanded_rows_statistics(case, chunk_size, monkeypat
     ``test_sparse_indicator_blocks_give_the_dense_pass_statistics``'s
     ``gamma`` bound; the means come from the same code and are equal.  A
     level absent from a chunk, a cut leaf, zero-weight rows and negative
-    rows are all here.
+    rows are all here, under a caller's error scale that charges every row:
+    a cut leaf's pieces then carry an error residual that is not zero.
     """
     if case == "edge":
         layout, matrices, leaf, weights = _edge_case()
@@ -260,7 +261,8 @@ def test_pair_sums_give_the_expanded_rows_statistics(case, chunk_size, monkeypat
     data, passes = _passes(layout, matrices, weights, chunk_size)
     gamma = (6 * n + 4 * -(-n // chunk_size) + 32) * EPS
     for a, mean in passes:
-        options = dict(mean=mean, center=None if mean is None else data.center)
+        error = np.abs(a) + 0.5
+        options = dict(mean=mean, center=None if mean is None else data.center, error=error)
         pairs = build_nested_leaf_statistics(layout, matrices, a, chunk_size=chunk_size, **options)
         with monkeypatch.context() as patch:
             written = row_expanded.install(patch)
@@ -274,7 +276,8 @@ def test_pair_sums_give_the_expanded_rows_statistics(case, chunk_size, monkeypat
         A = np.bincount(leaf, weights=np.abs(a), minlength=K)
         np.testing.assert_array_equal(pairs.mean, rows.mean)
         assert np.all(np.abs(pairs.within - rows.within) <= 2 * gamma * (M.T @ (A[:, None] * M)))
-        assert np.all(np.abs(pairs.absolute - rows.absolute) <= 2 * gamma * (A @ M**2))
+        E = np.bincount(leaf, weights=error, minlength=K)
+        assert np.all(np.abs(pairs.absolute - rows.absolute) <= 2 * gamma * (E @ M**2))
         assert (pairs.deviation is None) == (rows.deviation is None)
         if rows.deviation is not None:
             bound = 2 * gamma * A[:, None] * M
