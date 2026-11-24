@@ -1557,6 +1557,7 @@ class SuperGLM:
         theta_bounds: tuple[float, float] = (1e-8, 1e8),
         xatol: float = 1e-2,
         ci_alpha: float | None = None,
+        max_reml_iter: int | None = None,
         progress_callback: Callable[..., None] | None = None,
     ):
         """Estimate NB2 theta via profile likelihood, refit, and return result.
@@ -1591,6 +1592,11 @@ class SuperGLM:
             joint refinement that stopped short, or theta_hat outside that
             interval), a caution is warned, recorded, and shown in the
             interval's status.
+        max_reml_iter : int, optional
+            Outer-iteration budget for the REML publication refit. Requires
+            ``fit_mode="reml"`` or ``"inherit"`` resolving to REML. The theta
+            alternation uses its own ordinary fits. Defaults to the same
+            budget as ``fit_reml()``.
         progress_callback : callable, optional
             Called as ``progress_callback(phase, payload)``: ``"profiling"``
             with ``{"profile_trace": [row]}`` for each alternation step, then
@@ -1610,6 +1616,7 @@ class SuperGLM:
                     theta_bounds=theta_bounds,
                     xatol=xatol,
                     ci_alpha=ci_alpha,
+                    max_reml_iter=max_reml_iter,
                     progress_callback=progress_callback,
                 )
 

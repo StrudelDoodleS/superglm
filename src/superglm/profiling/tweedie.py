@@ -427,9 +427,9 @@ def _winner_caution(best: _Candidate, p_hat: float) -> str | None:
         )
     if not best.reml_converged:
         return (
-            f"p_hat={p_hat:.6g} rests on a candidate REML fit whose smoothing parameters had "
-            "not settled within the search's own budget, and so does its interval; "
-            "search_fit_mode='fit' searches p under ML."
+            f"p_hat={p_hat:.6g} and its interval rest on a candidate REML fit whose "
+            "smoothing parameters did not converge. Set "
+            "search_fit_mode='fit' to search p under ML."
         )
     return None
 
@@ -680,8 +680,8 @@ class TweedieProfileResult:
             ),
             (
                 [p for p, fit in fits.items() if fit.pirls_converged and not fit.reml_converged],
-                "candidate REML fits at p={} whose smoothing parameters had not settled within "
-                "the search's own budget; search_fit_mode='fit' searches p under ML.",
+                "candidate REML fits at p={} whose smoothing parameters did not converge. "
+                "Set search_fit_mode='fit' to search p under ML.",
             ),
         )
         for powers, cause in by_cause:

@@ -458,6 +458,15 @@ def test_the_direct_grouping_path_survives_term_inference():
     assert [str(level) for level in ti.levels] == ["1", "2", "3", "9"]
 
 
+@pytest.mark.parametrize("container", [list, pd.Series, np.array])
+def test_collapse_levels_refuses_distinct_levels_with_the_same_text(container):
+    values = [1, "1", 2, 3] * 25
+    data = values if container is list else container(values, dtype=object)
+    with pytest.raises(ValueError, match="Cast the column to one type") as caught:
+        collapse_levels(data, groups={"g": [1, 2]})
+    assert "1 and '1'" in str(caught.value)
+
+
 def test_a_large_integer_level_is_matched_exactly():
     # float() is lossy past 2**53, so two distinct integers can land on the same
     # value and one would be scored as the other. Confirming the match in the

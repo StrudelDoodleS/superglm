@@ -1881,6 +1881,7 @@ def _fit_pirls_inner(
             dm,
             groups,
             beta,
+            family=family,
             ratio=w_ratio,
             n_iter=outer + 1,
             exhausted_stagnant=(
