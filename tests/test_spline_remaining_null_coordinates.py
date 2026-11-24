@@ -540,9 +540,11 @@ def test_by_level_binding_penalty_matches_dense_root_reml_reference(discrete):
     ids=["exact-csr", "exact-compressed", "binned"],
 )
 def test_by_level_term_roots_survive_subset_range_pickle_and_extreme_whitening(
-    repeats, discrete, expected_cls
+    repeats, discrete, expected_cls, monkeypatch
 ):
     """By-level term_roots survive subsetting, ranges, pickle/legacy-unpickle, and QR whitening."""
+    import superglm.dm_builder as dm_builder
+
     x1 = np.geomspace(1.0, 1e5, 200)
     xr = np.tile(x1, repeats)
     x = np.r_[xr, xr]
@@ -553,7 +555,30 @@ def test_by_level_term_roots_survive_subset_range_pickle_and_extreme_whitening(
     )
     frame = pd.DataFrame({"x": x, "g": labels})
 
-    # Extreme lambda forces _whitening_map's QR fallback during build and REML rebuild.
+    # Force _whitening_map's LinAlgError fallback on the formed-Gram Cholesky
+    # attempt (deterministic across BLAS builds) while letting both the QR
+    # fallback's cholesky(G + ridge) and the eigh fallback's cholesky(rotated)
+    # run, so dropping _whitening_penalty drops the 6 weak modes via eigh.
+    orig_whitening_map = dm_builder._whitening_map
+    orig_cholesky = np.linalg.cholesky
+    fail_next_large = [False]
+
+    def forced_cholesky(a, *args, **kwargs):
+        if fail_next_large[0] and float(np.max(np.abs(a))) > 1e12:
+            fail_next_large[0] = False
+            raise np.linalg.LinAlgError("forced indefinite formed penalty")
+        return orig_cholesky(a, *args, **kwargs)
+
+    def wrapped_whitening_map(G, penalty, lam2):
+        fail_next_large[0] = True
+        try:
+            return orig_whitening_map(G, penalty, lam2)
+        finally:
+            fail_next_large[0] = False
+
+    monkeypatch.setattr(np.linalg, "cholesky", forced_cholesky)
+    monkeypatch.setattr(dm_builder, "_whitening_map", wrapped_whitening_map)
+
     model = SuperGLM(
         family="gaussian",
         selection_penalty=0,
@@ -569,13 +594,13 @@ def test_by_level_term_roots_survive_subset_range_pickle_and_extreme_whitening(
     gm_level = model._dm.group_matrices[2]
     group_level = model._groups[2]
     assert type(gm_level) is expected_cls
-    assert gm_level.term_roots is not None
     (pc,) = build_penalty_components(model._dm.group_matrices, [(2, group_level)])
     assert pc.rank == 20
     # QR whitening via term_roots keeps the null row exact zero and bounds all 20
     # whitened eigenvalues by 1 / lam (unlike eigh(omega), which drops the 6 weak modes).
     assert not pc.omega_ssp[0].any()
     assert float(np.max(pc.eigvals_omega)) <= 1.01 / 1e14
+    assert gm_level.term_roots is not None
 
     # Rebuild at another extreme lambda keeps term_roots and rank 20 via QR whitening.
     rebuilt_dm = rebuild_design_matrix_with_lambdas(
@@ -586,11 +611,11 @@ def test_by_level_term_roots_survive_subset_range_pickle_and_extreme_whitening(
     )
     gm_rebuilt = rebuilt_dm.group_matrices[2]
     assert type(gm_rebuilt) is expected_cls
-    assert gm_rebuilt.term_roots is not None
     (pc_rebuilt,) = build_penalty_components(rebuilt_dm.group_matrices, [(2, group_level)])
     assert pc_rebuilt.rank == 20
     assert not pc_rebuilt.omega_ssp[0].any()
     assert float(np.max(pc_rebuilt.eigvals_omega)) <= 1.01 / 2e14
+    assert gm_rebuilt.term_roots is not None
 
     # row_subset, group_row_range, and pickle preserve term_roots.
     sub = gm_level.row_subset(np.arange(0, len(y), 2))
