@@ -16,16 +16,12 @@ the record treats as determined only up to its rank cut (a near alias the
 data rank truncated) can read a share near ``tol`` and warn, as it does in
 ``predict.lm``.  The warning is advisory: the price is unchanged.
 
-**Which fits are tested.**  Only a dense, unbinned ``SuperGLM`` fit that
-carries both rank records below.  Every other fit is silent, as before this
-test existed: a binned fit (``discrete=True``, or a spline with
-``discrete=True``), whose record is its binned design's and not the rows it
-prices; a fit with a ``FactorSmooth`` term (``sz`` or ``fs``), whose held and
-population levels are priced by their own rules; a structured fit, and a
-compact or older saved model, that keeps no dense rank records; and a fit
-whose centred columns sit so far from zero that float64 cannot resolve a row's
-share at the tolerance (``_resolvable``).  ``SuperLSS`` has its own ``predict``
-and is not tested.
+**Which fits are tested.**  Dense ``SuperGLM`` fits that carry both rank records
+below. A newly binned fit records directions from its fitted bin representatives
+and tests the exact rows it prices. Older binned saves are silent, as are
+structured fits, fits with a ``FactorSmooth`` term, and fits whose column
+centres make the check unresolvable in float64 (``_resolvable``).
+``SuperLSS`` has its own ``predict``.
 
 **The directions.**  The fit's data rank (``RankInfo.data``, the decomposition
 of the centred data Gram ``X_c' W X_c`` the fit already decided) records the
@@ -38,8 +34,8 @@ scale-aware rank cut), is exactly the part no penalty curves.  Only the
 intersection of the two recorded null spaces is tested: the principal
 directions between them whose squared sine is at most ``FREE_SINE_CUT``.
 Penalty null spaces are structural, so a shared direction's squared sine is
-the bases' rounding and any penalised one's is one.  Nothing here reads the
-design or a training row, and nothing runs at fit time.
+the bases' rounding and any penalised one's is one. The check uses the fit's
+existing rank records without reading any training rows.
 
 The design with its intercept, ``[1, X]``, has null vectors ``[-c' n; n]`` for
 each such ``n`` (``c`` the record's weighted column centre), so a scoring row
@@ -97,7 +93,7 @@ class NonEstimablePredictionWarning(UserWarning):
     ``rows`` holds their positions in the order predicted, as R's
     ``"non-estim"`` attribute does.  Their predictions are returned unchanged:
     the published fit's values, which its constraint fixes there rather than
-    the data.  Only dense, unbinned fits are tested
+    the data. Dense fits, including fits with binned splines, can give this warning
     (``superglm.model.estimability_ops``).
     """
 
@@ -140,18 +136,18 @@ class DataNullDirections:
     outside: NDArray
 
 
-def _tested(model) -> bool:
-    """Whether the fit is one the test reads (module docstring): dense, unbinned, no factor smooth."""
+def _has_binned_spline(model) -> bool:
     from superglm.dm_builder import should_discretize
-    from superglm.features.factor_smooth import FactorSmooth
 
     discrete = bool(getattr(model, "_discrete", False))
-    if discrete:
-        return False
-    if any(should_discretize(spec, discrete) for spec in getattr(model, "_specs", {}).values()):
-        return False
+    return any(should_discretize(spec, discrete) for spec in getattr(model, "_specs", {}).values())
+
+
+def _has_factor_smooth(model) -> bool:
+    from superglm.features.factor_smooth import FactorSmooth
+
     interactions = getattr(model, "_interaction_specs", {}) or {}
-    return not any(isinstance(spec, FactorSmooth) for spec in interactions.values())
+    return any(isinstance(spec, FactorSmooth) for spec in interactions.values())
 
 
 def _records(model):
@@ -235,16 +231,29 @@ def _resolvable(null: DataNullDirections) -> bool:
     return bool(bound < PREDICTION_TOLERANCE / 16.0)
 
 
-def data_null_directions(model) -> DataNullDirections | None:
-    """The tested directions of the published fit (module docstring), or ``None``.
+def capture_binned_estimability(model, *, fresh_fit: bool) -> None:
+    """Record exact-scoring directions from the fitted bins' existing rank evidence."""
+    # A revision refreshes a record the fit published. A refit can also opt in.
+    if not (hasattr(model, "_binned_estimability") or (fresh_fit and _has_binned_spline(model))):
+        return
+    record = None if _has_factor_smooth(model) else _record_directions(model)
+    if record is not None:
+        for array in (record.dual, record.scale, record.centre, record.outside):
+            array.setflags(write=False)
+    model._binned_estimability = record
 
-    ``None`` for a fit the test does not read (``_tested``, ``_records``), for
-    one with no direction the data and the penalty both leave free, and for
-    one whose rows the centre cannot resolve (``_resolvable``): such a fit is
-    never tested.
-    """
-    if not _tested(model):
+
+def data_null_directions(model) -> DataNullDirections | None:
+    """The tested directions of the published fit, or ``None`` for a silent fit."""
+    if hasattr(model, "_binned_estimability"):
+        return model._binned_estimability
+    # Preserve the original behavior of models saved before binned publication.
+    if getattr(model, "_discrete", False) or _has_binned_spline(model) or _has_factor_smooth(model):
         return None
+    return _record_directions(model)
+
+
+def _record_directions(model) -> DataNullDirections | None:
     found = _records(model)
     if found is None:
         return None
