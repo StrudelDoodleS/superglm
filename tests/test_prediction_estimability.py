@@ -64,7 +64,7 @@ ALIASED_NEW = pd.DataFrame(
 # REML's default stop leaves a by-level spline's smoothing parameters to about 3e-6
 # relative, where its criterion is flat, and that moves a price by 1e-8: master's default
 # price sits 3.4e-9 from its own converged one. The spline's ``fit_reml`` price is fitted
-# and recorded at these tolerances, where master's two kernels agree to 1.4e-14 relative.
+# and recorded at these tolerances, where master's two kernels and this tree's agree to 2e-14.
 CONVERGED_REML = {"reml_tol": 1e-12, "pirls_tol": 1e-12, "max_reml_iter": 400}
 
 # master (bfff7a074)'s ``predict`` on ROW_J_NEW and ALIASED_NEW, as float.hex (native
