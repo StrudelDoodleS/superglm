@@ -87,6 +87,42 @@ def test_a_joint_gain_in_discarded_directions_must_be_fitted_or_disclosed(discre
         assert any(issubclass(item.category, ConvergenceWarning) for item in caught)
 
 
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
+def test_a_stiff_discarded_contrast_cannot_hide_the_gain_along_a_soft_one(monkeypatch, discrete):
+    """Force two discarded contrasts of unequal curvature (#728): fit both or disclose.
+
+    ``x`` varies in its 8th digit and barely matters; ``v`` varies in its 13th and
+    carries the response. A step along their joint score follows ``x`` and loses.
+    """
+    z = np.tile([-1.0, -1.0, 1.0, 1.0], 16)
+    v = np.repeat([-1.0, 1.0], 32)
+    X = pd.DataFrame({"x": 1e10 * (3e7 + z), "v": 1e10 * (1e12 + v)})
+    mu = 1e7 * (1 + 0.0001 * z + 0.7 * v)
+    y = mu + 1e7 * np.tile([-1.0, 1.0], 32)
+    check = solver._terminal_step_improves_objective
+
+    def with_both_contrasts_discarded(context, state, score, rank, discarded, *rest):
+        units = context.score_units
+        slopes = np.flatnonzero(units.centre)
+        if len(slopes) == 2:
+            # Each centred column in units of its level, as an equilibrated rank decision has it.
+            discarded = np.zeros((len(score), 2))
+            discarded[slopes, [0, 1]] = 1.0 / units.centre[slopes]
+            discarded[units.intercept[slopes], [0, 1]] = -1.0
+        return check(context, state, score, rank, discarded, *rest)
+
+    monkeypatch.setattr(solver, "_terminal_step_improves_objective", with_both_contrasts_discarded)
+    family = GaussianLS(scale_floor=0)
+    model = SuperLSS(family, family.location("x", "v"), family.scale(), discrete=discrete)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ConvergenceWarning)
+        model.fit(X, y)
+    if model.result_.converged:
+        np.testing.assert_allclose(model.predict(X), mu, rtol=1e-7, atol=0)
+    else:
+        assert any(issubclass(item.category, ConvergenceWarning) for item in caught)
+
+
 @pytest.mark.parametrize("force_fallback", [False, True], ids=["observed", "fisher"])
 def test_a_material_gain_is_measured_with_the_accepted_factor(monkeypatch, force_fallback):
     """A weakly weighted Gaussian can still gain 0.5. On fallback give the
