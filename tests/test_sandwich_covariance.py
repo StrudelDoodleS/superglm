@@ -1420,6 +1420,7 @@ class TestCoefficientsTheFitDoesNotDetermine:
             assert row.p is None or np.isnan(row.p)
         errors = summary["standard_errors"]["coefficient_se"]
         assert np.all(np.isnan(errors["a"])) and np.all(np.isnan(errors["b"]))
+        assert "Intercept" in str(summary) and summary._repr_html_()
 
         with pytest.warns(UserWarning, match="does not determine every coefficient of 'a'"):
             term = model.term_inference("a", covariance=cov)
