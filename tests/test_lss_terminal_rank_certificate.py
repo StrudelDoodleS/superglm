@@ -250,10 +250,10 @@ def test_a_near_alias_publishes_the_reduced_fit(monkeypatch, discrete, drift):
     information below the certified rank. The fit repeats the Newton
     iteration on the retained coefficients from the projected start;
     ``drifted_start`` moves the start 1e6 along ``x - z`` so that it takes
-    steps. Mutation checks: keeping the drifted state when the projection
-    costs objective publishes x = 1953.7 on the dense route; publishing the
-    projection without the reduced steps misses mgcv's variances by 8e-5
-    (chunked) and fails the stop's check (dense) on the drifted start.
+    steps. Mutation checks: keeping the unreduced state misses mgcv's
+    coefficients on the dense route. Publishing the projection without the
+    reduced steps misses mgcv's variances on the chunked route and on the
+    dense route with the drifted start.
     """
     import superglm.distributional.solver.solver as solver
 

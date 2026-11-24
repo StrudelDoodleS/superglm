@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pickle
-import tracemalloc
 import weakref
 
 import numpy as np
@@ -178,15 +177,9 @@ def test_tensor_matvec_workspace_has_no_observation_by_basis_arrays():
     group, rng = _tensor(192, 256, 3, 5, 20_000, 15)
     vector = rng.normal(size=15)
     group.matvec(vector)
-    tracemalloc.start()
-    try:
-        before, _ = tracemalloc.get_traced_memory()
-        result = group.matvec(vector)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+    peak, result = own_traced_peak(group.matvec, vector)
     workspace = 8 * (2 * group.shape[0] + 192 * 5 + 256 * 3 + 15)
-    assert peak - before < workspace + 64 * 1024
+    assert peak < workspace + 64 * 1024
     assert result.shape == (20_000,)
 
 
@@ -1098,14 +1091,13 @@ def test_distinct_margin_tensor_cross_gram_bounds_its_transient():
     left, right, rng = _tensor_pair(n, (64, 64, 7, 7, 40), (64, 64, 7, 7, 40))
     weights = rng.uniform(0.5, 1.5, size=n)
     algebra._cross_gram(left, right, weights)
-    tracemalloc.start()
-    try:
-        before, _ = tracemalloc.get_traced_memory()
+
+    def cross_gram():
         profile = {}
         result = algebra._cross_gram(left, right, weights, profile=profile)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+        return result, profile
+
+    peak, (result, profile) = own_traced_peak(cross_gram)
     assert profile["block_cross_tensor_tensor_channel_calls"] == 1
     assert profile["block_cross_tensor_tensor_channel_raw"] == 1
     raw_width = right.raw_channels.projection.shape[0]
@@ -1116,7 +1108,7 @@ def test_distinct_margin_tensor_cross_gram_bounds_its_transient():
     # allocation, and the three cell-order gathers are n-vectors (24 bytes a
     # row); both are traced.  What the ceiling pins is that no observation-row
     # panel (392 bytes a row here) is materialised.
-    assert peak - before <= 8 * cells + gathers + tmp_bytes + 64 * 1024
+    assert peak <= 8 * cells + gathers + tmp_bytes + 64 * 1024
     assert result.shape == (40, 40)
 
 
