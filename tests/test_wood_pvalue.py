@@ -2,6 +2,7 @@
 
 import inspect
 import math
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -657,6 +658,22 @@ class TestWoodTestSmooth:
 
 
 class TestMixtureFailureHandling:
+    def test_quad_failure_status_preserves_wood_fallback_and_warnings(self, monkeypatch):
+        def failed_quad(*args, full_output, **kwargs):
+            assert full_output == 1
+            warnings.warn("independent of QUADPACK status", RuntimeWarning)
+            # With no failure message this would give a certified probability.
+            return 0.0, 0.0, {}, "forced QUADPACK convergence failure"
+
+        monkeypatch.setattr("scipy.integrate.quad", failed_quad)
+        stat, stat_alt = 2.5, 3.0
+        weights = np.array([1.0, 0.65, 0.2])
+        with pytest.warns(RuntimeWarning, match="independent of QUADPACK status"):
+            actual = _fractional_tail(stat, stat_alt, weights, res_df=-1.0)
+        primary, _, _ = satterthwaite(stat, weights)
+        alternate, _, _ = satterthwaite(stat_alt, weights)
+        assert actual == pytest.approx(0.5 * (primary + alternate))
+
     def test_known_scale_fractional_tail_uses_satterthwaite_on_each_fault(
         self,
         monkeypatch,

@@ -61,9 +61,7 @@ def psum_chisq(
         use, a one-sided support boundary, or components too disparate in
         scale. 4 = invalid input.
     """
-    import warnings
-
-    from scipy.integrate import IntegrationWarning, quad
+    from scipy.integrate import quad
     from scipy.stats import chi2 as chi2_dist
     from scipy.stats import f as f_dist
     from scipy.stats import norm
@@ -272,20 +270,16 @@ def psum_chisq(
     integration_acc = max(min(float(acc), 1e-10), 50.0 * epsilon)
 
     def _quad_checked(*args, **kwargs) -> tuple[float, float, bool]:
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always", IntegrationWarning)
-            output = quad(
-                *args,
-                full_output=1,
-                epsabs=kwargs.pop("epsabs", integration_acc),
-                epsrel=integration_acc,
-                **kwargs,
-            )
-        value, error = float(output[0]), float(output[1])
-        converged = len(output) == 3 and not any(
-            issubclass(item.category, IntegrationWarning) for item in caught
+        # With full_output, QUADPACK appends a message on convergence failure.
+        output = quad(
+            *args,
+            full_output=1,
+            epsabs=kwargs.pop("epsabs", integration_acc),
+            epsrel=integration_acc,
+            **kwargs,
         )
-        return value, error, converged
+        value, error = float(output[0]), float(output[1])
+        return value, error, len(output) == 3
 
     try:
         # QUADPACK's Fourier driver is ill-conditioned as its frequency tends to zero, where the
