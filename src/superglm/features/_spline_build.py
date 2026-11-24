@@ -477,19 +477,13 @@ def _rows_identify_null_products(
 ) -> bool:
     """Whether the weighted rows identify a tensor's null coordinates beside the intercept.
 
-    ``rows1`` and ``rows2`` are the two margins' bases on the rows (or the
-    occupied cells) the fit reads, each with its ``nullities`` null
-    coordinates first, and ``weights`` are the solver's precision weights on
-    them. The tensor's null coordinates are the row-wise products of the
-    margins'. Each margin's rows identify its own (``_rows_identify``), but a
-    product is not centred, and rows on which it is constant (``x z = 1``)
-    alias it with the intercept: removing its weighted mean leaves the
-    column its rounding. An entry of the design is a product of two rounded
-    basis values, so that rounding is of order ``u`` times the design's
-    weighted Frobenius norm. When the centred products' smallest weighted
-    singular value falls below ``sqrt(u)`` of that norm, more than half the
-    column's digits are lost, as for a margin, and an exactly unpenalised
-    coordinate would be fitted to the rest.
+    ``rows1``/``rows2`` are the margins' bases on the rows (or occupied cells) the fit reads,
+    null coordinates first, with the solver's precision ``weights``. The tensor's null
+    coordinates are the margins' row-wise products; each margin's own are identified
+    (``_rows_identify``), but a product is not centred, and on rows where it is constant
+    (``x z = 1``) its weighted centring leaves only rounding, of order ``u`` times the design's
+    weighted Frobenius norm. Below ``sqrt(u)`` of that norm in the centred products' smallest
+    weighted singular value, more than half the digits are lost, as for a margin.
     """
     if weights is None:
         scale = np.ones(rows1.shape[0])
