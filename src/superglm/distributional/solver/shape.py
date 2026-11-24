@@ -132,7 +132,7 @@ def _qp_step(
         shifted = target if shift == 0.0 else target + shift * diagonal * anchor
         try:
             result = _solve_constrained_qp_with_cold_retry(
-                system, shifted, A, rhs, active, structure=structure
+                system, shifted, A, rhs, active, structure=structure, max_iter=200
             )
         except (ValueError, np.linalg.LinAlgError):
             continue

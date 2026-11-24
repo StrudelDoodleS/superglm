@@ -1066,31 +1066,10 @@ def test_qp_reml_discloses_a_feasible_terminal_state_without_a_kkt_certificate(
     assert np.all(np.isfinite(model.predict(frame)))
 
 
-@pytest.mark.parametrize(
-    ("failure_reason", "error_pattern"),
-    [
-        pytest.param(
-            "constraint_infeasible",
-            "fixed-lambda constrained REML fit ended at an infeasible coefficient mode",
-            id="primal-infeasible",
-        ),
-        pytest.param(
-            "constraint_kkt_incomplete",
-            "fixed-lambda constrained REML fit ended without a complete inner-QP KKT certificate",
-            id="kkt-incomplete",
-        ),
-    ],
-)
-def test_fixed_lambda_qp_reml_refuses_uncertified_result_before_publication(
-    monkeypatch: pytest.MonkeyPatch,
-    failure_reason: str,
-    error_pattern: str,
-) -> None:
-    """The fixed-lambda route gates an uncertified result before installing fit state."""
+def _fixed_lambda_qp_model(monkeypatch, failure_reason):
     import superglm.model.reml_execute as reml_execute
     from superglm import LambdaPolicy
 
-    frame, y = _healthy_increasing_problem()
     model = SuperGLM(
         family="gaussian",
         selection_penalty=0.0,
@@ -1103,17 +1082,19 @@ def test_fixed_lambda_qp_reml_refuses_uncertified_result_before_publication(
         },
     )
     real_fit = reml_execute.fit_irls_direct
-    fixed_route_calls: list[dict[str, str]] = []
 
     def force_uncertified_fixed_result(*args, **kwargs):
         result, inverse = real_fit(*args, **kwargs)
         terminal_beta = result.beta.copy()
+        group = next(group for group in kwargs["groups"] if group.constraints is not None)
         if failure_reason == "constraint_infeasible":
-            group = next(group for group in kwargs["groups"] if group.constraints is not None)
             terminal_beta[group.sl] = -10.0 * group.constraints.A[0]
-            slack = group.constraints.A @ terminal_beta[group.sl] - group.constraints.b
+        slack = group.constraints.A @ terminal_beta[group.sl] - group.constraints.b
+        if failure_reason == "constraint_infeasible":
             assert np.min(slack) < -1.0
-        fixed_route_calls.append(kwargs["debug_context"])
+        else:
+            assert np.min(slack) >= -1e-12
+        assert kwargs["debug_context"] == {"phase": "fixed_constraint"}
         return (
             replace(
                 result,
@@ -1129,18 +1110,47 @@ def test_fixed_lambda_qp_reml_refuses_uncertified_result_before_publication(
         "fit_irls_direct",
         force_uncertified_fixed_result,
     )
-    with pytest.raises(
-        RuntimeError,
-        match=error_pattern,
-    ):
-        model.fit_reml(frame, y)
+    return model
 
-    assert fixed_route_calls == [{"phase": "fixed_constraint"}]
+
+@pytest.mark.pins_behaviour
+def test_fixed_lambda_qp_reml_refuses_an_infeasible_result(monkeypatch):
+    """Pin the typed refusal before publication of a mode that violates a shape row."""
+    from superglm.reml.observed_geometry import ObservedModeNotConvergedError
+
+    model = _fixed_lambda_qp_model(monkeypatch, "constraint_infeasible")
+    with pytest.raises(ObservedModeNotConvergedError, match="infeasible coefficient mode"):
+        model.fit_reml(*_healthy_increasing_problem())
     assert model._result is None
     assert model._solver_result is None
     assert getattr(model, "_reml_result", None) is None
     assert getattr(model, "_reml_lambdas", None) is None
     assert model._fit_stats is None
+
+
+def test_fixed_lambda_qp_reml_discloses_uncertified_feasible_result(monkeypatch):
+    from superglm.diagnostics.convergence import ConvergenceWarning
+
+    model = _fixed_lambda_qp_model(monkeypatch, "constraint_kkt_incomplete")
+    frame, y = _healthy_increasing_problem()
+    messages = []
+
+    def when_warned(message, category, *args, **kwargs):
+        if issubclass(category, ConvergenceWarning):
+            assert model.result is not None and not model.result.converged
+            messages.append(str(message))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        monkeypatch.setattr(warnings, "showwarning", when_warned)
+        model.fit_reml(frame, y)
+    diagnostics = model.reml_diagnostics()
+    assert not diagnostics["converged"]
+    assert diagnostics["terminal_refit_termination"] == "constraint_kkt_incomplete"
+    assert messages == [diagnostics["convergence_note"]]
+    assert all(word in messages[0] for word in ("shape", "KKT", "predictions", "standard errors"))
+    assert "max_reml_iter" not in messages[0]
+    assert np.all(np.isfinite(model.predict(frame)))
 
 
 def test_infeasible_committed_state_prefers_finite_feasible_proposal_over_merit() -> None:

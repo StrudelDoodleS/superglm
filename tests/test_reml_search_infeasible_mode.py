@@ -353,13 +353,17 @@ class TestCIAtTheCertifiabilityWall:
 
 
 class TestQPModeFailuresAreRoutable:
+    @pytest.mark.pins_behaviour
     def test_the_qp_infeasibility_raise_is_typed_and_routable(self, monkeypatch):
-        """A QP candidate with no feasible mode (or no complete KKT
-        certificate) is this point's infeasibility, not a dead search:
-        both constraint terminations raise the routable typed family,
-        exactly like the SCOP and observed-geometry gates. A bare
+        """Pins the typed refusal of an infeasible QP mode, unchanged by #589's fix.
+
+        A QP candidate with no feasible mode is this point's
+        infeasibility, not a dead search: it raises the routable typed
+        family, exactly like the SCOP and observed-geometry gates. A bare
         RuntimeError here aborted an entire coupled power search on one
-        bad candidate."""
+        bad candidate. A feasible mode without a complete KKT certificate
+        is published and disclosed instead (#472), as on the estimated-λ
+        route; ``tests/test_constraint_fit_feasibility.py`` covers that."""
         from types import SimpleNamespace
 
         import superglm.model.reml_execute as reml_execute
@@ -378,7 +382,7 @@ class TestQPModeFailuresAreRoutable:
         model.fit_reml(frame, y)
         lambdas = {k: float(v) for k, v in model._reml_result.lambdas.items()}
 
-        for reason in ("constraint_infeasible", "constraint_kkt_incomplete"):
+        for reason in ("constraint_infeasible",):
             monkeypatch.setattr(
                 reml_execute,
                 "fit_irls_direct",
