@@ -39,7 +39,7 @@ from superglm.distributional.smoothing.objective import _component_states
 from superglm.distributional.smoothing.proposals import _accelerated_proposal
 from superglm.distributional.telemetry import CurvatureTelemetry
 from superglm.distributional.weights import ResolvedLikelihoodWeights, WeightContract
-from superglm.features import Numeric, RandomEffect, Spline
+from superglm.features import CubicRegressionSpline, Numeric, RandomEffect, Spline
 from superglm.group_matrix import (
     DesignMatrix,
     FactorSmoothGroupMatrix,
@@ -233,18 +233,23 @@ def _semantic_efs_fixture() -> _SemanticEFSFixture:
     )
 
 
+class _DataCoordinateSpline(CubicRegressionSpline):
+    """A subclass states no penalty null coordinates, so its block keeps the data's coordinates."""
+
+
 def _semantic_efs_predictors() -> tuple[Predictor, Predictor]:
+    """A scale spline in the data's coordinates (``_DataCoordinateSpline``).
+
+    The certificate below replays the stored penalty's eigensystem from its
+    Gram in solver coordinates. Held in its penalty's null coordinates,
+    superglm's own spline keeps the penalty's root and stores its singular
+    values instead.
+    """
     return (
         Predictor("location", {"x": Numeric()}),
         Predictor(
             "scale",
-            {
-                "z": Spline(
-                    kind="cr",
-                    n_knots=5,
-                    knot_strategy="quantile_rows",
-                )
-            },
+            {"z": _DataCoordinateSpline(n_knots=5, knot_strategy="quantile_rows")},
         ),
     )
 
