@@ -1454,6 +1454,8 @@ def shared_cell_row_notes(interaction_specs: dict[str, Any]) -> list[str]:
 
 def _editor_notes(info: dict[str, Any]) -> list[str]:
     notes: list[str] = []
+    if info.get("editor_statistics_note"):
+        notes.append(info["editor_statistics_note"])
     if info.get("editor_inference_stale", False):
         terms = ", ".join(info.get("editor_edited_terms") or [])
         suffix = f" Edited terms: {terms}." if terms else ""

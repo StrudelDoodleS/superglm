@@ -31,8 +31,10 @@ class EditMaterializationRequest:
     model_revision: int
     edit_epoch: int
     base_model: Any
+    base_fit: Any
     terms: dict[str, EditableTerm]
     dataset: EvaluationDataset | None
+    statistics_fallback: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

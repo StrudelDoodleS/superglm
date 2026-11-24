@@ -1011,6 +1011,7 @@ class SuperLSS:
         *,
         edited_terms: Sequence[str],
         X_train: FrameLike | EagerFrame | None = None,
+        refresh_training_rows: bool = True,
     ) -> SuperLSS:
         """Return a model that predicts with ``coefficients``; this one is unchanged.
 
@@ -1021,11 +1022,17 @@ class SuperLSS:
         ``coef_by_predictor_`` follow the edit; ``result_``, ``covariance_``, term
         tests and the rest of the inference describe the fit. An edit may write a
         non-zero value onto a coefficient the fit publishes at zero as aliased;
-        its standard error stays 0. The fitted rows are recomputed from the
-        training frame attached, else ``X_train``.
+        its standard error stays 0. The fitted rows are recomputed from the training
+        frame attached, else ``X_train``; a split-scoring predictor may skip them.
         """
         frame = self._training_frame if X_train is None else X_train
-        revised = revised_model(self._require_fitted(), coefficients, edited_terms, frame)
+        revised = revised_model(
+            self._require_fitted(),
+            coefficients,
+            edited_terms,
+            frame,
+            refresh_training_rows=refresh_training_rows,
+        )
         copied = copy.copy(self)
         copied._model = revised
         return copied

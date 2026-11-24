@@ -12,7 +12,7 @@ from numpy.typing import NDArray
 from superglm._utils import weighted_row_sum
 from superglm._weight_units import likelihood_scale
 from superglm.editor.display import display_for, is_edited, transform_for_link, unit_tolerance
-from superglm.editor.errors import EditorValueError
+from superglm.editor.errors import EditorValueError, no_quote_message
 from superglm.editor.lss.view import is_lss
 from superglm.editor.terms import native_log_effect_values
 from superglm.features.categorical import Categorical
@@ -149,6 +149,8 @@ def apply_edits_to_model_copy_with_data(
     sample_weight=None,
     offset=None,
     keep_pinned: bool = False,
+    statistics_fallback: str | None = None,
+    frame: EagerFrame | None = None,
 ):
     """Return a deep-copied model and refresh scalar fit stats if data is available.
 
@@ -159,7 +161,7 @@ def apply_edits_to_model_copy_with_data(
     rest of the term is edited.
 
     Where a scoring row of positive weight has no quote (``predict`` gives it
-    NaN), the edit stands without fit statistics (``_fit_stats`` None).
+    NaN), the edit stands with unavailable fit statistics and a row-level reason.
 
     A SuperLSS is revised from the rows its view holds; ``X``, ``y``,
     ``sample_weight`` and ``offset`` are not read.
@@ -168,11 +170,7 @@ def apply_edits_to_model_copy_with_data(
         from superglm.editor.lss.apply import lss_model_with_edits
 
         return lss_model_with_edits(model, terms, keep_pinned=keep_pinned)
-    changed_terms = [
-        term
-        for name, term in terms.items()
-        if is_edited(display_for(model, name), term.original_log_effect, term.edited_log_effect)
-    ]
+    changed_terms = _changed_terms(model, terms)
     has_explicit_rows = X is not None or y is not None
     has_retained_rows = (
         getattr(model, "_fit_X_ref", None) is not None
@@ -192,36 +190,28 @@ def apply_edits_to_model_copy_with_data(
     )
     if not changed_terms and not has_scoring_data:
         return copied_model
-    revision = FittedStateRevision.start(
-        copied_model,
-        increment=bool(changed_terms or has_scoring_data),
-        freeze_auxiliary_arrays=bool(changed_terms or has_scoring_data),
-    )
+    revision = _stage_glm_revision(copied_model, changed_terms, keep_pinned=keep_pinned)
     edited_model = revision.model
-    beta_before = np.array(edited_model._result.beta, dtype=np.float64)
-    for term in changed_terms:
-        _apply_term_edit(edited_model, term, keep_pinned=keep_pinned)
-    if changed_terms:
-        publish_revised_coefficients(edited_model, beta_before)
-    edited_terms = [term.name for term in changed_terms]
-    if edited_terms:
-        _stamp_stale_inference(edited_model, edited_terms)
-        _invalidate_model_caches(edited_model)
-    if edited_terms or has_scoring_data:
-        from superglm.model.base import NoPredictedMeanError
+    from superglm.model.base import NoPredictedMeanError
 
-        try:
-            _refresh_fit_statistics(
-                edited_model,
-                X=X,
-                y=y,
-                sample_weight=sample_weight,
-                offset=offset,
-            )
-        except NoPredictedMeanError:
-            # No statistics exist for rows with no quote; the summary says so, and each
-            # split's scores name the rows.
-            edited_model._fit_stats = None
+    reason = None
+    try:
+        scored = _refresh_fit_statistics(
+            edited_model,
+            frame=frame,
+            X=X,
+            y=y,
+            sample_weight=sample_weight,
+            offset=offset,
+        )
+        if not scored:
+            reason = "This model has no fit statistics. Supply both X and y to score the model."
+    except NoPredictedMeanError as error:
+        reason = (
+            f"This model has no fit statistics. {no_quote_message(error)} "
+            "Adjust the curve or undo the edit to restore the quotes."
+        )
+    revision = revision.with_edited_statistics(reason=reason, fallback=statistics_fallback)
     if not getattr(edited_model, "_retain_fit_state", True):
         from superglm.model.fit_ops import _maybe_release_fit_state
 
@@ -229,8 +219,88 @@ def apply_edits_to_model_copy_with_data(
     return revision.commit()
 
 
-def materialize_edit_request(request):
-    """Construct an edited model from an immutable session snapshot."""
+def _changed_terms(model, terms: dict[str, EditableTerm]) -> list[EditableTerm]:
+    return [
+        term
+        for name, term in terms.items()
+        if is_edited(display_for(model, name), term.original_log_effect, term.edited_log_effect)
+    ]
+
+
+def _stage_glm_revision(model, changed_terms: list[EditableTerm], *, keep_pinned: bool):
+    revision = FittedStateRevision.start(model)
+    if changed_terms:
+        edited = revision.model
+        beta_before = np.array(edited._result.beta, dtype=np.float64)
+        for term in changed_terms:
+            _apply_term_edit(edited, term, keep_pinned=keep_pinned)
+        publish_revised_coefficients(edited, beta_before)
+        _stamp_stale_inference(edited, [term.name for term in changed_terms])
+        _invalidate_model_caches(edited)
+    return revision
+
+
+def model_for_split_scoring(model, terms: dict[str, EditableTerm]):
+    """Build a private predictor for split evidence, without publishing fit statistics."""
+    if is_lss(model):
+        from superglm.editor.lss.apply import lss_model_with_edits
+
+        return lss_model_with_edits(model, terms, refresh_training_rows=False)
+    changed_terms = _changed_terms(model, terms)
+    if not changed_terms:
+        return model
+    copied = _copy_model_for_editor_edits(model, share_transient_state=True)
+    return _stage_glm_revision(copied, changed_terms, keep_pinned=False).model
+
+
+def statistics_scoring_data(request):
+    """Fingerprint scoring inputs and share their operation-local frame with scoring.
+
+    A fingerprint of None leaves the request uncached. Scoring itself gives the
+    usual validation error if these inputs are invalid.
+    """
+    from superglm._frame import as_eager_frame
+    from superglm.model.fit_data_guard import _numeric_vector_digest
+    from superglm.model.fit_ops import _required_fit_columns
+    from superglm.model.input_validation import _finite_vector
+
+    model, dataset = request.base_model, request.dataset
+    if dataset is None or is_lss(model):
+        return None, ()
+    frame = None
+    try:
+        frame = as_eager_frame(dataset.X)
+        columns = tuple(dict.fromkeys((*model._feature_order, *_required_fit_columns(model))))
+        uses_retained = dataset.X is getattr(model, "_fit_X_ref", None) and dataset.y is getattr(
+            model, "_fit_y_ref", None
+        )
+        if uses_retained and (guard := getattr(model, "_fit_data_guard", None)) is not None:
+            guarded = guard.x_columns
+            columns = None if guarded is None else tuple(dict.fromkeys((*guarded, *columns)))
+        vectors = tuple(
+            None
+            if value is None
+            else _numeric_vector_digest(_finite_vector(name, value, len(frame), check_finite=False))
+            for name, value in (
+                ("y", dataset.y),
+                ("sample_weight", dataset.sample_weight),
+                ("offset", dataset.offset),
+            )
+        )
+        return frame, (
+            dataset.name,
+            dataset.source,
+            uses_retained,
+            frame.backend,
+            frame.digest(columns),
+            vectors,
+        )
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError):
+        return frame, None
+
+
+def materialize_edit_request(request, *, frame: EagerFrame | None = None):
+    """Construct an edited model from the captured session state."""
     kwargs = {}
     if request.dataset is not None:
         kwargs = {
@@ -242,6 +312,8 @@ def materialize_edit_request(request):
     return apply_edits_to_model_copy_with_data(
         request.base_model,
         request.terms,
+        statistics_fallback=request.statistics_fallback,
+        frame=frame,
         **kwargs,
     )
 
@@ -610,10 +682,11 @@ def _refresh_fit_statistics(
     use_fitted_design: bool = False,
     frame: EagerFrame | None = None,
     statistics: bool = True,
-) -> None:
+) -> bool:
     """Refresh fitted means and statistics; ``frame`` is the caller's adapter of ``X``.
 
     ``statistics=False`` leaves ``_fit_stats`` empty, for a caller that forms them itself.
+    Returns whether scoring rows were available and deviance was computed.
 
     A row of positive weight with no mean (NaN, as ``predict`` gives it) is
     refused with ``NoPredictedMeanError`` before anything is refreshed; a
@@ -646,7 +719,7 @@ def _refresh_fit_statistics(
         require_unchanged_fit_data(model, X_ref, y_ref, frame=None if X is None else frame)
     if y_ref is None:
         model._fit_stats = None
-        return
+        return False
 
     explicit_scoring_data = X is not None or y is not None
     validation_weight = sample_weight
@@ -739,7 +812,7 @@ def _refresh_fit_statistics(
         mu = response_mean(model, linear_predictor(model._dm, solver_result, offset_arr))
     else:
         model._fit_stats = None
-        return
+        return False
 
     mu = np.asarray(mu, dtype=np.float64).ravel()
     if mu.size != y_arr.size:
@@ -822,6 +895,7 @@ def _refresh_fit_statistics(
             y_arr,
             columns=tuple(model._feature_order),
         )
+    return True
 
 
 def _stamp_stale_inference(model, edited_terms: list[str]) -> None:

@@ -727,6 +727,12 @@ export function createEditorActions({
       store.update((state) => {
         const completed = completeEvidence(state, panel, revision, sequence, response, inForce);
         accepted = completed !== state;
+        if (
+          accepted && panel === "summary" && typeof response.notice === "string" &&
+          completed.request.mutation.status === "idle"
+        ) {
+          return moved(completed, { type: "notice", message: response.notice });
+        }
         return completed;
       });
       return accepted;

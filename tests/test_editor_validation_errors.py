@@ -179,7 +179,7 @@ def test_a_zero_weight_row_with_no_quote_adds_nothing_to_an_edits_statistics():
     """A control: a zero-weight row added nothing to the statistics before, priced at 1e12.
 
     It pins that for a row with no quote, under Tweedie frequency weights. The
-    edit is materialized on the validation split, whose unseen cell has weight
+    edit is materialized on the validation fallback, whose unseen cell has weight
     zero. Mutation: the NaN reached the Tweedie density, which refused it ("mu
     must be finite and strictly positive"), and the edit failed.
     """
@@ -191,6 +191,7 @@ def test_a_zero_weight_row_with_no_quote_adds_nothing_to_an_edits_statistics():
         link="inverse",
         selection_penalty=0.0,
         weight_semantics="frequency",
+        retain_fit_state=False,
         features={"a": Categorical(), "b": Categorical()},
     ).fit(TRAIN, TRAIN_Y)
     weights = np.array([1.0, 1.0, 1.0, 0.0])

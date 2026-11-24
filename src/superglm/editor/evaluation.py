@@ -157,6 +157,20 @@ def training_export_dataset(session) -> EvaluationDataset | None:
     return retained_fit_dataset(session)
 
 
+def edited_statistics_dataset(session) -> EvaluationDataset | None:
+    """Use the in-force fit's training rows, or a holdout when training is unavailable."""
+    explicit = session._evaluation_data
+    for dataset in (
+        explicit.get("train"),
+        _retained_fit_dataset(session.model),
+        explicit.get("validation"),
+        explicit.get("test"),
+    ):
+        if dataset is not None and dataset.n_obs:
+            return dataset
+    return None
+
+
 def named_metrics_dataset(session, name: str | None) -> EvaluationDataset | None:
     """Resolve an optional split name for metric/report calls."""
     if name in (None, "", "default"):
@@ -168,12 +182,13 @@ def named_metrics_dataset(session, name: str | None) -> EvaluationDataset | None
 
 
 def retained_fit_dataset(session) -> EvaluationDataset | None:
-    """Expose retained fit data as an in-sample train split."""
-    reference_model = getattr(session, "reference_model", session.model)
-    if reference_model is None:
-        return None
-    X = getattr(reference_model, "_fit_X_ref", None)
-    y = getattr(reference_model, "_fit_y_ref", None)
+    """Expose the reference model's fit rows for split comparisons."""
+    return _retained_fit_dataset(getattr(session, "reference_model", session.model))
+
+
+def _retained_fit_dataset(model) -> EvaluationDataset | None:
+    X = getattr(model, "_fit_X_ref", None)
+    y = getattr(model, "_fit_y_ref", None)
     if X is None or y is None:
         return None
     return EvaluationDataset(
@@ -181,8 +196,8 @@ def retained_fit_dataset(session) -> EvaluationDataset | None:
         label="Train",
         X=X,
         y=y,
-        sample_weight=getattr(reference_model, "_fit_weights", None),
-        offset=getattr(reference_model, "_fit_offset", None),
+        sample_weight=getattr(model, "_fit_weights", None),
+        offset=getattr(model, "_fit_offset", None),
         source="retained_fit_data",
     )
 
@@ -192,6 +207,7 @@ __all__ = [
     "coerce_dataset",
     "coerce_evaluation_data",
     "default_metrics_dataset",
+    "edited_statistics_dataset",
     "evaluation_datasets",
     "named_metrics_dataset",
     "retained_fit_dataset",

@@ -6,11 +6,11 @@ from typing import Any
 
 import numpy as np
 
-from superglm.editor.apply import materialize_edit_request
 from superglm.editor.display import display_for
 from superglm.editor.terms import native_log_effect_values
 from superglm.inference.summary import editor_shape_notes
 from superglm.inference.summary_levels import validate_level_display
+from superglm.model.fit_state import edited_statistics_fallback_note, edited_statistics_unavailable
 
 
 def summary_payload(
@@ -72,19 +72,24 @@ def summary_payload(
             "error": "No fitted model is available.",
         }
 
-    if getattr(model, "_fit_stats", False) is None:
-        # An edit scored on rows with no quote (``apply_edits_to_model_copy_with_data``).
+    statistics_reason = edited_statistics_unavailable(model)
+    if statistics_reason is not None or getattr(model, "_fit_stats", False) is None:
         return {
             "available": False,
             "source": source,
             "label": label,
             "level_display": level_display,
-            "error": "This model has no fit statistics: some of the rows it is scored on have "
-            "no quote under its link. Each split's scores name those rows.",
+            "deviance": None,
+            "error": statistics_reason or "This model has no fit statistics.",
+            **({"notice": statistics_reason} if source == "in_force" and statistics_reason else {}),
         }
 
     summary = model.summary(level_display=level_display)
     compact = _compact_summary_payload(summary, source, offset_terms, offset_labels)
+    notes = [_summary_note(source), *editor_shape_notes(summary._info)]
+    fallback = edited_statistics_fallback_note(model)
+    if fallback:
+        notes.insert(0, fallback)
     return {
         "available": True,
         "source": source,
@@ -94,18 +99,15 @@ def summary_payload(
         "compact": compact,
         "offset_terms": offset_terms,
         "offset_labels": offset_labels,
-        "note": " ".join([_summary_note(source), *editor_shape_notes(summary._info)]),
+        "note": " ".join(notes),
     }
 
 
 def _in_force_summary_model(session, *, model_override=None):
     if model_override is not None:
         return model_override
-    if not session.edited_terms():
-        return session.model
     request = session.capture_materialization_request()
-    assert request is not None
-    return materialize_edit_request(request)
+    return session.model if request is None else session._materialize_current_statistics(request)
 
 
 def offset_label_payload(session, terms: list[str]) -> list[dict[str, Any]]:

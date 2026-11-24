@@ -6,7 +6,7 @@ import copy
 import math
 from collections.abc import Hashable, Iterator, Mapping
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
@@ -372,6 +372,37 @@ class ModelConfigPublication:
         }
 
 
+_EditedStatisticsStatus = Literal["fitted", "scored", "unavailable"]
+
+
+@dataclass(frozen=True)
+class EditedStatistics:
+    """Whether a coefficient revision has statistics for its scoring rows."""
+
+    status: _EditedStatisticsStatus
+    reason: str | None = None
+    fallback: str | None = None
+
+    @property
+    def fallback_note(self) -> str:
+        return (
+            ""
+            if self.fallback is None
+            else f"{self.fallback} fallback (no training rows available)."
+        )
+
+
+_FITTED_STATISTICS = EditedStatistics("fitted")
+_EDITED_STATISTICS_MOVES: dict[tuple[_EditedStatisticsStatus, str], _EditedStatisticsStatus] = {
+    ("fitted", "score"): "scored",
+    ("fitted", "withhold"): "unavailable",
+    ("scored", "score"): "scored",
+    ("scored", "withhold"): "unavailable",
+    ("unavailable", "score"): "scored",
+    ("unavailable", "withhold"): "unavailable",
+}
+
+
 @dataclass(frozen=True)
 class FitState:
     """Authoritative identity and projections for one complete successful fit."""
@@ -384,6 +415,36 @@ class FitState:
     repair_revision: int = 0
     resolved_penalty: object | None = None
     resolved_lambda2: object | None = None
+    edited_statistics: EditedStatistics = _FITTED_STATISTICS
+
+
+def _edited_statistics(model) -> EditedStatistics:
+    return getattr(getattr(model, "_fit_state", None), "edited_statistics", _FITTED_STATISTICS)
+
+
+def edited_statistics_unavailable(model) -> str | None:
+    """The explanation published with an unavailable edited score."""
+    return _edited_statistics(model).reason
+
+
+def edited_statistics_fallback_note(model) -> str:
+    """Identify holdout statistics when the edited model had no training data."""
+    return _edited_statistics(model).fallback_note
+
+
+def _transition_edited_statistics(
+    model, reason: str | None, fallback: str | None = None
+) -> EditedStatistics:
+    event = "score" if reason is None else "withhold"
+    status = _EDITED_STATISTICS_MOVES[(_edited_statistics(model).status, event)]
+    outcome = EditedStatistics(status, reason, fallback)
+    if status == "unavailable":
+        model._result.deviance = model._solver_result.deviance = float("nan")
+        model._fit_stats = model._fit_mu = model._fit_null_mu = None
+        model._fit_metrics_cache = model._fit_metrics_cache_signature = model._summary_cache = None
+        if outcome.fallback_note:
+            outcome = replace(outcome, reason=f"{outcome.fallback_note} {reason}")
+    return outcome
 
 
 @dataclass(frozen=True)
@@ -403,6 +464,7 @@ class FittedStateRevision:
     revision: int
     repair_revision: int
     freeze_auxiliary_arrays: bool = True
+    edited_statistics: EditedStatistics = _FITTED_STATISTICS
 
     @classmethod
     def start(
@@ -421,29 +483,7 @@ class FittedStateRevision:
 
         work_model = copy.copy(model)
         work_model.__dict__ = dict(model.__dict__)
-        result_copies: dict[int, object] = {}
-        result_copy_memo: dict[int, object] = {}
-        for result_name in ("_result", "_solver_result"):
-            source_result = getattr(model, result_name)
-            result_copy = result_copies.get(id(source_result))
-            if result_copy is None:
-                mutable_copy = getattr(source_result, "_mutable_copy", None)
-                result_copy = (
-                    mutable_copy(memo=result_copy_memo)
-                    if mutable_copy is not None
-                    else copy.deepcopy(source_result, result_copy_memo)
-                )
-                result_copies[id(source_result)] = result_copy
-            setattr(work_model, result_name, result_copy)
-
-        reml_result = getattr(model, "_reml_result", None)
-        if reml_result is not None:
-            nested_result = getattr(reml_result, "pirls_result", None)
-            replacement = result_copies.get(id(nested_result))
-            if replacement is not None:
-                reml_copy = copy.copy(reml_result)
-                reml_copy.pirls_result = replacement
-                work_model._reml_result = reml_copy
+        _copy_revision_results(model, work_model)
 
         if not (
             _recorded_shift_reads_the_coefficients(work_model)
@@ -469,6 +509,14 @@ class FittedStateRevision:
             freeze_auxiliary_arrays=bool(freeze_auxiliary_arrays),
         )
 
+    def with_edited_statistics(
+        self, *, reason: str | None = None, fallback: str | None = None
+    ) -> FittedStateRevision:
+        """Stage the score or its unavailability for this editor revision."""
+        return replace(
+            self, edited_statistics=_transition_edited_statistics(self.model, reason, fallback)
+        )
+
     def commit(self):
         """Validate and publish this complete revision through one dictionary swap."""
         if getattr(self.model, "_prediction_plan", None) is None:
@@ -481,9 +529,62 @@ class FittedStateRevision:
             revision=self.revision,
             repair_revision=self.repair_revision,
             freeze_auxiliary_arrays=self.freeze_auxiliary_arrays,
+            edited_statistics=self.edited_statistics,
         )
         _install_fit_state(self.target_model, candidate)
         return self.target_model
+
+
+def _copy_revision_results(model, work_model) -> None:
+    """Copy coefficient-scale results and preserve public, solver and REML aliases."""
+    result_copies: dict[int, object] = {}
+    result_copy_memo: dict[int, object] = {}
+    for result_name in ("_result", "_solver_result"):
+        source_result = getattr(model, result_name)
+        result_copy = result_copies.get(id(source_result))
+        if result_copy is None:
+            mutable_copy = getattr(source_result, "_mutable_copy", None)
+            result_copy = (
+                mutable_copy(memo=result_copy_memo)
+                if mutable_copy is not None
+                else copy.deepcopy(source_result, result_copy_memo)
+            )
+            result_copies[id(source_result)] = result_copy
+        setattr(work_model, result_name, result_copy)
+
+    reml_result = getattr(model, "_reml_result", None)
+    if reml_result is not None:
+        replacement = result_copies.get(id(getattr(reml_result, "pirls_result", None)))
+        if replacement is not None:
+            reml_copy = copy.copy(reml_result)
+            reml_copy.pirls_result = replacement
+            work_model._reml_result = reml_copy
+
+
+def restore_legacy_edited_statistics(model) -> None:
+    """Withhold the pre-edit score found in older artifacts with no edited statistics."""
+    state = getattr(model, "_fit_state", None)
+    if (
+        state is None
+        or "edited_statistics" in vars(state)
+        or not getattr(model, "_editor_inference_stale", False)
+        or getattr(model, "_fit_stats", None) is not None
+    ):
+        return
+    # The pre-edit deviance survived, but the rows given to the edit scorer
+    # may have been discarded. Never infer the failed score's rows from the fit.
+    _copy_revision_results(model, model)
+    outcome = _transition_edited_statistics(
+        model,
+        "This model has no fit statistics. The saved edit did not record the scoring rows "
+        "that prevented a score. Supply X and y to score the edited model.",
+    )
+    _freeze_candidate_arrays(model, auxiliary=False)
+    model._fit_state = replace(
+        state,
+        projections=FrozenMapping({name: getattr(model, name) for name in state.projections}),
+        edited_statistics=outcome,
+    )
 
 
 def canonical_intercept_shift(model, beta) -> float:
@@ -851,7 +952,9 @@ _FIT_PROJECTION_NAMES = (
 )
 
 
-def _validate_workspace_result(work_model) -> float:
+def _validate_workspace_result(
+    work_model, edited_statistics: EditedStatistics = _FITTED_STATISTICS
+) -> float:
     """Validate the minimum structural and finite invariants before publication."""
     result = work_model._result
     solver_result = work_model._solver_result
@@ -872,21 +975,33 @@ def _validate_workspace_result(work_model) -> float:
         raise RuntimeError("fit candidate public and solver coefficients are inconsistent")
     scalars = (
         result.intercept,
-        result.deviance,
         result.phi,
         result.effective_df,
         solver_result.intercept,
-        solver_result.deviance,
         solver_result.phi,
         solver_result.effective_df,
     )
+    deviances = (result.deviance, solver_result.deviance)
+    unavailable = edited_statistics.status == "unavailable"
+    if unavailable:
+        if (
+            not edited_statistics.reason
+            or work_model._fit_stats is not None
+            or not all(np.isnan(value) for value in deviances)
+        ):
+            raise RuntimeError("unavailable edited statistics require a reason and missing scores")
+    else:
+        if edited_statistics.status == "scored" and work_model._fit_stats is None:
+            raise RuntimeError("a scored editor revision requires fit statistics")
+        scalars += deviances
     if not np.all(np.isfinite(np.asarray(scalars, dtype=np.float64))):
         raise RuntimeError("fit candidate scalar results must be finite")
     public_solver_scalars = (
-        (result.deviance, solver_result.deviance),
         (result.phi, solver_result.phi),
         (result.effective_df, solver_result.effective_df),
     )
+    if not unavailable:
+        public_solver_scalars += (deviances,)
     if any(float(public) != float(solver) for public, solver in public_solver_scalars) or (
         int(result.n_iter) != int(solver_result.n_iter)
         or bool(result.converged) is not bool(solver_result.converged)
@@ -1008,9 +1123,10 @@ def _capture_model_state(
     repair_revision: int,
     freeze_auxiliary_arrays: bool,
     config_publication: ModelConfigPublication | None = None,
+    edited_statistics: EditedStatistics = _FITTED_STATISTICS,
 ) -> FitCandidate:
     """Build a validated candidate from a complete private fitted model."""
-    selection_penalty = _validate_workspace_result(work_model)
+    selection_penalty = _validate_workspace_result(work_model, edited_statistics)
     _freeze_candidate_arrays(work_model, auxiliary=freeze_auxiliary_arrays)
     projections = {
         name: getattr(work_model, name)
@@ -1041,6 +1157,7 @@ def _capture_model_state(
         repair_revision=int(repair_revision),
         resolved_penalty=resolved_penalty,
         resolved_lambda2=copy.deepcopy(resolved_lambda2),
+        edited_statistics=edited_statistics,
     )
 
     # Shallow transfer is intentional: every large buffer was created by this
