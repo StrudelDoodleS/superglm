@@ -68,6 +68,13 @@ def _general_difference_penalty(
     return standard.T @ standard, "projected", standard
 
 
+def normalized_knots(knots: NDArray, left: int, right: int) -> NDArray:
+    """Map the domain endpoints to -1 and 1 without overflowing or losing a common offset."""
+    _, exponent = np.frexp(np.max(np.abs(knots)))
+    scaled = np.ldexp(knots, -exponent)
+    return 2.0 * ((scaled - scaled[left]) / (scaled[right] - scaled[left])) - 1.0
+
+
 def _polynomial_coefficients(knots: NDArray, degree: int, order: int) -> NDArray:
     """B-spline coefficients of ``1, s, ..., s**(order - 1)``, ``s`` the domain mapped to [-1, 1].
 
@@ -77,8 +84,7 @@ def _polynomial_coefficients(knots: NDArray, degree: int, order: int) -> NDArray
     ``binomial(degree, p)``.
     """
     n_basis = len(knots) - degree - 1
-    lo, hi = knots[degree], knots[n_basis]
-    s = (2.0 * knots - (lo + hi)) / (hi - lo)
+    s = normalized_knots(knots, degree, n_basis)
     windows = np.lib.stride_tricks.sliding_window_view(s[1 : n_basis + degree], degree)
     elementary = np.zeros((n_basis, order))
     elementary[:, 0] = 1.0

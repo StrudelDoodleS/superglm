@@ -430,6 +430,42 @@ def test_discrete_spline_does_not_decompose_a_training_row_matrix(monkeypatch):
     assert max(row_counts, default=0) <= 64
 
 
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("reml", [False, True])
+def test_cardinal_smooth_reproduces_lines_far_from_the_origin(reml):
+    """Pin linear reproduction under a large second-derivative penalty after translating x."""
+    x = 1e14 + np.linspace(0, 1, 200)
+    frame = pd.DataFrame({"x": x})
+    y = 1 + 2 * (x - x[0])
+    penalty = {"lambda_policy": LambdaPolicy.fixed(1e3)} if reml else {}
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        spline_penalty=1e4,
+        discrete=False,
+        features={"x": Spline(kind="cr_cardinal", n_knots=6 if reml else 8, **penalty)},
+    )
+    (model.fit_reml if reml else model.fit)(frame, y)
+    np.testing.assert_allclose(model.predict(frame), y, rtol=0, atol=1e-11)
+
+
+@pytest.mark.pins_behaviour
+def test_finite_extreme_knots_can_fit_an_integrated_spline():
+    """Pin finite fitted predictions on a large but representable knot interval."""
+    x = np.linspace(1e308, 1.05e308, 120)
+    t = (x - x[0]) / (x[-1] - x[0])
+    y = 1 + t + 0.05 * np.sin(7 * t)
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        spline_penalty=2,
+        discrete=False,
+        features={"x": Spline(kind="bs", n_knots=5)},
+    ).fit(frame, y)
+    np.testing.assert_allclose(model.predict(frame), y, atol=0.05, rtol=0)
+
+
 def _closed_form_large_lambda_reml_objective(spec, x: np.ndarray, y: np.ndarray) -> float:
     """Exact Gaussian REML objective in the ``lambda -> inf`` limit of SSP coordinates.
 

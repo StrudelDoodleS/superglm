@@ -1147,7 +1147,9 @@ class CardinalCRSpline(_SplineBase):
         """The straight lines: a cardinal coefficient is the curve's value at its knot."""
         del order
         knots = cast(NDArray, self._cr_knots)
-        return np.column_stack([np.ones_like(knots), knots])
+        return np.column_stack(
+            [np.ones_like(knots), _spline_penalties.normalized_knots(knots, 0, -1)]
+        )
 
     def _penalty_root_for_order(self, order: int) -> NDArray:
         """The fixed penalty's factor ``L^{-1} B_u`` (``cr_penalty_root``)."""
