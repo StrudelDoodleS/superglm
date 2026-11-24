@@ -13,6 +13,7 @@ zeros and ones the leaf means carry.  Section numbers refer to
 from __future__ import annotations
 
 import warnings
+from dataclasses import replace
 from fractions import Fraction
 
 import numpy as np
@@ -237,7 +238,9 @@ def test_pair_sums_give_the_expanded_rows_statistics(case, chunk_size, monkeypat
     ``gamma`` bound; the means come from the same code and are equal.  A
     level absent from a chunk, a cut leaf, zero-weight rows and negative
     rows are all here, under a caller's error scale that charges every row:
-    a cut leaf's pieces then carry an error residual that is not zero.
+    a cut leaf's pieces then carry an error residual that is not zero.  The
+    absolute mass is also held to the dense pass's, which forms every
+    indicator column as dense rows and shares none of the pair bookkeeping.
     """
     if case == "edge":
         layout, matrices, leaf, weights = _edge_case()
@@ -260,6 +263,8 @@ def test_pair_sums_give_the_expanded_rows_statistics(case, chunk_size, monkeypat
     X = _border_rows(layout) - _border_center(layout)
     data, passes = _passes(layout, matrices, weights, chunk_size)
     gamma = (6 * n + 4 * -(-n // chunk_size) + 32) * EPS
+    dense = replace(layout)
+    dense.__dict__["sparse_indicators"] = ()
     for a, mean in passes:
         error = np.abs(a) + 0.5
         options = dict(mean=mean, center=None if mean is None else data.center, error=error)
@@ -278,6 +283,10 @@ def test_pair_sums_give_the_expanded_rows_statistics(case, chunk_size, monkeypat
         assert np.all(np.abs(pairs.within - rows.within) <= 2 * gamma * (M.T @ (A[:, None] * M)))
         E = np.bincount(leaf, weights=error, minlength=K)
         assert np.all(np.abs(pairs.absolute - rows.absolute) <= 2 * gamma * (E @ M**2))
+        reference = build_nested_leaf_statistics(
+            dense, matrices, a, chunk_size=chunk_size, **options
+        )
+        assert np.all(np.abs(pairs.absolute - reference.absolute) <= 2 * gamma * (E @ M**2))
         assert (pairs.deviation is None) == (rows.deviation is None)
         if rows.deviation is not None:
             bound = 2 * gamma * A[:, None] * M
