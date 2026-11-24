@@ -1639,6 +1639,35 @@ def _is_fixed_diagonal(matrix: NDArray, width: int, structural_rank: int | None)
     )
 
 
+def _fixed_coordinate_components(
+    gm: GroupMatrix, width: int, structural_ranks: dict
+) -> list[NDArray] | None:
+    """A fixed-coordinate block's penalties in its solver coordinates, when each is diagonal there.
+
+    The block's coordinate map ``C`` is the identity, or the turn into a
+    dominant margin's eigenbasis, which for diagonal margins is a signed
+    permutation. ``C' Omega C`` is then formed exactly and stays diagonal, so
+    its positive entries are its range spectrum. Any other map, or a
+    component that is not a positive diagonal there, returns None.
+    """
+    if getattr(gm, "reparametrize", True):
+        return None
+    matrices = [matrix for _, matrix in gm.omega_components]
+    if any(matrix.shape != (width, width) for matrix in matrices):
+        return None
+    turn = np.asarray(penalty_coordinate_map(gm), dtype=float)
+    if turn.shape != (width, width):
+        return None
+    if not np.array_equal(turn, np.eye(width)):
+        matrices = [turn.T @ matrix @ turn for matrix in matrices]
+    if all(
+        _is_fixed_diagonal(matrix, width, structural_ranks.get(suffix))
+        for (suffix, _), matrix in zip(gm.omega_components, matrices, strict=True)
+    ):
+        return matrices
+    return None
+
+
 def _tensor_marginal_rank_logdet(
     gm: GroupMatrix,
     omega_raw: NDArray,
@@ -2321,10 +2350,8 @@ def build_penalty_components(
             # after removing its bilinear axis. Its positive diagonal entries
             # already are its range spectrum. A Gram cut can erase the tail on
             # skewed knots, and a projected root can fill the other margin's zeros.
-            fixed_diagonal = not getattr(gm, "reparametrize", True) and all(
-                _is_fixed_diagonal(matrix, g.size, structural_ranks.get(suffix))
-                for suffix, matrix in gm.omega_components
-            )
+            fixed_components = _fixed_coordinate_components(gm, g.size, structural_ranks)
+            fixed_diagonal = fixed_components is not None
             if (
                 not fixed_diagonal
                 and len(gm.omega_components) > 1
@@ -2373,12 +2400,12 @@ def build_penalty_components(
                             previous=None if reused is None else reused.plain,
                         )
             for component_index, (suffix, omega_j) in enumerate(gm.omega_components):
-                if fixed_diagonal:
-                    diagonal = np.diag(omega_j)
+                if fixed_components is not None:
+                    omega_ssp_j = fixed_components[component_index]
+                    diagonal = np.diag(omega_ssp_j)
                     pos_eigvals = np.sort(diagonal[diagonal > 0])[::-1]
                     rank = float(pos_eigvals.size)
                     log_det = math.fsum(math.log(value) for value in pos_eigvals)
-                    omega_ssp_j = omega_j
                 elif raw_support is not None:
                     # Transport one selected raw family through the common map.
                     # Independent eigen-truncations of transformed Grams can

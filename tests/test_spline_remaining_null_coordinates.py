@@ -19,6 +19,7 @@ from superglm.group_matrix import (
     SplineCategoricalGroupMatrix,
     SupportCompressedSplineCategoricalGroupMatrix,
 )
+from superglm.model.reml_setup import collect_reml_groups
 from superglm.reml.penalty_algebra import build_penalty_components
 
 
@@ -263,6 +264,56 @@ def test_decomposed_tensor_fits_where_one_margin_penalty_outweighs_the_data():
     np.testing.assert_allclose(stiff, loose, atol=1e-6, rtol=0)
 
 
+@pytest.mark.parametrize("dominant", ["x", "z"])
+@pytest.mark.parametrize("kind", ["ps", "cr"])
+def test_turned_fixed_coordinate_tensor_stores_its_penalty_in_the_turned_coordinates(
+    kind, dominant
+):
+    """REML's penalty for a turned tensor is ``C' Omega C``, with its rank and log-determinant.
+
+    A dominant margin turns the block into that margin's eigenbasis ``C``,
+    a signed permutation of the fixed coordinates, so each margin's penalty
+    in the solver's coordinates is still diagonal and is formed exactly.
+    """
+    rng = np.random.default_rng(7)
+    x, z = rng.uniform(0, 1, 400), rng.uniform(0, 1, 400)
+    frame = pd.DataFrame({"x": x, "z": z})
+    y = 1 + x * z + 0.3 * x * np.sin(4 * z) + 0.05 * rng.normal(size=400)
+    other = "z" if dominant == "x" else "x"
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        discrete=False,
+        spline_penalty={
+            "x": 1.0,
+            "z": 1.0,
+            f"x:z:wiggly:margin_{dominant}": 1e12,
+            f"x:z:wiggly:margin_{other}": 0.0,
+        },
+        features={"x": Spline(kind=kind, n_knots=6), "z": Spline(kind=kind, n_knots=6)},
+    )
+    model._add_interaction("x", "z", decompose=True)
+    model.fit(frame, y)
+    matrices = list(model._dm.group_matrices)
+    index = next(i for i, group in enumerate(model._groups) if group.name == "x:z:wiggly")
+    turn = matrices[index].R_inv_local
+    assert not np.array_equal(turn, np.eye(len(turn)))
+    groups = collect_reml_groups(list(model._groups), matrices)
+    penalties = [
+        penalty
+        for penalty in build_penalty_components(matrices, groups)
+        if penalty.group_index == index
+    ]
+    assert len(penalties) == 2
+    for penalty in penalties:
+        formed = turn.T @ penalty.omega_raw @ turn
+        np.testing.assert_array_equal(penalty.omega_ssp, formed)
+        spectrum = np.linalg.eigvalsh(penalty.omega_raw)
+        spectrum = spectrum[spectrum > 1e-12 * spectrum[-1]]
+        assert penalty.rank == spectrum.size
+        np.testing.assert_allclose(penalty.log_det_omega_plus, np.sum(np.log(spectrum)), rtol=1e-12)
+
+
 @pytest.mark.parametrize("discrete", [False, True])
 def test_by_level_curve_retains_its_unpenalized_slope(discrete):
     x = np.geomspace(1.0, 1e5, 200)
@@ -403,7 +454,6 @@ def test_distributional_centering_keeps_a_selected_smooths_penalty_roots(monkeyp
     them the centred block sends REML to the eigen route instead.
     """
     from superglm.distributional import predictor
-    from superglm.model.reml_setup import collect_reml_groups
 
     calls = []
     center = predictor._center_selected_smooths
