@@ -1409,8 +1409,8 @@ class TestCoefficientsTheFitDoesNotDetermine:
         )
         cov = model.sandwich_covariance()
         assert cov.available
-        assert not cov.intercept_estimable and not cov.coefficient_estimable.any()
         assert np.all(np.isnan(cov.se))
+        assert not cov.intercept_estimable and not cov.coefficient_estimable.any()
 
         summary = model.summary(covariance=cov)
         rows = {row.name: row for row in summary._coef_rows}
@@ -1430,7 +1430,10 @@ class TestCoefficientsTheFitDoesNotDetermine:
         assert np.all(np.isnan(frames["a"]["se_log_relativity"]))
 
     def test_an_alias_between_slopes_leaves_the_intercept_its_error(self):
-        """``x2 = 2 x1`` is orthogonal to the intercept's contrast: only the slopes are blank."""
+        """``x2 = 2 x1`` is orthogonal to the intercept's contrast: only the slopes are blank.
+
+        A control on the intercept's mask: its error and p-value stay.
+        """
         rng = np.random.default_rng(910)
         x = rng.normal(size=60)
         y = 1.0 + 0.5 * x + rng.normal(scale=0.5, size=60)
@@ -1438,13 +1441,13 @@ class TestCoefficientsTheFitDoesNotDetermine:
             pd.DataFrame({"x1": x, "x2": 2.0 * x}), y
         )
         cov = model.sandwich_covariance()
-        assert cov.intercept_estimable and not cov.coefficient_estimable.any()
         assert np.isfinite(cov.se[0]) and np.all(np.isnan(cov.se[1:]))
         intercept = next(
             r for r in model.summary(covariance=cov)._coef_rows if r.name == "Intercept"
         )
         np.testing.assert_allclose(intercept.se, cov.se[0], rtol=1e-12)
         assert np.isfinite(intercept.p)
+        assert cov.intercept_estimable and not cov.coefficient_estimable.any()
 
     def test_separated_level_is_blank_in_the_result_and_the_summary_dictionary(self):
         x = np.repeat(["A", "B", "C"], 30)
@@ -1479,10 +1482,10 @@ class TestWaldTestsACovarianceCanCarry:
             return next(r for r in model.summary(covariance=cov)._coef_rows if r.name == "x")
 
         two = model.sandwich_covariance(cluster=np.arange(n) % 2)
-        assert two.wald_df_limit == 1
         row = term_row(two)
         assert row.n_params == 2
         assert row.wald_chi2 is None and row.wald_p is None and row.ref_df is None
+        assert two.wald_df_limit == 1
 
         three = model.sandwich_covariance(cluster=np.arange(n) % 3)
         assert three.wald_df_limit == 2
@@ -1507,6 +1510,7 @@ class TestWaldTestsACovarianceCanCarry:
         block = next(g for g in cov.active_groups if g.name == "x")
         beta = model.result.beta[block.sl]
         expected = float(beta @ np.linalg.solve(cov.slope_covariance[block.sl, block.sl], beta))
+        assert rows["x"].wald_chi2 is not None
         np.testing.assert_allclose(rows["x"].wald_chi2, expected, rtol=1e-8)
         assert rows["x"].ref_df == 3.0
         # the ridge-shrunk coefficient itself still carries no z or p
