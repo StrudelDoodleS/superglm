@@ -193,19 +193,19 @@ def flat_tail_names(
 
 def endpoint_trial_names(
     flat_tail: tuple[str, ...],
-    update: EFSUpdateResult,
+    log_steps: Mapping[str, float],
     estimated_names: tuple[str, ...],
     latched: Collection[str],
 ) -> tuple[str, ...]:
-    """The flat-tail components to try at their upper bounds in this round.
+    """The flat-tail components to try at their upper bounds beside the step ``log_steps``.
 
-    A component whose trial was refused is ``latched`` to ordinary steps. No
-    trial is made while another estimated component proposes a step beyond
+    A component tried before is ``latched`` to ordinary steps. No trial is made
+    while another estimated component proposes a step beyond
     ``ENDPOINT_GATE_LOG_STEP``.
     """
     names = tuple(name for name in flat_tail if name not in latched)
     others = (name for name in estimated_names if name not in names)
-    if any(abs(update.log_steps[name]) > ENDPOINT_GATE_LOG_STEP for name in others):
+    if any(abs(log_steps[name]) > ENDPOINT_GATE_LOG_STEP for name in others):
         return ()
     return names
 

@@ -671,3 +671,23 @@ def _complete_mapping(
             value = cast(float, missing)
         completed[name] = float(value)
     return completed
+
+
+def remaining_fall(fall: float, previous_fall: float, resolution: float) -> float:
+    """Aitken's estimate of how far a linearly converging objective still has to fall.
+
+    Successive falls d' then d of an objective converging at a constant rate
+    a = d / d' leave d a / (1 - a) to its limit. Stopping on that estimate
+    rather than on d itself is the convergence criterion of Boehning, Dietz,
+    Schaub, Schlattmann and Lindsay (1994) for EM iterations, which a
+    Fellner--Schall round approximates: one round's change is a measure of
+    progress, not of distance, and a slow steady drift keeps it small. A fall
+    within ``resolution`` is none; one that is not contracting, or has no
+    finite fall before it, has no such limit.
+    """
+    if fall <= resolution:
+        return 0.0
+    if previous_fall <= fall or not math.isfinite(previous_fall):
+        return math.inf
+    rate = fall / previous_fall
+    return fall * rate / (1.0 - rate)

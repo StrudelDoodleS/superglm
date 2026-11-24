@@ -80,6 +80,7 @@ from superglm.distributional.smoothing.objective import (
     _laplace_objective,
     _maximum_step,
     rank_matched_objectives,
+    remaining_fall,
 )
 from superglm.distributional.smoothing.penalty_face import PenaltyFace, PenaltyFaceError
 from superglm.distributional.smoothing.penalty_geometry import _PenaltyEvaluationMemo
@@ -367,14 +368,22 @@ def fit_distributional_efs(
     # does (Zhou, Hu, Zhou and Lange, arXiv 1509.07426), so a component heading for its
     # upper bound never arrives. One whose working problem falls all the way there is
     # tried at the bound once (``endpoint_tried``), and the objective and the evidence
-    # at the bound decide. An accepted trial holds its components at their caps like a
-    # refused promotion's, so the other components' fits stay off the face and it is
-    # assessed once, where they end. That stop is theirs: ``endgame_due`` returns a
-    # search that paused its endgame for the assessment straight to it, and
-    # ``plateau_earned`` keeps a practical plateau through it.
+    # at the bound decide. An accepted trial (``endpoint_caps``) holds its components at
+    # their caps like a refused promotion's, so the other components' fits stay off the
+    # face and it is assessed once, where they end. That stop is theirs: ``endgame_due``
+    # returns a search whose endgame waits on the assessment straight to it, and
+    # ``plateau_earned`` keeps a practical plateau through it. The exact gradient in log
+    # lambda vanishes at a cap whatever the multiplier of the bound tau = 1/lambda >= 0,
+    # which is what decides an optimum on it (Mishchenko, Holmgren and Ronnegard, arXiv
+    # 0711.2619, section 4.3), so a stationary endgame hands the caps a trial reached to
+    # the assessor (``handed_over``), whose refusal leaves its verdict standing.
     endpoint_tried: set[str] = set()
+    endpoint_caps: set[str] = set()
     endgame_due = False
+    handed_over = False
     plateau_earned = False
+    # The objective's fall over the last two accepted Fellner--Schall rounds.
+    fall = previous_fall = math.inf
 
     def _evidence_at(
         lambdas: Mapping[str, float],
@@ -488,17 +497,65 @@ def fit_distributional_efs(
             if name not in cap_held
         )
 
-    def _plateau_result() -> DistributionalEFSResult | None:
-        """End at a practical plateau, or go on (``None``) to judge the held caps first.
+    def _endpoint_names(
+        flat_tail: tuple[str, ...], log_steps: Mapping[str, float], names: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """The components to try at their bounds beside ``log_steps``, each once in a search.
 
-        Caps no assessment has refused are not judged beside another component's cap,
-        where none could be promoted: the plateau stands and the result names them.
+        The accelerator extrapolates the same fixed-point map, so an accelerated
+        search makes no endpoint trial.
+        """
+        if accelerator is not None:
+            return ()
+        chosen = endpoint_trial_names(flat_tail, log_steps, names, endpoint_tried)
+        endpoint_tried.update(chosen)
+        return chosen
+
+    def _handed_caps() -> tuple[str, ...]:
+        """The caps a stationary endgame hands to the face assessor.
+
+        They are the pressed caps an endpoint trial reached, where a round is left
+        to promote them in and to take the gradient on their face, and no other
+        component stands at its cap, beside which none could be promoted.
+        """
+        pressed = terminal_evidence.unresolved_upper_bound
+        capped = [
+            name for name in estimated_names if current_lambdas[name] == outer_config.upper(name)
+        ]
+        if (
+            not pressed
+            or any(name not in endpoint_caps or name not in pressed for name in capped)
+            or min(newton_budget, outer_config.max_iterations - len(history) - 1) <= 0
+        ):
+            return ()
+        return pressed
+
+    def _plateau_result() -> DistributionalEFSResult | None:
+        """End at a practical plateau, or go on (``None``).
+
+        A plateau reads one round's change, which a slow steady drift keeps small, so
+        a search with an active bound, an exact face or a cap a trial holds for one,
+        goes on while its objective is on course to fall further than the plateau's
+        tolerance (``remaining_fall``). Either bound asks the same question, so it
+        does not matter to the stop when a held cap is promoted. The held caps are
+        judged before the plateau stands, but for caps no assessment has refused
+        beside another component's cap, where none could be promoted: the result
+        names those. A face is revalidated by the strict stop the earned plateau
+        goes to.
         """
         nonlocal plateau_earned
+        ceiling = outer_config.plateau_tolerance * (1.0 + abs(current_objective))
+        resolution = outer_config.objective_tolerance * (1.0 + abs(current_objective))
+        bound = current_face is not None or not endpoint_caps.isdisjoint(cap_held)
+        if bound and remaining_fall(fall, previous_fall, resolution) > ceiling:
+            return None
         if (refused_fit is not None or not _foreign_cap()) and _release_held_caps():
             plateau_earned = True
             return None
-        return _result(converged=True, reason="practical_plateau")
+        if current_face is None:
+            return _result(converged=True, reason="practical_plateau")
+        plateau_earned = not cap_held
+        return None
 
     def _active_set_changed(*, held_promoted: bool = False) -> None:
         """A face was promoted or released: the plateau and the endgame's verdict were the old set's.
@@ -508,8 +565,9 @@ def fit_distributional_efs(
         """
         nonlocal terminal_evidence, estimated_names, endgame_outcome, endgame_stationary
         nonlocal pending_cap, plateau_run, practical_run, plateau_qualified
-        nonlocal previous_accepted_step, plateau_earned
+        nonlocal previous_accepted_step, plateau_earned, fall, previous_fall
         plateau_earned = plateau_earned and held_promoted
+        fall = previous_fall = math.inf
         pending_cap = None
         endgame_outcome = None  # its derivatives named the old set's components
         endgame_stationary = False
@@ -553,6 +611,7 @@ def fit_distributional_efs(
             upper_bounds=beyond_cap,
             budget=budget,
             cap_tolerance=outer_config.tolerance,
+            endpoint_trial=_endpoint_names,
         )
 
     def _result(
@@ -627,7 +686,7 @@ def fit_distributional_efs(
         """Run the endgame from the accepted state; a result ends the fit, ``None`` continues."""
         nonlocal current_lambdas, current_fit, current_objective, terminal_fit_index
         nonlocal terminal_evidence, endgame_outcome, endgame_stationary, pending_cap, newton_budget
-        nonlocal endgame_due
+        nonlocal endgame_due, handed_over
         budget = _endgame_budget()
         if budget <= 0:
             return _result(converged=False, reason="max_iterations")
@@ -651,6 +710,7 @@ def fit_distributional_efs(
             del history[entry_iterations:]
             outcome = replace(outcome, state=entry, derivatives=None)
         newton_budget -= outcome.newton_iterations
+        endpoint_caps.update(outcome.endpoint_components)
         endgame_outcome = outcome
         state = outcome.state
         current_lambdas = dict(state.lambdas)
@@ -676,13 +736,17 @@ def fit_distributional_efs(
             return None
         if outcome.kind == "stationary":
             # The exact gradient is the authority now: no component is at the cap
-            # with an outward gradient, so a Fellner--Schall nomination is void.
+            # with an outward gradient, so a Fellner--Schall nomination is void,
+            # but for the caps handed to the assessor.
             endgame_stationary = True
             pending_cap = None
-            terminal_evidence = replace(terminal_evidence, unresolved_upper_bound=())
+            handed = _handed_caps()
+            endgame_due = handed_over = bool(handed)
+            terminal_evidence = replace(terminal_evidence, unresolved_upper_bound=handed)
             return None
         if outcome.kind == "cap_pressure":
             pending_cap = outcome
+            endgame_due = True  # the endgame goes on from a face promoted for this pressure
             nominated = set(terminal_evidence.unresolved_upper_bound) | set(outcome.cap_pressure)
             terminal_evidence = replace(
                 terminal_evidence,
@@ -815,11 +879,13 @@ def fit_distributional_efs(
             coefficient_fits, history, terminal_fit_index=terminal_fit_index, config=outer_config
         )
         if terminal_evidence.unresolved_upper_bound:
-            if len(history) >= outer_config.max_iterations or (
+            if (len(history) >= outer_config.max_iterations and not plateau_earned) or (
                 caps_final and current_fit is refused_fit
             ):
                 # No round is left, or these caps were refused at this very fit. Held caps
                 # no assessment has refused were never judged: the search ran out of rounds.
+                # Judging the caps of a plateau already earned is its terminal check, not a
+                # search step, so the round limit does not refuse it.
                 unjudged = caps_final and refused_fit is None
                 return _result(
                     converged=False,
@@ -859,7 +925,9 @@ def fit_distributional_efs(
                     _reuse_session=reuse_session,
                 )
             if promotion is None:
-                if outer_config.outer != "efs" and pending_cap is None:
+                if handed_over:
+                    pass  # the endgame's verdict stands, with the refusal recorded
+                elif outer_config.outer != "efs" and pending_cap is None:
                     if _endgame_budget() > 0 and estimated_names:
                         # The FS proposal nominated this cap; the exact gradient decides
                         # before a refusal is recorded (these assessment fits are dropped).
@@ -922,6 +990,11 @@ def fit_distributional_efs(
                             source_fit=current_fit,
                         )
                     )
+                if handed_over:
+                    endpoint_caps.difference_update(terminal_evidence.unresolved_upper_bound)
+                    endgame_due = handed_over = False
+                    terminal_evidence = replace(terminal_evidence, unresolved_upper_bound=())
+                    continue
                 if outer_config.outer == "efs" and not caps_final:
                     refused_fit = current_fit
                     cap_held |= frozenset(terminal_evidence.unresolved_upper_bound)
@@ -971,11 +1044,15 @@ def fit_distributional_efs(
             current_fit = promotion.fit
             current_objective = promotion.objective
             _active_set_changed(held_promoted=True)
-            if endgame_due and estimated_names:
+            resume = endgame_due and bool(estimated_names)
+            # A stationary verdict whose handed caps were all that was left to estimate
+            # stands: there is no gradient to take again.
+            endgame_stationary = handed_over and not estimated_names
+            endgame_due = handed_over = False
+            if resume:
                 endgame_result = _run_endgame()
                 if endgame_result is not None:
                     return endgame_result
-            endgame_due = False
             continue
         stopped = endgame_stationary or plateau_earned
         if stopped or (
@@ -1008,12 +1085,10 @@ def fit_distributional_efs(
                     if len(current_face.component_names) > 1
                     else len(current_face.component_names)
                 )
-                # Revalidating a stationary endgame's face is its terminal check,
-                # not a search step, so the iteration budget does not refuse it.
-                if (
-                    not endgame_stationary
-                    and len(history) + revalidation_events > outer_config.max_iterations
-                ):
+                # Revalidating the face of a stationary endgame or an earned plateau is
+                # its terminal check, not a search step, so the iteration budget does not
+                # refuse it.
+                if not stopped and len(history) + revalidation_events > outer_config.max_iterations:
                     return _result(converged=False, reason="max_iterations")
                 if len(current_face.component_names) > 1:
                     authority_config = _face_authority_config(inner_config)
@@ -1402,14 +1477,8 @@ def fit_distributional_efs(
             missing=0.0,
         )
 
-        # The accelerator extrapolates the same fixed-point map, so an accelerated
-        # search makes no endpoint trial.
-        endpoint_names = (
-            endpoint_trial_names(
-                terminal_evidence.flat_tail, plain_update, estimated_names, endpoint_tried
-            )
-            if accelerator is None
-            else ()
+        endpoint_names = _endpoint_names(
+            terminal_evidence.flat_tail, plain_update.log_steps, estimated_names
         )
         accepted_evidence: _FreshRawEvidence | None = None
         if endpoint_names:
@@ -1421,7 +1490,6 @@ def fit_distributional_efs(
                     endpoint_names,
                     outer_config,
                 )
-            endpoint_tried.update(endpoint_names)
             trial_fit, fit_index, trial_objective = _trial(trial_lambdas)
             if trial_objective is not None and _within_ceiling(
                 current_fit, current_objective, trial_fit, trial_objective, outer_config
@@ -1433,6 +1501,7 @@ def fit_distributional_efs(
                     # A bound overshoots: the evidence there asks for a finite value.
                     accepted_evidence = None
             if accepted_evidence is not None:
+                endpoint_caps.update(endpoint_names)
                 accepted_fit = trial_fit
                 accepted_fit_index = fit_index
                 accepted_lambdas = trial_lambdas
@@ -1621,6 +1690,7 @@ def fit_distributional_efs(
                 endpoint_components=endpoint_names,
             )
         )
+        previous_fall, fall = fall, current_objective - accepted_objective
         current_lambdas = accepted_lambdas
         current_fit = accepted_fit
         current_objective = accepted_objective
@@ -1710,7 +1780,9 @@ def fit_distributional_efs(
             continue
         if (
             outer_config.practical_convergence
-            and (current_face is None or finishes)
+            # Plain Fellner--Schall has no other exit from a face. A spent finish leaves
+            # a face to the strict stop, and a Newton endgame takes it at its hand-off.
+            and (current_face is None or finishes or outer_config.outer == "efs")
             and (outward_plateau or practical_run >= outer_config.plateau_iterations)
             and terminal_evidence.maximum > outer_config.tolerance
             and interior

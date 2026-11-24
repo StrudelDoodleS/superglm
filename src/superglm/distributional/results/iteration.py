@@ -284,9 +284,9 @@ class DistributionalEFSIteration:
     # eigenvalue raise that made the active Hessian positive definite
     # (``0.0`` when it already was, ``None`` for a BFGS or bracket step).  A convergence check that makes no trial fit is not an
     # iteration and leaves no record.
-    # ``step_source="endpoint"`` is an accepted trial that took
-    # ``endpoint_components`` to their upper bounds; a round that lists them under
-    # another source tried that and refused it.
+    # ``step_source="endpoint"`` on an accepted row is a trial that took
+    # ``endpoint_components`` to their upper bounds; a row that lists them under
+    # another source, or is not accepted, tried that and refused it.
     stage: Literal["efs", "newton"] = "efs"
     step_source: Literal["efs", "newton", "bfgs", "bracket", "endpoint"] = "efs"
     endpoint_components: tuple[str, ...] = ()

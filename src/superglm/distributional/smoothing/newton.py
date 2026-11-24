@@ -455,6 +455,8 @@ class NewtonEndgameOutcome:
     cap_pressure: tuple[str, ...]
     newton_iterations: int
     bfgs_iterations: int
+    # Components an accepted endpoint trial of this run put on their upper bounds.
+    endpoint_components: tuple[str, ...] = ()
 
 
 class _TrialFitter:
@@ -565,12 +567,13 @@ def newton_iteration_record(
     fit_indices: tuple[int, ...],
     tolerances: tuple[float, ...],
     accepted_fit: DenseSolverResult | None,
-    step_source: Literal["newton", "bfgs", "bracket"],
+    step_source: Literal["newton", "bfgs", "bracket", "endpoint"],
     derivatives: LamlDerivatives,
     projected_gradient_norm: float,
     hessian_certificate: float | None,
     ridge: float | None,
     estimated_names: tuple[str, ...],
+    endpoint_components: tuple[str, ...] = (),
 ) -> DistributionalEFSIteration:
     """One Newton-stage iteration in the smoothing history's own vocabulary."""
     update = evidence.update
@@ -617,6 +620,7 @@ def newton_iteration_record(
         accepted_curvature=None if accepted_fit is None else accepted_fit.terminal_curvature,
         stage="newton",
         step_source=step_source,
+        endpoint_components=endpoint_components,
         gradient=dict(zip(derivatives.names, derivatives.gradient.tolist(), strict=True)),
         gradient_certificate=dict(
             zip(derivatives.names, derivatives.gradient_certificate.tolist(), strict=True)
@@ -678,6 +682,10 @@ def run_newton_endgame(
     upper_bounds: Mapping[str, float] | None = None,
     budget: int | None = None,
     cap_tolerance: float | None = None,
+    endpoint_trial: Callable[
+        [tuple[str, ...], Mapping[str, float], tuple[str, ...]], tuple[str, ...]
+    ]
+    | None = None,
 ) -> NewtonEndgameOutcome:
     """Damped Newton on the exact LAML gradient from an accepted smoothing state.
 
@@ -697,6 +705,20 @@ def run_newton_endgame(
     ``reml_tol`` can keep that bar at ``reml_tol``; ``None`` reads the config's.
     Iterations and trial fits are appended to ``history`` and ``coefficient_fits`` as the
     loop's own are; a convergence check that makes no trial leaves no record.
+
+    Newton in log lambda moves a component whose optimum is infinite about one unit
+    an iteration (on a tail ``V + c exp(-rho)`` the gradient and the curvature are
+    equal and opposite), and a bound-constrained Newton method reaches a bound by
+    landing on it (Mishchenko, Holmgren and Ronnegard, arXiv 0711.2619, section
+    4.3). ``endpoint_trial(flat_tail, log_steps, names)`` names the flat-tail
+    components to land on their upper bounds beside the step ``log_steps``, each
+    once in a search. That candidate is tried before the line search, and before a
+    converged point is returned, and is kept when the objective is no worse. What
+    follows judges the bound: the next iteration's exact gradient takes a component
+    back that it asks inward, and the caller's face assessor reads the multiplier
+    of the bound. The Fellner--Schall evidence at the trial fit does not: at a
+    bound its penalised quadratic form is of the order of the coefficient fit's
+    tolerance, which leaves the sign of its step undetermined.
     """
     config = efs_config
     stationary = config.outer == "efs+stationary"
@@ -753,6 +775,7 @@ def run_newton_endgame(
     last_exact_positive_definite: bool | None = None
     newton_count = 0
     bfgs_count = 0
+    landed: list[str] = []
 
     def finish(
         kind: EndgameKind,
@@ -771,6 +794,7 @@ def run_newton_endgame(
             cap_pressure=caps,
             newton_iterations=newton_count,
             bfgs_iterations=bfgs_count,
+            endpoint_components=tuple(landed),
         )
 
     def upper_lambda(name: str) -> float:
@@ -793,6 +817,91 @@ def run_newton_endgame(
                 # the curvature it accepted, the one its Laplace objective uses.
                 curvature="terminal",
             )
+
+    def endpoint_names(log_steps: NDArray[np.float64]) -> tuple[str, ...]:
+        """The flat tails to land on their bounds beside ``log_steps``; naming one spends its trial."""
+        if endpoint_trial is None or remaining <= 0:
+            return ()
+        steps = dict(zip(names, log_steps.tolist(), strict=True))
+        return endpoint_trial(current.evidence.flat_tail, steps, names)
+
+    def landed_evidence(
+        trial_lambdas: Mapping[str, float],
+        trial_fit: DenseSolverResult,
+        trial_objective: float | None,
+    ) -> _FreshRawEvidence | None:
+        """The evidence at an endpoint trial that is kept: its objective is no worse."""
+        if trial_objective is None:
+            return None
+        reference, landed_objective = rank_matched_objectives(
+            current.fit, objective, trial_fit, trial_objective
+        )
+        if landed_objective > reference + config.objective_tolerance * score_scale:
+            return None
+        return _fresh_raw_evidence(layout, trial_lambdas, trial_fit, config, face=current.face)
+
+    def land_at_convergence(published: LamlDerivatives) -> bool:
+        """Before a converged point is returned, land its untried flat tails; true when it moved.
+
+        The landing is no step of the iteration, so the objective change Wood's
+        criterion reads stays that of the last step, and the quasi-Newton memory,
+        which a jump to a bound would corrupt, is dropped.
+        """
+        nonlocal current, previous, previous_rho, previous_gradient, previous_objective
+        nonlocal inverse_memory, memory_reusable, last_good_hessian, last_exact_positive_definite
+        nonlocal newton_count, remaining
+        trial_names = endpoint_names(np.zeros(count))
+        if not trial_names:
+            return False
+        newton_count += 1
+        remaining -= 1
+        trial_lambdas = dict(current.lambdas)
+        trial_lambdas.update({name: upper_lambda(name) for name in trial_names})
+        trial_fit, trial_objective = fitter.fit(
+            trial_lambdas, initial=current.fit.coefficients, reuse_source=current.fit
+        )
+        coefficient_fits.append(trial_fit)
+        fit_index = len(coefficient_fits) - 1
+        evidence = landed_evidence(trial_lambdas, trial_fit, trial_objective)
+        kept = evidence is not None and trial_objective is not None
+        history.append(
+            newton_iteration_record(
+                iteration=len(history) + 1,
+                state=current,
+                proposed_lambdas=trial_lambdas,
+                lambdas_after=trial_lambdas if kept else current.lambdas,
+                objective_after=trial_objective if kept else objective,
+                evidence=evidence if kept else current.evidence,
+                fit_indices=(fit_index,),
+                tolerances=(fitter.tolerance,),
+                accepted_fit=trial_fit if kept else None,
+                step_source="endpoint",
+                derivatives=published,
+                projected_gradient_norm=norm,
+                hessian_certificate=None,
+                ridge=None,
+                estimated_names=names,
+                endpoint_components=trial_names,
+            )
+        )
+        if not kept:
+            return False
+        landed.extend(trial_names)
+        previous = published
+        previous_objective += trial_objective - objective
+        previous_rho = previous_gradient = None
+        inverse_memory = last_good_hessian = None
+        memory_reusable = False
+        last_exact_positive_definite = None
+        current = EndgameState(
+            lambdas=trial_lambdas,
+            fit=trial_fit,
+            objective=trial_objective,
+            face=current.face,
+            evidence=evidence,
+            terminal_fit_index=fit_index,
+        )
+        return True
 
     while True:
         compact_coefficient_history(
@@ -937,6 +1046,8 @@ def run_newton_endgame(
             # Every direction at this accepted coefficient mode passed the
             # current gradient/curvature or outward-bound test. There is no
             # Newton block to differentiate a second time.
+            if land_at_convergence(checked_curvature or derivatives):
+                continue
             return converged_outcome(checked_curvature or derivatives)
 
         # A third arm beside Wood's criterion, on the objective's scale: the
@@ -954,6 +1065,8 @@ def run_newton_endgame(
                 remaining_gain = math.inf
         viable_curvature = positive_definite and not bool(np.any(freeze.shoulder))
         if candidate.converged and viable_curvature and remaining_gain <= tolerance * score_scale:
+            if land_at_convergence(checked_curvature or derivatives):
+                continue
             return converged_outcome(checked_curvature or derivatives)
         if bool(np.any(blocking)):
             # Within its certificate the gradient cannot be told from zero: the
@@ -1065,7 +1178,8 @@ def run_newton_endgame(
                 for k in np.flatnonzero(fs_stepped & ~frozen):
                     step[k] = float(update.log_steps[names[k]])
             step[frozen] = 0.0
-            if not np.any(step != 0.0):
+            trial_names = endpoint_names(step)
+            if not np.any(step != 0.0) and not trial_names:
                 # Nothing to move (every direction frozen or at a bound): a
                 # gradient under the bar is the stationary point.
                 if not stationary and norm < score_bar:
@@ -1091,7 +1205,23 @@ def run_newton_endgame(
             accepted_lambdas: dict[str, float] | None = None
             accepted_objective: float | None = None
             ceiling_slack = config.objective_tolerance * score_scale
-            for backtrack in range(config.max_backtracks + 1):
+            landing: _FreshRawEvidence | None = None
+            if trial_names:
+                # The first candidate: the full step with the flat tails on their bounds.
+                trial_lambdas = dict(proposed_lambdas)
+                trial_lambdas.update({name: upper_lambda(name) for name in trial_names})
+                trial_fit, trial_objective = fitter.fit(
+                    trial_lambdas, initial=current.fit.coefficients, reuse_source=current.fit
+                )
+                coefficient_fits.append(trial_fit)
+                fit_indices.append(len(coefficient_fits) - 1)
+                tolerances.append(fitter.tolerance)
+                landing = landed_evidence(trial_lambdas, trial_fit, trial_objective)
+                if landing is not None:
+                    accepted_fit = trial_fit
+                    accepted_lambdas = proposed_lambdas = trial_lambdas
+                    accepted_objective = trial_objective
+            for backtrack in range(config.max_backtracks + 1 if landing is None else 0):
                 scale = config.backtrack_factor**backtrack
                 trial_lambdas = dict(current.lambdas)
                 for k, name in enumerate(names):
@@ -1129,13 +1259,14 @@ def run_newton_endgame(
                     return converged_outcome(recorded)
                 return finish("objective_rejected", recorded, norm)
             accepted = accepted_fit is not None
-            evidence = (
-                _fresh_raw_evidence(
+            if landing is not None:
+                evidence = landing
+            elif accepted and accepted_lambdas is not None and accepted_fit is not None:
+                evidence = _fresh_raw_evidence(
                     layout, accepted_lambdas, accepted_fit, config, face=current.face
                 )
-                if accepted and accepted_lambdas is not None and accepted_fit is not None
-                else current.evidence
-            )
+            else:
+                evidence = current.evidence
             history.append(
                 newton_iteration_record(
                     iteration=len(history) + 1,
@@ -1151,12 +1282,13 @@ def run_newton_endgame(
                     fit_indices=tuple(fit_indices),
                     tolerances=tuple(tolerances),
                     accepted_fit=accepted_fit,
-                    step_source=step_source,
+                    step_source=step_source if landing is None else "endpoint",
                     derivatives=recorded,
                     projected_gradient_norm=norm,
                     hessian_certificate=active_certificate,
                     ridge=ridge,
                     estimated_names=names,
+                    endpoint_components=trial_names,
                 )
             )
             if accepted:
@@ -1180,6 +1312,13 @@ def run_newton_endgame(
         previous_gradient = gradient
         previous_objective = objective
         accepted_count += 1
+        if landing is not None:
+            # A jump to a bound is no secant pair: the next step forms its own Hessian.
+            landed.extend(trial_names)
+            previous_rho = previous_gradient = None
+            inverse_memory = last_good_hessian = None
+            memory_reusable = False
+            last_exact_positive_definite = None
         current = EndgameState(
             lambdas=accepted_lambdas,
             fit=accepted_fit,

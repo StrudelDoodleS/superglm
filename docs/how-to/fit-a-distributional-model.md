@@ -1222,14 +1222,32 @@ penalty whose trial is refused takes ordinary steps from then on. A penalty the
 trial puts on its cap is held there while the other penalties finish, so their
 fits stay ordinary ones, and its exact face is assessed once, where they stop:
 before the Newton steps of `"efs+finish"`, or at the practical plateau or the
-fixed point of `"efs"`, which then stands. Next to another penalty's cap no
-exact face can be promoted, so the plateau or the exact gradient decides with
-the penalty at its cap. Under `"efs+newton"` and `"efs+stationary"` the exact
-gradient at the cap decides as described above.
+fixed point of `"efs"`. A plateau reads one round's change, which a slow steady
+drift keeps small, so while a search holds such a cap, or has a term on an
+exact face, its plateau stands only if the REML score is also not on course to
+fall further than the plateau's tolerance: with falls `d'` then `d` in its last
+two rounds, by `d a / (1 - a)` at the rate `a = d / d'` (Aitken's estimate).
+Otherwise the search goes on, to a later plateau, its fixed point or
+`max_reml_iter`.
+
+The Newton steps make the same trial for a penalty whose evidence first
+qualifies there: the first point their line search tries has that penalty on
+its cap, and a search about to stop tries it there before it does. They keep
+it when the REML score is no worse, and their next exact gradient takes the
+penalty back if it asks for a smaller value. Under
+`"efs+newton"` and `"efs+stationary"` the exact gradient is taken with such a
+penalty at its cap. A gradient in log λ is inside any bar that far out, whether
+the optimum is infinite or only just beyond the cap, so when it leaves the
+search stationary the exact-face check is made on the penalties a trial put
+there. If the check supports the face the gradient is taken again on it and
+the fit reports `stationary` with the term in `exact_face_components_`; if
+not, the stationary fit stands with the penalty at its cap and the refused
+check in the search history. Next to another penalty's cap no exact face can
+be promoted, so there the exact gradient alone decides.
 Only a penalty alone on its coefficients is tried this way, so a tensor
 margin never is, and a search with `acceleration="multisecant"` makes no trial.
-The search history marks an accepted trial with `step_source="endpoint"` and
-lists the penalties tried in `endpoint_components`.
+A history row lists the penalties it tried in `endpoint_components`; an
+accepted row with `step_source="endpoint"` is a trial that was kept.
 
 Every exact face is checked once more where the search stops, on the fit it
 stopped on. If the other penalties have moved so that a term's endpoint
@@ -1237,11 +1255,14 @@ derivative is now negative, the term leaves its exact face and the search
 carries on to the finite optimum. Only a check that cannot decide the sign
 ends the fit, as `endpoint_revalidation_failed` with `converged=False`.
 
-`smoothing_certified_` (`matched_certified`) means: the terminal stop carries
-its own authority — the projected gradient and every gradient certificate
-within the bar for `stationary`, the Fellner–Schall residual within `reml_tol`
-otherwise — no curvature fallback occurred, no endpoint assessment was refused,
-and every exact face carries analytic endpoint evidence. When the Newton
+`smoothing_certified_` (`matched_certified`) is `True` only for a strict stop
+off every bound. The terminal stop carries its own authority — the projected
+gradient and every gradient certificate within the bar for `stationary`, the
+Fellner–Schall residual within `reml_tol` otherwise — no curvature fallback
+occurred, no endpoint assessment was refused, and no term ended on an exact
+face, pushing against its cap or, after a `stationary` stop, resting on it. A
+fit with a term on an exact face is therefore never certified, whatever its
+endpoint evidence: read `exact_face_components_` beside the flag. When the Newton
 endgame computes the exact Hessian of the LAML in log λ, it publishes that
 matrix as `smoothing_hessian`, with its certificate, for smoothing-parameter
 uncertainty. A stationary fit can stop before that Hessian pass. If it retained

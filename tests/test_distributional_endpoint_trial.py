@@ -121,6 +121,29 @@ def test_a_flat_component_is_taken_to_its_bound_once_and_judged_where_the_others
     )
 
 
+def test_a_plateau_earned_in_the_last_round_keeps_its_terminal_checks() -> None:
+    """Judging the caps of a plateau already earned is no search step: the round limit does not refuse it.
+
+    The round limit is the round in which ``x`` earns its plateau with ``z`` held.
+    The face is still promoted and revalidated, in two rows past the limit, and the
+    fit reports the plateau; with one round fewer the search is out of rounds
+    before the plateau. Mutation check: with the limit refusing the assessment,
+    the fit that earned its plateau reports ``max_iterations``.
+    """
+    _model, free = _fit("efs", **_PLATEAU)
+    (promoted,) = (i for i, row in enumerate(free.history) if row.activated_face_components)
+
+    model, smoothing = _fit("efs", max_reml_iter=promoted, **_PLATEAU)
+    assert len(smoothing.history) == promoted + 2
+    assert smoothing.history[-2].activated_face_components == (_Z,)
+    assert smoothing.history[-1].revalidated_face_components == (_Z,)
+    assert (smoothing.converged, smoothing.convergence_reason) == (True, "practical_plateau")
+    assert model.exact_face_components_ == (_Z,)
+
+    _short_model, short = _fit("efs", max_reml_iter=promoted - 1, **_PLATEAU)
+    assert (short.converged, short.convergence_reason) == (False, "max_iterations")
+
+
 def test_a_search_out_of_rounds_before_judging_its_held_cap_says_so() -> None:
     """A cap the trial reached and no assessment has refused is not reported as unresolved.
 
@@ -285,6 +308,422 @@ def test_held_caps_are_not_assessed_beside_another_components_cap(
     assert smoothing.unresolved_upper_bound == (_Z,)
 
 
+def _named_in_the_endgame(monkeypatch, *, forced: tuple[str, ...] = (), skip: int = 0) -> list[str]:
+    """Withhold every nomination until the Newton steps run; ``forced`` names them then.
+
+    The first ``skip`` requests of the Newton steps are withheld as well. Returns
+    the kinds of the endgame runs' outcomes, in order.
+    """
+    from superglm.distributional.smoothing import loop
+
+    names, endgame, kinds, requests = loop.endpoint_trial_names, loop.run_newton_endgame, [], []
+
+    def late(flat_tail, log_steps, estimated_names, tried):
+        if not kinds:
+            return ()
+        requests.append(None)
+        if len(requests) <= skip:
+            return ()
+        if forced:
+            return tuple(name for name in forced if name not in tried)
+        return names(flat_tail, log_steps, estimated_names, tried)
+
+    def entered(*args, **kwargs):
+        kinds.append("running")
+        outcome = endgame(*args, **kwargs)
+        kinds[-1] = outcome.kind
+        return outcome
+
+    monkeypatch.setattr(loop, "endpoint_trial_names", late)
+    monkeypatch.setattr(loop, "run_newton_endgame", entered)
+    return kinds
+
+
+def test_the_remaining_fall_of_a_linearly_converging_objective() -> None:
+    """Falls d' then d at rate a = d / d' leave d a / (1 - a); no rate, no limit.
+
+    Mutation check: read as the last fall itself, the first case is 0.25.
+    """
+    from superglm.distributional.smoothing.objective import remaining_fall
+
+    assert remaining_fall(0.25, 0.5, 1.0e-9) == pytest.approx(0.25)
+    assert remaining_fall(0.9, 1.0, 1.0e-9) == pytest.approx(8.1)
+    assert remaining_fall(1.0e-3, 0.5, 1.0e-9) == pytest.approx(1.0e-3 * 2.0e-3 / 0.998)
+    assert remaining_fall(1.0, 1.0, 1.0e-9) == math.inf
+    assert remaining_fall(1.0, 0.5, 1.0e-9) == math.inf
+    assert remaining_fall(1.0, math.inf, 1.0e-9) == math.inf
+    # A fall within the objective's resolution is none, and a rise is none.
+    assert remaining_fall(1.0e-10, 1.0e-12, 1.0e-9) == 0.0
+    assert remaining_fall(-1.0, 0.5, 1.0e-9) == 0.0
+    assert remaining_fall(math.inf, math.inf, 1.0e-9) == math.inf
+
+
+def test_a_search_holding_a_trials_cap_goes_on_through_a_plateau_still_falling(
+    monkeypatch,
+) -> None:
+    """A practical plateau reads one round's change, which a slow steady drift keeps small.
+
+    Holding ``z``'s cap, the search asks how far the objective still has to fall
+    before its plateau may stand. The estimate is scripted to say "further than
+    the tolerance" at the first plateau: the search takes one more round with
+    ``z`` held, and then stops at its plateau and promotes the face, as the
+    unscripted fit does at once. A fit that holds no trial's cap never asks.
+    Mutation checks: without the question the scripted fit stops where the
+    unscripted one does; asked at every plateau, the fit with ``z`` fixed asks.
+    """
+    from superglm.distributional.smoothing import loop
+
+    _model, plain = _fit("efs", **_PLATEAU)
+    bound = plain.config.upper(_Z)
+    estimate, asked = getattr(loop, "remaining_fall", None), []
+
+    def scripted(fall, previous_fall, resolution):
+        asked.append(estimate(fall, previous_fall, resolution))
+        return math.inf if len(asked) == 1 else asked[-1]
+
+    monkeypatch.setattr(loop, "remaining_fall", scripted, raising=False)
+    model, smoothing = _fit("efs", **_PLATEAU)
+
+    assert len(asked) == 2
+    # Unscripted, each of those plateaus would have stood.
+    ceiling = smoothing.config.plateau_tolerance * (1.0 + abs(smoothing.objective))
+    assert max(asked) <= ceiling
+    (promoted,) = (i for i, row in enumerate(smoothing.history) if row.activated_face_components)
+    (expected,) = (i for i, row in enumerate(plain.history) if row.activated_face_components)
+    assert promoted == expected + 1
+    extra = smoothing.history[expected:promoted]
+    assert all(row.accepted and row.step_source == "efs" and row.stage == "efs" for row in extra)
+    assert all(row.lambdas_after[_Z] == bound and not _face_event(row) for row in extra)
+    assert (smoothing.converged, smoothing.convergence_reason) == (True, "practical_plateau")
+    assert model.exact_face_components_ == (_Z,)
+
+    asked.clear()
+    _fixed_model, fixed = _fit("efs", policies={"z": LambdaPolicy.fixed(bound)}, **_PLATEAU)
+    assert (fixed.converged, fixed.convergence_reason) == (True, "practical_plateau")
+    assert asked == []
+
+
+def test_a_plateau_stands_on_an_exact_face_under_the_question_a_held_cap_asks(monkeypatch) -> None:
+    """A term on an exact face and a cap held for one are the same active bound to the plateau.
+
+    ``z`` starts at its bound, so its face is promoted before the first round and
+    every fit is on the face. Where ``x`` earns its practical plateau the search
+    stops and the face is revalidated; scripted to say the objective has further
+    to fall at the first plateau, it takes one more round first. Which of the two
+    bounds a search has can differ between BLAS kernels, since a held cap is
+    promoted when its evidence wavers; the stop must not. Mutation checks: with a
+    face barring the plateau the fit runs on to its fixed point; with a face not
+    asking, the scripted fit stops where the unscripted one does.
+    """
+    from superglm.distributional.smoothing import loop
+
+    bound = _fit("efs", max_reml_iter=1, **_PLATEAU)[1].config.upper(_Z)
+    options = {"lambdas": {_Z: bound}, **_PLATEAU}
+    model, plain = _fit("efs", **options)
+    assert plain.history[0].activated_face_components == (_Z,)
+    assert plain.history[-1].revalidated_face_components == (_Z,)
+    assert all(row.stage == "efs" and row.accepted for row in plain.history[1:-1])
+    assert (plain.converged, plain.convergence_reason) == (True, "practical_plateau")
+    assert model.exact_face_components_ == (_Z,) and not _trials(plain)
+
+    estimate, asked = getattr(loop, "remaining_fall", None), []
+
+    def scripted(fall, previous_fall, resolution):
+        asked.append(estimate(fall, previous_fall, resolution))
+        return math.inf if len(asked) == 1 else asked[-1]
+
+    monkeypatch.setattr(loop, "remaining_fall", scripted, raising=False)
+    _model, smoothing = _fit("efs", **options)
+    assert len(asked) == 2 and len(smoothing.history) == len(plain.history) + 1
+    assert (smoothing.converged, smoothing.convergence_reason) == (True, "practical_plateau")
+
+
+@pytest.mark.parametrize("outer", ["efs+newton", "efs+stationary"])
+@pytest.mark.parametrize("where", ["line search", "converged point"])
+def test_the_newton_steps_land_a_component_first_named_there(
+    monkeypatch, outer: _Outer, where: str
+) -> None:
+    """A component named during the Newton steps is put on its bound by them, once.
+
+    Newton in log lambda moves a component with no finite optimum about one unit an
+    iteration. ``z``'s nomination is withheld until the Newton steps run. Named at
+    their first iteration, it is the line search's first candidate, ``x``'s own
+    step beside it; withheld one request longer, ``x`` has converged, and the
+    trial is made before the converged point is returned, ``x`` standing still.
+    Either way one fit puts ``z`` on its bound, its face is promoted, the gradient
+    is retaken on the face with no Fellner-Schall round between, and the fit is
+    the one with ``z`` fixed at its bound. Mutation checks: without the trial in
+    the line search, or without the trial before a converged return, the fit
+    named there walks ``z`` or leaves it short of its bound.
+    """
+    kinds = _named_in_the_endgame(monkeypatch, skip=int(where == "converged point"))
+    model, smoothing = _fit(outer)
+    bound = smoothing.config.upper(_Z)
+    history = smoothing.history
+
+    (trial,) = _trials(smoothing)
+    row = history[trial]
+    assert (row.stage, row.step_source, row.accepted) == ("newton", "endpoint", True)
+    assert row.endpoint_components == (_Z,)
+    assert row.lambdas_after[_Z] == bound
+    assert len(row.coefficient_fit_indices) == 1
+    if where == "line search":
+        assert history[trial - 1].stage == "efs" and row.accepted_log_steps[_X] != 0.0
+    else:
+        assert history[trial - 1].stage == "newton" and row.accepted_log_steps[_X] == 0.0
+    assert all(later.lambdas_after[_Z] == bound for later in history[trial:])
+
+    promoted = [index for index, item in enumerate(history) if item.activated_face_components]
+    assert len(promoted) == 1 and promoted[0] > trial
+    if where == "converged point":
+        # The landing is no step of the iteration: the verdict follows it at once.
+        assert promoted[0] == trial + 1
+    elif outer == "efs+stationary":
+        # A jump to a bound is no secant pair: the next step forms its own Hessian.
+        assert history[trial + 1].step_source == "newton"
+    assert history[-1].revalidated_face_components == (_Z,)
+    # After the face is promoted the endgame goes on from it: no Fellner-Schall round.
+    assert all(item.stage == "newton" for item in history[promoted[0] + 1 : -1])
+    assert kinds[-1] == "stationary"
+    assert (smoothing.converged, smoothing.convergence_reason) == (True, "stationary")
+    assert model.exact_face_components_ == (_Z,)
+    assert smoothing.unresolved_upper_bound == ()
+
+    monkeypatch.undo()
+    reference, fixed = _fit(outer, policies={"z": LambdaPolicy.fixed(bound)})
+    assert smoothing.lambdas[_X] == pytest.approx(fixed.lambdas[_X], rel=1.0e-5)
+    np.testing.assert_allclose(
+        smoothing.terminal_fit.theta, fixed.terminal_fit.theta, rtol=0.0, atol=1.0e-6
+    )
+    assert model.result_.total_effective_df == pytest.approx(
+        reference.result_.total_effective_df, rel=1.0e-6
+    )
+
+
+def test_a_stationary_endgame_hands_a_trials_cap_to_the_face_assessor(monkeypatch) -> None:
+    """The gradient in log lambda is inside any bar at a cap, whatever lies beyond it.
+
+    On a tail ``V + c / lambda`` that gradient is ``-c / lambda`` while the
+    derivative in ``tau = 1 / lambda`` stays ``c``, so a stationary verdict with
+    ``z`` on its cap does not say whether the optimum is infinite. The verdict
+    hands ``z`` to the assessor: its face is promoted, the endgame is run again on
+    the face and is stationary there, and the face is revalidated. Mutation check:
+    with the nomination voided, the fit ends stationary with ``z`` at its cap and
+    no face.
+    """
+    from superglm.distributional.smoothing import loop
+
+    endgame, runs = loop.run_newton_endgame, []
+
+    def entered(*args, state, **kwargs):
+        outcome = endgame(*args, state=state, **kwargs)
+        face = () if state.face is None else state.face.component_names
+        runs.append((outcome.kind, face, outcome.state.lambdas[_Z]))
+        return outcome
+
+    monkeypatch.setattr(loop, "run_newton_endgame", entered)
+    model, smoothing = _fit("efs+newton")
+    bound = smoothing.config.upper(_Z)
+
+    assert runs == [("stationary", (), bound), ("stationary", (_Z,), bound)]
+    events = [index for index, row in enumerate(smoothing.history) if _face_event(row)]
+    assert len(events) == 2 and events[1] == events[0] + 1 == len(smoothing.history) - 1
+    assert smoothing.history[events[0]].activated_face_components == (_Z,)
+    assert smoothing.history[events[1]].revalidated_face_components == (_Z,)
+    assert (smoothing.converged, smoothing.convergence_reason) == (True, "stationary")
+    assert model.exact_face_components_ == (_Z,)
+
+
+def test_handed_caps_that_were_all_there_was_to_estimate_keep_the_stationary_reason() -> None:
+    """A stationary verdict stands when its handed caps leave nothing to estimate.
+
+    ``x``'s smoothing parameter is fixed, so ``z``'s is the only one estimated. The
+    endgame is stationary with ``z`` on its cap, the face is promoted, and there is
+    no gradient to take again. Mutation check: without the standing verdict the
+    reason is the Fellner-Schall fixed point's, ``lambda_change``.
+    """
+    model, smoothing = _fit("efs+newton", policies={"x": LambdaPolicy.fixed(0.19)})
+
+    assert len(_trials(smoothing)) == 1
+    assert model.exact_face_components_ == (_Z,)
+    assert (smoothing.converged, smoothing.convergence_reason) == (True, "stationary")
+    assert smoothing.terminal_projected_gradient_norm == 0.0
+
+
+def test_a_refused_hand_over_leaves_the_stationary_verdict_standing(monkeypatch) -> None:
+    """An assessment that cannot support the face records its refusal and changes nothing else.
+
+    The endpoint derivative is made unavailable, so the assessor refuses ``z``'s
+    face. The fit is the one the endgame called stationary, with ``z`` at its cap,
+    converged, and the refusal is the history's last row. Mutation check: treated
+    as a refused cap under pressure, the fit reports ``lambda_cap_unresolved``.
+    """
+    from superglm.distributional.smoothing import faces, loop
+    from superglm.distributional.smoothing.endpoint_laml import EndpointLaplaceError
+
+    endgame, runs = loop.run_newton_endgame, []
+
+    def entered(*args, **kwargs):
+        outcome = endgame(*args, **kwargs)
+        runs.append(outcome)
+        return outcome
+
+    def unavailable(*args, **kwargs):
+        raise EndpointLaplaceError("scripted: no endpoint derivative")
+
+    monkeypatch.setattr(loop, "run_newton_endgame", entered)
+    monkeypatch.setattr(faces, "evaluate_endpoint_laplace_derivative", unavailable)
+    model, smoothing = _fit("efs+newton")
+    bound = smoothing.config.upper(_Z)
+
+    (verdict,) = runs
+    assert verdict.kind == "stationary"
+    refusal = smoothing.history[-1]
+    assert refusal.refused_face_components == (_Z,)
+    assert refusal.endpoint_assessment_failure_reason == "analytic_unavailable"
+    assert [index for index, row in enumerate(smoothing.history) if _face_event(row)] == [
+        len(smoothing.history) - 1
+    ]
+    assert (smoothing.converged, smoothing.convergence_reason) == (True, "stationary")
+    assert smoothing.lambdas == dict(verdict.state.lambdas) and smoothing.lambdas[_Z] == bound
+    assert smoothing.objective == verdict.state.objective
+    assert model.exact_face_components_ == ()
+    assert smoothing.unresolved_upper_bound == ()
+    assert model.smoothing_certified_ is False
+
+
+def test_a_landing_past_an_interior_optimum_is_taken_back_by_the_exact_gradient(
+    monkeypatch,
+) -> None:
+    """The Newton steps keep a trial that scores no worse, and their gradient judges the bound.
+
+    The nomination is forced onto ``x``, whose optimum is interior, in the first
+    Newton iteration, from a start far below the optimum and under a bound just
+    above it, so the bound scores better than the start. The trial is kept, the
+    next gradient asks ``x`` inward, and the fit ends at the unforced optimum with
+    no face. Mutation check: asked the Fellner-Schall evidence at the bound as
+    well, the trial is refused and the row is an ordinary step.
+    """
+    options = {
+        "terms": ("x",),
+        "max_lambda": 1.0,
+        "lambdas": {_X: 1.0e-3},
+        "max_log_step": 0.5,
+    }
+    _unforced_model, unforced = _fit("efs+newton", **options)
+    assert not _trials(unforced)
+
+    _named_in_the_endgame(monkeypatch, forced=(_X,))
+    model, smoothing = _fit("efs+newton", **options)
+
+    (trial,) = _trials(smoothing)
+    row = smoothing.history[trial]
+    assert (row.stage, row.step_source, row.accepted) == ("newton", "endpoint", True)
+    assert row.lambdas_after[_X] == 1.0 and len(row.coefficient_fit_indices) == 1
+    assert smoothing.history[trial + 1].lambdas_after[_X] < 1.0
+    assert smoothing.lambdas[_X] == pytest.approx(unforced.lambdas[_X], rel=1.0e-4)
+    assert (smoothing.converged, smoothing.convergence_reason) == (True, "stationary")
+    assert model.exact_face_components_ == ()
+
+
+@pytest.mark.parametrize("where", ["line search", "converged point"])
+def test_a_bound_the_objective_refuses_costs_the_newton_steps_one_fit(
+    monkeypatch, where: str
+) -> None:
+    """A trial of the Newton steps scored worse than the fit it starts from is dropped.
+
+    ``z``'s nomination is withheld until the Newton steps run (one request longer
+    for the converged point), and the first objective scored with ``z`` at its
+    bound is raised far above the current one. In the line search the iteration
+    then takes its own step; at the converged point the refusal is a row of its
+    own, and the stationary verdict stands with ``z`` short of its bound.
+    Mutation check: without the objective test the trial is kept.
+    """
+    from superglm.distributional.smoothing import newton
+
+    skip = int(where == "converged point")
+    kinds = _named_in_the_endgame(monkeypatch, skip=skip)
+    _model, plain = _fit("efs+newton")
+    (expected,) = _trials(plain)
+    bound = plain.config.upper(_Z)
+    objective, raised = newton._laplace_objective, []
+
+    def scored(result, *, lambdas, **kwargs):
+        value = objective(result, lambdas=lambdas, **kwargs)
+        if lambdas[_Z] == bound and not raised:
+            raised.append(value)
+            return value + 1.0e9
+        return value
+
+    monkeypatch.undo()
+    kinds = _named_in_the_endgame(monkeypatch, skip=skip)
+    monkeypatch.setattr(newton, "_laplace_objective", scored)
+    model, smoothing = _fit("efs+newton")
+
+    assert _trials(smoothing) == [expected] and len(raised) == 1
+    row = smoothing.history[expected]
+    assert row.stage == "newton" and row.lambdas_after[_Z] < bound
+    if where == "line search":
+        assert row.accepted and row.step_source != "endpoint"
+        assert len(row.coefficient_fit_indices) == 2
+        return
+    assert (row.accepted, row.step_source) == (False, "endpoint")
+    assert len(row.coefficient_fit_indices) == 1 and row is smoothing.history[-1]
+    assert kinds == ["stationary"]
+    assert (smoothing.converged, smoothing.convergence_reason) == (True, "stationary")
+    assert smoothing.lambdas[_Z] == row.lambdas_before[_Z] < bound
+    assert model.exact_face_components_ == ()
+
+
+@pytest.mark.pins_behaviour
+def test_a_stationary_endgame_hands_nothing_over_beside_another_components_cap(monkeypatch) -> None:
+    """A face is promoted with every cap in it, so beside a cap no trial reached, none is assessed.
+
+    Pins what a stationary verdict did before it handed any cap over: beside
+    another component's cap it still assesses nothing.
+
+    ``w`` starts at its bound, under a ceiling below its optimum so that it stays,
+    and the Fellner-Schall evidence is scripted to show it standing there without
+    pressure, as a tensor margin can; ``z``'s trial is forced in the first round.
+    The endgame's verdict is scripted stationary with both at their bounds, and it
+    stands without an assessment. Mutation check: handing ``z`` over whatever
+    stands beside it, the assessors run.
+    """
+    from superglm.distributional.smoothing import loop
+
+    options = {"terms": ("x", "z", "w"), "max_lambda": 100.0}
+    bound = _fit("efs+newton", **{**options, "max_reml_iter": 1})[1].config.upper(_W)
+    evidence, endgame, events = loop._fresh_raw_evidence, loop.run_newton_endgame, []
+
+    def unpressed(*args, held=frozenset(), **kwargs):
+        built = evidence(*args, held=frozenset(held) | {_W}, **kwargs)
+        return replace(built, cap_held=tuple(name for name in built.cap_held if name != _W))
+
+    def assessor(*args, **kwargs):
+        events.append("assessment")
+        return None, None
+
+    def stationary(*args, **kwargs):
+        outcome = endgame(*args, **kwargs)
+        events.append(outcome.kind)
+        return replace(outcome, kind="stationary", cap_pressure=())
+
+    monkeypatch.setattr(loop, "_fresh_raw_evidence", unpressed)
+    monkeypatch.setattr(
+        loop, "endpoint_trial_names", lambda _f, _s, _n, tried: () if _Z in tried else (_Z,)
+    )
+    monkeypatch.setattr(loop, "_try_joint_exact_face", assessor)
+    monkeypatch.setattr(loop, "_try_exact_face", assessor)
+    monkeypatch.setattr(loop, "run_newton_endgame", stationary)
+    model, smoothing = _fit("efs+newton", lambdas={_X: 1.0, _Z: 1.0, _W: bound}, **options)
+
+    assert _trials(smoothing) == [0] and smoothing.history[0].step_source == "endpoint"
+    assert smoothing.lambdas[_W] == bound == smoothing.lambdas[_Z]
+    assert len(events) == 1 and events[0] != "assessment"
+    assert (smoothing.converged, smoothing.convergence_reason) == (True, "stationary")
+    assert model.exact_face_components_ == ()
+
+
 def _block(curvature: np.ndarray, *, lam: float = 1.0, beta=(0.1, 0.1), name: str = "a"):
     """One identity penalty on a block whose profiled data curvature is ``curvature``."""
     width = len(curvature)
@@ -367,15 +806,10 @@ def test_the_trial_waits_for_the_other_components_and_lands_on_each_ones_own_bou
     made beside a 1.5-unit step; with the global ceiling the scaled component
     lands a factor of its unit away.
     """
-    component, inverse, update = _block(np.diag([0.2, 0.1]), beta=(0.02, 0.02))
-    other = replace(component, name="b", coefficient_slice=slice(2, 4))
-    update = wood_fasiolo_update(
-        (component, other), np.array([0.02, 0.02, 0.5, 0.5]), np.kron(np.eye(2), inverse)
-    )
     for step, expected in ((0.9, ("a",)), (-0.9, ("a",)), (1.5, ()), (-1.5, ())):
-        moved = replace(update, log_steps={"a": 2.0, "b": step})
+        moved = {"a": 2.0, "b": step}
         assert endpoint_trial_names(("a",), moved, ("a", "b"), set()) == expected
-    settled = replace(update, log_steps={"a": 2.0, "b": 0.1})
+    settled = {"a": 2.0, "b": 0.1}
     assert endpoint_trial_names(("a",), settled, ("a", "b"), {"a"}) == ()
     assert endpoint_trial_names(("a", "b"), settled, ("a", "b"), {"b"}) == ("a",)
 
