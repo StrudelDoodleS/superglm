@@ -388,6 +388,48 @@ def test_a_null_direction_centring_cancels_keeps_the_datas_coordinates(kind):
     assert np.max(np.abs(model.predict(frame) - exact) / np.abs(exact)) <= 1e-6
 
 
+@pytest.mark.pins_behaviour
+def test_one_occupied_bin_cannot_identify_a_spline_slope():
+    """Pin the constant prediction across a spline represented by a single bin."""
+    z = np.tile(np.linspace(0, 1, 31), 4)
+    y = 2 + np.sin(8 * z) + 0.1 * np.random.default_rng(2026).normal(size=z.size)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        spline_penalty=0.1,
+        features={
+            "x": Spline(kind="bs", n_knots=3, n_bins=1, discrete=True),
+            "z": Spline(kind="ps", n_knots=4),
+        },
+    ).fit(pd.DataFrame({"x": z, "z": z}), y)
+    grid = pd.DataFrame({"x": [0, 0.2, 0.5, 0.8, 1], "z": 0.3})
+    assert np.ptp(model.predict(grid)) <= 2**10 * U * np.max(np.abs(y))
+
+
+@pytest.mark.pins_behaviour
+def test_discrete_spline_does_not_decompose_a_training_row_matrix(monkeypatch):
+    """Pin the discrete build's work bound on the number of rows in spectral norms."""
+    spectral_norm = np.linalg.norm
+    row_counts = []
+
+    def counted_norm(a, ord=None, *args, **kwargs):
+        if ord == 2 and a.ndim == 2:
+            row_counts.append(a.shape[0])
+        return spectral_norm(a, ord, *args, **kwargs)
+
+    monkeypatch.setattr(np.linalg, "norm", counted_norm)
+    x = np.linspace(0, 1, 2000)
+    SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        spline_penalty=1,
+        discrete=True,
+        n_bins=64,
+        features={"x": Spline(kind="cr", n_knots=12)},
+    ).fit(pd.DataFrame({"x": x}), np.cos(2 * x))
+    assert max(row_counts, default=0) <= 64
+
+
 def _closed_form_large_lambda_reml_objective(spec, x: np.ndarray, y: np.ndarray) -> float:
     """Exact Gaussian REML objective in the ``lambda -> inf`` limit of SSP coordinates.
 

@@ -6,6 +6,7 @@ from typing import Any, Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy import sparse
 
 from superglm._group_matrix import _group_matrix_support as row_supports
 from superglm.features._spline_config import (
@@ -325,19 +326,20 @@ def build_group_info(
         monotone_engine=monotone_engine,
         raw_to_solver_map=raw_to_solver_map,
     )
-    return _with_row_support(
-        finish_penalties(spec, info, x, sample_weight), value_rows, index, full
-    )
+    if distinct is None:
+        finish_penalties(spec, info, full, sample_weight)
+    else:
+        counts = np.bincount(distinct[1], weights=sample_weight, minlength=len(distinct[0]))
+        finish_penalties(spec, info, value_rows, counts)
+    return _with_row_support(info, value_rows, index, full)
 
 
-def finish_penalties(
-    spec: Any, info: GroupInfo, x: NDArray, sample_weight: NDArray | None
-) -> GroupInfo:
+def finish_penalties(spec: Any, info: GroupInfo, basis, weights: NDArray | None) -> GroupInfo:
     """``info`` with the spec's lambda policies, the rank of each named penalty and its null basis.
 
     A ``lambda_policy`` names a one-penalty term's penalty ``"wiggle"``, and the
-    ranks are keyed by penalty name, so they are found after it. ``x`` and
-    ``sample_weight`` are the rows the term was built on (``declared_null_basis``).
+    ranks are keyed by penalty name, so they are found after it. Each raw design
+    row in ``basis`` carries the combined weight of the observations it represents.
     """
     if (
         spec._lambda_policy is not None
@@ -348,12 +350,12 @@ def finish_penalties(
         info.component_types = {"wiggle": "difference"}
     info.lambda_policies = spec._resolve_lambda_policies(info)
     info.structural_ranks = structural_penalty_ranks(spec, info)
-    info.null_coordinates = declared_null_coordinates(spec, info, x, sample_weight)
+    info.null_coordinates = declared_null_coordinates(spec, info, basis, weights)
     return info
 
 
 def declared_null_coordinates(
-    spec: Any, info: GroupInfo, x: NDArray, sample_weight: NDArray | None
+    spec: Any, info: GroupInfo, basis, weights: NDArray | None
 ) -> NullCoordinates | None:
     """The term's exact penalty null spaces and penalty roots in ``info``'s coordinates, if stated.
 
@@ -417,22 +419,32 @@ def declared_null_coordinates(
     if null_basis is None:
         return None
     nullity = null_basis.shape[1]
-    values = np.asarray(x, dtype=np.float64).ravel()
-    weights = np.ones_like(values)
-    if sample_weight is not None:
-        weights = np.asarray(sample_weight, dtype=np.float64).ravel()
-    kept = weights > 0.0
-    support, inverse = np.unique(values[kept], return_inverse=True)
-    if support.size <= nullity:
+    occupied = basis.shape[0] if weights is None else np.count_nonzero(weights > 0)
+    if occupied <= nullity:
         return None
-    basis = spec._basis_matrix(support).toarray()
-    if not np.all(np.abs(basis).sum(axis=0) > 0.0):
+    rows = basis
+    if weights is not None:
+        scale = (np.sqrt(weights) / np.sqrt(np.max(weights)))[:, None]
+        rows = basis.multiply(scale) if sparse.issparse(basis) else scale * basis
+    if sparse.issparse(rows):
+        column_squares = np.asarray(rows.multiply(rows).sum(axis=0)).ravel()
+    else:
+        column_squares = np.einsum("ij,ij->j", rows, rows)
+    if not np.all(column_squares > 0.0):
         return None
-    members = null_basis if info.projection is None else info.projection @ null_basis
-    rows = np.sqrt(np.bincount(inverse, weights=weights[kept]))[:, None] * basis
-    cut = np.sqrt(2.0**-53) * np.linalg.norm(rows, 2)
-    if nullity and np.linalg.svd(rows @ members, compute_uv=False)[-1] < cut:
-        return None
+    if nullity:
+        members = null_basis if info.projection is None else info.projection @ null_basis
+        smallest = np.linalg.svd(rows @ members, compute_uv=False)[-1]
+        # The Frobenius norm bounds the spectral norm from above, so most
+        # terms pass without a Gram. Only its largest eigenvalue is needed
+        # for the original cutoff; the small singular value uses B M itself.
+        resolution = np.sqrt(2.0**-53)
+        if smallest < resolution * np.sqrt(column_squares.sum()):
+            gram = rows.T @ rows
+            if sparse.issparse(gram):
+                gram = gram.toarray()
+            if smallest < resolution * np.sqrt(np.linalg.eigvalsh(gram)[-1]):
+                return None
     return NullCoordinates(null_basis, tuple(t.shape[1] for t in thetas), tuple(roots))
 
 

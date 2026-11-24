@@ -524,8 +524,8 @@ def compile_predictor_design(
                             monotone_engine=monotone_engine,
                             raw_to_solver_map=raw_to_solver_map,
                         ),
-                        x_col,
-                        feature_build_weight,
+                        B_unique,
+                        exposure_agg,
                     )
                 ]
         else:
