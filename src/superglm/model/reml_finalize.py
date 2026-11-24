@@ -917,9 +917,9 @@ def finalize_reml_fit(
                 derivative_order=0,
                 # the identified part rebuilds the structured factor returned here
                 compute_inverse=bool(identified),
-                groups=model._groups if structured_linear_state is not None else None,
-                lambdas=lambdas if structured_linear_state is not None else None,
-                reml_penalties=reml_penalties if structured_linear_state is not None else None,
+                groups=model._groups,
+                lambdas=lambdas,
+                reml_penalties=reml_penalties,
                 structured_group_index=structured_group_index,
                 structured_chain_group_indices=structured_chain,
             )

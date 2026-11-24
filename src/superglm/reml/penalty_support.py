@@ -148,25 +148,44 @@ def _component_root(
     else:
         raise PenaltyNumericalError("unsupported component root representation")
     root = _finite_double(root, "component root")
-    scale = np.where(d.column_scale > 0, d.column_scale, 1.0)
+    return (
+        _readonly(root),
+        bool(d.resolution_limited),
+        _reconstruction_bound(values, root, d.column_scale),
+    )
+
+
+def _reconstruction_bound(values: NDArray, root: NDArray, diagonal_scale: NDArray) -> NDArray:
+    """Componentwise reconstruction evidence in the Gram's equilibrated coordinates."""
+    scale = np.where(diagonal_scale > 0, diagonal_scale, 1.0)
     equilibrated = values / scale[:, None] / scale[None, :]
     scaled_root = root / scale
     represented = scaled_root.T @ scaled_root
     bound = np.abs(equilibrated - represented)
-    bound += 4 * max(d.width, 1) * _EPS * (np.abs(scaled_root).T @ np.abs(scaled_root))
-    return (
-        _readonly(root),
-        bool(d.resolution_limited),
-        _readonly(_finite_double(bound, "root bound")),
+    bound += (
+        4
+        * max(values.shape[0], len(root), 1)
+        * _EPS
+        * (np.abs(scaled_root).T @ np.abs(scaled_root))
     )
+    return _readonly(_finite_double(bound, "root bound"))
 
 
 def _penalty_support(
-    penalty_matrices: Sequence[NDArray], *, rcond: float | None = None
+    penalty_matrices: Sequence[NDArray],
+    *,
+    rcond: float | None = None,
+    roots: Sequence[NDArray] | None = None,
 ) -> _PenaltySupport:
     if not penalty_matrices:
         raise ValueError("at least one penalty matrix is required")
-    extracted = tuple(_component_root(matrix, rcond=rcond) for matrix in penalty_matrices)
+    if roots is not None:
+        extracted = tuple(
+            (root, False, _reconstruction_bound(matrix, root, np.sqrt(np.diag(matrix))))
+            for matrix, root in zip(penalty_matrices, roots, strict=True)
+        )
+    else:
+        extracted = tuple(_component_root(matrix, rcond=rcond) for matrix in penalty_matrices)
     if len({root.shape[1] for root, _, _ in extracted}) != 1:
         raise ValueError("penalty matrices must have a common shape")
     support = _penalty_support_from_roots(

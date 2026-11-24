@@ -150,6 +150,7 @@ def _legacy_rank_state(model, solver, W: NDArray):
     from superglm.inference.covariance import _active_penalty_matrix
     from superglm.solvers.centered_system import (
         build_centered_system,
+        centered_penalty_factor,
         grouped_augmented_factor,
         grouped_projected_factor,
         grouped_structural_nulls,
@@ -174,7 +175,7 @@ def _legacy_rank_state(model, solver, W: NDArray):
         dtype=np.float64,
         copy=True,
     )
-    from superglm.solvers.pirls import _add_selection_local_curvature
+    from superglm.solvers.pirls import _add_selection_local_curvature, _selected_penalty_rows
 
     original_by_name = {group.name: group for group in model._groups}
     original_active_groups = [original_by_name[group.name] for group in active_groups]
@@ -194,6 +195,16 @@ def _legacy_rank_state(model, solver, W: NDArray):
         z_off=np.zeros(design.n),
         penalty=curvature,
     )
+    rows = _selected_penalty_rows(
+        model._dm.group_matrices,
+        model._groups,
+        active_groups,
+        lam2,
+        getattr(model, "_reml_penalties", None),
+        fitted_penalty(model),
+        solver.beta,
+    )
+    centered = replace(centered, penalty_rows=rows)
     raw_gram, _, _, _ = centered.raw_weighted_moments()
     coefficient_rank = decompose_gram_if_authoritative(raw_gram + curvature)
     # rows centred about the system's exact centre pair
@@ -214,7 +225,11 @@ def _legacy_rank_state(model, solver, W: NDArray):
         certify=not np.any(curvature),
     )
     if coefficient_rank is None:
-        certified = decompose_factor(grouped_augmented_factor(design, W, curvature))
+        certified = decompose_factor(
+            grouped_augmented_factor(
+                design, W, curvature, smooth_factor=centered_penalty_factor(centered)
+            )
+        )
         coefficient_rank = certified
     if not np.any(curvature):
         profile_rank = data_rank
@@ -228,6 +243,7 @@ def _legacy_rank_state(model, solver, W: NDArray):
                     curvature,
                     center=centre,
                     center_lo=centre_lo,
+                    smooth_factor=centered_penalty_factor(centered),
                 )
             )
             profile_rank = certified
@@ -283,7 +299,11 @@ def face_record_at(model, W: NDArray):
     the centre are formed at ``W`` as the fit forms them; the data Gram is
     left for the first inference at ``W`` to take.
     """
-    from superglm.solvers.centered_system import grouped_augmented_factor, grouped_projected_factor
+    from superglm.solvers.centered_system import (
+        centered_penalty_factor,
+        grouped_augmented_factor,
+        grouped_projected_factor,
+    )
     from superglm.solvers.irls_direct import _face_decomposition, _feature_edf
     from superglm.solvers.rank import weights_fingerprint
 
@@ -302,6 +322,7 @@ def face_record_at(model, W: NDArray):
             np.ldexp(curvature, -exponent),
             center=centre,
             center_lo=centre_lo,
+            smooth_factor=centered_penalty_factor(centered, exponent),
         )
 
     def projected_rows(exponent: int = 0) -> NDArray:
@@ -314,7 +335,12 @@ def face_record_at(model, W: NDArray):
         face_augmented = _face_decomposition(centered.hessian, face, factor, design.n)
         raw = centered.hessian + centered.sum_w * np.outer(centered.mean_x, centered.mean_x)
         face_coefficient = _face_decomposition(
-            raw, face, lambda: grouped_augmented_factor(design, W, curvature), design.n
+            raw,
+            face,
+            lambda: grouped_augmented_factor(
+                design, W, curvature, smooth_factor=centered_penalty_factor(centered)
+            ),
+            design.n,
         )
     feature_edf, feature_edf1 = _feature_edf(
         centered,

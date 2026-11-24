@@ -32,7 +32,7 @@ _SPLINE_CATEGORY = (
     SupportCompressedSplineCategoricalGroupMatrix,
 )
 _METADATA = ("omega", "projection", "omega_components", "component_types", "structural_ranks")
-_SUPPORT_METADATA = (*_METADATA, "R_inv_local")
+_SUPPORT_METADATA = (*_METADATA, "R_inv_local", "term_roots")
 _CATEGORY_METADATA = (
     *_METADATA,
     "lambda_policies",

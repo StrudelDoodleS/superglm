@@ -17,7 +17,6 @@ from superglm.group_matrix import (
     DiscretizedSSPGroupMatrix,
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
-    penalty_coordinate_map,
 )
 from superglm.solvers._structured.balance_tree import ProfiledSumToZeroTreeFactor
 from superglm.solvers._structured.block_leaves import (
@@ -384,6 +383,7 @@ def _active_penalty_components(
     lambda2: float | dict[str, float],
     *,
     reml_penalties: list | None = None,
+    factors: bool = False,
 ):
     """Yield ``(columns, lam, omega)`` for each nonzero term of ``S = sum_k lam_k S_k``.
 
@@ -391,10 +391,16 @@ def _active_penalty_components(
     ``omega`` its ``S_k`` there; ``None`` is the identity on the slice.
     """
     from superglm.reml.penalty_algebra import (
+        _penalty_component_omega_ssp,
+        group_penalty_matrix,
         resolve_component_lambda,
         resolve_group_lambda,
-        ssp_penalty_matrix,
+        stored_component_root,
     )
+    from superglm.solvers.centered_system import penalty_factor
+
+    def matrix_or_root(omega):
+        return penalty_factor(omega) if factors else omega
 
     active_by_name = {group.name: group for group in active_groups}
     if reml_penalties is not None:
@@ -410,15 +416,26 @@ def _active_penalty_components(
             if component.penalty_kind == "identity":
                 yield active_group.sl, lam, None
                 continue
-            omega = (
-                component.omega_ssp
-                if component.omega_ssp is not None
-                else ssp_penalty_matrix(penalty_coordinate_map(gm), component.omega_raw)
-            )
+            root = stored_component_root(component) if factors else None
+            if root is not None:
+                yield active_group.sl, lam, root
+                continue
+            if factors and component.penalty_kind == "dense" and component.omega_ssp is None:
+                if component.omega_raw is None:
+                    raise ValueError(f"Dense penalty component {component.name!r} has no matrix.")
+                suffix = component.name.removeprefix(component.group_name).removeprefix(":")
+                yield (
+                    active_group.sl,
+                    lam,
+                    group_penalty_matrix(gm, component.omega_raw, suffix, factor=True),
+                )
+                continue
+            omega = _penalty_component_omega_ssp(component, gm, stable_congruence=True)
+            assert omega is not None  # identity components were handled above
             yield (
                 active_group.sl,
                 lam,
-                _expanded_component_omega(component, omega, active_group.size),
+                matrix_or_root(_expanded_component_omega(component, omega, active_group.size)),
             )
 
         for group_index, group in enumerate(groups):
@@ -429,7 +446,11 @@ def _active_penalty_components(
                 continue
             lam = resolve_group_lambda(lambda2, group.name)
             if lam > 0:
-                yield active_group.sl, lam, group.scop_reparameterization.penalty_matrix()
+                yield (
+                    active_group.sl,
+                    lam,
+                    matrix_or_root(group.scop_reparameterization.penalty_matrix()),
+                )
         return
 
     for gm, group in zip(group_matrices, groups, strict=True):
@@ -452,7 +473,7 @@ def _active_penalty_components(
                     yield (
                         active_group.sl,
                         lam_j,
-                        ssp_penalty_matrix(penalty_coordinate_map(gm), omega_j),
+                        group_penalty_matrix(gm, omega_j, suffix, factor=factors),
                     )
                 continue
             lam = resolve_group_lambda(lambda2, group.name)
@@ -461,12 +482,16 @@ def _active_penalty_components(
             omega = gm.omega
             if omega is None:
                 omega = _second_diff_penalty(gm.R_inv.shape[0])
-            yield active_group.sl, lam, ssp_penalty_matrix(penalty_coordinate_map(gm), omega)
+            yield active_group.sl, lam, group_penalty_matrix(gm, omega, factor=factors)
         elif group.scop_reparameterization is not None:
             lam = resolve_group_lambda(lambda2, group.name)
             if lam == 0:
                 continue
-            yield active_group.sl, lam, group.scop_reparameterization.penalty_matrix()
+            yield (
+                active_group.sl,
+                lam,
+                matrix_or_root(group.scop_reparameterization.penalty_matrix()),
+            )
 
 
 def _active_penalty_matrix(
@@ -526,15 +551,39 @@ def _active_penalty_root(
     case of Wood's (2011, JRSS-B 73(1), sec. 3.1 and app. B) similarity
     transform needed by a product ``PZ``: no truncation acts across terms.
     """
-    from superglm.solvers.centered_system import penalty_factor
-
     p_active = sum(group.size for group in active_groups)
     rows = [np.empty((0, p_active), dtype=np.float64)]
-    for columns, lam, omega in _active_penalty_components(
-        group_matrices, groups, active_groups, lambda2, reml_penalties=reml_penalties
+    for columns, lam, root in _active_penalty_components(
+        group_matrices, groups, active_groups, lambda2, reml_penalties=reml_penalties, factors=True
     ):
-        root = np.eye(columns.stop - columns.start) if omega is None else penalty_factor(omega)
+        if root is None:
+            root = np.eye(columns.stop - columns.start)
         embedded = np.zeros((root.shape[0], p_active), dtype=np.float64)
         embedded[:, columns] = np.sqrt(lam) * root
         rows.append(embedded)
     return np.vstack(rows)
+
+
+def declared_penalty_factor(
+    group_matrices, groups, active_groups, lambda2, reml_penalties, override=None
+):
+    """Lazy factor for one fixed solver design and smoothing weights, when a term supplies roots.
+
+    An externally supplied matrix (including extra selection curvature) takes precedence.
+    The fit owns the factor and its comparison with that matrix until its basis or weights change.
+    """
+    from functools import cache
+
+    if not any(getattr(gm, "term_roots", None) for gm in group_matrices):
+        return None
+    args = group_matrices, groups, active_groups, lambda2
+
+    @cache
+    def get():
+        if override is not None and not np.array_equal(
+            override, _active_penalty_matrix(*args, reml_penalties=reml_penalties)
+        ):
+            return None
+        return _active_penalty_root(*args, reml_penalties=reml_penalties)
+
+    return get

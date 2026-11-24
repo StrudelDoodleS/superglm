@@ -82,6 +82,7 @@ class CenteredSystem:
     # from raw moments, whose rows are centred about ``mean_x`` alone.
     mean_hi: NDArray | None = None
     mean_lo: NDArray | None = None
+    penalty_rows: Callable[[], NDArray | None] | None = None
 
     def centre_pair(self) -> tuple[NDArray, NDArray | None]:
         """``(hi, lo)`` for centring rows as ``(x - hi) - lo`` (``lo`` ``None``: ``x - mean_x``)."""
@@ -730,6 +731,18 @@ def _equilibrated_block_root(block: NDArray) -> NDArray | None:
     return np.sqrt(eigenvalues[kept])[:, None] * eigenvectors[:, kept].T * scale[None, :]
 
 
+def centered_penalty_factor(system: CenteredSystem, exponent: int = 0) -> NDArray:
+    """Factor of the fixed penalty in units of 2**exponent, from term roots when available."""
+    rows = getattr(system, "penalty_rows", None)
+    root = None if rows is None else rows()
+    if root is None:
+        return penalty_factor(np.ldexp(system.penalty, -exponent) if exponent else system.penalty)
+    if not exponent:
+        return root
+    half, odd = divmod(exponent, 2)
+    return np.ldexp(root, -half) * (np.sqrt(0.5) if odd else 1.0)
+
+
 def grouped_augmented_factor(
     dm: DesignMatrix,
     W: NDArray,
@@ -737,10 +750,12 @@ def grouped_augmented_factor(
     *,
     center: NDArray | None = None,
     center_lo: NDArray | None = None,
+    smooth_factor: NDArray | None = None,
 ) -> NDArray:
     """Return the bounded weighted-design factor augmented by ``sqrt(S)``."""
     data_factor = grouped_weighted_factor(dm, W, center=center, center_lo=center_lo)
-    smooth_factor = penalty_factor(penalty)
+    if smooth_factor is None:
+        smooth_factor = penalty_factor(penalty)
     return data_factor if smooth_factor.shape[0] == 0 else np.vstack((data_factor, smooth_factor))
 
 
@@ -752,6 +767,7 @@ def grouped_augmented_factor_rhs(
     response: NDArray,
     center: NDArray | None = None,
     center_lo: NDArray | None = None,
+    smooth_factor: NDArray | None = None,
 ) -> tuple[NDArray, NDArray]:
     """Return one compact QR of the weighted data, penalty, and response."""
     data_factor, transformed_rhs = grouped_weighted_factor_rhs(
@@ -761,7 +777,8 @@ def grouped_augmented_factor_rhs(
         center=center,
         center_lo=center_lo,
     )
-    smooth_factor = penalty_factor(penalty)
+    if smooth_factor is None:
+        smooth_factor = penalty_factor(penalty)
     if smooth_factor.shape[0] == 0:
         return data_factor, transformed_rhs
     joint = np.column_stack((data_factor, transformed_rhs))
@@ -1097,6 +1114,7 @@ def refresh_centered_rhs(
         rhs=rhs,
         penalty=system.penalty,
         hessian=system.hessian,
+        penalty_rows=system.penalty_rows,
         mean_hi=mean_hi,
         mean_lo=mean_lo,
     )

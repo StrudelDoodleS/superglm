@@ -99,6 +99,7 @@ class DiscretizedSSPGroupMatrix:
         "omega",
         "projection",
         "R_inv_local",
+        "term_roots",
         "omega_components",
         "component_types",
         "structural_ranks",
@@ -115,6 +116,7 @@ class DiscretizedSSPGroupMatrix:
         self.omega = None  # the penalty, in the coordinates penalty_coordinate_map(self) maps
         self.projection = None  # (K, n_sub) projection matrix, set externally
         self.R_inv_local = None  # (n_sub, p) term-to-solver map, when omega is in term coordinates
+        self.term_roots = None  # component square roots in those same coordinates
         self.omega_components = None  # list[(suffix, omega)] for multi-penalty, set externally
         self.component_types = None  # dict[suffix, type] for multi-penalty, set externally
         self.structural_ranks = None
@@ -226,6 +228,7 @@ class DiscretizedSSPGroupMatrix:
         sub.omega = self.omega
         sub.projection = self.projection
         sub.R_inv_local = getattr(self, "R_inv_local", None)
+        sub.term_roots = getattr(self, "term_roots", None)
         sub.omega_components = self.omega_components
         sub.component_types = self.component_types
         sub.structural_ranks = getattr(self, "structural_ranks", None)

@@ -109,6 +109,77 @@ def _exact_fit(knots, x, y, lam, dps=40) -> np.ndarray:
     return np.array([float(fitted[i]) for i in range(len(x))])
 
 
+@pytest.mark.parametrize("kind", ["cr_cardinal", "cr"], ids=["cardinal-geometric", "cr-lognormal"])
+@pytest.mark.parametrize("fit", ["fit", "fit_reml"])
+def test_graded_penalty_range_matches_the_natural_smoother(kind, fit):
+    """A genuine weak range direction still smooths at fixed lambda, in predictions and EDF."""
+    mp = pytest.importorskip("mpmath")
+    if kind == "cr_cardinal":
+        x = np.geomspace(1, 1e5, 200)
+    else:
+        x = np.sort(np.random.default_rng(42).lognormal(0, 3, 200))
+    t = x / x[-1]
+    y = 1 + t + np.sin(4 * t)
+    frame = pd.DataFrame({"x": x})
+    lam = 1e14
+    # A fixed REML weight also exercises the component's rank and log-determinant.
+    # For the integrated spline its nested first-derivative component is off.
+    m = (1, 2) if fit == "fit_reml" and kind == "cr" else 2
+    policy = (
+        {"d1": LambdaPolicy.off(), "d2": LambdaPolicy.fixed(lam)}
+        if m != 2
+        else LambdaPolicy.fixed(lam)
+    )
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        spline_penalty=lam,
+        discrete=False,
+        features={
+            "x": Spline(
+                kind=kind,
+                n_knots=20,
+                knot_strategy="quantile_rows",
+                m=m,
+                lambda_policy=policy if fit == "fit_reml" else None,
+            )
+        },
+    )
+    getattr(model, fit)(frame, y)
+    with mp.workdps(100):
+        basis, penalty = _natural_smoother(_knots(model), x, 100)
+        gram = basis.T * basis
+        inverse = (gram + lam * penalty) ** -1
+        fitted = basis * (inverse * (basis.T * mp.matrix(y)))
+        influence = inverse * gram
+        edf = sum(influence[i, i] for i in range(influence.rows))
+    # The fitted values and hat trace are both order one. Losing a range
+    # direction changes them by order one even at this smoothing weight.
+    np.testing.assert_allclose(model.predict(frame), [float(v) for v in fitted], atol=1e-8, rtol=0)
+    assert model.result.effective_df == pytest.approx(float(edf), abs=1e-8)
+    if fit == "fit_reml":
+        from superglm.reml import build_penalty_caches, cached_logdet_s_plus
+        from superglm.reml.penalty_algebra import compute_penalty_nullity
+
+        active = model._reml_penalties[-1]
+        rank = len(_knots(model)) - 2
+        assert active.rank == rank
+        weights = {pc.name: float(pc is active) for pc in model._reml_penalties}
+        width = model._dm.p
+        assert (
+            compute_penalty_nullity(
+                hessian_rank=width + 1, penalties=model._reml_penalties, lambdas=weights
+            )
+            == width + 1 - rank
+        )
+        caches = build_penalty_caches(model._dm.group_matrices, list(enumerate(model._groups)))
+        # Scaling just the active component by two adds rank * log(2) to
+        # its log pseudodeterminant, including through the compatibility cache.
+        twice = {key: 2 * value for key, value in weights.items()}
+        change = cached_logdet_s_plus(twice, caches) - cached_logdet_s_plus(weights, caches)
+        assert change == pytest.approx(rank * np.log(2.0), abs=1e-10)
+
+
 def _exact_reml_optimum(knots, x, y, dps=40) -> float:
     """The root in ``rho = log lambda`` of ``V = (n - 2)/2 log(RSS + pen) + log|C'C + lambda S|/2 - (K - 2) rho / 2``."""
     mp = pytest.importorskip("mpmath")

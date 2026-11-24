@@ -52,6 +52,7 @@ from superglm.solvers.centered_system import (
     _FisherDataReuse,
     _InitialDataReuse,
     build_centered_system,
+    centered_penalty_factor,
     grouped_augmented_factor,
     grouped_augmented_factor_rhs,
     refresh_centered_rhs,
@@ -361,6 +362,7 @@ def _certify_centered_factor(
             system.penalty,
             center=centre,
             center_lo=centre_lo,
+            smooth_factor=centered_penalty_factor(system),
         )
         transformed_rhs = None
     else:
@@ -371,6 +373,7 @@ def _certify_centered_factor(
             response=response,
             center=centre,
             center_lo=centre_lo,
+            smooth_factor=centered_penalty_factor(system),
         )
     factor_decomposition = decompose_factor(
         factor,
@@ -579,7 +582,7 @@ class _IRLSDirectFitFields:
         # _setup_design
         " dm n p gms objective_merit_scale structured_decision _use_structured step"
         " _direct_fallback_reason _state_center beta intercept _start_lowered S"
-        " _penalty_curvature _physical_weights weight_exponent"
+        " _penalty_curvature penalty_rows _physical_weights weight_exponent"
         # _setup_routes
         " qp curvature"
         # _setup_systems
@@ -1029,6 +1032,11 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         self.structured_decision, self._use_structured = structured_decision, _use_structured
         self._direct_fallback_reason, self._state_center = _direct_fallback_reason, _state_center
         self.beta, self.intercept, self._start_lowered, self.S = beta, intercept, _start_lowered, S
+        from superglm.inference.covariance import declared_penalty_factor
+
+        self.penalty_rows = declared_penalty_factor(
+            gms, groups, groups, self.lambda2, self.reml_penalties, S_override
+        )
         # diag(S), formed once per call on first use by the mode score (S is fixed)
         self._penalty_curvature: list[NDArray] = []
 
@@ -1311,7 +1319,9 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         )
         if not (_use_structured or has_constraints):
             self.step: _IRLSDirectStep = (
-                _IRLSDirectQRStep(gms, self.S, self.p) if _use_qr else _IRLSDirectDenseStep()
+                _IRLSDirectQRStep(gms, self.S, self.p, self.penalty_rows)
+                if _use_qr
+                else _IRLSDirectDenseStep()
             )
 
         # Tabmat acceleration: the structured layout owns a pruned small-block
@@ -1448,7 +1458,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                 np.asarray(self.S),
             )
             if reused is not None:
-                return reused
+                return replace(reused, penalty_rows=self.penalty_rows)
         if (
             _can_reuse_weighted_gram
             and _constant_centered_cache is not None
@@ -1483,6 +1493,8 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         )
         if fisher is not None and fisher.data is None:
             fisher.remember(W_current, system)
+        if self.penalty_rows is not None:
+            system = replace(system, penalty_rows=self.penalty_rows)
         if (
             self._raw_moment_policy is not None
             and _tabmat_centering_state.raw_moment_eligible is False

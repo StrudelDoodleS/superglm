@@ -1082,6 +1082,39 @@ def _add_selection_local_curvature(
         )
 
 
+def _selected_penalty_rows(gms, groups, active, lambda2, components, penalty, beta):
+    """The active smooth roots and the selection curvature on the fitted coefficients."""
+    from functools import cache
+
+    from superglm.inference.covariance import declared_penalty_factor
+    from superglm.solvers.centered_system import penalty_factor
+
+    smooth = declared_penalty_factor(gms, groups, active, lambda2, components)
+    if (
+        smooth is None
+        or type(penalty) not in (Ridge, GroupLasso, GroupElasticNet)
+        or not penalty.lambda1
+    ):
+        return smooth
+    by_name = {group.name: group for group in groups}
+    originals = [by_name[group.name] for group in active]
+
+    @cache
+    def rows():
+        width = sum(group.size for group in active)
+        local = np.zeros((width, width))
+        _add_selection_local_curvature(
+            curvature=local,
+            penalty=penalty,
+            beta=beta,
+            original_groups=originals,
+            active_groups=active,
+        )
+        return np.vstack((smooth(), penalty_factor(local)))
+
+    return rows
+
+
 def _selection_local_curvature_depends_on_beta(penalty: Penalty) -> bool:
     """Whether exact built-in inference curvature changes with coefficients."""
     lam = float(penalty.lambda1 or 0.0)
@@ -1980,6 +2013,9 @@ def _fit_pirls_inner(
     # The certificates centre their rows exactly as the Gram did: a dense
     # column about its exact pair (issue #430), so both decide the same rank.
     centre, centre_lo = centered.centre_pair()
+    penalty_rows = _selected_penalty_rows(
+        gms, groups, selected_groups, lambda2, None, penalty, beta
+    )
     # Unpenalized, the data rank is also the Hessian's, whose decomposition
     # the standard errors read: it keeps the full factor route.
     data_rank = decide_data_rank(
@@ -2016,6 +2052,7 @@ def _fit_pirls_inner(
                 selected_penalty,
                 center=centre,
                 center_lo=centre_lo,
+                smooth_factor=None if penalty_rows is None else penalty_rows(),
             )
         )
         augmented_rank = certified
@@ -2023,7 +2060,12 @@ def _fit_pirls_inner(
     coefficient_rank = decompose_gram_if_authoritative(raw_gram + selected_penalty)
     if coefficient_rank is None:
         certified = decompose_factor(
-            grouped_augmented_factor(selected_dm, W_final, selected_penalty)
+            grouped_augmented_factor(
+                selected_dm,
+                W_final,
+                selected_penalty,
+                smooth_factor=None if penalty_rows is None else penalty_rows(),
+            )
         )
         coefficient_rank = certified
     feature_edf = np.zeros(p)

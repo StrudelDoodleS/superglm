@@ -81,12 +81,15 @@ def _term_penalty_block(terms, indices: NDArray, width: int) -> NDArray:
         where = np.flatnonzero((indices >= group_slice.start) & (indices < group_slice.stop))
         if where.size == 0:
             continue
-        omega_arr = np.asarray(omega, dtype=np.float64)
-        if raw_projection is not None:
+        if omega is None:
+            omega_arr = raw_projection.T @ raw_projection
+        elif raw_projection is not None:
             # Formed as the fit forms it (``build_penalty_matrix``): the Gram of a
             # transported root keeps the penalty's null space, where the congruence
             # ``R' Omega R`` leaves rounding that a large lambda makes curvature.
-            omega_arr = ssp_penalty_matrix(raw_projection, omega_arr)
+            omega_arr = ssp_penalty_matrix(raw_projection, omega)
+        else:
+            omega_arr = np.asarray(omega, dtype=np.float64)
         local = indices[where] - group_slice.start
         block[np.ix_(where, where)] += lam * omega_arr[np.ix_(local, local)]
     return block
@@ -268,6 +271,16 @@ def _build_smooth_penalty_terms(
         DiscretizedSplineCategoricalGroupMatrix,
         DiscretizedSSPGroupMatrix,
     )
+
+    def smooth_term(gm, group, weight, omega, suffix):
+        coordinate_map = penalty_coordinate_map(gm)
+        root = (getattr(gm, "term_roots", None) or {}).get(suffix)
+        if root is None:
+            return group.sl, weight, omega, coordinate_map
+        # ||R C beta||² reads the same root as the fit. The identity between
+        # these rows and themselves needs no stored matrix.
+        return group.sl, weight, None, root @ coordinate_map
+
     for gm, group in zip(group_matrices, groups, strict=True):
         if not group.penalized:
             continue
@@ -278,7 +291,7 @@ def _build_smooth_penalty_terms(
                     lam_j = float(resolve_component_lambda(lambda2, group.name, suffix))
                     if lam_j == 0.0:
                         continue
-                    terms.append((group.sl, lam_j, omega_j, penalty_coordinate_map(gm)))
+                    terms.append(smooth_term(gm, group, lam_j, omega_j, suffix))
                 continue
             lam = resolve_group_lambda(lambda2, group.name)
             lam_float = float(lam)
@@ -286,7 +299,7 @@ def _build_smooth_penalty_terms(
                 continue
             omega = gm.omega
             if omega is not None:
-                terms.append((group.sl, lam_float, omega, penalty_coordinate_map(gm)))
+                terms.append(smooth_term(gm, group, lam_float, omega, ""))
             continue
         lam = resolve_group_lambda(lambda2, group.name)
         lam_float = float(lam)
@@ -329,8 +342,10 @@ def _smooth_penalty_value(
             if raw_projection is None
             else np.asarray(raw_projection @ group_beta, dtype=np.float64)
         )
-        omega_arr = np.asarray(omega, dtype=np.float64)
-        value += lam * float(penalty_beta @ (omega_arr @ penalty_beta))
+        action = (
+            penalty_beta if omega is None else np.asarray(omega, dtype=np.float64) @ penalty_beta
+        )
+        value += lam * float(penalty_beta @ action)
     return float(value)
 
 
