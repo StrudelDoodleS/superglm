@@ -66,6 +66,7 @@ def _ordered_piecewise_structural_rows(
     *,
     is_sandwich: bool = False,
     sandwich_penalized: bool = False,
+    wald_df_limit: int | None = None,
 ) -> list[_CoefRow]:
     """Structural contrast rows for an OrderedCategorical Piecewise basis.
 
@@ -144,7 +145,9 @@ def _ordered_piecewise_structural_rows(
             else:
                 from superglm.inference._sandwich_core import wald_block_statistic
 
-                stat, p_val = wald_block_statistic(b_family, np.asarray(V_family, dtype=np.float64))
+                stat, p_val = wald_block_statistic(
+                    b_family, np.asarray(V_family, dtype=np.float64), df_limit=wald_df_limit
+                )
                 if stat is None:
                     ref_df = None
         else:
@@ -305,10 +308,10 @@ def build_coef_rows(
         return max(float(n_obs) - effective_df, 1.0)
 
     is_sandwich = sandwich_covariance is not None
-    sandwich_penalized = bool(sandwich_covariance.penalized) if is_sandwich else False
     sandwich_penalized_groups: frozenset[str] = (
         frozenset(sandwich_covariance.penalized_group_names) if is_sandwich else frozenset()
     )
+    wald_df_limit = sandwich_covariance.wald_df_limit if is_sandwich else None
 
     def _se_from_var(var: NDArray | float) -> Any:
         if is_sandwich:
@@ -384,6 +387,8 @@ def build_coef_rows(
         augmented_reference_contrast,
     )
     icpt_se = float(_se_from_var(icpt_var))
+    if is_sandwich and not sandwich_covariance.intercept_estimable:
+        icpt_se = float("nan")
 
     rows: list[_CoefRow] = []
     # The coefficients a separated level or cell moves (``separated_coefficients``,
@@ -405,7 +410,8 @@ def build_coef_rows(
 
         ref_df_val = float(len(b_block))
         if is_sandwich:
-            if sandwich_penalized or group_name in sandwich_penalized_groups:
+            # The penalty that voids an ordinary Wald test is the one on this block.
+            if group_name in sandwich_penalized_groups:
                 return None, None, None
             if not np.all(coefficient_estimable[g_slice]):
                 return None, None, None
@@ -413,7 +419,7 @@ def build_coef_rows(
                 return None, None, None
             from superglm.inference._sandwich_core import wald_block_statistic
 
-            stat_v, p_v = wald_block_statistic(b_block, V_block)
+            stat_v, p_v = wald_block_statistic(b_block, V_block, df_limit=wald_df_limit)
             if stat_v is None:
                 return None, None, None
             return stat_v, p_v, ref_df_val
@@ -784,8 +790,8 @@ def build_coef_rows(
                             V_b_main,
                             alpha,
                             is_sandwich=is_sandwich,
-                            sandwich_penalized=sandwich_penalized
-                            or (main_group.name in sandwich_penalized_groups),
+                            sandwich_penalized=main_group.name in sandwich_penalized_groups,
+                            wald_df_limit=wald_df_limit,
                         )
                     )
 

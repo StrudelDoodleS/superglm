@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import math
-import uuid
 from collections.abc import Hashable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -385,7 +384,6 @@ class FitState:
     repair_revision: int = 0
     resolved_penalty: object | None = None
     resolved_lambda2: object | None = None
-    fit_uid: str = ""
 
 
 @dataclass(frozen=True)
@@ -1043,7 +1041,6 @@ def _capture_model_state(
         repair_revision=int(repair_revision),
         resolved_penalty=resolved_penalty,
         resolved_lambda2=copy.deepcopy(resolved_lambda2),
-        fit_uid=uuid.uuid4().hex,
     )
 
     # Shallow transfer is intentional: every large buffer was created by this

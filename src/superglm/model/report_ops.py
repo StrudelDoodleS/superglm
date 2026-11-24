@@ -162,16 +162,11 @@ def summary(
     level_display = validate_level_display(level_display)
 
     if covariance is not None:
-        from superglm.inference._sandwich_core import SandwichCovariance
-        from superglm.inference.sandwich import fit_binding_for_superglm
+        from superglm.inference.sandwich import bound_covariance
 
-        if not isinstance(covariance, SandwichCovariance):
-            raise TypeError(
-                f"covariance must be a SandwichCovariance or None, got {type(covariance).__name__}."
-            )
         if model._fit_stats is None or model._result is None:
             raise RuntimeError("No fit stats — call fit() or fit_reml() first.")
-        covariance.require_available(fit_binding_for_superglm(model))
+        bound_covariance(model, covariance)
 
     cache = model._summary_cache
     if cache is None:
@@ -484,7 +479,8 @@ def summary(
                     augmented_indices,
                 )
                 if covariance is not None:
-                    se_vals = np.sqrt(np.maximum(var_diag, 0.0))
+                    # the result's own errors: blank where the fit determines nothing
+                    se_vals = np.array(covariance.se[augmented_indices])
                     se_raw_dict[g.name] = se_vals
                     se_dict[g.name] = se_vals
                 else:

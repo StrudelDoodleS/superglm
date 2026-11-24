@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 from typing import Any, Literal
 
 import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
+from scipy.special import expit
 
-from superglm._roundoff import EPS as _EPS
 from superglm._weight_units import scale_penalties
 from superglm.distributions import (
     _VARIANCE_FLOOR,
@@ -52,6 +53,7 @@ from superglm.links import (
 from superglm.model.fit_state import fitted_lambda2, fitted_penalty
 from superglm.model.report_ops import shape_repaired_feature_names
 from superglm.model.retired_state import retained_linear_state
+from superglm.model.separated_levels import separated_coefficients
 from superglm.model.state_ops import (
     _grouped_active_state,
     _names_an_unpriced_level,
@@ -97,25 +99,49 @@ _MAX_CHUNK_ROWS = 8192
 _TARGET_CHUNK_BYTES = 16 << 20  # 16 MiB per replay chunk
 
 
-def fit_binding_for_superglm(model: Any) -> FitBinding:
-    """Build the picklable ``FitBinding`` identifying ``model``'s current fitted state."""
+_UNBOUND_MESSAGE = (
+    "This model keeps no record of the rows it was fitted on, so a sandwich covariance "
+    "cannot be tied to it; refit the model."
+)
+
+
+def fit_binding_for_superglm(model: Any) -> FitBinding | None:
+    """The ``FitBinding`` of ``model``'s current fit, or ``None`` where it recorded no rows.
+
+    The rows are the fit's ``FitGeometryGuard``: the digests of the frame, response,
+    weights and offset every fit writes and a saved model keeps.
+    """
     result = model._result
     if result is None:
         raise RuntimeError("Model must be fitted before building a covariance binding.")
+    guard = getattr(model, "_fit_geometry_guard", None)
+    if guard is None:
+        return None
+    rows = hashlib.blake2b(digest_size=16)
+    rows.update(int(guard.n_rows).to_bytes(8, "little"))
+    for part in (guard.x_digest, guard.y_digest, guard.weight_digest, guard.offset_digest):
+        rows.update(part)
     state = getattr(model, "_fit_state", None)
-    fit_uid = getattr(state, "fit_uid", "") if state is not None else ""
-    if not fit_uid:
-        # Legacy pickle fallback: stable per-fit identity from available state.
-        fit_uid = f"legacy-{int(getattr(model, '_fit_revision', 0))}"
-    fit_revision = int(getattr(model, "_fit_revision", 0))
-    repair_revision = int(getattr(state, "repair_revision", 0)) if state is not None else 0
     return FitBinding(
         model_kind="SuperGLM",
-        fit_uid=str(fit_uid),
-        fit_revision=fit_revision,
-        repair_revision=repair_revision,
+        data_digest=rows.digest(),
+        fit_revision=int(getattr(model, "_fit_revision", 0)),
+        repair_revision=int(getattr(state, "repair_revision", 0)) if state is not None else 0,
         coef_digest=coef_digest(float(result.intercept), np.asarray(result.beta, dtype=np.float64)),
     )
+
+
+def bound_covariance(model: Any, covariance: Any) -> SandwichCovariance:
+    """``covariance`` once it is an available result of ``model``'s current fit; raises otherwise."""
+    if not isinstance(covariance, SandwichCovariance):
+        raise TypeError(
+            f"covariance must be a SandwichCovariance or None, got {type(covariance).__name__}."
+        )
+    covariance.require_available()
+    binding = fit_binding_for_superglm(model)
+    if binding is None:
+        raise ValueError(_UNBOUND_MESSAGE)
+    return covariance.require_available(binding)
 
 
 def _observed_score_and_curvature(
@@ -142,10 +168,10 @@ def _observed_score_and_curvature(
         if dist_type is Poisson and link_type is LogLink:
             return y - mu, mu.copy(), True, "fisher"
         if dist_type is Binomial and link_type is LogitLink:
-            h = fisher_working_weights(
-                distribution=distribution, link=link, mu=mu, eta=eta, sample_weight=ones
-            )
-            return y - mu, h, True, "fisher"
+            # y log p + (1 - y) log(1 - p) at p = expit(eta): score y - p and curvature
+            # p (1 - p), each a sum or product of non-negative terms in either tail.
+            event, non_event = expit(eta), expit(-eta)
+            return y * non_event - (1.0 - y) * event, event * non_event, True, "fisher"
         if dist_type is Gamma and link_type is InverseLink:
             h = fisher_working_weights(
                 distribution=distribution, link=link, mu=mu, eta=eta, sample_weight=ones
@@ -175,11 +201,14 @@ def _observed_score_and_curvature(
                 h_unit = (2.0 - p) * mu_2mp + (p - 1.0) * y * mu_1mp
                 return s_unit, h_unit, False, "observed"
         if dist_type is NegativeBinomial and distribution.theta != "auto":
+            # theta (y - mu) / (theta + mu) and theta mu (theta + y) / (theta + mu)**2 as
+            # products of ratios no larger than their operands: neither theta**2 nor
+            # theta * mu is formed, and theta -> inf gives Poisson's y - mu and mu.
             theta = float(distribution.theta)
-            denom = theta + mu
             with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
-                s_unit = theta * (y - mu) / denom
-                h_unit = theta * mu * (theta + y) / (denom * denom)
+                shrink = 1.0 / (1.0 + mu / theta)
+                s_unit = (y - mu) * shrink
+                h_unit = mu * shrink * ((theta + y) / (theta + mu))
                 return s_unit, h_unit, False, "observed"
         if dist_type is Gaussian:
             with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
@@ -558,6 +587,13 @@ def compute_superglm_sandwich_covariance(
     solver = model._solver_pirls_result()
     weight_semantics = model_weight_semantics(model)
     n_obs = int(model._fit_stats.n_obs) if getattr(model, "_fit_stats", None) is not None else 0
+    if binding is None:
+        return build_unavailable_covariance(
+            unavailable_reason="missing_fit_state",
+            message=_UNBOUND_MESSAGE,
+            n_obs=n_obs,
+            weight_semantics=weight_semantics,
+        )
 
     # ── Explicit unavailability checks (deterministic order) ───────
     if getattr(model, "_editor_inference_stale", False):
@@ -648,13 +684,23 @@ def compute_superglm_sandwich_covariance(
         )
 
     # ── Retained fit arrays and cluster normalization ──────────────
+    # The scores are replayed on the fit's own rows.  A model rescored on other rows
+    # (``EditorSession.to_model(X=..., y=...)``) keeps the fitted design beside their
+    # response, weights and offset, and has no score of its own to replay.
     y = np.asarray(model._fit_data_guard.y_snapshot, dtype=np.float64)
     w_phys = np.asarray(model._fit_weights, dtype=np.float64)
     n_rows = int(model._dm.n)
-    if len(y) != n_rows or len(w_phys) != n_rows:
+    if not (
+        len(y) == len(w_phys) == n_rows
+        and model._fit_geometry_guard.records_vectors(y, w_phys, model._fit_offset)
+    ):
         return build_unavailable_covariance(
             unavailable_reason="missing_fit_state",
-            message="Retained response or weight vector length does not match the fitting design.",
+            message=(
+                "The response, weights or offset this model holds are not the rows it was "
+                "fitted on, so the fit's scores cannot be replayed from it. Request "
+                "sandwich_covariance() from the fitted model."
+            ),
             binding=binding,
             n_obs=n_rows,
             weight_semantics=weight_semantics,
@@ -687,9 +733,22 @@ def compute_superglm_sandwich_covariance(
         eta = np.asarray(eta_raw, dtype=np.float64)
         with np.errstate(over="ignore", under="ignore"):
             mu = np.exp(eta)
+        clip_held = False
     else:
+        # The solver holds a binomial mean off 0 and 1 at clip_mu's 1e-7, and its working
+        # weight there is no longer the likelihood's curvature.  Score and bread are read
+        # at the mean the fitted predictor gives, so both are derivatives of the one
+        # log-likelihood (A = -dpsi/dtheta and B = psi psi' of the same psi: Stefanski &
+        # Boos, The Calculus of M-Estimation, Am. Stat. 56(1), 2002), and a fit holding
+        # such a row forms its own bread below.
         eta = stabilize_eta(eta_raw, model._link)
-        mu = clip_mu(model._link.inverse(eta), model._distribution)
+        mu = np.asarray(model._link.inverse(eta), dtype=np.float64)
+        clipped = clip_mu(mu, model._distribution)
+        clip_held = isinstance(model._distribution, Binomial) and bool(
+            np.any((clipped != mu) & pos)
+        )
+        if not isinstance(model._distribution, Binomial):
+            mu = clipped
 
     row_bundle = _observed_score_and_curvature(model._distribution, model._link, y, mu, eta)
     if row_bundle is None:
@@ -712,6 +771,9 @@ def compute_superglm_sandwich_covariance(
             n_obs=n_rows,
             weight_semantics=weight_semantics,
         )
+    # A zero-weight row carries no score, whatever its mean evaluates to.
+    s_unit = np.where(pos, s_unit, 0.0)
+    h_unit = np.where(pos, h_unit, 0.0)
 
     exponent = int(getattr(solver, "weight_exponent", 0))
     w_solver = np.ldexp(w_phys, exponent) if exponent else w_phys
@@ -783,7 +845,7 @@ def compute_superglm_sandwich_covariance(
 
     if backend == "structured":
         assert isinstance(linear_state, StructuredLinearSystemState)
-        if is_canonical and ridge_lam == 0.0:
+        if is_canonical and ridge_lam == 0.0 and not clip_held:
             profiled_factor = linear_state.profiled_factor
             bread_solver = profiled_factor
             bread_sum_h = float(profiled_factor.sum_w)
@@ -829,6 +891,7 @@ def compute_superglm_sandwich_covariance(
         can_reuse_rank = (
             is_canonical
             and ridge_lam == 0.0
+            and not clip_held
             and solver.rank_info is not None
             and solver.rank_info.face is None
             and len(solver.rank_info.selected_columns) == p_active
@@ -989,6 +1052,14 @@ def compute_superglm_sandwich_covariance(
         delta_shift = (m_shift - centre) if centre_lo is None else ((m_shift - centre) - centre_lo)
     else:
         delta_shift = np.empty(0, dtype=np.float64)
+    # The public intercept is the centred one plus ``delta_shift' beta``: determined
+    # where that contrast is orthogonal to the aliased directions (``is_estimable``).
+    # A truncated structured bread carries no such test, so its intercept is not certified.
+    intercept_estimable = (
+        bool(bread_solver.is_estimable(delta_shift))
+        if isinstance(bread_solver, RankDecomposition)
+        else bread_full_rank
+    )
 
     chunk_rows = max(1, min(_MAX_CHUNK_ROWS, _TARGET_CHUNK_BYTES // max(16 * q, 1)))
     leaf_parts = _design_leaf_parts(X_active) if p_active > 0 else None
@@ -1094,7 +1165,6 @@ def compute_superglm_sandwich_covariance(
             gram_acc.add_rows(z_pub)
 
         cov_pub = gram_acc.finalize(multiplier=correction_factor)
-        meat_rank: int | None = bread_rank
     else:
         # One-way clustered CR0 / CR1
         assert cluster_codes is not None and n_clusters is not None
@@ -1178,7 +1248,6 @@ def compute_superglm_sandwich_covariance(
 
         cov_pub = gram_acc.finalize(multiplier=correction_factor)
         peak_chunk_bytes = max(peak_chunk_bytes, acc.buffer_bytes)
-        meat_rank = None
 
     if cov_pub is None or not np.all(np.isfinite(cov_pub)):
         return build_unavailable_covariance(
@@ -1189,26 +1258,20 @@ def compute_superglm_sandwich_covariance(
             weight_semantics=weight_semantics,
         )
 
-    if clustered and n_clusters is not None:
-        if n_clusters <= q + 1:
-            try:
-                eigs = np.linalg.eigvalsh(cov_pub)
-                max_eig = float(eigs[-1]) if len(eigs) else 0.0
-                meat_rank = (
-                    int(np.count_nonzero(eigs > float(max(q, 1)) * _EPS * max_eig))
-                    if max_eig > 0.0
-                    else 0
-                )
-            except np.linalg.LinAlgError:
-                meat_rank = min(max(n_clusters - 1, 0), bread_rank)
-        else:
-            meat_rank = bread_rank
-
+    # A standard error is blank for a coefficient the fit does not determine: an aliased
+    # one, a separated level's (``separated_coefficients``, the intercept last), and the
+    # intercept where either moves it.  ``covariance`` keeps the entries of the fit's own
+    # identification (aliased coefficients held where the fit left them).
+    separated = separated_coefficients(model._groups, model._specs, model._interaction_specs)
     se = np.sqrt(np.maximum(np.diag(cov_pub), 0.0))
-    if p_active > 0:
-        for ag in active_groups:
-            orig_mask = coef_estimable[orig_by_name[ag.name].sl]
-            se[1 + ag.start : 1 + ag.end][~orig_mask] = np.nan
+    if not intercept_estimable or (separated is not None and separated[-1]):
+        se[0] = np.nan
+    for ag in active_groups:
+        columns = orig_by_name[ag.name].sl
+        blank = ~coef_estimable[columns]
+        if separated is not None:
+            blank |= separated[columns]
+        se[1 + ag.start : 1 + ag.end][blank] = np.nan
 
     retained_bytes = int(cov_pub.nbytes + se.nbytes + coef_estimable.nbytes)
     peak_bytes = int(
@@ -1242,10 +1305,10 @@ def compute_superglm_sandwich_covariance(
         n_clusters=n_clusters,
         n_params=q,
         bread_rank=bread_rank,
-        meat_rank=meat_rank,
         covariance=cov_pub,
         se=se,
         coefficient_estimable=coef_estimable,
+        intercept_estimable=intercept_estimable,
         active_groups=tuple(active_groups),
         penalized_group_names=penalized_group_names,
         telemetry=telemetry,

@@ -947,12 +947,14 @@ class TestFitBindingAndRoundTrip:
         s_rt = m1_rt.summary(covariance=cov1_rt)
         assert s_rt["standard_errors"]["coefficient_se_scale"] == "sandwich"
 
-        # A second model on identical data has a distinct fit_uid and rejects cov1.
+        # A model fitted to another response is another fit and rejects cov1.
+        y_other = y.copy()
+        y_other[0] += 1.0
         m2 = SuperGLM(
             family="poisson",
             selection_penalty=0.0,
             features={"x": Numeric(), "s": Spline(kind="cr", k=5)},
-        ).fit(X, y)
+        ).fit(X, y_other)
         for call in (
             lambda: m2.summary(covariance=cov1),
             lambda: m2.relativities(with_se=True, covariance=cov1),
@@ -969,6 +971,62 @@ class TestFitBindingAndRoundTrip:
             m1.summary(covariance=cov1)
         with pytest.raises(ValueError, match="different fit"):
             m1.summary(covariance=cov1_rt)
+
+    def test_the_same_fit_on_the_same_rows_is_one_identity(self):
+        """The binding is the fit's own record, not an identity allocated per fit.
+
+        A rerun of one specification on the same rows publishes the same numbers and
+        reads a covariance computed on the first run.
+        """
+        rng = np.random.default_rng(811)
+        X = pd.DataFrame({"x": rng.normal(size=50)})
+        y = rng.poisson(np.exp(0.2 + 0.3 * X["x"].to_numpy())).astype(float)
+        first = SuperGLM(family="poisson", features={"x": Numeric()}).fit(X, y)
+        rerun = SuperGLM(family="poisson", features={"x": Numeric()}).fit(X.copy(), y.copy())
+        cov = first.sandwich_covariance()
+        assert cov.binding == rerun.sandwich_covariance().binding
+        np.testing.assert_array_equal(
+            rerun.term_inference("x", covariance=cov).se_log_relativity,
+            first.term_inference("x", covariance=cov).se_log_relativity,
+        )
+
+    def test_saved_fits_with_equal_coefficients_do_not_share_a_covariance(self):
+        """Two intercept-only fits at intercept 0 on different responses are different fits."""
+        frame = pd.DataFrame(index=range(8))
+        models = []
+        for amplitude in (1.0, 2.0):
+            model = SuperGLM(family="gaussian", features={}).fit(
+                frame, np.tile([-amplitude, amplitude], 4)
+            )
+            model = pickle.loads(pickle.dumps(model))
+            # A model saved before fits could be bound stores no identity beyond its rows.
+            vars(model._fit_state).pop("fit_uid", None)
+            models.append(model)
+        small, large = models
+        assert small.result.intercept == large.result.intercept == 0.0
+        cov_small, cov_large = small.sandwich_covariance(), large.sandwich_covariance()
+        np.testing.assert_allclose(cov_small.se, [1.0 / math.sqrt(8.0)], rtol=1e-12)
+        np.testing.assert_allclose(cov_large.se, [2.0 / math.sqrt(8.0)], rtol=1e-12)
+        with pytest.raises(ValueError, match="different fit"):
+            large.summary(covariance=cov_small)
+
+    def test_a_model_rescored_on_other_rows_replays_no_scores(self):
+        """``to_model(X=, y=)`` keeps the fitted design beside the supplied response."""
+        from superglm.editor import EditorSession
+
+        x = np.tile([-1.0, 1.0], 32)
+        noise = np.tile([-1.0, -1.0, 1.0, 1.0], 16)
+        X = pd.DataFrame({"x": x})
+        model = SuperGLM(family="gaussian", features={"x": Numeric()}).fit(X, x + 0.1 * noise)
+        fitted = model.sandwich_covariance()
+        np.testing.assert_allclose(fitted.se, [0.0125, 0.0125], rtol=1e-10)
+
+        session = EditorSession.from_model(model, terms=["x"])
+        rescored = session.to_model(X=pd.DataFrame({"x": -x}), y=-x + 10.0 * noise)
+        np.testing.assert_array_equal(rescored.result.beta, model.result.beta)
+        own = rescored.sandwich_covariance()
+        assert not own.available and own.unavailable_reason == "missing_fit_state"
+        assert "not the rows it was fitted on" in own.message
 
 
 class TestUnavailableConditionsAndRecovery:
@@ -1284,3 +1342,166 @@ class TestReadersAndStructuredFits:
         ti_re = model.term_inference("grp", covariance=cov)
         assert ti_re.covariance_n_clusters == n_groups
         assert ti_re.se_log_relativity is not None and np.all(np.isfinite(ti_re.se_log_relativity))
+
+
+class TestRowScoresInTheTails:
+    @pytest.mark.parametrize("clustered", [False, True])
+    def test_binomial_logit_rows_past_the_mean_clip_use_one_likelihood(self, clustered):
+        """Offsets of +-19 put every fitted probability past the solver's 1e-7 clip.
+
+        The reference is the likelihood's own sandwich at the fitted intercept,
+        ``sum g^2 / (sum p (1 - p))^2`` with ``p = expit(eta)`` and ``g`` the row or
+        cluster sums of ``y - p``; unclustered it is ``1 / n``.
+        """
+        from scipy.special import expit
+
+        n = 40
+        y = np.tile([0.0, 1.0], n // 2)
+        offset = np.tile([-19.0, 19.0], n // 2)
+        model = SuperGLM(family="binomial", link="logit", features={}).fit(
+            pd.DataFrame(index=range(n)), y, offset=offset
+        )
+        assert model.result.converged
+        eta = model.result.intercept + offset
+        assert np.all(np.abs(eta) > 16.2)  # every row is past logit(1e-7)
+        score = np.where(y == 1.0, expit(-eta), -expit(eta))
+        cluster = np.arange(n) // 3 if clustered else None
+        units = score if cluster is None else np.bincount(cluster, weights=score)
+        reference = float(units @ units) / float(np.sum(expit(eta) * expit(-eta))) ** 2
+
+        cov = model.sandwich_covariance(cluster=cluster)
+        assert cov.available
+        np.testing.assert_allclose(cov.covariance[0, 0], reference, rtol=1e-10)
+        if not clustered:
+            np.testing.assert_allclose(cov.se[0], 1.0 / math.sqrt(n), rtol=1e-6)
+
+    def test_negative_binomial_log_at_a_huge_theta_is_the_poisson_sandwich(self):
+        """``theta**2`` overflows at 1e200; the rows are Poisson's ``y - mu`` and ``mu``."""
+        X = pd.DataFrame({"x": np.tile([-1.0, 1.0, 1.0, -1.0, 0.5], 8)})
+        y = np.tile([0.0, 1.0, 2.0, 3.0], 10)
+        nb = SuperGLM(
+            family=NegativeBinomial(theta=1e200), link="log", features={"x": Numeric()}
+        ).fit(X, y)
+        poisson = SuperGLM(family="poisson", features={"x": Numeric()}).fit(X, y)
+        cov_nb = nb.sandwich_covariance()
+        assert cov_nb.available, cov_nb.message
+        np.testing.assert_allclose(
+            cov_nb.covariance, poisson.sandwich_covariance().covariance, rtol=1e-6, atol=1e-12
+        )
+
+
+class TestCoefficientsTheFitDoesNotDetermine:
+    def test_aliased_intercept_and_slopes_are_blank_in_every_robust_reader(self):
+        """``b = a + 1`` leaves the direction (intercept, a, b) = (1, 1, -1) free.
+
+        No coefficient of the three is determined, so the result, the summary
+        table and dictionary, and the term readers give none an error or a p-value.
+        """
+        x = np.tile([-1.0, 1.0], 12)
+        y = 1.0 + 2.0 * x + np.repeat(np.tile([-1.0, 1.0], 6), 2)
+        model = SuperGLM(family="gaussian", features={"a": Numeric(), "b": Numeric()}).fit(
+            pd.DataFrame({"a": x, "b": x + 1.0}), y
+        )
+        cov = model.sandwich_covariance()
+        assert cov.available
+        assert not cov.intercept_estimable and not cov.coefficient_estimable.any()
+        assert np.all(np.isnan(cov.se))
+
+        summary = model.summary(covariance=cov)
+        rows = {row.name: row for row in summary._coef_rows}
+        assert set(rows) == {"Intercept", "a", "b"}
+        for row in rows.values():
+            assert row.se is None or np.isnan(row.se)
+            assert row.p is None or np.isnan(row.p)
+        errors = summary["standard_errors"]["coefficient_se"]
+        assert np.all(np.isnan(errors["a"])) and np.all(np.isnan(errors["b"]))
+
+        with pytest.warns(UserWarning, match="does not determine every coefficient of 'a'"):
+            term = model.term_inference("a", covariance=cov)
+        assert term.se_log_relativity is None
+        with pytest.warns(UserWarning, match="does not determine every coefficient"):
+            frames = model.relativities(with_se=True, covariance=cov)
+        assert np.all(np.isnan(frames["a"]["se_log_relativity"]))
+
+    def test_an_alias_between_slopes_leaves_the_intercept_its_error(self):
+        """``x2 = 2 x1`` is orthogonal to the intercept's contrast: only the slopes are blank."""
+        rng = np.random.default_rng(910)
+        x = rng.normal(size=60)
+        y = 1.0 + 0.5 * x + rng.normal(scale=0.5, size=60)
+        model = SuperGLM(family="gaussian", features={"x1": Numeric(), "x2": Numeric()}).fit(
+            pd.DataFrame({"x1": x, "x2": 2.0 * x}), y
+        )
+        cov = model.sandwich_covariance()
+        assert cov.intercept_estimable and not cov.coefficient_estimable.any()
+        assert np.isfinite(cov.se[0]) and np.all(np.isnan(cov.se[1:]))
+        intercept = next(
+            r for r in model.summary(covariance=cov)._coef_rows if r.name == "Intercept"
+        )
+        np.testing.assert_allclose(intercept.se, cov.se[0], rtol=1e-12)
+        assert np.isfinite(intercept.p)
+
+    def test_separated_level_is_blank_in_the_result_and_the_summary_dictionary(self):
+        x = np.repeat(["A", "B", "C"], 30)
+        y = np.tile([0.0, 1.0, 2.0], 30)
+        y[x == "C"] = 0.0
+        with pytest.warns(superglm.SeparationWarning):
+            model = SuperGLM(family="poisson", features={"x": Categorical(base="A")}).fit(
+                pd.DataFrame({"x": x}), y
+            )
+        cov = model.sandwich_covariance()
+        assert cov.available
+        assert np.all(np.isfinite(cov.se[:2])) and np.isnan(cov.se[2])
+        summary = model.summary(covariance=cov)
+        errors = summary["standard_errors"]["coefficient_se"]["x"]
+        np.testing.assert_allclose(errors[0], cov.se[1], rtol=1e-12)
+        assert np.isnan(errors[1])
+        assert next(r for r in summary._coef_rows if r.name == "x[C]").se is None
+
+
+class TestWaldTestsACovarianceCanCarry:
+    def test_two_clusters_carry_no_two_df_test_and_three_carry_it(self):
+        """A clustered Wald test takes at most G - 1 restrictions (Cameron & Miller 2015)."""
+        rng = np.random.default_rng(719)
+        n = 150
+        x = rng.uniform(-1.0, 1.0, n)
+        y = rng.gamma(1.0, np.exp(0.7 + 1.5 * x))
+        model = SuperGLM(family="gamma", link="log", features={"x": Piecewise(breaks=[0.0])}).fit(
+            pd.DataFrame({"x": x}), y
+        )
+
+        def term_row(cov):
+            return next(r for r in model.summary(covariance=cov)._coef_rows if r.name == "x")
+
+        two = model.sandwich_covariance(cluster=np.arange(n) % 2)
+        assert two.wald_df_limit == 1
+        row = term_row(two)
+        assert row.n_params == 2
+        assert row.wald_chi2 is None and row.wald_p is None and row.ref_df is None
+
+        three = model.sandwich_covariance(cluster=np.arange(n) % 3)
+        assert three.wald_df_limit == 2
+        row = term_row(three)
+        beta = model.result.beta
+        expected = float(beta @ np.linalg.solve(three.slope_covariance, beta))
+        np.testing.assert_allclose(row.wald_chi2, expected, rtol=1e-8)
+        assert row.ref_df == 2.0
+
+    def test_a_penalty_on_another_term_leaves_an_unpenalized_block_its_test(self):
+        rng = np.random.default_rng(72)
+        x = rng.uniform(-1.0, 1.0, 150)
+        z = rng.normal(size=150)
+        model = SuperGLM(
+            family="gaussian",
+            features={"x": Piecewise(breaks=[-0.3, 0.3]), "z": Numeric()},
+            penalty=Ridge(lambda1=3.0, features=["z"]),
+        ).fit(pd.DataFrame({"x": x, "z": z}), 2.0 * x + z + rng.normal(size=150))
+        cov = model.sandwich_covariance()
+        assert cov.penalized_group_names == frozenset({"z"})
+        rows = {row.name: row for row in model.summary(covariance=cov)._coef_rows}
+        block = next(g for g in cov.active_groups if g.name == "x")
+        beta = model.result.beta[block.sl]
+        expected = float(beta @ np.linalg.solve(cov.slope_covariance[block.sl, block.sl], beta))
+        np.testing.assert_allclose(rows["x"].wald_chi2, expected, rtol=1e-8)
+        assert rows["x"].ref_df == 3.0
+        # the ridge-shrunk coefficient itself still carries no z or p
+        assert rows["z"].z is None and rows["z"].p is None and np.isfinite(rows["z"].se)

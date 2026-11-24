@@ -5,6 +5,8 @@ from __future__ import annotations
 import dataclasses
 import warnings
 
+import numpy as np
+
 from superglm.inference._term_covariance import simultaneous_band_and_critical_value
 from superglm.inference._term_model_ops import (
     drop1 as _drop1,
@@ -68,15 +70,34 @@ _SHAPE_REPAIRED_INFERENCE_MESSAGE = (
 
 def _resolve_robust_slope_covariance(model, covariance):
     """Validate fit-bound ``SandwichCovariance`` and return ``(Cov_slopes, active_groups)``."""
-    from superglm.inference._sandwich_core import SandwichCovariance
-    from superglm.inference.sandwich import fit_binding_for_superglm
+    from superglm.inference.sandwich import bound_covariance
 
-    if not isinstance(covariance, SandwichCovariance):
-        raise TypeError(
-            f"covariance must be a SandwichCovariance or None, got {type(covariance).__name__}."
-        )
-    covariance.require_available(fit_binding_for_superglm(model))
+    covariance = bound_covariance(model, covariance)
     return covariance.slope_covariance, list(covariance.active_groups)
+
+
+def _aliased_features(model, covariance) -> set[str]:
+    """Terms holding a coefficient the fit does not determine, by ``str`` as the readers key them.
+
+    The term readers report contrasts of a whole block, so a robust reader
+    withholds the errors of such a term, as it does a repaired one's;
+    ``summary(covariance=...)`` blanks the coefficients themselves.
+    """
+    active = {group.name for group in covariance.active_groups}
+    estimable = covariance.coefficient_estimable
+    return {
+        str(group.feature_name)
+        for group in model._groups
+        if group.name in active and not estimable[group.sl].all()
+    }
+
+
+_ALIASED_INFERENCE_MESSAGE = (
+    "The fit does not determine every coefficient of {terms} (aliased with another term "
+    "or the intercept), so the robust standard errors of {terms} are withheld. "
+    "summary(covariance=...) blanks the coefficients concerned; drop or merge the "
+    "aliased terms and refit to get them."
+)
 
 
 def metrics(model, X, y, sample_weight=None, offset=None):
@@ -218,6 +239,17 @@ def relativities(model, with_se=False, centering="native", *, covariance=None):
             if "se_log_relativity" in frame.columns:
                 warnings.warn(_SHAPE_REPAIRED_INFERENCE_MESSAGE, UserWarning, stacklevel=2)
                 frames[name] = frame.drop(columns=["se_log_relativity"])
+        aliased = _aliased_features(model, covariance) if robust_cov is not None else set()
+        withheld = [
+            key
+            for key in frames
+            if str(key) in aliased and "se_log_relativity" in frames[key].columns
+        ]
+        for name in withheld:
+            frames[name] = frames[name].assign(se_log_relativity=np.nan)
+        if withheld:
+            terms = ", ".join(repr(name) for name in withheld)
+            warnings.warn(_ALIASED_INFERENCE_MESSAGE.format(terms=terms), UserWarning, stacklevel=2)
     return frames
 
 
@@ -247,6 +279,8 @@ def simultaneous_bands(
             "would be simulated from the unconstrained fit's covariance around constrained "
             "coefficients. Fit the constraint (Constraint.fit.*) if you need a band."
         )
+    if robust_cov is not None and str(feature) in _aliased_features(model, covariance):
+        raise RuntimeError(_ALIASED_INFERENCE_MESSAGE.format(terms=repr(feature)))
     from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
 
     _ensure_factor_smooth_levels_recorded(model)
@@ -293,6 +327,12 @@ def term_inference(
     repaired = _shape_repaired(model, name)
     if repaired and with_se:
         warnings.warn(_SHAPE_REPAIRED_INFERENCE_MESSAGE, UserWarning, stacklevel=2)
+        with_se = False
+        simultaneous = False
+    if robust_cov is not None and with_se and str(name) in _aliased_features(model, covariance):
+        warnings.warn(
+            _ALIASED_INFERENCE_MESSAGE.format(terms=repr(name)), UserWarning, stacklevel=2
+        )
         with_se = False
         simultaneous = False
     from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded

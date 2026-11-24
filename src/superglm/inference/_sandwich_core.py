@@ -75,10 +75,17 @@ def coef_digest(intercept: float, beta: NDArray) -> bytes:
 
 @dataclass(frozen=True)
 class FitBinding:
-    """Picklable identity tying a covariance result to one exact fitted state."""
+    """Picklable identity tying a covariance result to one exact fitted state.
+
+    ``data_digest`` is a digest of the rows the fit recorded (frame, response,
+    weights and offset) and ``coef_digest`` one of the coefficients it published,
+    so the identity is the fit's own content: a default fit allocates nothing for
+    it, a saved model keeps it, and two fits share it only when they are the same
+    numbers on the same rows at the same revision.
+    """
 
     model_kind: Literal["SuperGLM", "SuperLSS"]
-    fit_uid: str
+    data_digest: bytes
     fit_revision: int
     repair_revision: int
     coef_digest: bytes
@@ -90,7 +97,7 @@ class FitBinding:
                 f"SandwichCovariance was built for {self.model_kind}, not {current.model_kind}."
             )
         if (
-            self.fit_uid != current.fit_uid
+            self.data_digest != current.data_digest
             or self.fit_revision != current.fit_revision
             or self.repair_revision != current.repair_revision
             or self.coef_digest != current.coef_digest
@@ -122,6 +129,13 @@ class SandwichCovariance:
     Constructed via :meth:`superglm.SuperGLM.sandwich_covariance` (and future
     ``SuperLSS`` equivalents) and passed as ``covariance=`` to ``summary()``,
     ``relativities()``, ``term_inference()``, and ``simultaneous_bands()``.
+
+    ``se`` is NaN for a coefficient the fit does not determine: a slope
+    ``coefficient_estimable`` marks False, the intercept where
+    ``intercept_estimable`` is False, and a separated level's coefficient.
+    ``covariance`` keeps the entries of the fit's own identification, in which
+    an aliased coefficient stays where the fit left it; the readers blank what
+    ``se`` blanks.
     """
 
     status: SandwichStatus
@@ -141,10 +155,10 @@ class SandwichCovariance:
     n_clusters: int | None = None
     n_params: int = 0
     bread_rank: int = 0
-    meat_rank: int | None = None
     covariance: NDArray | None = None
     se: NDArray | None = None
     coefficient_estimable: NDArray[np.bool_] | None = None
+    intercept_estimable: bool = True
     active_groups: tuple[GroupSlice, ...] = ()
     penalized_group_names: frozenset[str] = frozenset()
     telemetry: SandwichTelemetry | None = None
@@ -163,6 +177,17 @@ class SandwichCovariance:
         return view
 
     @property
+    def wald_df_limit(self) -> int | None:
+        """Most restrictions one cluster-robust Wald test may carry: ``G - 1``.
+
+        ``G`` cluster scores that sum to zero span at most ``G - 1`` directions, so
+        "at most G - 1 restrictions can be tested using a Wald test" (Cameron &
+        Miller, J. Human Resources 50(2), 2015, sections II.E and VII.A).  ``None``
+        for a row-level covariance.
+        """
+        return None if self.n_clusters is None else max(int(self.n_clusters) - 1, 0)
+
+    @property
     def method_label(self) -> str:
         """Human-readable label describing the robust covariance estimator."""
         if not self.available:
@@ -172,16 +197,15 @@ class SandwichCovariance:
         return f"{base} (sandwich{suffix})"
 
     def require_available(self, binding: FitBinding | None = None) -> SandwichCovariance:
-        """Validate fit binding and availability before a reader consumes this covariance."""
-        if binding is not None and self.binding is not None:
-            self.binding.validate_match(binding)
-        elif binding is not None and self.binding is None:
-            raise ValueError("SandwichCovariance carries no fit binding and cannot be verified.")
+        """Validate availability, then the fit binding, before a reader consumes this covariance."""
         if not self.available:
             detail = f": {self.message}" if self.message else ""
             raise RuntimeError(
                 f"SandwichCovariance is unavailable ({self.unavailable_reason}){detail}"
             )
+        if binding is not None:
+            assert self.binding is not None
+            self.binding.validate_match(binding)
         return self
 
     def __repr__(self) -> str:
@@ -218,10 +242,10 @@ def build_available_covariance(
     n_clusters: int | None,
     n_params: int,
     bread_rank: int,
-    meat_rank: int | None,
     covariance: NDArray,
     se: NDArray,
     coefficient_estimable: NDArray[np.bool_],
+    intercept_estimable: bool,
     active_groups: tuple[GroupSlice, ...],
     penalized_group_names: frozenset[str],
     telemetry: SandwichTelemetry,
@@ -246,10 +270,10 @@ def build_available_covariance(
         n_clusters=None if n_clusters is None else int(n_clusters),
         n_params=int(n_params),
         bread_rank=int(bread_rank),
-        meat_rank=None if meat_rank is None else int(meat_rank),
         covariance=_freeze(np.asarray(covariance, dtype=np.float64)),
         se=_freeze(np.asarray(se, dtype=np.float64)),
         coefficient_estimable=_freeze(np.asarray(coefficient_estimable, dtype=bool)),
+        intercept_estimable=bool(intercept_estimable),
         active_groups=tuple(active_groups),
         penalized_group_names=frozenset(penalized_group_names),
         telemetry=telemetry,
@@ -636,18 +660,24 @@ class ClusterScoreAccumulator:
 def wald_block_statistic(
     beta_block: NDArray,
     cov_block: NDArray,
+    *,
+    df_limit: int | None = None,
 ) -> tuple[float | None, float | None]:
     """Compute ordinary multi-df Wald ``b' V^-1 b`` only if ``V`` spans ``len(b)``.
 
-    Returns ``(None, None)`` when ``cov_block`` is non-finite or rank-deficient
-    (for example when cluster count ``G <= len(b)``).
+    Returns ``(None, None)`` when the block has more coefficients than
+    ``df_limit`` (``SandwichCovariance.wald_df_limit``), or ``cov_block`` is
+    non-finite or numerically rank-deficient.  The limit is decided from the
+    cluster count and not from the block's eigenvalues: a fit converged to a
+    tolerance leaves the direction the clusters cannot span a variance of the
+    order of that tolerance squared, which is small but not rounding.
     """
     from scipy.stats import chi2 as chi2_dist
 
     b = np.asarray(beta_block, dtype=np.float64).ravel()
     V = np.asarray(cov_block, dtype=np.float64)
     d = len(b)
-    if d == 0 or V.shape != (d, d):
+    if d == 0 or V.shape != (d, d) or (df_limit is not None and d > df_limit):
         return None, None
     if not (np.all(np.isfinite(b)) and np.all(np.isfinite(V))):
         return None, None
