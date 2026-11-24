@@ -1383,6 +1383,49 @@ class TestUnavailableConditionsAndRecovery:
             declared.covariance[1, 1], log_link.covariance[1, 1] / 4.0, rtol=1e-6
         )
 
+    def test_a_family_that_inherits_another_variances_derivative_is_unsupported(self):
+        """Gamma with ``V = 2 mu^2``, overriding the variance and inheriting ``V' = 2 mu``.
+
+        A constant factor on ``V`` leaves the estimating equations and the sandwich
+        unchanged, so the right covariance is Gamma/log's, which statsmodels gives
+        independently (HC0 on the observed Hessian).  The inherited derivative gives
+        the wrong curvature, so the result is ``unsupported_curvature``; declaring
+        ``V' = 4 mu`` gives statsmodels' covariance.
+        """
+
+        class DoubledGamma(Gamma):
+            def variance(self, mu):
+                return 2.0 * mu**2
+
+            def reml_curvature(self, counterpart):
+                return "observed"
+
+        class DeclaredDoubledGamma(DoubledGamma):
+            def variance_derivative(self, mu):
+                return 4.0 * mu
+
+        rng = np.random.default_rng(5)
+        n = 400
+        x = rng.normal(size=n)
+        y = rng.gamma(4.0, np.exp(0.6 + 0.4 * x) / 4.0)
+
+        def fitted(family):
+            return SuperGLM(
+                family=family, link=LogLink(), tol=1e-12, features={"x": Numeric()}
+            ).fit(pd.DataFrame({"x": x}), y)
+
+        stale = fitted(DoubledGamma()).sandwich_covariance()
+        assert not stale.available and stale.unavailable_reason == "unsupported_curvature"
+
+        declared = fitted(DeclaredDoubledGamma()).sandwich_covariance()
+        assert declared.available and declared.bread_curvature == "observed"
+        _, cov_sm = _sm_glm_cov(
+            np.column_stack([np.ones(n), x]), y, sm.families.Gamma(sm.families.links.Log())
+        )
+        np.testing.assert_allclose(
+            declared.covariance, cov_sm, atol=_cov_tol(cov_sm, extra=1e-6), rtol=1e-6
+        )
+
 
 class TestReadersAndStructuredFits:
     def test_summary_relativities_term_inference_and_simultaneous_bands(self):
