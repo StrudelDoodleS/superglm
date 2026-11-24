@@ -1784,13 +1784,12 @@ def _discarded_newton_direction(
 ) -> NDArray[np.float64]:
     """The Newton direction of the discarded subspace, in its basis ``N``.
 
-    A gain has the same size in any coordinates only when the step is taken in
-    the curvature's metric (the Newton decrement, Boyd & Vandenberghe §9.5), so
-    the subspace needs its own curvature ``N'HN``. The factored ``H`` cannot
-    supply it: ``X'WX`` cancels a column far from zero at the square of its
-    level over its spread (the normal equations square the condition number
-    of the rows, Higham 2002, ch. 20), which is what dropped the contrast.
-    Summed over the rows of ``X N`` it cancels once, as the predictors do.
+    A gain is coordinate-free only in the curvature's metric (the Newton
+    decrement, Boyd & Vandenberghe §9.5), so the subspace needs its own
+    ``N'HN``. The factored ``H`` cannot supply it: ``X'WX`` cancels a column
+    far from zero at the square of its level over its spread (Higham 2002,
+    ch. 20), which is what dropped the contrast. Summed over the rows of
+    ``X N`` it cancels once, as the predictors do.
 
     Curvature below ``k eps`` of the subspace's largest is flat and gets no
     step, as does a subspace whose row curvature cannot be evaluated.
