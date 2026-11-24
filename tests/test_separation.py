@@ -1586,3 +1586,29 @@ def test_a_fit_reports_the_build_warnings_where_master_did():
         ).fit(pd.DataFrame({"c": c}), y)
     attributed = [w for w in record if "falling back" in str(w.message)]
     assert [Path(w.filename).name for w in attributed] == ["dm_builder.py"]
+
+
+@pytest.mark.pins_behaviour
+def test_delegated_categorical_build_keeps_warning_attribution():
+    """Preserve master's named warning and module filter when a subclass calls super()."""
+    frame = pd.DataFrame({"band": ["a", "b"] * 20})
+    y = np.array([1.0, 4.0] * 20)
+    model = SuperGLM(
+        family="poisson", features={"band": _WithoutPenalty(base="z", levels=["a", "b", "z"])}
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        warnings.filterwarnings("ignore", category=UserWarning, module=r"^superglm\.dm_builder$")
+        model.fit(frame, y)
+    np.testing.assert_allclose(
+        model.predict(pd.DataFrame({"band": ["a", "b"]})), [1.0, 4.0], rtol=1e-6
+    )
+
+    with pytest.warns(UserWarning) as record:
+        SuperGLM(
+            family="poisson", features={"band": _WithoutPenalty(base="z", levels=["a", "b", "z"])}
+        ).fit(frame, y)
+    (fallback,) = [w for w in record if "falling back" in str(w.message)]
+    assert fallback.category is UserWarning
+    assert str(fallback.message).startswith("Feature 'band': ")
+    assert Path(fallback.filename).name == "dm_builder.py"

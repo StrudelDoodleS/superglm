@@ -79,10 +79,10 @@ def warn_scop_retired(
     else:
         effect = "it has no effect on this spline, which fits as it did in 0.41.0"
     message = f"{subject}: {effect}. {remedy}"
-    if feature_name is None:
-        warn_caller(message, SCOPRetiredWarning)
+    if saved or feature_name is not None:
+        warn_feature(message, feature_name, SCOPRetiredWarning, stacklevel=None)
     else:
-        warn_feature(message, feature_name, SCOPRetiredWarning)
+        warn_caller(message, SCOPRetiredWarning)
 
 
 def _iter_knots(knots: Any) -> list[Any]:

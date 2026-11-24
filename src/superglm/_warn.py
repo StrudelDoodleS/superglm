@@ -23,14 +23,14 @@ def warn_caller(message: str | Warning, category: type[Warning] = UserWarning) -
 def feature_build_messages(name: str) -> Iterator[None]:
     """Name a feature's errors and report its built-in warnings at the build's caller."""
     pending: list[tuple[str, type[Warning]]] = []
-    previous = getattr(_feature_warnings, "pending", None)
-    _feature_warnings.pending = pending
+    previous = getattr(_feature_warnings, "build", (None, None))
+    _feature_warnings.build = name, pending
     try:
         yield
     except ValueError as err:
         raise ValueError(f"Feature {name!r}: {err}") from err
     finally:
-        _feature_warnings.pending = previous
+        _feature_warnings.build = previous
     for message, category in pending:
         # This generator, contextlib.__exit__, the build, then its caller.
         warnings.warn(message, category, stacklevel=4)
@@ -41,14 +41,21 @@ def warn_feature(
     feature_name: str | None,
     category: type[Warning] = UserWarning,
     *,
-    stacklevel: int = 1,
+    stacklevel: int | None = 1,
 ) -> None:
-    """Keep built-in warnings in their synchronous build on the emitting thread."""
+    """Use the active build's name for delegated warnings on the emitting thread.
+
+    Outside a build, a named warning or a stacklevel of None uses the first
+    caller outside superglm. An unnamed warning with a stacklevel uses that frame.
+    """
+    name, pending = getattr(_feature_warnings, "build", (None, None))
     if feature_name is None:
+        feature_name = name
+    if feature_name is None and stacklevel is not None:
         warnings.warn(message, category, stacklevel=stacklevel + 1)
         return
-    message = f"Feature {feature_name!r}: {message}"
-    pending = getattr(_feature_warnings, "pending", None)
+    if feature_name is not None:
+        message = f"Feature {feature_name!r}: {message}"
     if pending is None:
         warn_caller(message, category)
     else:
