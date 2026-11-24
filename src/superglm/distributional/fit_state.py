@@ -835,6 +835,14 @@ def prepare_distributional_fit_state(
                 if solver_result.convergence_reason == "no_ascent_direction"
                 else ()
             ),
+            *(
+                (
+                    "The coefficient fit stopped with a small score, but a further step improves "
+                    "the penalized likelihood beyond tolerance. The fit has not converged.",
+                )
+                if solver_result.convergence_reason == "material_likelihood_gain"
+                else ()
+            ),
             *shape_disclosures(shape_fit),
             *_curvature_disclosures(family, solver_result, response, likelihood_plan, layout),
             *(

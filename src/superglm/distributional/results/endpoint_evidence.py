@@ -34,6 +34,9 @@ ConvergenceReason = Literal[
     "rank_reduced_at_stop",
     # No damping of the coefficient curvature gave a certified ascent direction.
     "no_ascent_direction",
+    # The score passed in predictor units, but a retained Newton correction
+    # increases the penalized likelihood beyond the stopping tolerance.
+    "material_likelihood_gain",
 ]
 
 

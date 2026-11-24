@@ -1155,8 +1155,11 @@ def test_resolution_limited_decrement_encloses_subnormal_dot_underflow() -> None
     )
 
 
-def test_endpoint_authority_routes_an_ordinary_plateau_through_private_resolution() -> None:
-    """Kills bypassing private policy for an above-tolerance ordinary plateau."""
+@pytest.mark.parametrize("coefficient_scale", [2.0**-22, 2.0**22])
+def test_endpoint_authority_routes_an_ordinary_plateau_through_private_resolution(
+    coefficient_scale: float,
+) -> None:
+    """An above-tolerance plateau must reach private polishing in either coefficient unit."""
     (
         family,
         layout,
@@ -1166,9 +1169,10 @@ def test_endpoint_authority_routes_an_ordinary_plateau_through_private_resolutio
         face,
         initial,
         config,
-    ) = _resolution_limited_face_problem(2.0**22)
-    # Force an ordinary small-step stop before the mean, not a rounding accident.
-    config = replace(config, max_predictor_step=2.0**-50)
+    ) = _resolution_limited_face_problem(coefficient_scale)
+    # At predictor 1 the capped relative move is 2**-51 (two eps).
+    # The remaining score from the 2**-40 perturbation is larger in both units.
+    config = replace(config, max_predictor_step=2.0**-50, tolerance=3.0 * np.finfo(float).eps)
     response = np.array([0.0, 2.0 + 2.0**-40], dtype=np.float64)
     likelihood_plan = family.bind_likelihood(
         response,
@@ -1216,8 +1220,9 @@ def test_resolution_limited_newton_decrement_is_invariant_to_coefficient_rescali
     gains: list[float] = []
     coefficient_ulp_mutant_verdicts: list[bool] = []
 
-    # Powers of two preserve the initial predictor exactly in both coordinates.
-    for coefficient_scale in (1.0, 2.0**54):
+    # Powers of two preserve the initial predictor, including when the raw
+    # coefficient score is below tolerance but its predictor-unit score is not.
+    for coefficient_scale in (1.0, 2.0**54, 2.0**-54):
         (
             family,
             layout,
@@ -1249,8 +1254,8 @@ def test_resolution_limited_newton_decrement_is_invariant_to_coefficient_rescali
         gains.append(predicted_gain)
         coefficient_ulp_mutant_verdicts.append(predicted_gain <= coefficient_ulp)
 
-    np.testing.assert_allclose(gains[1], gains[0], rtol=8.0 * np.finfo(float).eps, atol=0.0)
-    assert coefficient_ulp_mutant_verdicts == [True, False]
+    np.testing.assert_allclose(gains, gains[0], rtol=8.0 * np.finfo(float).eps, atol=0.0)
+    assert coefficient_ulp_mutant_verdicts == [True, False, True]
 
 
 def test_private_score_only_solver_continues_past_ordinary_objective_step_stop() -> None:
