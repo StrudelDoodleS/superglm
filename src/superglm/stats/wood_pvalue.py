@@ -72,6 +72,43 @@ def _orient_boundary(vectors: NDArray, r_factor: NDArray, piv: NDArray, basis: N
                 break
 
 
+def _frame_tied_boundary(
+    evals: NDArray,
+    evecs: NDArray,
+    first: int,
+    stop: int,
+    r_factor: NDArray,
+    piv: NDArray,
+    basis: NDArray,
+) -> None:
+    """Resolve a repeated eigenvalue touched by the cutoff in the declared column order."""
+    tolerance = _RANK_RTOL * evals[0]
+    i = first
+    while i < stop:
+        # Include the whole resolved eigenspace, also across the truncation.
+        tied = np.flatnonzero((np.abs(evals - evals[i]) <= tolerance) & (evals > tolerance))
+        i = int(tied[-1]) + 1
+        if tied.size == 1:
+            continue
+        space = evecs[:, tied]
+        frame: list[NDArray] = []
+        for direction in basis.T:
+            column = r_factor @ direction[piv]
+            candidate = space.T @ column
+            # Reorthogonalized Gram-Schmidt on the projected term columns.
+            # A rotation in 'space' counter-rotates all their coordinates.
+            if frame:
+                axes = np.column_stack(frame)
+                for _ in range(2):
+                    candidate -= axes @ (axes.T @ candidate)
+            size = np.linalg.norm(candidate)
+            if size > _RANK_RTOL * np.linalg.norm(column):
+                frame.append(candidate / size)
+                if len(frame) == tied.size:
+                    evecs[:, tied] = space @ np.column_stack(frame)
+                    break
+
+
 def _pivoted_test_space(X_j: NDArray, V_b_j: NDArray) -> tuple[NDArray, NDArray, NDArray]:
     """Project a smooth into the orthogonal test space used by Wood's test."""
     from scipy.linalg import qr as scipy_qr
@@ -252,8 +289,11 @@ def wood_test_smooth(
         return 0.0, 1.0, 0.0
 
     if frac > 0.0:
-        if term_basis is not None and working_dim >= 2:
-            _orient_boundary(evecs[:, rank_floor - 1 : working_dim], r_factor, piv, term_basis)
+        if term_basis is not None:
+            first = max(rank_floor - 1, 0)
+            _frame_tied_boundary(evals, evecs, first, working_dim, r_factor, piv, term_basis)
+            if working_dim >= 2:
+                _orient_boundary(evecs[:, first:working_dim], r_factor, piv, term_basis)
         pos_map, neg_map, weights, ref_df = _fractional_rank_maps(
             evecs, evals, rank_floor, frac, working_dim, target_rank
         )

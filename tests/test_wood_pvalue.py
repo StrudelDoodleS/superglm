@@ -527,6 +527,44 @@ class TestSatterthwaite:
 
 
 class TestWoodTestSmooth:
+    def test_fractional_interaction_is_invariant_to_a_rotation_of_its_tied_eigenspace(
+        self, monkeypatch
+    ):
+        """The same covariance may return any orthonormal pair for the grid's tied directions."""
+        import superglm.stats.wood_pvalue as wood
+        from superglm import Spline, SuperGLM
+
+        x, z = (a.ravel() for a in np.meshgrid(np.linspace(-1, 1, 12), np.linspace(-1, 1, 12)))
+        y = 2 + 0.4 * x * z + 1.2 * (1.8 * x * z**2 + 0.2 * z * x**2)
+        y += np.random.default_rng(0).normal(size=x.size)
+
+        def interaction_test():
+            model = SuperGLM(
+                family="gaussian",
+                selection_penalty=0,
+                spline_penalty=100,
+                discrete=False,
+                features={name: Spline(kind="cr", n_knots=2) for name in ("x", "z")},
+                interactions=[("x", "z")],
+            ).fit(pd.DataFrame({"x": x, "z": z}), y)
+            row = next(r for r in model.summary()._coef_rows if r.name == "x:z")
+            return row.wald_chi2, row.wald_p
+
+        original = wood._ordered_eigensystem
+
+        def rotate(matrix):
+            values, vectors = original(matrix)
+            if len(values) == 9:
+                assert values[1] == pytest.approx(values[2], rel=1e-12)
+                angle = 0.7
+                c, s = np.cos(angle), np.sin(angle)
+                vectors[:, 1:3] = vectors[:, 1:3] @ np.array([[c, -s], [s, c]])
+            return values, vectors
+
+        reference = interaction_test()
+        monkeypatch.setattr(wood, "_ordered_eigensystem", rotate)
+        np.testing.assert_allclose(interaction_test(), reference, rtol=1e-11)
+
     def test_rotation_when_one_boundary_axis_is_orthogonal_to_the_first_column(self):
         """mgcv's statistic on diag(4, 1) in the declared identity basis."""
         beta = np.array([2.0, 1.0])
