@@ -68,7 +68,7 @@ from superglm.distributional.solver.derivatives import (
     transform_natural_derivatives,
     transform_natural_information,
 )
-from superglm.distributional.telemetry import CurvatureTelemetry
+from superglm.distributional.telemetry import AcceptedCurvatureKind, CurvatureTelemetry
 from superglm.distributional.timing import FitPhaseRecorder, measure_phase
 from superglm.distributional.walls import PRESSED_STEP, outward_step, wall_rows
 from superglm.distributional.weights import (
@@ -1779,7 +1779,7 @@ def _discarded_newton_direction(
     state: _AcceptedState,
     discarded: NDArray,
     slopes: NDArray,
-    source: chunking.CurvatureSource,
+    source: AcceptedCurvatureKind,
     phase_recorder: FitPhaseRecorder | None,
 ) -> NDArray[np.float64]:
     """The Newton direction of the discarded subspace, in its basis ``N``.
@@ -1795,6 +1795,8 @@ def _discarded_newton_direction(
     Curvature below ``k eps`` of the subspace's largest is flat and gets no
     step, as does a subspace whose row curvature cannot be evaluated.
     """
+    if source not in ("observed", "fisher", "nearest_semidefinite"):
+        return np.zeros_like(slopes)
     try:
         with measure_phase(phase_recorder, "curvature_gradient_assembly"):
             if context.chunk_size is not None:
@@ -1814,11 +1816,11 @@ def _discarded_newton_direction(
                     raise RuntimeError("dense solver context is missing predictor matrices")
                 # A reused endpoint carries no row derivatives.
                 rows = (
-                    _evaluate_state_unmeasured(context, state.coefficients)
+                    _evaluate_state(context, state.coefficients, phase_recorder=phase_recorder)
                     if state.derivatives is None
                     else state
                 )
-                if rows is None:
+                if rows is None or rows.derivatives is None:
                     return np.zeros_like(slopes)
                 moves = np.stack(
                     [
