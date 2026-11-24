@@ -35,6 +35,7 @@ _EXPORTS = {
         "TwoPieceNormalLSS",
     ),
     "Predictor": ("superglm.distributional.predictor", "Predictor"),
+    "SplitSplice": ("superglm.distributional.splice", "SplitSplice"),
     "SuperLSSTrainingTelemetry": (
         "superglm.distributional.api",
         "SuperLSSTrainingTelemetry",
