@@ -82,6 +82,11 @@ _LAZY_PACKAGES = (
     "superglm.solvers.irls_direct",
     "superglm.distributional.solver",
     "superglm._group_matrix",
+    "superglm.penalties",
+    "superglm.stats",
+    "superglm.profiling",
+    "superglm.plotting",
+    "superglm.export",
 )
 _LIBRARIES = (
     "numpy",
@@ -362,6 +367,223 @@ def test_cold_submodule_imports_from_several_threads(paths):
         timeout=60,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+_PACKAGE_BODY_OVERLAP = """
+import builtins
+import sys
+import threading
+from importlib import import_module
+
+import _frozen_importlib
+
+import superglm
+
+package, held, waiting = sys.argv[1:]
+assert package not in sys.modules
+body_started, peer_waits, done = threading.Event(), threading.Event(), {}
+holder = []
+original_import, original_acquire = builtins.__import__, _frozen_importlib._ModuleLock.acquire
+
+def hold_package_body(name, globals=None, locals=None, fromlist=(), level=0):
+    if (globals or {}).get("__name__") == package and not body_started.is_set():
+        # The package's first import: its thread holds the lock of the child it was asked for.
+        body_started.set()
+        assert peer_waits.wait(60), "the peer never waited on a lock this thread holds"
+    return original_import(name, globals, locals, fromlist, level)
+
+def note_waits(self):
+    if holder and self.owner == holder[0] and threading.current_thread().name == "peer":
+        peer_waits.set()
+    return original_acquire(self)
+
+def run(module, after=None):
+    if after is not None:
+        assert after.wait(60), "the package body never ran"
+    else:
+        holder.append(threading.get_ident())
+    try:
+        import_module(module)
+        done[module] = "ok"
+    except BaseException as error:
+        done[module] = f"{type(error).__name__}: {error}"
+    finally:
+        body_started.set()
+        peer_waits.set()
+
+builtins.__import__ = hold_package_body
+_frozen_importlib._ModuleLock.acquire = note_waits
+threads = [
+    threading.Thread(target=run, args=(held,), name="holder"),
+    threading.Thread(target=run, args=(waiting, body_started), name="peer"),
+]
+for thread in threads:
+    thread.start()
+for thread in threads:
+    thread.join(120)
+builtins.__import__, _frozen_importlib._ModuleLock.acquire = original_import, original_acquire
+print("hung" if any(t.is_alive() for t in threads) else done, flush=True)
+sys.stdout.flush()
+import os
+os._exit(0)
+"""
+
+
+@pytest.mark.parametrize(
+    ("package", "held", "waiting"),
+    [
+        ("penalties", "base", "ridge"),
+        ("stats", "davies", "wood_pvalue"),
+        ("profiling", "_scalar", "nb"),
+        ("plotting", "common", "comparison"),
+        ("export", "_ppform", "rating_tables"),
+    ],
+    ids=["penalties", "stats", "profiling", "plotting", "export"],
+)
+def test_a_package_whose_child_is_imported_cold_never_waits_on_a_sibling(package, held, waiting):
+    """A cold import of ``package.held`` holds that child's lock while the package body runs.
+
+    The interleaving is forced, not left to chance: the holder thread stops at the package
+    body's first import until the peer, importing ``package.waiting`` (whose body imports
+    ``held``), waits on the holder's lock. A package body that imports its children then asks
+    for ``waiting``, so CPython's import locks find the cycle and fail one thread with
+    ``_DeadlockError`` or a half-built module, on every supported Python. Since CPython 3.13.16
+    and 3.14 a thread importing a child also waits for a parent that is still running
+    (python/cpython#160045), so any package body that imports its children can close such a
+    cycle. A body that imports no child finishes, the holder runs ``held``, and the peer goes
+    on. Mutation check: any of these packages' ``__init__`` importing its children again fails
+    its case.
+    """
+    package = f"superglm.{package}"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _PACKAGE_BODY_OVERLAP,
+            package,
+            f"{package}.{held}",
+            f"{package}.{waiting}",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    outcome = completed.stdout.strip()
+    assert outcome != "hung", completed.stderr
+    expected = {f"{package}.{held}": "ok", f"{package}.{waiting}": "ok"}
+    assert ast.literal_eval(outcome) == expected, (outcome, completed.stderr)
+
+
+_LOCK_WAITS = """
+import builtins
+import importlib
+import importlib.util
+import json
+import sys
+
+waits = {}
+
+def body():
+    frame = sys._getframe(2)
+    while frame is not None and frame.f_code.co_name != "<module>":
+        frame = frame.f_back
+    return frame and frame.f_globals.get("__name__", "")
+
+def note(importer, module):
+    if not (importer or "").startswith("superglm") or not module.startswith("superglm"):
+        return
+    names = module.split(".")
+    chain = [".".join(names[: i + 1]) for i in range(len(names))]
+    waits.setdefault(importer, set()).add(module)
+    for child, parent in zip(chain[:0:-1], chain[-2::-1]):
+        waits.setdefault(child, set()).add(parent)  # a cold parent runs under the child's lock
+
+original_import, original_import_module = builtins.__import__, importlib.import_module
+
+def recording_import(name, globals=None, locals=None, fromlist=(), level=0):
+    importer = body()
+    value = original_import(name, globals, locals, fromlist, level)
+    module = importlib.util.resolve_name("." * level + name, (globals or {}).get("__package__")) if level else name
+    note(importer, module)
+    package = sys.modules.get(module)
+    owners = {}
+    if module.startswith("superglm"):
+        owners = {n: m for m, ns in getattr(package, "_LAZY_EXPORTS", {}).items() for n in ns}
+    for item in fromlist or ():
+        if f"{module}.{item}" in sys.modules:
+            note(importer, f"{module}.{item}")
+        if item in owners:  # a first read of a lazy name imports its module
+            note(importer, owners[item])
+    return value
+
+def recording_import_module(name, package=None):
+    importer = body()
+    value = original_import_module(name, package)
+    note(importer, value.__name__)
+    return value
+
+builtins.__import__, importlib.import_module = recording_import, recording_import_module
+import superglm
+
+for module in [*superglm._LAZY_EXPORTS, *sys.argv[1:]]:
+    original_import_module(module)
+print(json.dumps({k: sorted(v - {k}) for k, v in waits.items()}))
+"""
+
+
+def _cycles(edges: dict[str, list[str]]) -> list[list[str]]:
+    """The strongly connected components of more than one node (Tarjan, 1972)."""
+    index: dict[str, int] = {}
+    low: dict[str, int] = {}
+    stack: list[str] = []
+    found: list[list[str]] = []
+
+    def visit(node: str) -> None:
+        index[node] = low[node] = len(index)
+        stack.append(node)
+        for nxt in edges.get(node, ()):
+            if nxt not in index:
+                visit(nxt)
+                low[node] = min(low[node], low[nxt])
+            elif nxt in stack:
+                low[node] = min(low[node], index[nxt])
+        if low[node] == index[node]:
+            component = []
+            while not component or component[-1] != node:
+                component.append(stack.pop())
+            if len(component) > 1:
+                found.append(sorted(component))
+
+    for node in sorted(edges):
+        if node not in index:
+            visit(node)
+    return sorted(found)
+
+
+def test_no_two_module_bodies_a_cold_import_runs_can_wait_on_each_other():
+    """The locks a module body can wait on form no cycle, so no order of threads deadlocks.
+
+    A body waits on the lock of each module it imports, of each lazy name's module it first
+    reads, and, when it imports ``a.b`` cold, the lock of ``a`` while it holds ``a.b``'s: a
+    package body that imports its children closes a cycle with any child imported by path.
+    Two threads on a cycle are what CPython breaks with ``_DeadlockError`` or a half-built
+    module. Recorded from every body that reading each root export, and each module the
+    six-submodule test imports, runs. The root's own cycle with ``superglm._lazy`` and
+    ``superglm._numba_cache`` stays: its body must import the loader, and it closes only for a
+    thread whose first import is one of those private modules by path. Mutation check: any
+    ``penalties``, ``stats``, ``profiling``, ``plotting`` or ``export`` body importing its
+    children again fails this.
+    """
+    six = ("terms", "model.api", "inference._term_covariance", "inference._term_ops")
+    six += ("features.categorical", "features.interaction")
+    completed = subprocess.run(
+        [sys.executable, "-c", _LOCK_WAITS, *(f"superglm.{path}" for path in six)],
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    cycles = _cycles(json.loads(completed.stdout))
+    assert cycles == [["superglm", "superglm._lazy", "superglm._numba_cache"]], cycles
 
 
 _DEMO_INIT = (
