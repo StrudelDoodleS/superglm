@@ -541,6 +541,14 @@ def newton_step_settled(step_left: float, taken_step: float, *, bar: float) -> b
     at a rate ``r`` the two steps read for free. Steps that keep one sign then
     leave a distance of about ``step_left / (1 - r)``, and a step that did not
     contract says nothing about the distance.
+
+    ``taken_step`` is the Newton step proposed, not the fraction of it a line
+    search accepted: ``r`` is the simplified Newton correction over the
+    ordinary one (Deuflhard, *Newton Methods for Nonlinear Problems*, 2011,
+    ch. 3, the natural monotonicity test). A fraction ``a`` of an exact step
+    then reads as ``r = 1 - a``, a slower contraction that overstates the
+    distance left by ``1 / a``; against the fraction itself it would read as
+    none.
     """
     if step_left >= taken_step:
         return False

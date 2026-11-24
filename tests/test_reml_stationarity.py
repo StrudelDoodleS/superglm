@@ -179,6 +179,59 @@ def test_a_contracting_scalar_step_rechecks_the_curvature_of_held_terms(monkeypa
     assert not any(model._reml_profile["reml_freeze_decision"]["frozen"])
 
 
+@pytest.mark.parametrize(
+    "half_step", [pytest.param("halved", marks=pytest.mark.pins_behaviour), "tail-trial"]
+)
+def test_a_step_stop_reads_contraction_against_the_newton_step_proposed(monkeypatch, half_step):
+    """Pin the contraction read after a halved step; an accepted tail trial gives none.
+
+    Newton proposes 4e-5 on every term and half of it is taken, which leaves
+    2e-5 on the same Hessian. Against the proposal that is a contraction of
+    1/2 and a distance left of 4e-5, under the step bar: the simplified Newton
+    correction over the ordinary one (Deuflhard 2011, ch. 3, the natural
+    monotonicity test). Against the half taken it would read as no
+    contraction. Where the half was a tail trial's, the held Hessian's step
+    was not the one taken and confirms nothing.
+    """
+    from superglm.reml import direct
+
+    from .test_reml_tol_determination import _compound_test_never_accepts, _fit_informative_fixture
+
+    _compound_test_never_accepts(monkeypatch)
+    reads = trials = 0
+    gradient = direct.reml_direct_gradient
+    objective = direct.reml_laml_objective
+
+    def scores(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        return np.full_like(gradient(*args, **kwargs), -4e-5 if reads == 1 else -2e-5)
+
+    def downhill(*args, **kwargs):
+        nonlocal trials
+        ev = objective(*args, **kwargs)
+        trials += reads == 1
+        if half_step == "halved" and reads == 1 and trials == 1:
+            return replace(ev, value=np.inf)
+        return replace(ev, value=ev.value - 100.0 * reads)
+
+    monkeypatch.setattr(direct, "reml_direct_gradient", scores)
+    monkeypatch.setattr(direct, "reml_direct_hessian", lambda *a, **kw: np.eye(len(kw["gradient"])))
+    monkeypatch.setattr(direct, "reml_w_correction", lambda *a, **kw: None)
+    monkeypatch.setattr(direct, "reml_laml_objective", downhill)
+    if half_step == "tail-trial":
+        monkeypatch.setattr(direct, "flat_tail_trial", lambda delta, *a, **kw: 0.5 * delta)
+    model = _fit_informative_fixture(discrete=False, max_reml_iter=2)
+    stop = model._reml_profile.get("reml_newton_step_stop")
+    if half_step == "tail-trial":
+        assert stop is None
+        assert not model.reml_diagnostics()["converged"]
+    else:
+        assert model.reml_diagnostics()["termination_reason"] == "newton_step_tolerance"
+        assert stop["taken_step"] == pytest.approx(4e-5)
+        assert stop["step_left"] == pytest.approx(2e-5)
+
+
 @pytest.mark.parametrize("unavailable", [False, True])
 def test_stationary_finish_publishes_a_gradient_at_the_returned_fit(monkeypatch, unavailable):
     from superglm.distributional.smoothing import newton

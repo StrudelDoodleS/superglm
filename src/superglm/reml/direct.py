@@ -888,7 +888,7 @@ def optimize_direct_reml(
         print(f"  REML bootstrap: lambdas=[{boot_lam_str}]")
 
     step_bar = newton_step_stop_bar(_tol)
-    held_newton_model: tuple[NDArray, NDArray] | None = None
+    held_newton_model: tuple[NDArray, NDArray, float] | None = None
     held_cross: NDArray | None = None
     last_accepted_step = 0.0
     last_accepted_idx: NDArray | None = None
@@ -1363,7 +1363,7 @@ def optimize_direct_reml(
             """
             nonlocal held_cross
             assert held_newton_model is not None
-            hessian, index = held_newton_model
+            hessian, index, _ = held_newton_model
             if table_route:
                 try:
                     held_cross = stop_cross_terms()
@@ -1373,15 +1373,16 @@ def optimize_direct_reml(
                 hessian = hessian + held_cross[np.ix_(index, index)]
             return newton_step_left(hessian, grad[index])
 
-        def record_step_stop(step_left: float, *, step_taken: bool) -> None:
+        def record_step_stop(step_left: float, *, taken_step: float | None) -> None:
+            """``taken_step`` is the Newton step proposed and then taken, None where none was."""
             if profile is not None:
                 profile["reml_newton_step_stop"] = {
                     "iter": int(n_iter),
                     "step_left": step_left,
-                    "taken_step": last_accepted_step if step_taken else None,
-                    "previous_step": last_accepted_step,
+                    "taken_step": taken_step,
+                    "previous_step": last_accepted_step if taken_step is None else taken_step,
                     "bar": step_bar,
-                    "step_taken": step_taken,
+                    "step_taken": taken_step is not None,
                 }
 
         revalidated_hess = None
@@ -1430,7 +1431,9 @@ def optimize_direct_reml(
             and stop_criterion_frozen is not None
             and mode_certified
             and not np.any(stop_grad[stop_criterion_frozen])
-            and newton_step_settled(step_left := held_step_left(), last_accepted_step, bar=step_bar)
+            and newton_step_settled(
+                step_left := held_step_left(), held_newton_model[2], bar=step_bar
+            )
         ):
             # The old Hessian confirms contraction on its free block. Check
             # whether a held term has regained curvature at this *new* fit.
@@ -1463,7 +1466,7 @@ def optimize_direct_reml(
                         estimated_mask=estimated_mask,
                     )
             if same_terms:
-                record_step_stop(step_left, step_taken=True)
+                record_step_stop(step_left, taken_step=held_newton_model[2])
                 converged = True
                 termination_reason = "newton_step_tolerance"
                 break
@@ -1601,7 +1604,7 @@ def optimize_direct_reml(
         ):
             held_hessian = hess[np.ix_(newton_idx, newton_idx)]
             if newton_step_resolved(held_hessian, grad[newton_idx], bar=step_bar):
-                held_newton_model = (held_hessian, newton_idx)
+                held_newton_model = (held_hessian, newton_idx, max_delta)
         if exact_hessian_available:
             contraction = (
                 proj_grad_norm / previous_gradient_norm if previous_gradient_norm > 0.0 else np.inf
@@ -2067,6 +2070,8 @@ def optimize_direct_reml(
             if trial_accepted:
                 if taking_tail:
                     allow_tail_trial = True
+                    # The held Hessian's step was not the one taken.
+                    held_newton_model = None
                 if trial_mode_residual is not None:
                     _accepted_observed_mode_residual_max = max(
                         _accepted_observed_mode_residual_max,
@@ -2160,7 +2165,7 @@ def optimize_direct_reml(
                 # or rejected, add none either way, so the point stands.
                 step_left = held_step_left()
                 if newton_step_settled(step_left, last_accepted_step, bar=step_bar):
-                    record_step_stop(step_left, step_taken=False)
+                    record_step_stop(step_left, taken_step=None)
                     termination_reason = "newton_step_tolerance"
             if profile is not None:
                 # The dead-search exit's evidence, as the discrete engine
