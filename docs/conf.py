@@ -141,6 +141,8 @@ nitpick_ignore_regex = [
     # Private row records behind ``ModelSummary``; private by design, so they
     # get no page and no cross-reference target.
     ("py:class", r"_(CoefRow|BasisDetailRow)"),
+    # SplitSplice's component tuple and prediction offsets are internal types.
+    ("py:class", r"superglm\.distributional\.splice\.(_Components|_Offsets)"),
     # The repairers' annotations name the certificate unqualified as well.
     ("py:class", r"ShapeConstraintCertificate"),
     # Display helper for summary levels; not exported, so no page.

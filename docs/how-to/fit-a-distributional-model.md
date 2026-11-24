@@ -676,15 +676,45 @@ family that is wrong just below `u` misstates it, and the error grows as `u`
 rises. If it is off, model `P(Y > u | x)` separately, which is the split
 method.
 
-*Split method.* Share out the claims rather than their amounts. The body sees
-only the claims at or below `u` and is fitted as truncated there, a binary GLM
-gives `P(Y > u | x)`, and the tail is as above:
+*Split method.* Pass the original claim amounts to `SplitSplice`. It puts
+complete claims at or below `u` in a body fitted with upper truncation at `u`,
+fits a binary GLM for `P(Y > u | x)`, and subtracts `u` from larger claims
+before fitting the tail.
 
 ```python
-body = SuperLSS(
-    body_family, body_family.mean(s("DrivAge", kind="cr", k=8)), body_family.scale()
-).fit_reml(claims.loc[~large], claims.loc[~large, "loss"], truncation=(None, u))
+from joblib import dump, load
+from superglm import SplitSplice, SuperGLM
+
+splice = SplitSplice.fit(
+    claims,
+    claims["loss"],
+    threshold=u,
+    body=SuperLSS(
+        body_family, body_family.mean(s("DrivAge", kind="cr", k=8)), body_family.scale()
+    ),
+    exceedance=SuperGLM(family="binomial", terms=[s("DrivAge", kind="cr", k=8)]),
+    tail=SuperLSS(
+        tail_family, tail_family.scale(s("DrivAge", kind="cr", k=8)), tail_family.shape()
+    ),
+    reml=True,
+)
+
+q = splice.predict_survival(holdout_df, u)
+cdf_at_u = splice.predict_cdf(holdout_df, u)
+q99 = splice.predict_quantile(holdout_df, 0.99)
+mean = splice.predict(holdout_df)
+cost = splice.predict_layer(holdout_df, attachment=10_000, limit=10_000)
+
+dump(splice, "severity-splice.joblib")
+restored = load("severity-splice.joblib")
 ```
+
+The split accepts `GammaLS` or `LogNormalLS` for the body and
+`GeneralizedParetoLSS` for the tail. For integer replication counts, configure
+all three models with `weight_semantics="frequency"` and pass `sample_weight=`.
+To fit and save the parts separately, call `SplitSplice.fit_components` with the
+same arguments. `SplitSplice(body, exceedance, tail)` assembles the three fits
+from that split and takes its threshold from their saved fit evidence.
 
 In either method the pieces share no parameters, so fitting each one
 separately, with its own smoothing selection, is the maximum-likelihood fit of
@@ -700,8 +730,10 @@ matter here: on 20,000 Burr XII claims with a heavy tail, censored at their
 85% point, a log-normal body put `P(Y > u)` 11% too high and a generalized
 gamma body 2.6% too low.
 
-Where a policy limit caps a large claim, record its excess at `limit - u` and
-pass `censored=` for the claims settled at their limit when fitting the tail.
+Where a policy limit caps a large claim, pass the recorded limit in `y` and flag
+the row with `censored=True` in the input to `SplitSplice.fit`. The limit must
+be at or above `u` so exceedance membership is known. For a separate tail fit,
+pass the excess `limit - u` and the censoring flag on that row.
 
 The fitted body and tail describe the uncut laws. Joining them:
 
