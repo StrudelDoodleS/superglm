@@ -45,6 +45,7 @@ from superglm.group_matrix import (
     FactorSmoothGroupMatrix,
     RandomEffectGroupMatrix,
     SparseSSPGroupMatrix,
+    penalty_coordinate_map,
 )
 from superglm.links import IdentityLink
 from superglm.model.reml_setup import collect_reml_groups
@@ -682,7 +683,7 @@ def _certify_structural_penalty_logdet(
 
     # eigvals_omega precedes omega_ssp canonicalization in production. Replay
     # that exact intervening route before applying a numerical residual bound.
-    transform = ssp_penalty_matrix(group_matrix.R_inv, raw_omega)
+    transform = ssp_penalty_matrix(penalty_coordinate_map(group_matrix), raw_omega)
     replay_values, replay_vectors = np.linalg.eigh(transform)
     retained_values = replay_values[-declared_rank:]
     retained_vectors = replay_vectors[:, -declared_rank:]

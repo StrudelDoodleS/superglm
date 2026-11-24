@@ -44,7 +44,7 @@ from superglm.distributional.smoothing.derivatives import LamlDerivativeError
 from superglm.distributional.smoothing.penalty_face import build_penalty_face
 from superglm.distributional.solver import fit_dense_fixed_lambda
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
-from superglm.features import RandomEffect
+from superglm.features import CubicRegressionSpline, RandomEffect
 
 
 def _spline_face():
@@ -196,8 +196,19 @@ def test_endpoint_revalidation_records_material_state_refusal(
     assert terminal_event.endpoint_assessment_failure_reason == "endpoint_state_changed"
 
 
+class _DataCoordinateSpline(CubicRegressionSpline):
+    """A subclass states no penalty null coordinates, so its block keeps the data's coordinates."""
+
+
 def _capped_spline_problem():
-    """A Gaussian location spline with its smoothing parameter at the cap."""
+    """A Gaussian location spline with its smoothing parameter at the cap.
+
+    The spline keeps the data's coordinates (``_DataCoordinateSpline``), where the
+    capped penalty meets coefficients of order one and the rounding of their
+    product is far above the tolerance. Held in its penalty's null coordinates,
+    superglm's own spline has its penalised coefficients near zero at a cap, and
+    that rounding with them.
+    """
     family = GaussianLS()
     n = 40
     x = np.linspace(0.0, 1.0, n)
@@ -212,7 +223,7 @@ def _capped_spline_problem():
             weights,
             family.parameters,
             (
-                Predictor("location", {"x": Spline(kind="cr", n_knots=8)}, intercept=True),
+                Predictor("location", {"x": _DataCoordinateSpline(n_knots=8)}, intercept=True),
                 Predictor("scale", {}, intercept=True),
             ),
         )
