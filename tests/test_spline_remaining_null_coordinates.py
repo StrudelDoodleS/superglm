@@ -107,18 +107,25 @@ def test_tensor_keeps_the_bilinear_surface_under_both_margin_penalties(decompose
 
 
 @pytest.mark.parametrize(
-    "x", [np.full(50, 0.5), np.linspace(0.0, 0.3, 50)], ids=["one-value", "unreached-basis"]
+    ("kind", "boundary", "x"),
+    [
+        ("ps", (0.0, 1.0), np.full(50, 0.5)),
+        ("ps", (0.0, 1.0), np.linspace(0.0, 0.3, 50)),
+        ("bs", None, np.full(50, 0.5)),
+    ],
+    ids=["one-value", "unreached-basis", "zero-penalty"],
 )
-def test_tensor_margin_its_rows_cannot_identify_keeps_the_formed_penalty(x):
+def test_tensor_margin_its_rows_cannot_identify_keeps_the_formed_penalty(kind, boundary, x):
     """A margin states its penalty's null coordinates only where its rows identify them.
 
     On one value the centred basis is zero, and with a boundary past the rows a
     basis function has no row: an exactly unpenalised tensor coordinate would
     then be fitted to the rounding of its column (a coefficient of 4.3e14 where
     one kernel left 1e-18 there). Such a margin keeps the data's coordinates and
-    the formed penalty, as a main effect does.
+    the formed penalty, as a main effect does, and so does a ``bs`` margin on
+    one value, whose penalty is zero.
     """
-    spec = Spline(kind="ps", n_knots=3, boundary=(0.0, 1.0))
+    spec = Spline(kind=kind, n_knots=3, boundary=boundary)
     spec.build(x)
     info = spec.tensor_marginal_ingredients(x)
     assert info.penalty_root is None and info.penalty_nullity is None
