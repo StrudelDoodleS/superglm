@@ -43,6 +43,11 @@ from superglm.solvers.centered_system import (
     grouped_weighted_factor,
     two_pass_centred_gram,
 )
+from superglm.solvers.clip_rows import (
+    count_held_against,
+    declares_tail_rows,
+    likelihood_working_rows,
+)
 from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
 from superglm.solvers.irls_state import (
     _evaluate_irls_state,
@@ -196,7 +201,10 @@ class REMLGeometrySummary:
 # reaches diagnostics and the trace, never a result.  ``score_stagnated`` ends a
 # solve whose certificate score stopped contracting short of its bar (published
 # as not converged, never refused).  ``link_domain_infeasible`` means the
-# returned state has a row outside the link's domain.  The fitted-state
+# returned state has a row outside the link's domain.  ``clip_held`` means the
+# returned state holds a binomial row against its outcome at the working clip,
+# under a link with no closed-form tail rows (``solvers.clip_rows``): the clip,
+# not the likelihood, decided where the fit stopped.  The fitted-state
 # invalidation marker, stamped later by ``setattr``, is deliberately not here.
 type TerminationReason = Literal[
     "constraint_infeasible",
@@ -209,6 +217,7 @@ type TerminationReason = Literal[
     "score_stagnated",
     "mean_space_boundary",
     "link_domain_infeasible",
+    "clip_held",
 ]
 
 # The same vocabulary at runtime, for consumers that enumerate the reasons
@@ -336,6 +345,14 @@ class PIRLSResult:
     # stationary, so a criterion read at it uses the model's own likelihood
     # and curvature.
     mean_space_true_mode: bool = False
+    # Which rows the returned state read where the working clip holds a
+    # binomial row (``clip_rows.ClipRows``): under ``"likelihood"`` its
+    # deviance and working rows are the likelihood's own on every held row, so
+    # a criterion read at it takes its likelihood term from ``deviance``.
+    clip_rows: str = "working"
+    # Positive-weight rows the returned state holds against their outcome;
+    # nonzero only with ``termination_reason == "clip_held"``.
+    clip_held_rows: int = 0
     # Rows moved by a direction the factorization truncated, each judged
     # (``mode_score.truncated_direction_ratio``): weakly identified, beyond
     # float64's resolution, rising towards the boundary, or unresolved by the
@@ -1391,6 +1408,7 @@ def _fit_pirls_inner(
     # added to ``TerminationReason`` before it can leave the loop.
     termination_reason: TerminationReason
     boundary_rows = 0
+    clip_held_rows = 0
     for outer in range(max_iter_outer):
         t_outer_start = time.perf_counter()
 
@@ -1722,6 +1740,15 @@ def _fit_pirls_inner(
         if iteration_converged:
             boundary_rows = mean_space_boundary_rows(family, link, retained.eta_unclipped, weights)
             iteration_converged = not boundary_rows
+        # Nor is one holding a binomial row against its outcome at the working
+        # clip: this engine reads that row at the clip, where its score is not
+        # the likelihood's, so the stop is the clip's (``solvers.clip_rows``).
+        clip_held_rows = 0
+        if iteration_converged:
+            clip_held_rows = count_held_against(
+                family, link, y, weights, retained.eta_unclipped, retained.eta, retained.mu
+            )
+            iteration_converged = not clip_held_rows
 
         if step_rejected:
             termination_reason = "step_rejected"
@@ -1734,6 +1761,8 @@ def _fit_pirls_inner(
                 "the penalized maximum is constrained, fit is not converged.",
                 boundary_rows,
             )
+        elif clip_held_rows:
+            termination_reason = "clip_held"
         elif iteration_converged:
             termination_reason = "converged"
         elif outer + 1 == max_iter_outer:
@@ -1884,7 +1913,7 @@ def _fit_pirls_inner(
             logger.warning(f"PIRLS non-finite deviance at outer={outer + 1}: dev={dev:.2e}")
             break
 
-        if boundary_rows:
+        if boundary_rows or clip_held_rows:
             break
         if iteration_converged:
             converged = True
@@ -2007,6 +2036,20 @@ def _fit_pirls_inner(
     )
     W_final = final_working_rows.weights
     z_final = final_working_rows.response
+    if declares_tail_rows(family, link):
+        # the published rows read the likelihood's information where the clip holds a row
+        W_final, z_final = likelihood_working_rows(
+            family,
+            link,
+            y,
+            weights,
+            eta_new_unclipped,
+            eta_new,
+            mu_new,
+            W_final,
+            z_final,
+            observed=False,
+        )
     centered = build_centered_system(
         dm=selected_dm,
         W=W_final,
@@ -2162,6 +2205,7 @@ def _fit_pirls_inner(
         centred_intercept=None if state_center is None else retained.centred_intercept,
         state_center=None if state_center is None else state_center.copy(),
         mean_space_boundary_rows=boundary_rows,
+        clip_held_rows=clip_held_rows if termination_reason == "clip_held" else 0,
         separation_message=separation_message,
         separation_groups=separation_groups,
     )

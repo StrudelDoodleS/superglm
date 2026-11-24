@@ -125,9 +125,11 @@ def build_reporting_support_state(
     if not structured_indices:
         return None
 
+    from superglm.solvers.clip_rows import likelihood_information
     from superglm.solvers.mode_score import linear_predictor
 
-    full_eta = stabilize_eta(linear_predictor(dm, result, offset), link)
+    eta_unclipped = linear_predictor(dm, result, offset)
+    full_eta = stabilize_eta(eta_unclipped, link)
     mu = clip_mu(link.inverse(full_eta), distribution)
     working_weights = fisher_working_weights(
         distribution=distribution,
@@ -135,6 +137,10 @@ def build_reporting_support_state(
         mu=mu,
         eta=full_eta,
         sample_weight=sample_weight,
+    )
+    # a binomial row the working clip holds reads the likelihood's information
+    working_weights = likelihood_information(
+        distribution, link, eta_unclipped, full_eta, mu, sample_weight, working_weights
     )
     supplied = information_by_group_index or {}
     totals: dict[str, StructuredLevelSupport | FactorSmoothLevelSupport] = {}

@@ -145,6 +145,7 @@ def run_fixed_monotone_reml(
         debug_context={"phase": "fixed_constraint"},
         separation="record",
         weight_semantics=model_weight_semantics(model),
+        _published=True,
     )
     # A violated shape row prevents publication. A feasible mode short of its
     # KKT certificate is installed with its coefficient convergence warning.

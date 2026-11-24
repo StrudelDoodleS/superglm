@@ -96,6 +96,7 @@ from superglm.solvers.centered_system import (
     _FisherDataReuse,
     _InitialDataReuse,
 )
+from superglm.solvers.clip_rows import ClipRows
 from superglm.solvers.dispersion import lazy_likelihood_size
 from superglm.solvers.hessian_factor import DenseHessianFactor, as_hessian_factor
 from superglm.solvers.irls_direct import StructuredSolverError, fit_irls_direct
@@ -519,6 +520,9 @@ def optimize_direct_reml(
     # Once a Gamma/log solve leaves Fisher scoring for Newton
     # (``fit_irls_direct``), later solves start on Newton.
     newton_latch = [False]
+    # Once a binomial solve ends on a row the working clip holds against its
+    # outcome, later solves read the likelihood's rows there (``solvers.clip_rows``).
+    clip_rows = ClipRows()
 
     # === Pre-solve: cached-W performance iteration on this same design ===
     # The cheap cached-W loop covers the far-from-optimum phase; its fixed
@@ -681,6 +685,7 @@ def optimize_direct_reml(
             _raw_moment_policy=raw_moment_policy,
             _fisher_data_reuse=fisher_data_reuse,
             _newton_latch=newton_latch,
+            _clip_rows=clip_rows,
             _mode_bar=mode_bar,
         )
         _t_pirls += _time.perf_counter() - _t0
@@ -846,6 +851,7 @@ def optimize_direct_reml(
             _raw_moment_policy=raw_moment_policy,
             _fisher_data_reuse=fisher_data_reuse,
             _newton_latch=newton_latch,
+            _clip_rows=clip_rows,
             _laplace_excluded=tuple(int(index) for index in identified.weak),
             _mode_bar=mode_bar,
             cache_out=fit_cache,
@@ -1705,6 +1711,7 @@ def optimize_direct_reml(
                     _raw_moment_policy=raw_moment_policy,
                     _fisher_data_reuse=fisher_data_reuse,
                     _newton_latch=newton_latch,
+                    _clip_rows=clip_rows,
                     _laplace_excluded=tuple(int(index) for index in identified.weak),
                     _mode_bar=mode_bar,
                     cache_out=trial_cache,

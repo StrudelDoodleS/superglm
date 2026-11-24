@@ -425,6 +425,11 @@ def reml_laml_objective(
     if isinstance(distribution, Poisson) and (XtWX is not None or retained_geometry_complete):
         # Up to additive constants, Poisson negative log-likelihood is deviance / 2.
         nll = 0.5 * result.deviance
+    elif getattr(result, "clip_rows", "working") == "likelihood":
+        # A binomial state read on the likelihood's own rows where the working
+        # clip holds one (``solvers.clip_rows``): its deviance is ``-2 log L``
+        # at the unclipped predictor, which the clipped mean below is not.
+        nll = 0.5 * result.deviance
     else:
         if mu is None:
             eta = stabilize_eta(linear_predictor(dm, result, offset_arr), link)

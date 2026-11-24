@@ -58,8 +58,10 @@ from superglm.solvers.centered_system import (
     refresh_centered_rhs,
     serves_initial_data,
 )
+from superglm.solvers.clip_rows import ClipRows, clip_can_hold_against
 from superglm.solvers.constrained_qp import _feasibility_slack
 from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
+from superglm.solvers.irls_direct._clip import _IRLSDirectClipOverlay
 from superglm.solvers.irls_direct._convergence import _IRLSDirectConvergence
 from superglm.solvers.irls_direct._dense import _IRLSDirectDenseStep
 from superglm.solvers.irls_direct._finalise import _IRLSDirectFinalGeometry
@@ -237,6 +239,8 @@ def fit_irls_direct(
     _compensate_centred_intercept: bool = True,
     _centred_init: tuple[float, NDArray] | None = None,
     _defer_rank_info: list[Callable[[], RankInfo]] | None = None,
+    _clip_rows: ClipRows | None = None,
+    _published: bool = False,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit by direct IRLS (``_IRLSDirectFit``, whose docstring documents the parameters).
 
@@ -303,6 +307,8 @@ def fit_irls_direct(
             _compensate_centred_intercept=_compensate_centred_intercept,
             _centred_init=_centred_init,
             _defer_rank_info=_defer_rank_info,
+            _clip_rows=_clip_rows,
+            _published=_published,
         )
         return result
     finally:
@@ -449,6 +455,7 @@ class _IRLSDirectCurvaturePolicy:
 
     __slots__ = (
         "observed stagnation_newton_available weighted_gram_reuse _latch _family _link _y _weights"
+        " _concave_newton_available"
     ).split()
 
     def __init__(
@@ -520,6 +527,13 @@ class _IRLSDirectCurvaturePolicy:
         self.weighted_gram_reuse = constant_weights and not use_structured and not observed
         self._latch = latch
         self._family, self._link, self._y, self._weights = family, link, y, weights
+        # Newton steps a fit on the likelihood's own rows may take (``newton_on_likelihood_rows``)
+        self._concave_newton_available = bool(
+            use_observed_newton
+            and not has_constraints
+            and not return_working_system
+            and concave_observed_rows(family, link)
+        )
 
     def working_rows(self, mu: NDArray, eta: NDArray) -> CoefficientWorkingRows:
         """The iterate's working rows in the current curvature (``coefficient_working_rows``)."""
@@ -551,6 +565,22 @@ class _IRLSDirectCurvaturePolicy:
             prefer_observed=True,
         )
         return rows.rejection_reason is not None
+
+    def newton_on_likelihood_rows(self) -> None:
+        """Newton steps for a fit that reads the likelihood's rows where the clip holds one.
+
+        Such a fit holds a row against its outcome, whose observed information
+        is of order one where Fisher's is near zero (probit: ``l1 (l1 + eta)``
+        against ``l1 l0``), so Fisher scoring there contracts linearly at a
+        rate the mismatch sets and a deviance stop lands short of the root
+        (Green 1984, JRSSB 46, section 2.3).  A pair whose observed rows are
+        never negative (``concave_observed_rows``; Pratt 1981) takes Newton
+        steps on them instead, off the constrained routes and the fREML
+        performance iteration, which keep their own rows.  The logit's
+        observed rows are its Fisher rows, and it keeps them.
+        """
+        if self._concave_newton_available:
+            self.observed = True
 
     def switch_to_newton(self, recorder: _IRLSDirectRecorder) -> None:
         """Newton steps on the observed information for the iterations left.
@@ -586,7 +616,7 @@ class _IRLSDirectFitFields:
         # _setup_routes
         " qp curvature"
         # _setup_systems
-        " mean_space _constant_centered_cache _constant_centered_z"
+        " mean_space clip _constant_centered_cache _constant_centered_z"
         " certify_centered_factor authoritative_gram_rank _initial_data_key _tabmat_split"
         " _tabmat_centering_state"
         " fixed_owners _initial_data_pending"
@@ -731,6 +761,20 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
     _deviance_init : float, optional
         Previously evaluated deviance at ``beta_init``/``intercept_init``.
         Used by private fREML steps to avoid repeating a full response scan.
+    _clip_rows : ClipRows, optional
+        Internal, shared by the PIRLS solves of one REML fit: which rows a
+        binomial fit reads where the working clip holds one
+        (``solvers.clip_rows``).  A solve that ends on a row held against its
+        outcome moves it to the likelihood's rows, and a later solve of the
+        fit that finds it moved starts on them.  ``None`` (the default)
+        shares nothing.
+    _published : bool
+        Internal: this solve's exported rows are the ones a model publishes
+        (its covariance and effective degrees of freedom).  A binomial pair
+        with tail rows then exports the likelihood's information on every row
+        the working clip holds, whichever rows its iteration read.  An in-loop
+        REML solve leaves it False, so the search reads the rows it always
+        has unless the fit moved to the likelihood's.
     record_diagnostics : bool
         If True, record per-iteration W/mu/eta stats on the result.
     S_override : (p, p) ndarray, optional
@@ -792,6 +836,8 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
     _compensate_centred_intercept: bool = True
     _centred_init: tuple[float, NDArray] | None = None
     _defer_rank_info: list[Callable[[], RankInfo]] | None = None
+    _clip_rows: ClipRows | None = None
+    _published: bool = False
 
     def run(self) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
         self._setup_design()
@@ -800,9 +846,24 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         self._setup_systems()
         recorder.start()
         self._setup_loop()
-        step, stop_rule = self.step, self.stop_rule
+        it = self._iterate(0)
+        clip = self.clip
+        if clip is not None and not clip.likelihood and clip.moves_to_likelihood(self, it):
+            # the loop ended on a row the clip holds against its outcome: the
+            # iterations left solve the likelihood's own rows from there
+            it = self._iterate(it + 1)
+        recorder.stop(it)
+        self._finish(it)
+        self._terminal_rows()
+        recorder.profile_fit(self, it)
+        # the step's finaliser: the retained model's geometry
+        return self._publish(it, self.step.finalise(self))
+
+    def _iterate(self, first: int) -> int:
+        """Run the loop from iteration ``first`` until a verdict or the budget ends it; the last iteration."""
+        step, stop_rule, recorder = self.step, self.stop_rule, self.recorder
         search = self.trial_search.search
-        for it in range(self.max_iter):
+        for it in range(first, self.max_iter):
             self._working(it)
             if step.propose(self, it):
                 break
@@ -845,12 +906,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                 break
             if self.score_stagnated:
                 break
-        recorder.stop(it)
-        self._finish(it)
-        self._terminal_rows()
-        recorder.profile_fit(self, it)
-        # the step's finaliser: the retained model's geometry
-        return self._publish(it, step.finalise(self))
+        return it
 
     def _setup_design(self) -> None:
         X, family, link, groups, weights = self.X, self.family, self.link, self.groups, self.weights
@@ -1130,6 +1186,11 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             sample_weight=self.weights,
             prefer_observed=False,
         )
+        # the origin of the rows' response: a held row's is its unclipped predictor
+        origin, clip = eta_values, self.clip
+        if clip is not None and clip.likelihood:
+            origin = self.eta_unclipped
+            rows = clip.patched(self, rows, origin, eta_values, mu_values, observed=False)
         with np.errstate(invalid="ignore", divide="ignore"):
             scale = np.sqrt(np.abs(diagonal) / sum_w)
         excluded = np.zeros(self.p, dtype=bool)
@@ -1149,7 +1210,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             _penalty_curvature.append(self.penalty_curvature())
         return penalized_mode_residual(
             dm=self.dm,
-            row_score=rows.weights * (rows.response - eta_values),
+            row_score=rows.weights * (rows.response - origin),
             fisher_weights=rows.weights,
             positive_prior=self.weights > 0.0,
             mean_x=mean_x,
@@ -1223,6 +1284,9 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             lambdas=recorder.resolved_lambdas,
             eta_clock=recorder.eta_formed,
         )
+        clip = self.clip
+        if clip is not None and clip.likelihood:
+            state = replace(state, deviance=clip.deviance(self, state))
         state = replace(
             state,
             penalized_deviance=float(state.deviance + self.penalty_quadratic(state.beta)),
@@ -1319,6 +1383,15 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                 start_lowered=self._start_lowered,
             )
         )
+        # The working clip's overlay, ``None`` unless the clip can hold a
+        # binomial row against its outcome (``clip_rows.clip_can_hold_against``).
+        self.clip = (
+            _IRLSDirectClipOverlay(family, link, self._clip_rows)
+            if clip_can_hold_against(family, link)
+            else None
+        )
+        if self.clip is not None and self.clip.likelihood:
+            self.curvature.newton_on_likelihood_rows()
         if not (_use_structured or has_constraints):
             self.step: _IRLSDirectStep = (
                 _IRLSDirectQRStep(gms, self.S, self.p, self.penalty_rows)
@@ -1563,12 +1636,14 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                     (_state_center - warm_centre) * self.beta
                 )
         # Freeze the fit-entry state so iteration-one trial safety has a baseline.
+        # a caller's deviance is the clipped rows': a fit on the likelihood's evaluates its own
+        on_likelihood_rows = self.clip is not None and self.clip.likelihood
         committed = self.evaluate_state(
             self.beta,
             self.intercept,
             phase="initial",
             iteration=0,
-            deviance=self._deviance_init,
+            deviance=None if on_likelihood_rows else self._deviance_init,
             centred_intercept=centred_start,
         )
         self.recorder.emit_state_commit(
@@ -1596,6 +1671,9 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
     @property
     def working_response_eta(self) -> NDArray:
         """Origin of z before subtracting the offset in the working least squares."""
+        if self.clip is not None and self.clip.likelihood:
+            # every row's own predictor: a held row's response is about it
+            return self.eta_unclipped
         offset = self.offset
         if offset is not None and type(self.family) is Tweedie and type(self.link) is LogLink:
             lower = (self.eta_unclipped < self.eta) & (offset < 0)
@@ -1619,7 +1697,20 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
 
         # Working quantities from current eta/mu (already computed)
         _t0 = time.perf_counter()
-        working_rows = self.curvature.working_rows(self.mu, self.working_response_eta)
+        clip = self.clip
+        if clip is not None and clip.likelihood:
+            # the solver's rows inside the guard, the likelihood's on every held row
+            working_rows = self.curvature.working_rows(self.mu, self.eta)
+            working_rows = clip.patched(
+                self,
+                working_rows,
+                self.eta_unclipped,
+                self.eta,
+                self.mu,
+                observed=working_rows.curvature_source == "observed",
+            )
+        else:
+            working_rows = self.curvature.working_rows(self.mu, self.working_response_eta)
         W = working_rows.weights
         z = working_rows.response
         # the mean space's Newton rows once engaged, in score form
@@ -1812,6 +1903,9 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             converged, termination_reason = mean_space.final(
                 self, eta_unclipped, converged, termination_reason
             )
+        # the working clip's verdict on the returned state
+        if self.clip is not None:
+            converged, termination_reason = self.clip.final(converged, termination_reason)
         self.centred_intercept_lo = centred_intercept_lo
         self.eta_unclipped, self.eta, self.mu, self.dev = eta_unclipped, eta, mu, dev
         self.converged, self.termination_reason = converged, termination_reason
@@ -1822,15 +1916,25 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         # model. Private fREML performance iterations deliberately reuse the
         # working system used for their one coefficient update.
         if not self._return_working_system:
+            clip = self.clip
+            # A published fit of a pair with tail rows exports the likelihood's
+            # information on every row the clip holds, whichever rows its
+            # iteration read: a clipped row's weight is the clip's, and the
+            # covariance reads these.  An in-loop solve exports the rows it read.
+            tail_rows = clip is not None and clip.declared and (clip.likelihood or self._published)
             export_rows = coefficient_working_rows(
                 distribution=self.family,
                 link=self.link,
                 y=self.y,
                 mu=self.mu,
-                eta=self.working_response_eta,
+                eta=self.eta if tail_rows else self.working_response_eta,
                 sample_weight=self.weights,
                 prefer_observed=False,
             )
+            if tail_rows:
+                export_rows = clip.patched(
+                    self, export_rows, self.eta_unclipped, self.eta, self.mu, observed=False
+                )
             W = export_rows.weights
             z = export_rows.response
             self.export_rows = export_rows
@@ -1938,6 +2042,10 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             ),
             weight_exponent=exponent,
             solver_phi=solver_phi,
+            clip_rows="working" if self.clip is None else self.clip.rows.state,
+            clip_held_rows=(
+                self.clip.held_against if self.termination_reason == "clip_held" else 0
+            ),
             separation_message=self.separation_message,
             separation_groups=self.separation_groups,
         )

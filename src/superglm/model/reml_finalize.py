@@ -83,6 +83,7 @@ from superglm.solvers._structured.state import (
     StructuredLinearSystemState,
     centred_data_operator,
 )
+from superglm.solvers.clip_rows import clip_rows_after
 from superglm.solvers.dispersion import (
     DEVIANCE_FORM,
     REML_PROFILE,
@@ -474,6 +475,7 @@ def maybe_qp_passthrough_refit(
         trace_purpose="reml_qp_final",
         separation="record",
         weight_semantics=model_weight_semantics(model),
+        _published=True,
     )
     return qp_output[0]
 
@@ -759,6 +761,8 @@ def finalize_reml_fit(
         trace_purpose="reml_final",
         separation="record",
         weight_semantics=model_weight_semantics(model),
+        _published=True,
+        _clip_rows=clip_rows_after(best.pirls_result),
         _laplace_excluded=tuple(int(index) for index in identified.weak),
         _mode_bar=terminal_bar,
         compute_rank_info=not discard_rank_info and deferred_rank_info is None,

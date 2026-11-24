@@ -25,9 +25,6 @@ from scipy.special import expit, log_ndtr
 from superglm import Numeric, Spline, SuperGLM
 from superglm.links import LogitLink
 
-_ISSUE = "#734: a row the working clip holds against its outcome loses its likelihood score"
-
-
 # ── the likelihood in closed form in eta ───────────────────────────
 
 
@@ -157,7 +154,6 @@ def held_against(request) -> _Case:
 # ── what a user reads ──────────────────────────────────────────────
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_ISSUE)
 def test_a_row_held_against_its_outcome_leaves_the_fit_at_the_likelihoods_root(held_against):
     """Converged, and every coefficient within a thousandth of its standard error of the root.
 
@@ -172,7 +168,6 @@ def test_a_row_held_against_its_outcome_leaves_the_fit_at_the_likelihoods_root(h
     assert np.all(np.abs(coefficients - reference) <= 1e-3 * standard_error)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_ISSUE)
 def test_its_default_standard_errors_are_the_likelihoods_information(held_against):
     """``sqrt(diag(I^-1))`` with ``I = X' W X`` the Fisher information at the root."""
     reference = held_against.root()
@@ -182,7 +177,6 @@ def test_its_default_standard_errors_are_the_likelihoods_information(held_agains
     np.testing.assert_allclose(reported, standard_error, rtol=1e-3)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_ISSUE)
 def test_its_deviance_counts_the_held_row(held_against):
     """The fit's deviance is ``-2 log L``: an event at ``eta = -36`` adds 72, not ``-2 log 1e-7``."""
     model, _ = held_against.fit()
@@ -190,20 +184,20 @@ def test_its_deviance_counts_the_held_row(held_against):
     np.testing.assert_allclose(model.result.deviance, exact, rtol=1e-6)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_ISSUE)
 def test_one_distant_event_does_not_move_the_other_rows_predictions():
     """Five non-events and one event share an intercept: each of the five is priced at 1/5.
 
     The sixth row's offset of -35 puts its own probability at ``2e-16``, so the
     score ``1 - 5 p = 0`` gives ``p = 1/5``.  The unfixed fit reports 0.0041.
+    The fit is asked for the digits the comparison reads: at the default
+    ``tol=1e-6`` its stop leaves the prediction 2e-6 from the root.
     """
     case = _HELD_AGAINST["logit_event_at_minus_35"]()
-    model, _ = case.fit()
+    model, _ = case.fit(tol=1e-10)
     predicted = model.predict(pd.DataFrame(index=range(1)), offset=np.zeros(1))
     np.testing.assert_allclose(predicted, 0.2, rtol=1e-6)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_ISSUE)
 @pytest.mark.parametrize("discrete", [False, True])
 def test_a_penalised_fit_balances_the_likelihoods_score(discrete):
     """With an unpenalised intercept the likelihood's row scores sum to zero at any smoothing.
@@ -235,7 +229,6 @@ class _UndeclaredLogit(LogitLink):
     """A logit the solver has no closed-form tail rows for: exact types declare those."""
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_ISSUE)
 def test_a_stop_the_clip_decided_is_not_reported_as_converged():
     """A link without tail rows of its own keeps the clip, and says the fit did not converge.
 
@@ -254,11 +247,6 @@ def test_a_stop_the_clip_decided_is_not_reported_as_converged():
     assert any("clip" in str(item.message) for item in caught)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="#734: the default covariance reads the clipped working weights on every held row",
-)
 def test_default_standard_error_when_every_row_sits_in_a_tail():
     """Offsets of +-19 and +-35 with events at the positive ones: no row is against its outcome.
 
@@ -289,3 +277,106 @@ def test_rows_held_on_the_side_of_their_outcome_leave_the_fit_at_the_root():
     assert model.result.converged
     assert abs(case.score(coefficients)[0]) <= 1e-12
     assert abs(coefficients[0]) <= 1e-6
+
+
+# ── the rows themselves, and the value that says which a fit reads ──
+
+
+def _exact_rows(link: str, eta: float):
+    """``log p``, ``log(1 - p)``, ``p'/p``, ``p'/(1 - p)`` at 60 digits: the definitions, not the closed forms."""
+    import mpmath as mp
+
+    with mp.workdps(60):
+        x = mp.mpf(eta)
+        if link == "logit":
+            p, q = 1 / (1 + mp.exp(-x)), 1 / (1 + mp.exp(x))
+            slope = p * q
+        elif link == "probit":
+            p, q, slope = mp.ncdf(x), mp.ncdf(-x), mp.npdf(x)
+        else:
+            q = mp.exp(-mp.exp(x))
+            p, slope = -mp.expm1(-mp.exp(x)), mp.exp(x) * q
+        # each log from the smaller of the pair, so neither rounds to log(1)
+        log_p = mp.log(p) if p < q else mp.log1p(-q)
+        log_q = mp.log(q) if q < p else mp.log1p(-p)
+        return tuple(float(v) for v in (log_p, log_q, slope / p, slope / q))
+
+
+@pytest.mark.parametrize(
+    ("link", "etas"),
+    [
+        ("logit", [-700.0, -40.0, -9.0, 0.3, 9.0, 40.0, 700.0]),
+        ("probit", [-40.0, -9.0, -5.3, 0.3, 5.3, 9.0, 30.0]),
+        ("cloglog", [-40.0, -20.5, -9.0, 0.3, 2.8, 4.5]),
+    ],
+)
+def test_tail_rows_are_the_likelihoods_rows_in_both_tails(link, etas):
+    """Log-likelihood, score and Fisher information against the definitions at 60 digits.
+
+    The predictors pass the working clip on both sides (``+-20``, the cloglog
+    cap of 2.736, the mean floor); a row read at the clip is wrong there by
+    orders of magnitude, so each number is held to ``1e-11`` of its value.
+    """
+    from superglm.links import CloglogLink, LogitLink, ProbitLink
+    from superglm.solvers.clip_rows import tail_rows
+
+    link_object = {"logit": LogitLink, "probit": ProbitLink, "cloglog": CloglogLink}[link]()
+    eta = np.asarray(etas)
+    log_p, log_q, event_score, non_event_score = (
+        np.array(column) for column in zip(*(_exact_rows(link, value) for value in etas))
+    )
+    for response, log_likelihood, score in (
+        (1.0, log_p, event_score),
+        (0.0, log_q, -non_event_score),
+    ):
+        rows = tail_rows(link_object, np.full(len(etas), response), eta)
+        np.testing.assert_allclose(rows[0], log_likelihood, rtol=1e-11, atol=1e-300)
+        np.testing.assert_allclose(rows[1], score, rtol=1e-11, atol=1e-300)
+        np.testing.assert_allclose(rows[2], event_score * non_event_score, rtol=1e-11, atol=1e-300)
+        assert np.all(rows[3] >= 0.0)
+
+
+def test_the_rows_a_fit_reads_move_one_way():
+    """``ClipRows`` walks its table: ``working`` to ``likelihood`` on a held row, and never back."""
+    from superglm.solvers.clip_rows import (
+        CLIP_ROWS_MOVES,
+        ClipRows,
+        clip_rows_after,
+        note_held_against,
+    )
+
+    assert CLIP_ROWS_MOVES == {
+        ("working", "held_against"): "likelihood",
+        ("likelihood", "held_against"): "likelihood",
+    }
+    rows = ClipRows()
+    assert rows.state == "working"
+    for (state, _event), destination in CLIP_ROWS_MOVES.items():
+        rows.state = state
+        assert note_held_against(rows) == (state != destination)
+        assert rows.state == destination
+    # a fit publishes the rows it ended on, and a solve that continues from it starts there
+    case = _HELD_AGAINST["logit_event_at_minus_35"]()
+    model, _ = case.fit()
+    assert model._solver_pirls_result().clip_rows == "likelihood"
+    assert clip_rows_after(model._solver_pirls_result()).state == "likelihood"
+
+
+def test_a_selection_penalty_fit_stopped_by_the_clip_is_not_reported_as_converged():
+    """The proximal engine reads a held row at the clip: its stop there is ``clip_held``.
+
+    A selection penalty takes the fit through the proximal engine, which has
+    no rows of its own for the tails.  With a penalty too small to move the
+    answer it stops where the unfixed direct solver did, 0.97 standard errors
+    from the root, and must say so.
+    """
+    case = _HELD_AGAINST["logit_slope_and_weighted_event"]()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model, coefficients = case.fit(selection_penalty=1e-6)
+    reference = case.root()
+    standard_error = np.sqrt(np.diag(np.linalg.inv(case.information(reference))))
+    assert np.max(np.abs(coefficients - reference) / standard_error) > 0.5  # the control
+    assert not model.result.converged
+    assert model._solver_pirls_result().termination_reason == "clip_held"
+    assert any("clip" in str(item.message) for item in caught)

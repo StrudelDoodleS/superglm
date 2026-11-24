@@ -402,6 +402,21 @@ def lss_corrected_covariance_unavailable_message(cause: str) -> str:
     )
 
 
+def _clip_held_message(fit_result: Any) -> str:
+    """The statement for a fit stopped by the solver's clip on rows held against their outcome."""
+    rows = int(getattr(fit_result, "clip_held_rows", 0) or 0)
+    return (
+        f"The fit holds {rows} row{'' if rows == 1 else 's'} at the solver's clip against "
+        "the response: an event at a fitted probability below 1e-7, or a non-event above "
+        "1 - 1e-7. The solver read such a row at the clip, so the clip, not the likelihood, "
+        "decided where the fit stopped: it is reported as not converged and its "
+        "coefficients and standard errors may be far from the maximum-likelihood estimate "
+        "(termination_reason='clip_held'). A logit, probit or cloglog link without a "
+        "selection penalty reads such rows exactly; otherwise check those rows' offsets and "
+        "responses."
+    )
+
+
 def coefficient_nonconvergence_message(fit_result: Any) -> str | None:
     """The statement for an unconverged coefficient fit with no smoothing selection."""
     if fit_result is None or bool(getattr(fit_result, "converged", True)):
@@ -425,6 +440,8 @@ def coefficient_nonconvergence_message(fit_result: Any) -> str | None:
             "every probability inside (0, 1); a categorical level whose responses are all 0 "
             "or all 1 can also be merged."
         )
+    if reason == "clip_held":
+        return _clip_held_message(fit_result)
     n_iter = getattr(fit_result, "n_iter", None)
     return (
         "SuperGLM coefficient fit did not converge"

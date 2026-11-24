@@ -1086,7 +1086,7 @@ def warn_published_coefficient_nonconvergence(model) -> None:
     result = model._result
     # Other stops warn where they are found, and an unresolved boundary stop is
     # named with its rows by the unresolved-row warning.
-    if result.termination_reason not in ("max_iter", "mean_space_boundary"):
+    if result.termination_reason not in ("max_iter", "mean_space_boundary", "clip_held"):
         return
     if result.termination_reason == "mean_space_boundary" and result.mean_space_boundary_unresolved:
         return
@@ -1644,6 +1644,7 @@ def _solve_coefficients(
             reml_penalties=reml_penalties,
             compute_rank_info=compute_rank_info,
             _weight_unit=_weight_unit,
+            _published=compute_rank_info,
         )
         return result
 
