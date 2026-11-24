@@ -151,7 +151,9 @@ def _shifted_sums(rows, a, reference, out):  # pragma: no cover - compiled
 # first: every product keeps its factors ``1 - m`` and ``m``, so an entry stays
 # within the row sum's bound ``gamma sum_r |a_r| |x_rj - m_j| |y_r|`` and is an
 # exact zero wherever every weighted row's factor is.  ``R_j`` is summed pair by
-# pair, never formed as the leaf total less ``Y_j``.
+# pair, never formed as the leaf total less ``Y_j``.  A sum of weights meets one
+# of its two factors before the other, as a row's ``(a d_j) d_k`` does: the
+# product of two means underflows where the entry itself does not.
 @njit(cache=True)
 def _pair_sums(own, bounds, a, error, weighted, sums):  # pragma: no cover - compiled
     """Add each row of a chunk to its pair's sums: one entry a row.
@@ -223,7 +225,7 @@ def _center_pairs(
         for t in range(lo, hi):
             m = mean[t]
             u = 1.0 - m
-            mass[t] = u * u * sums[t, width + 1] + m * m * centered[t, width + 1]
+            mass[t] = sums[t, width + 1] * u * u + centered[t, width + 1] * m * m
             for j in range(columns):
                 centered[t, j] = u * sums[t, j] - m * centered[t, j]
             for j in range(width):
@@ -253,11 +255,11 @@ def _pair_block(pair_bounds, column, mean, weight, offset, out):  # pragma: no c
         for j in range(lo, hi):
             mj, wj = mean[j], weight[j]
             uj = 1.0 - mj
-            out[column[j], offset + column[j]] += wj * uj * uj + mj * mj * (before + after[j - lo])
+            out[column[j], offset + column[j]] += wj * uj * uj + (before + after[j - lo]) * mj * mj
             between = before
             for k in range(j + 1, hi):
                 mk, wk = mean[k], weight[k]
-                value = mj * mk * (between + after[k - lo]) - (wj * uj * mk + wk * mj * (1.0 - mk))
+                value = (between + after[k - lo]) * mj * mk - (wj * uj * mk + wk * mj * (1.0 - mk))
                 out[column[j], offset + column[k]] += value
                 out[column[k], offset + column[j]] += value
                 between += wk

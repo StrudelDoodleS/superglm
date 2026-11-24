@@ -89,6 +89,24 @@ def _edge_case(seed: int = 20261124):
     return layout, matrices, leaf, weights
 
 
+def _design(leaf, indicators, dense=None):
+    """A lone random effect ``leaf`` beside dense columns and crossed effects ``(codes, levels)``."""
+    matrices = [] if dense is None else [DenseGroupMatrix(dense)]
+    matrices += [RandomEffectGroupMatrix(codes, levels) for codes, levels in indicators]
+    matrices.append(RandomEffectGroupMatrix(leaf, int(leaf.max()) + 1))
+    groups, start = [], 0
+    for index, matrix in enumerate(matrices):
+        groups.append(GroupSlice(name=f"g{index}", start=start, end=start + matrix.shape[1]))
+        start += matrix.shape[1]
+    dm = DesignMatrix(matrices, n=len(leaf), p=start)
+    last = len(matrices) - 1
+    layout = get_structured_layout(
+        dm, groups, dominant_group_index=last, chain_group_indices=(last,)
+    )
+    assert len(layout.sparse_indicators) == len(indicators)
+    return layout, matrices
+
+
 def _passes(layout, matrices, weights, chunk_size):
     """The data pass, a data pass with negative rows and a signed pass about the data means."""
     rng = np.random.default_rng(7)
@@ -222,6 +240,49 @@ def test_a_leaf_that_meets_one_border_level_keeps_exact_zeros_and_ones(chunk_siz
             np.testing.assert_array_equal(stats.deviation[:, FIRST_COLUMNS], 0.0)
         # the second effect mixes within those leaves: its own block is not zero
         assert np.any(stats.absolute[SECOND_COLUMNS] > 0.0)
+
+
+@pytest.mark.parametrize("case", [pytest.param("data", marks=pytest.mark.pins_behaviour), "signed"])
+def test_a_weight_meets_one_mean_before_the_other(case) -> None:
+    """Weights of ``2**600`` and ``1e180`` beside leaf means near their reciprocals.
+
+    A row off levels ``j`` and ``k`` adds ``a m_j m_k``.  The product of the
+    two means underflows where the entry is an ordinary number, so the weight
+    meets one mean first, as the row sum's ``(a d_j) d_k`` does.  Data pass:
+    one leaf with weights ``2**600, 1, 2`` on three levels, whose (1, 2) entry
+    is ``2**-599 (1 - 1 - 1)``; with the means multiplied first it is
+    ``-2**-598``.  Signed pass: a row of weight ``-1e180`` about stored means
+    ``1e-180`` and ``2e-180``, whose block ``-1e180 m m'`` would be four
+    zeros.  Both are held to the exact rational sums over rows within the row
+    sum's bound, and the absolute mass, formed the same way, to its own exact
+    sum, so it still bounds the diagonal.  The data pass is a control: the row
+    expansion multiplied the weight first too.  Its absolute mass squared the
+    mean first and read zero on the signed pass.
+    """
+    leaf = np.array([0, 0, 0, 1, 1, 2, 2, 3, 3])
+    layout, matrices = _design(leaf, [(np.array([0, 1, 2, 0, 2, 1, 2, 0, 1]), 3)])
+    n, a, options = len(leaf), np.zeros(len(leaf)), {}
+    if case == "data":
+        a[:3] = 2.0**600, 1.0, 2.0
+    else:
+        stored = np.array([1.0, 1e-180, 2e-180] + [1.0] * 6)
+        data = build_nested_leaf_statistics(layout, matrices, stored)
+        np.testing.assert_array_equal(data.mean[0], stored[:3])
+        a[0], options = -1e180, dict(mean=data.mean, center=data.center)
+    stats = build_nested_leaf_statistics(layout, matrices, a, **options)
+    d = _border_rows(layout) - stats.mean[leaf]
+    exact = _exact_scatter(d, a)
+    assert np.all(exact[1:, 1:] != 0.0)
+    bound = (n + 7) * EPS * (np.abs(d).T @ (np.abs(a)[:, None] * np.abs(d)))
+    assert np.all(np.abs(stats.within - exact) <= bound)
+    squares = np.array(
+        [
+            float(sum(Fraction(abs(w)) * Fraction(v) ** 2 for w, v in zip(a, column, strict=True)))
+            for column in d.T
+        ]
+    )
+    assert np.all(np.abs(stats.absolute - squares) <= (n + 4) * EPS * squares)
+    assert np.all(np.abs(np.diag(stats.within)) <= (1 + 2 * n * EPS) * stats.absolute)
 
 
 @pytest.mark.parametrize("case", ["edge", "indicator", "chain"])
