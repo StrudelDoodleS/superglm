@@ -1843,9 +1843,11 @@ def _discarded_newton_direction(
         _NumericalEvaluationError,
         FloatingPointError,
         OverflowError,
+        MemoryError,
         ValueError,
         np.linalg.LinAlgError,
     ):
+        # The trial is optional: a row pass that fails or runs out of memory leaves the fit as is.
         return np.zeros_like(slopes)
     keep = values > len(values) * np.finfo(np.float64).eps * values[-1]
     return vectors[:, keep] @ ((vectors[:, keep].T @ (slopes / unit)) / values[keep]) / unit
