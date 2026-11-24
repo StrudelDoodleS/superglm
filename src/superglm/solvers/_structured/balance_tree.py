@@ -174,9 +174,8 @@ def _root_images(border: NDArray, spread: NDArray, roots, error=None):
     null of it shows at most the products' rounding plus the root's tilt.
     A fitted alias also carries representation error (twice the correction
     still due, and the lifted residual rounding) and the level basis's
-    function-space resolution. To attribute any larger image to root tilt,
-    its raw coefficients must lie in the penalty's null space. A unit
-    column reads the map exactly and always needs that membership check.
+    function-space resolution. A larger image is put down to root tilt only when
+    its raw coefficients lie in the penalty's null space (checked for every unit column).
     """
     from superglm.solvers.centered_system import penalty_factor_tilt, penalty_null_columns
 
