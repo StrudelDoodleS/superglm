@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -12,6 +13,7 @@ import scipy.sparse as sp
 
 import superglm.reml.direct as direct_reml
 import superglm.reml.discrete as discrete_reml
+import superglm.solvers._structured.geometry as structured_geometry
 import superglm.solvers._structured.selection as structured_selection
 import superglm.solvers.irls_direct._finalise as irls_finalise
 import superglm.solvers.irls_direct._fit as irls_direct
@@ -1187,6 +1189,62 @@ def test_factor_smooth_estimability_and_summary_match_dense_centered_geometry():
         "null_0",
         "null_1",
     }
+
+
+def test_factor_smooth_summary_uses_dense_estimability_within_workspace_budget(monkeypatch):
+    rng = np.random.default_rng(819)
+    x = np.tile(np.linspace(-1.0, 1.0, 12), 100)
+    z = rng.uniform(-1.0, 1.0, len(x))
+    group = np.repeat(np.arange(100).astype(str), 12)
+    frame = pd.DataFrame({"x": x, "z": z, "group": group})
+    y = np.sin(3.0 * x) + z + rng.normal(scale=0.1, size=len(x))
+    fixed = LambdaPolicy.fixed(1.0)
+    model = SuperGLM(
+        family="gaussian",
+        direct_solve="structured",
+        selection_penalty=0.0,
+        features={"z": Spline(kind="cr", n_knots=6, lambda_policy=fixed)},
+        interactions=[
+            FactorSmooth(
+                "x",
+                group="group",
+                basis="fs",
+                k=6,
+                lambda_policy={name: fixed for name in ("wiggle", "null_0", "null_1")},
+            ),
+        ],
+    )
+
+    def fail_compact(_operator):
+        raise np.linalg.LinAlgError("forced compact certification failure")
+
+    def fail_dense(_operator):
+        pytest.fail("certified fits must bypass dense centered estimability")
+
+    monkeypatch.setattr(
+        structured_geometry, "_independent_block_centered_estimability", fail_compact
+    )
+    with monkeypatch.context() as healthy:
+        healthy.setattr(structured_geometry, "_bounded_centered_estimability", fail_dense)
+        model.fit_reml(frame, y)
+        assert model.result.direct_backend == "structured"
+        assert model.result.converged
+        assert model.result.beta.size == 607
+        certified_rows = model.summary(detail="full")._basis_detail["z"]
+
+    # The positive-definite penalty certified the original fit. Re-read its
+    # summary without that certificate to force the data-only decision.
+    model._solver_result = replace(model._solver_pirls_result(), converged=False)
+    model.__dict__.pop("_fit_inference_info")
+    model._summary_cache = None
+    fallback_rows = model.summary(detail="full")._basis_detail["z"]
+
+    # The separately sampled z design has full rank outside the factor smooth
+    # span. All seven of its standard errors should still be reported.
+    certified_se = [row.se for row in certified_rows]
+    assert len(certified_se) == 7
+    assert np.all(np.isfinite(certified_se))
+    np.testing.assert_array_equal([row.se for row in fallback_rows], certified_se)
 
 
 @pytest.mark.parametrize(

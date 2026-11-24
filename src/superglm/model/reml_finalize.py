@@ -518,6 +518,7 @@ def _disclose_weak_identification(
     lambdas,
     reml_penalties,
     at_mode: bool,
+    held_columns=(),
 ) -> None:
     """Publish every weakly identified slope of a finished REML fit.
 
@@ -529,7 +530,7 @@ def _disclose_weak_identification(
     slope indices, ``model.diagnostics()`` their names, and one
     ``WeakIdentificationWarning`` names them.
     """
-    flagged: set[int] = set()
+    flagged: set[int] = set(held_columns)
     if at_mode:
         flagged.update(
             int(index)
@@ -639,6 +640,7 @@ def finalize_reml_fit(
     compute_fit_stats,
     trace_run: TraceRun | None = None,
     durable_retain_fit_state: bool | None = None,
+    level_hold=None,
 ):
     """Finalize model state after a successful REML optimization run."""
     model._result = best.pirls_result
@@ -1085,6 +1087,16 @@ def finalize_reml_fit(
         likelihood_phi=likelihood_phi,
         likelihood_method=likelihood_method,
     )
+    if level_hold is not None:
+        corrected = level_hold.lift(model, corrected)
+        disclosed = IdentifiedLaplace.for_design(
+            model._dm,
+            sample_weight,
+            reml_penalties,
+            y=y,
+            distribution=model._distribution,
+            link=model._link,
+        )
     model._result = corrected
     model._reml_result.pirls_result = corrected
     # Under "error" a separated fit is refused before anything describes it.
@@ -1097,10 +1109,11 @@ def finalize_reml_fit(
         factor=final_factor,
         y=y,
         sample_weight=sample_weight,
-        offset_arr=offset_arr,
+        offset_arr=offset if level_hold is not None else offset_arr,
         lambdas=lambdas,
         reml_penalties=reml_penalties,
         at_mode=not qp_passthrough,
+        held_columns=() if level_hold is None else level_hold.separated_columns,
     )
     model._reporting_support_state = reporting_state
     model._linear_system_state = structured_linear_state

@@ -7,8 +7,6 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import scipy.linalg
-import scipy.sparse
-import scipy.sparse.linalg
 from numpy.typing import NDArray
 
 from superglm.solvers._structured.operators import (
@@ -28,16 +26,11 @@ from superglm.solvers.rank import (
 if TYPE_CHECKING:
     from superglm.solvers._structured.nested import NestedDataOperator
 
-_MAX_DENSE_CENTERED_ESTIMABILITY_WIDTH = 512
+_MAX_DENSE_CENTERED_ESTIMABILITY_BYTES = 64 << 20
 
 
 def _bounded_centered_estimability(operator: CenteredBlockOperator) -> NDArray:
-    """Use exact dense rank only below a fixed inference-memory bound."""
-    if operator.shape[0] > _MAX_DENSE_CENTERED_ESTIMABILITY_WIDTH:
-        # Large constrained systems with deficient local data can have a
-        # border as wide as the structured term. Refusing to claim any
-        # individual coordinate is safer than allocating a global p-by-p Gram.
-        return np.zeros(operator.shape[0], dtype=bool)
+    """Read coefficient estimability from the materialized centered Gram."""
     return decompose_gram(materialize_compact_operator(operator)).coefficient_estimable()
 
 
@@ -608,17 +601,18 @@ def centered_operator_coefficient_estimable(
         if isinstance(operator.raw, NestedDataOperator):
             return _nested_centered_estimability(operator, operator.raw)
         return _independent_block_centered_estimability(operator)
-    except (
-        np.linalg.LinAlgError,
-        scipy.sparse.linalg.ArpackError,
-        scipy.sparse.linalg.ArpackNoConvergence,
-    ) as error:
-        if operator.shape[0] <= _MAX_DENSE_CENTERED_ESTIMABILITY_WIDTH:
+    except np.linalg.LinAlgError as error:
+        width = operator.shape[0]
+        # Materialization and Gram decomposition peaked at 13–15 square
+        # float64 arrays' worth of workspace in the fallback probes. Allow 16.
+        workspace_bytes = 16 * width**2 * np.dtype(np.float64).itemsize
+        budget = _MAX_DENSE_CENTERED_ESTIMABILITY_BYTES
+        if workspace_bytes <= budget:
             return _bounded_centered_estimability(operator)
         raise RuntimeError(
-            "Compact structured estimability certification failed for a system "
-            "wider than the bounded dense fallback; coefficient standard errors "
-            "cannot be reported safely."
+            f"Compact structured estimability certification failed for p={width}. "
+            f"The dense fallback exceeds its {budget >> 20} MiB workspace budget. "
+            "Coefficient standard errors cannot be reported safely."
         ) from error
 
 

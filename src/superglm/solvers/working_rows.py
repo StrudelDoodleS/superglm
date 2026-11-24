@@ -259,6 +259,30 @@ def _fitted_null_intercept(
     return float(result.intercept)
 
 
+def binomial_log_lower_fisher(
+    result: NDArray,
+    eta: NDArray,
+    mu: NDArray,
+    sample_weight: NDArray,
+    probability: NDArray,
+    *,
+    order: int = 0,
+) -> NDArray:
+    """Replace lower-clipped rows by the log-binomial Fisher weight or its derivative."""
+    lower = probability < mu
+    if np.any(lower):
+        # W = w p/(1-p), as in mean_space_score_rows, at the same stabilized
+        # predictor as the coefficient fit. Keep the upper-wall policy.
+        complement = -np.expm1(eta[lower])
+        weight = sample_weight[lower] * (probability[lower] / complement)
+        if order:
+            weight /= complement
+        if order == 2:
+            weight *= (1.0 + probability[lower]) / complement
+        result[lower] = weight
+    return result
+
+
 def fisher_working_weights(
     *,
     distribution: object,
@@ -275,7 +299,8 @@ def fisher_working_weights(
     eta. Their algebraic reductions keep unweighted curvature in range and
     avoid recomputing the inverse link. Exact types preserve custom variance
     and link overrides. Poisson/sqrt uses the exact 4w curvature, including at
-    zero, with the unfloored working response in ``_fisher_rows``. Other pairs
+    zero, with the unfloored working response in ``_fisher_rows``. Binomial/log
+    uses its model probability below the lower clip. Other pairs
     retain the variance floor and their actual inverse-link derivative,
     including when the mean has been clipped.
     """
@@ -341,6 +366,8 @@ def fisher_working_weights(
             except _NumericalEvaluationError:
                 result[index] = np.inf
     result[sample_weight == 0.0] = 0.0
+    if family_type is Binomial and link_type is LogLink:
+        return binomial_log_lower_fisher(result, eta, mu, sample_weight, dmu_deta)
     return result
 
 
@@ -437,6 +464,8 @@ def _fisher_rows(
     # square-root link at eta = 0) z itself is infinite and 0 * z would be
     # NaN; the row takes z = eta, whose products with its weight are zeros.
     with np.errstate(divide="ignore", invalid="ignore"):
+        if type(distribution) is Binomial and type(link) is LogLink:
+            mu = np.minimum(mu, dmu_deta)
         response = eta + (y - mu) / dmu_deta
     response = np.where(weights == 0.0, eta, response)
     return CoefficientWorkingRows(

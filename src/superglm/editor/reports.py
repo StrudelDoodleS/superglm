@@ -6,6 +6,7 @@ import logging
 from collections.abc import Iterable
 from typing import Any
 
+from superglm.editor.apply import model_for_split_scoring
 from superglm.editor.cv import FINAL_NOT_RUN, cv_report_payload, diagnose_report_payload
 from superglm.editor.diagnose import fit_trace
 from superglm.editor.display import fold_chart_display
@@ -106,7 +107,7 @@ def final_fit_report_payload(
         "title": "Final Fit Report",
         "note": (
             "The model as it stands now. Where you moved a curve by hand, standard errors "
-            "and fit statistics still describe the fit before the move."
+            "still describe the fit before the move."
         ),
         "metric_labels": report_metrics(widget.session.model),
         "compares_edit": (
@@ -260,7 +261,7 @@ def _split_metrics(session) -> list[dict[str, Any]]:
     reference_model = getattr(session, "reference_model", session.model)
     if reference_model is None:
         return []
-    edited_model = session.to_model()
+    edited_model = model_for_split_scoring(session.model, session.terms)
     metric_pairs: dict[str, tuple[dict[str, float | str], dict[str, float | str]]] = {}
     for dataset in evaluation_datasets(session):
         original = compute_dataset_metrics(reference_model, dataset)
@@ -278,6 +279,8 @@ def _validation_note(session, splits: list[dict[str, Any]]) -> str:
     if not explicit:
         return "No explicit split data supplied; metrics are in-sample on retained fit data."
     if "validation" not in explicit:
+        if splits[0]["name"] == "test":
+            return "Live editor metrics use test data because no training or validation rows are available."
         return "No validation split supplied; live editor metrics fall back to train data."
     return "Each split scored by the model as edited. Δ is the change from the last fit."
 

@@ -120,6 +120,7 @@ class _PowerProfile:
         self.infeasible: dict[float, str] = {}
         self.on_evaluation: Callable[[dict], None] | None = None
         if fit_mode == "fit_reml":
+            self.anchors_by_power = getattr(model, "_profile_anchors_by_power", {})
             self._prepare_reml(X, y, sample_weight, offset)
         else:
             self._prepare_ml(X, y, sample_weight, offset)
@@ -261,6 +262,7 @@ class _PowerProfile:
         REML stop and its inner fits at it, or at the model's tighter tol."""
         clone = self.clone
         clone.family = Tweedie(p)
+        clone._profile_level_anchors = self.anchors_by_power.setdefault(p, {})
         reml_tol, pirls_tol = (
             (_SEARCH_REML_TOL, None) if tol is None else (tol, min(clone._tol, tol))
         )
@@ -274,8 +276,9 @@ class _PowerProfile:
             reml_tol=reml_tol,
             pirls_tol=pirls_tol,
         )
-        if getattr(clone._reml_result, "terminal_refit_termination", None) == (
-            "constraint_kkt_incomplete"
+        if "constraint_kkt_incomplete" in (
+            clone.result.termination_reason,
+            getattr(clone._reml_result, "terminal_refit_termination", None),
         ):
             # Published as not converged to a user, but a candidate whose
             # constrained mode is not certified optimal has no objective to
@@ -427,9 +430,9 @@ def _winner_caution(best: _Candidate, p_hat: float) -> str | None:
         )
     if not best.reml_converged:
         return (
-            f"p_hat={p_hat:.6g} rests on a candidate REML fit whose smoothing parameters had "
-            "not settled within the search's own budget, and so does its interval; "
-            "search_fit_mode='fit' searches p under ML."
+            f"p_hat={p_hat:.6g} and its interval rest on a candidate REML fit whose "
+            "smoothing parameters did not converge. Set "
+            "search_fit_mode='fit' to search p under ML."
         )
     return None
 
@@ -680,8 +683,8 @@ class TweedieProfileResult:
             ),
             (
                 [p for p, fit in fits.items() if fit.pirls_converged and not fit.reml_converged],
-                "candidate REML fits at p={} whose smoothing parameters had not settled within "
-                "the search's own budget; search_fit_mode='fit' searches p under ML.",
+                "candidate REML fits at p={} whose smoothing parameters did not converge. "
+                "Set search_fit_mode='fit' to search p under ML.",
             ),
         )
         for powers, cause in by_cause:

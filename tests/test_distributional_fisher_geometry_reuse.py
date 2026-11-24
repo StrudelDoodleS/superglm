@@ -18,10 +18,10 @@ from ._distributional_weights import resolved_prior
 from .test_distributional_endpoint_laml import _UnitGaussian
 
 
-def _problem(scale=1.0):
+def _problem(scale=1.0, weight=1.0):
     family = _UnitGaussian()
     response = np.array([1.0, 1.0, np.nextafter(1.0, np.inf)])
-    weights = resolved_prior(np.ones(3))
+    weights = resolved_prior(np.full(3, weight))
     frame = as_eager_frame(pd.DataFrame({"x": np.full(3, scale)}))
     layout = build_stacked_layout(
         compile_predictors(
@@ -52,13 +52,18 @@ def _record_geometry(monkeypatch, alter=None):
 @pytest.mark.parametrize("chunk_size", [None, 1], ids=["dense", "chunked"])
 @pytest.mark.parametrize("distinct_step", [False, True], ids=["noop", "accepted_step"])
 @pytest.mark.parametrize("certified", [False, True], ids=["refused", "certified"])
+@pytest.mark.pins_behaviour
 def test_certificate_geometry_reaches_initial_terminal(
     monkeypatch, chunk_size, distinct_step, certified
 ):
-    scale = 2.0**20 if distinct_step else 1.0
-    problem = _problem(scale)
-    initial = np.array([np.nextafter(1.0 / scale, 0.0) if distinct_step else 1.0])
-    config = DenseSolverConfig(max_iterations=1, tolerance=1.0e-20, coefficient_curvature="fisher")
+    """Pin observed-geometry reuse on a one-ulp step. Frequency weight keeps the
+    remaining score above tolerance even when the step meets it in predictor units.
+    """
+    problem = _problem(weight=64.0)
+    initial = np.array([np.nextafter(1.0, 0.0) if distinct_step else 1.0])
+    config = DenseSolverConfig(
+        max_iterations=1, tolerance=np.finfo(float).eps, coefficient_curvature="fisher"
+    )
     records = _record_geometry(monkeypatch)
     if not certified:
         monkeypatch.setattr(solver, "_newton_decrement_is_certified", lambda **kwargs: False)
@@ -82,7 +87,7 @@ def test_certificate_geometry_reaches_initial_terminal(
     )
     assert result.iterations == len(result.history) == int(distinct_step)
     # The represented-data optimum is within one rounding unit of one.
-    assert abs(scale * result.coefficients[0] - 1.0) <= np.finfo(float).eps
+    assert abs(result.coefficients[0] - 1.0) <= np.finfo(float).eps
 
 
 @pytest.mark.parametrize("chunk_size", [None, 1], ids=["dense", "chunked"])
@@ -126,8 +131,12 @@ def test_new_accepted_state_invalidates_refused_certificate_geometry(monkeypatch
 
 @pytest.mark.parametrize("chunk_size", [None, 1], ids=["dense", "chunked"])
 @pytest.mark.parametrize("retry_recovers", [False, True], ids=["fisher_fallback", "observed_retry"])
+@pytest.mark.pins_behaviour
 def test_certificate_geometry_reaches_retry_terminal(monkeypatch, chunk_size, retry_recovers):
-    problem = _problem(2.0**10)
+    """Pin the retry's observed-geometry handoff. The one-ulp residual summed with
+    weight 64 clears the retry's ten-epsilon score floor in predictor units.
+    """
+    problem = _problem(weight=64.0)
 
     def alter(source, geometry):
         if source == "observed" and not retry_recovers:
@@ -153,7 +162,7 @@ def test_certificate_geometry_reaches_retry_terminal(monkeypatch, chunk_size, re
     result = solver.fit_dense_fixed_lambda(
         *problem,
         np.zeros((1, 1)),
-        initial=np.array([2.0**-10]),
+        initial=np.ones(1),
         config=DenseSolverConfig(
             max_iterations=1,
             terminal_retry_iterations=1,

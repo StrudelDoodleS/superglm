@@ -38,7 +38,9 @@ and SymPy's ``loggamma`` and ``polygamma``.  ``polygamma``,
 ``psires`` and ``sres`` of orders ``n <= 3``, and ``lphi`` of ``n <= 4``, at one
 argument share one call of the jet functions ``polygamma_0123``,
 ``psires_0123``, ``sres_0123`` and ``log_ndtr_01234``, the last with the
-kernel's run-time order, below which it skips its orders 3-4.  An :class:`Engine` (plan
+kernel's run-time order, below which it skips its orders 3-4. The ordered
+``log1mexp_exp`` and ``logsoftplus`` jets compose in the log cumulative hazard.
+An :class:`Engine` (plan
 interface I2) is a two-argument primitive ``engine(u, v, upper, order, out)``:
 each generated row calls it once per argument pair, with the kernel's
 run-time ``order`` and a non-literal tail so Numba compiles one copy of the
@@ -185,8 +187,8 @@ class psires(sp.Function):  # noqa: N801
         return psires(n + 1, a)
 
 
-class lphi(sp.Function):  # noqa: N801
-    """``d^n log Phi(x) / dx^n``, the standard normal log CDF's derivatives."""
+class _UnaryJet(sp.Function):
+    """An order-indexed scalar derivative, emitted once per argument."""
 
     nargs = 2
 
@@ -194,11 +196,35 @@ class lphi(sp.Function):  # noqa: N801
         if argindex != 2:
             raise ArgumentIndexError(self, argindex)
         n, x = self.args
-        return lphi(n + 1, x)
+        return self.func(n + 1, x)
+
+
+class lphi(_UnaryJet):  # noqa: N801
+    """Derivatives of log Phi(x)."""
+
+
+class log1mexp_exp(_UnaryJet):  # noqa: N801
+    """Derivatives of log(1 - exp(-exp(w))) with respect to w."""
+
+
+class logsoftplus(_UnaryJet):  # noqa: N801
+    """Derivatives of log(log(1 + exp(z))) with respect to z."""
 
 
 def _mp_log_ndtr(x):
     return mp.log(mp.ncdf(x)) if x < 0 else mp.log1p(-mp.ncdf(-x))
+
+
+def _mp_log1mexp_exp(w):
+    t = mp.exp(w)
+    return mp.log(-mp.expm1(-t)) if t < 1 else mp.log1p(-mp.exp(-t))
+
+
+def _mp_log_hazard_jet(function, n, x):
+    # The value is x + O(exp(x)) on the left. Resolve that correction before
+    # differencing it for the oracle's small second and higher derivatives.
+    with mp.extraprec(max(0, int(-x / mp.log(2)))):
+        return mp.diff(function, x, int(n))
 
 
 def _mp_psires(n, a):
@@ -224,6 +250,8 @@ MPMATH = {
     "loggamma": mp.loggamma,
     "polygamma": lambda n, x: mp.polygamma(int(n), x),
     "lphi": lambda n, x: mp.diff(_mp_log_ndtr, x, int(n)),
+    "log1mexp_exp": lambda n, w: _mp_log_hazard_jet(_mp_log1mexp_exp, n, w),
+    "logsoftplus": lambda n, z: _mp_log_hazard_jet(lambda x: mp.log(mp.log1p(mp.exp(x))), n, z),
 }
 """mpmath references of the primitives, by SymPy function name, for the oracles."""
 
@@ -558,7 +586,7 @@ LOMAX = Declaration(
     parameters=("scale", "shape"),
     log_density=lambda y, s, a: sp.log(a) - sp.log(s) - (a + 1) * softplus(logratio(y, s)),
     log_survival=lambda y, s, a: -a * softplus(logratio(y, s)),
-    log_cdf=lambda y, s, a: log1mexp(a * softplus(logratio(y, s))),
+    log_cdf=lambda y, s, a: log1mexp_exp(0, sp.log(a) + logsoftplus(0, logratio(y, s))),
     doc=(
         "Lomax in monetary scale and positive tail exponent. The numerical wrapper owns\n"
         "the exact-zero limit and admission of tail derivatives; positive responses here."
@@ -687,10 +715,12 @@ _JETS = {
     psires: ("psires_0123", 4),
     sres: ("sres_0123", 4),
     lphi: ("log_ndtr_01234", 5),
+    log1mexp_exp: ("log1mexp_exp_01234", 5),
+    logsoftplus: ("logsoftplus_01234", 5),
 }
 _JET_COUNT = dict(_JETS.values())
 # Jet functions that also take the kernel's run-time order, and may skip work above it.
-_ORDERED_JETS = frozenset({"log_ndtr_01234"})
+_ORDERED_JETS = frozenset({"log_ndtr_01234", "log1mexp_exp_01234", "logsoftplus_01234"})
 _PRINTER = _Printer({"fully_qualified_modules": False})
 
 
@@ -722,9 +752,6 @@ def _calls(expressions: list[sp.Expr]):
             elif hasattr(type(atom), "engine"):
                 key = (type(atom).engine, type(atom).upper, atom.args)
                 groups.setdefault(key, {})[atom] = _engine_index(*type(atom).orders)
-    for key in groups:
-        if any(argument.atoms(sp.Function) & set().union(*groups.values()) for argument in key[2]):
-            raise ValueError("a jet or engine argument may not itself call a jet or engine")
     return groups
 
 
@@ -772,6 +799,13 @@ def emit_kernel(
                 size = getattr(importlib.import_module(callee.module), callee.work)
                 shape = tuple(map(int, size)) if isinstance(size, tuple) else int(size)
                 preamble.append(f"    work = np.empty({shape})")
+    # An outer jet can read an inner jet's value. _ordered puts its definition
+    # before the first use and CSE shares the same value across all orders.
+    for argument in arguments:
+        for atom in argument.atoms(sp.Function) & outputs.keys():
+            if not isinstance(atom, _UnaryJet) or atom.args[0] != 0:
+                raise ValueError("a nested jet argument must use a unary jet's value channel")
+    arguments = [argument.xreplace(outputs) for argument in arguments]
     expressions = [expression.xreplace(outputs) for expression in expressions]
     expressions, residuals = _bind_piece(expressions)
     replacements, reduced = sp.cse(
@@ -823,7 +857,9 @@ def emit_kernel(
             ]
         else:
             defines = tuple(sp.Symbol(f"c{g}_{n}") for n in range(_JET_COUNT[callee]))
-            ordered = ", order" if callee in _ORDERED_JETS and parametrised else ""
+            ordered = ""
+            if callee in _ORDERED_JETS:
+                ordered = ", order" if parametrised else ", 0"
             lines = [f"{', '.join(map(str, defines))} = {callee}({printed[0]}{ordered})"]
             statements.append(_Statement(defines, uses, lines))
     writes: list[list[str]] = [[] for _ in range(levels)]

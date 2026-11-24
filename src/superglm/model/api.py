@@ -35,6 +35,7 @@ from .fit_state import (
     configured_lambda2,
     configured_link,
     configured_penalty,
+    restore_legacy_edited_statistics,
 )
 
 _SPLINES_DEPRECATION_MESSAGE = (
@@ -60,6 +61,9 @@ class SuperGLM:
     lasso, sparse group lasso, or ridge penalties.  Smoothing parameters can
     be estimated via REML (``fit_reml``) or cross-validation (``cross_validate``).
     """
+
+    _specs: dict[Hashable, FeatureSpec]
+    _interaction_specs: dict[str, Any]
 
     def __init__(
         self,
@@ -361,6 +365,7 @@ class SuperGLM:
         ``release_separated_level_summaries``).
         """
         self.__dict__.update(state)
+        restore_legacy_edited_statistics(self)
         # Metadata of a retired fast discrete predictor; nothing reads it.
         self.__dict__.pop("_fast_prediction_state", None)
         from superglm.model.retired_state import (
@@ -1249,6 +1254,9 @@ class SuperGLM:
         is the binned one, so these differ slightly from
         :meth:`metrics` on the same data, which evaluates the model's
         predictions on the rows passed.
+
+        An editor revision reports the statistics of its scoring rows. When
+        those statistics are unavailable, this method raises with the reason.
         """
         with self._parallel_scope():
             return report_ops.summary(
@@ -1640,6 +1648,7 @@ class SuperGLM:
         theta_bounds: tuple[float, float] = (1e-8, 1e8),
         xatol: float = 1e-2,
         ci_alpha: float | None = None,
+        max_reml_iter: int | None = None,
         progress_callback: Callable[..., None] | None = None,
     ):
         """Estimate NB2 theta via profile likelihood, refit, and return result.
@@ -1674,6 +1683,11 @@ class SuperGLM:
             joint refinement that stopped short, or theta_hat outside that
             interval), a caution is warned, recorded, and shown in the
             interval's status.
+        max_reml_iter : int, optional
+            Outer-iteration budget for the REML publication refit. Requires
+            ``fit_mode="reml"`` or ``"inherit"`` resolving to REML. The theta
+            alternation uses its own ordinary fits. Defaults to the same
+            budget as ``fit_reml()``.
         progress_callback : callable, optional
             Called as ``progress_callback(phase, payload)``: ``"profiling"``
             with ``{"profile_trace": [row]}`` for each alternation step, then
@@ -1693,6 +1707,7 @@ class SuperGLM:
                     theta_bounds=theta_bounds,
                     xatol=xatol,
                     ci_alpha=ci_alpha,
+                    max_reml_iter=max_reml_iter,
                     progress_callback=progress_callback,
                 )
 

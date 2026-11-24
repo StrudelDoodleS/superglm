@@ -146,17 +146,11 @@ def run_fixed_monotone_reml(
         separation="record",
         weight_semantics=model_weight_semantics(model),
     )
-    # Typed like the observed-geometry gates: to a power search a QP
-    # candidate with no feasible mode (or no complete KKT certificate) is an
-    # infeasible point to route around, not a dead search. Bare RuntimeError
-    # stays reserved for invariant violations.
+    # A violated shape row prevents publication. A feasible mode short of its
+    # KKT certificate is installed with its coefficient convergence warning.
     if result.termination_reason == "constraint_infeasible":
         raise ObservedModeNotConvergedError(
             "fixed-lambda constrained REML fit ended at an infeasible coefficient mode"
-        )
-    if result.termination_reason == "constraint_kkt_incomplete":
-        raise ObservedModeNotConvergedError(
-            "fixed-lambda constrained REML fit ended without a complete inner-QP KKT certificate"
         )
 
     # Publish the scales the unconstrained REML route publishes (``finalize_reml_fit``):
@@ -231,6 +225,7 @@ def optimize_reml_best(
     model_optimize_direct_reml,
     debug_recorder=None,
     warm_lambdas: dict[str, float] | None = None,
+    level_hold=None,
 ):
     """Run the REML optimizer and return its best result object."""
     reml_tol = resolve_reml_tol(reml_tol)
@@ -262,6 +257,7 @@ def optimize_reml_best(
         debug_recorder=debug_recorder,
         trace_run=trace_run,
         warm_lambdas=None if fixed else warm_lambdas or None,
+        **({"level_hold": level_hold} if level_hold is not None else {}),
     )
     _record_reml_trace(best, debug_recorder)
     return best

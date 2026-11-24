@@ -1216,6 +1216,41 @@ test("an answer about the model a structural change replaced is dropped", async 
   assert.strictEqual(summary.payload, envelope.summary);
 });
 
+test("only the accepted in-force summary can announce missing statistics", async () => {
+  const older = deferred();
+  const current = deferred();
+  const replies = [older, current];
+  const store = createEditorStore(createInitialEditorState(snapshotOf(3, "fit-a")));
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: () => {
+        const reply = replies.shift();
+        assert.ok(reply);
+        return reply.promise;
+      },
+      getState: async () => snapshotOf(4, "fit-b")
+    }
+  });
+  const first = actions.refreshEvidence("summary", "/summary", {});
+  store.update((state) => commitRemote(state, snapshotOf(4, "fit-b")));
+  const second = actions.refreshEvidence("summary", "/summary", {});
+  current.resolve({
+    notice: "10 of 30 training rows have no quote",
+    model_revision: 4, in_force: "fit-b", request_sequence: 2
+  });
+  assert.equal(await second, true);
+  older.resolve({
+    notice: "2 of 30 training rows have no quote",
+    model_revision: 3, in_force: "fit-a", request_sequence: 1
+  });
+  assert.equal(await first, false);
+  assert.deepEqual(store.getState().request.recovery, {
+    message: "10 of 30 training rows have no quote", retry: null
+  });
+  assert.equal(store.getState().request.mutation.status, "idle");
+});
+
 test("a failure about the model an undo put back is dropped, not shown", async () => {
   const pendingEvidence = deferred();
   const store = createEditorStore(createInitialEditorState(snapshotOf(3, "fit-a")));

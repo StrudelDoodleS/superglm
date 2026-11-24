@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import threading
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -51,7 +52,7 @@ from superglm.editor.evaluation import (
     EvaluationDataset,
     coerce_dataset,
     coerce_evaluation_data,
-    default_metrics_dataset,
+    edited_statistics_dataset,
     training_export_dataset,
 )
 from superglm.editor.evaluation_cache import EditMaterializationRequest
@@ -327,6 +328,12 @@ def _each_public_method_follows_its_model(cls):
     return cls
 
 
+@dataclass(frozen=True, slots=True)
+class _StatisticsInputs:
+    request: EditMaterializationRequest
+    fingerprint: tuple
+
+
 @_each_public_method_follows_its_model
 class EditorSession:
     """Stateful editor for fitted 1D main effects.
@@ -402,6 +409,8 @@ class EditorSession:
         self._edit_epoch = 0
         self._materialized_edit_model = None
         self._materialized_edit_epoch: int | None = None
+        self._statistics_inputs: _StatisticsInputs | None = None
+        self._statistics_lock = threading.Lock()
         # Each predictor's mean |eta| (``additive_step``), with the fit identity it was read on.
         self._eta_sizes: dict[str | None, tuple[Any, float]] = {}
 
@@ -782,6 +791,7 @@ class EditorSession:
         self._edit_epoch += 1
         self._materialized_edit_model = None
         self._materialized_edit_epoch = None
+        self._statistics_inputs = None
 
     def selection(self, term: str) -> NDArray[np.intp]:
         """Return selected point indices for a term."""
@@ -1325,23 +1335,15 @@ class EditorSession:
     def to_model(self, *, X=None, y=None, sample_weight=None, offset=None):
         """Return an edited copy of the source model.
 
-        If explicit evaluation data is supplied, scalar fit statistics on the
-        copy are refreshed against that data. Otherwise the fitted model's
-        retained fit data is used when available.
+        Explicit scoring data refreshes scalar fit statistics on the copy.
+        By default, edits are scored on supplied or retained training rows,
+        with a labelled holdout fallback when no training rows are available.
         """
-        if (
-            X is None
-            and y is None
-            and sample_weight is None
-            and offset is None
-            and self.edited_terms()
-        ):
-            train = self._evaluation_data.get("train")
-            if train is not None:
-                X = train.X
-                y = train.y
-                sample_weight = train.sample_weight
-                offset = train.offset
+        if X is None and y is None and sample_weight is None and offset is None:
+            request = self.capture_materialization_request()
+            if request is not None:
+                # Python callers may refit or otherwise change this copy.
+                return apply.materialize_edit_request(request)
         return apply.apply_edits_to_model_copy_with_data(
             self.model,
             self.terms,
@@ -1357,23 +1359,47 @@ class EditorSession:
         dataset=None,
         include_unchanged: bool = False,
     ) -> EditMaterializationRequest | None:
-        """Capture plot-scale state and immutable evaluation references."""
-        if not include_unchanged and not self.edited_terms():
+        """Capture plot-scale state and references to the evaluation inputs."""
+        changed = self.edited_terms()
+        if not include_unchanged and not changed:
             return None
+        fallback = None
+        if dataset is None:
+            dataset = edited_statistics_dataset(self)
+            if dataset is not None and dataset.name != "train":
+                fallback = dataset.label
         return EditMaterializationRequest(
             model_revision=self.model_revision,
             edit_epoch=self.edit_epoch,
             base_model=self.model,
-            terms={name: term.copy() for name, term in self.terms.items()},
-            dataset=default_metrics_dataset(self) if dataset is None else dataset,
+            base_fit=_fit_in_force(self.model),
+            terms={name: self.terms[name].copy() for name in changed},
+            dataset=dataset,
+            statistics_fallback=fallback,
         )
+
+    def _materialize_current_statistics(self, request: EditMaterializationRequest):
+        """Share the default private summary/export model for the captured revision."""
+        with self._statistics_lock:
+            frame, fingerprint = apply.statistics_scoring_data(request)
+            if self._materialization_request_is_current(request):
+                cached = self._cached_statistics(fingerprint)
+                if cached is not None:
+                    return cached
+            model = apply.materialize_edit_request(request, frame=frame)
+            self._publish_materialized_model(request, model, fingerprint)
+            return model
 
     def materialization_request_is_current(self, request: EditMaterializationRequest) -> bool:
         """Return whether a captured model snapshot still identifies this session state."""
+        return self._materialization_request_is_current(request)
+
+    def _materialization_request_is_current(self, request: EditMaterializationRequest) -> bool:
         return (
             request.model_revision == self.model_revision
             and request.edit_epoch == self.edit_epoch
             and request.base_model is self.model
+            and request.base_fit is _fit_in_force(self.model)
         )
 
     def cached_materialized_model(
@@ -1383,23 +1409,69 @@ class EditorSession:
         model_revision: int | None = None,
         base_model=None,
     ):
-        """Return the cached model only for matching live session identity."""
+        """Return the cached model only for matching live session and scoring inputs."""
         if int(edit_epoch) != self.edit_epoch:
             return None
         if model_revision is not None and int(model_revision) != self.model_revision:
             return None
         if base_model is not None and base_model is not self.model:
             return None
-        if self._materialized_edit_epoch != int(edit_epoch):
-            return None
-        return self._materialized_edit_model
+        with self._statistics_lock:
+            request = self.capture_materialization_request()
+            if request is None or request.edit_epoch != int(edit_epoch):
+                return None
+            _, fingerprint = apply.statistics_scoring_data(request)
+            return self._cached_statistics(fingerprint)
+
+    def _cached_statistics(self, fingerprint: tuple | None):
+        cached = self._statistics_inputs
+        if (
+            cached is not None
+            and fingerprint is not None
+            and self._materialized_edit_epoch == self.edit_epoch
+            and self._materialization_request_is_current(cached.request)
+            and cached.fingerprint == fingerprint
+        ):
+            return self._materialized_edit_model
+        return None
 
     def publish_materialized_model(self, request: EditMaterializationRequest, model) -> bool:
-        """Publish a private model only if its entire snapshot is still current."""
-        if not self.materialization_request_is_current(request):
+        """Publish an independently materialized model if its scoring rows still match."""
+        with self._statistics_lock:
+            if not self._materialization_request_is_current(request):
+                return False
+            frame, fingerprint = apply.statistics_scoring_data(request)
+            dataset = request.dataset
+            if dataset is not None and not is_lss(request.base_model):
+                guard = getattr(model, "_fit_data_guard", None)
+                if (
+                    fingerprint is None
+                    or guard is None
+                    or not guard.matches(
+                        frame,
+                        dataset.y,
+                        dataset.sample_weight,
+                        dataset.offset,
+                        fit_weights=model._fit_weights,
+                        fit_offset=model._fit_offset,
+                        own_frame=dataset.X is model._fit_X_ref,
+                    )
+                ):
+                    return False
+                if dataset.sample_weight is None and not np.all(model._fit_weights == 1.0):
+                    return False
+                if dataset.offset is None and model._fit_offset is not None:
+                    return False
+            return self._publish_materialized_model(request, model, fingerprint)
+
+    def _publish_materialized_model(
+        self, request: EditMaterializationRequest, model, fingerprint: tuple | None
+    ) -> bool:
+        if fingerprint is None or not self._materialization_request_is_current(request):
             return False
         self._materialized_edit_model = model
         self._materialized_edit_epoch = request.edit_epoch
+        self._statistics_inputs = _StatisticsInputs(request, fingerprint)
         return True
 
     def save_model(self, path: str | Path) -> Path:

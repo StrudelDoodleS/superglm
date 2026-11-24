@@ -1156,6 +1156,7 @@ _OUTCOME_GUARDS = {
     "test_distributional_newton_practical_handoff.py::test_a_finish_that_moved_far_and_was_rejected_does_not_relabel_where_it_stalled": _TRAJECTORY,
     "test_distributional_newton_practical_handoff.py::test_a_finish_on_a_face_that_cannot_reach_stationary_leaves_the_stop_to_the_strict_test": _IMPLIES,
     "test_distributional_perf_levers.py::test_narrow_fit_keeps_blas_capped_regardless_of_row_count": _CAPABILITY,
+    "test_distributional_score_units.py::test_gaussian_fit_reaches_the_centred_mle_or_discloses_the_stop": _ONE_SIDED,
     "test_factor_smooth_sz_thin_and_influence.py::test_sz_same_x_reml_decisions_do_not_follow_the_blas_thread_count": _CAPABILITY,
     "test_gamma_ls_family.py::test_gamma_endpoint_polish_reversal_never_certifies_a_nonstationary_fit": _NEVER_RUN,
     "test_generalized_gamma_lss_vertical_slice.py::test_infinite_mean_data_either_diagnose_or_stop_at_the_boundary": _NEVER_RUN,

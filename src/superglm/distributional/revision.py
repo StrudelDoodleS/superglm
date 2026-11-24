@@ -162,6 +162,7 @@ def revised_model(
     X_train: FrameLike | EagerFrame | None,
     *,
     repairs: Sequence[ShapeRepairRecord] = (),
+    refresh_training_rows: bool = True,
 ) -> Any:
     """A model predicting with ``coefficients``; ``model`` is left as it was.
 
@@ -187,7 +188,7 @@ def revised_model(
         (*(record for record in kept if record.term not in repaired_now), *repairs),
     )
     check_hand_edit(edit, state.layout, state.result.coefficients)
-    rows = state.retained_rows
+    rows = state.retained_rows if refresh_training_rows else None
     if rows is not None:
         from superglm.model.base import NoPredictedMeanError
 

@@ -269,6 +269,14 @@ def data_null_directions(model) -> DataNullDirections | None:
     scale[selected] = local_scale
     dual = np.zeros((width, dual_local.shape[1]))
     dual[selected] = dual_local
+    # Scoring uses the original indicators for held prices. In the free design
+    # their contribution is an offset, and cannot leave the training span.
+    if held_columns := getattr(result, "held_level_columns", ()):
+        held = list(held_columns)
+        scale[held] = 0.0
+        dual[held] = 0.0
+        if not np.any(dual):
+            return None
     sum_w = float(rank_info.sum_w)
     null = DataNullDirections(
         dual=dual,

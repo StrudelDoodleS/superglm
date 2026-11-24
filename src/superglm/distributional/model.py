@@ -77,6 +77,7 @@ from superglm.distributional.results.solver import DenseSolverConfig, DenseSolve
 from superglm.distributional.separation import (
     apply_separation_policy,
     censored_recession,
+    disclose_predictor_separation,
     format_censored_separation_message,
     predictor_response_boundaries,
     record_factor_smooth_levels,
@@ -1206,18 +1207,20 @@ def _fit_candidate(
             separation_boundaries=separation_boundaries,
             separation_response=retained_y,
         )
-    if separation_boundaries is not None:
-        apply_separation_policy(
-            scan_predictor_separation(
-                compiled,
-                retained_y,
-                resolved_weights.values,
-                boundaries=separation_boundaries,
-            ),
-            separation_policy,
-            stacklevel=4,
-        )
     bound_rows = plan_observation(likelihood_plan).bounds
+    separation_findings = []
+    if separation_boundaries is not None:
+        findings = scan_predictor_separation(
+            compiled,
+            retained_y,
+            resolved_weights.values,
+            boundaries=separation_boundaries,
+            bounds=bound_rows,
+        )
+        if separation_policy == "warn":
+            separation_findings = findings
+        else:
+            apply_separation_policy(findings, separation_policy, stacklevel=4)
     if bound_rows is not None and separation_policy != "ignore":
         apply_separation_policy(
             scan_censored_separation(
@@ -1323,7 +1326,7 @@ def _fit_candidate(
             # before the rules, not the one conditional on those rows.
             rule_free_covariance = rule_free.terminal_pseudo_inverse()
     with measure_phase(phase_recorder, "inference_edf"):
-        return prepare_distributional_fit_state(
+        candidate = prepare_distributional_fit_state(
             family,
             templates,
             compiled,
@@ -1341,6 +1344,8 @@ def _fit_candidate(
             shape_fit=shape_fit,
             rule_free_covariance=rule_free_covariance,
         )
+    disclose_predictor_separation(separation_findings, compiled, resolved_weights.values)
+    return candidate
 
 
 def fit_dense_distributional(

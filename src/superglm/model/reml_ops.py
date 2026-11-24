@@ -28,6 +28,7 @@ def model_optimize_direct_reml(
     debug_recorder=None,
     trace_run=None,
     warm_lambdas=None,
+    level_hold=None,
 ):
     """Optimize the direct REML objective via damped Newton (Wood 2011)."""
     from superglm.model.reml_execute import resolve_reml_tol
@@ -63,6 +64,7 @@ def model_optimize_direct_reml(
         debug_recorder=debug_recorder,
         trace_run=trace_run,
         warm_lambdas=warm_lambdas,
+        level_hold=level_hold,
         # A Tweedie power search's candidate fits, and the fits of an
         # estimated-theta NB2 alternation, keep the plain cold start.
         presolve=False

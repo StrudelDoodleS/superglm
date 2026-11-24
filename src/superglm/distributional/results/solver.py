@@ -10,6 +10,7 @@ from types import MappingProxyType
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.distributional._score import ScoreUnits
 from superglm.distributional.results.endpoint_evidence import (
     CoefficientCurvature,
     ConvergenceReason,
@@ -26,13 +27,18 @@ from superglm.solvers.rank import RankDecomposition, decompose_gram
 def _assessment_retained_kkt_ratio(result: DenseSolverResult) -> float:
     """Recompute endpoint-authority stationarity from retained fit state."""
 
+    optimizing = result.penalized_optimizing_log_likelihood
+    if optimizing is None:
+        raise ValueError("endpoint assessment fit has no optimizing likelihood")
+    if result.score_units is not None:
+        return result.score_units.relative(
+            result.terminal_score, optimizing, face=result.coefficient_face
+        )
+    # Results saved before the solver recorded predictor scales.
     retained_score = result.terminal_score
     if result.coefficient_face is not None:
         retained_score = result.coefficient_face.reduce_vector(retained_score)
     score_norm = float(np.max(np.abs(retained_score), initial=0.0))
-    optimizing = result.penalized_optimizing_log_likelihood
-    if optimizing is None:
-        raise ValueError("endpoint assessment fit has no optimizing likelihood")
     return score_norm / (1.0 + abs(float(optimizing)))
 
 
@@ -77,6 +83,10 @@ class RetainedCoordinates:
     def null_basis(self) -> NDArray[np.float64]:
         return np.eye(self.dropped.size)[:, ~self.dropped]
 
+    @property
+    def constraint_basis(self) -> NDArray[np.float64]:
+        return np.eye(self.dropped.size)[:, self.dropped]
+
     def reduce_vector(self, values: NDArray) -> NDArray[np.float64]:
         return np.asarray(values, dtype=np.float64)[~self.dropped]
 
@@ -100,6 +110,8 @@ def _score_within_rounding_floor(
     face: PenaltyFace | RetainedCoordinates | None,
     objective: float,
     tolerance: float,
+    score_units: ScoreUnits | None = None,
+    score_normals: NDArray | None = None,
 ) -> bool:
     """Return whether the retained score is within its rounding floor and moves nothing.
 
@@ -136,7 +148,7 @@ def _score_within_rounding_floor(
     absolute_score = np.abs(np.asarray(score, dtype=np.float64))
     nonzeros = np.count_nonzero(penalty, axis=1)
     width = absolute_score.size
-    retained_score = absolute_score if face is None else np.abs(face.reduce_vector(score))
+    retained_score = score if face is None else face.reduce_vector(score)
     with np.errstate(over="ignore", invalid="ignore"):
         row_gamma = nonzeros * unit_roundoff / (1.0 - nonzeros * unit_roundoff)
         floor = row_gamma * (np.abs(penalty) @ np.abs(np.asarray(coefficients, dtype=np.float64)))
@@ -147,14 +159,21 @@ def _score_within_rounding_floor(
             floor = np.abs(face.null_basis).T @ (floor + reduction * absolute_score)
             roundings += width + 2
         # Every term is nonnegative, so the computed floor is at most gamma_m
-        # low for the m roundings that formed it; restore it outward, then
-        # add the relative tolerance outward too.
+        # low for the m roundings that formed it; restore it outward.
         restore = 2 * roundings * unit_roundoff / (1.0 - 2 * roundings * unit_roundoff)
         floor = np.nextafter(floor * (1.0 + restore), np.inf)
-        scale = np.nextafter(1.0 + abs(float(objective)), np.inf)
-        limit = np.nextafter(tolerance * scale, np.inf)
-        allowed = np.nextafter(limit + floor, np.inf)
-    if not (np.all(np.isfinite(allowed)) and np.all(retained_score <= allowed)):
+    if not np.isfinite(floor).all():
+        return False
+    # Remove only a residual that the computed rounding floor could explain.
+    # What remains must pass the same relative-gradient test as an ordinary
+    # stop. The decrement below still covers *every* error inside the floor.
+    excess = retained_score - np.clip(retained_score, -floor, floor)
+    if score_units is None:
+        relative = np.max(np.abs(excess), initial=0.0) / (1.0 + abs(objective))
+    else:
+        full = excess if face is None else face.lift_vector(excess)
+        relative = score_units.relative(full, objective, face=face, normals=score_normals)
+    if not relative <= tolerance:
         return False
     return _newton_decrement_is_certified(
         config=config,
@@ -206,6 +225,7 @@ def _assessment_is_numerically_stationary(
                 face=result.coefficient_face,
                 objective=optimizing,
                 tolerance=tolerance,
+                score_units=result.score_units,
             )
         )
     )
@@ -587,6 +607,7 @@ def _validate_resolution_limited_stationarity(
     penalized_objective: float,
     face: PenaltyFace | None,
     retained_rank: RankDecomposition | None,
+    score_units: ScoreUnits | None = None,
 ) -> None:
     if not converged:
         raise ValueError("resolution-limited stationarity requires converged=True")
@@ -613,10 +634,14 @@ def _validate_resolution_limited_stationarity(
         or retained_rank.resolution_limited
     ):
         raise ValueError("resolution-limited stationarity requires full retained rank")
-    raw_kkt = float(np.max(np.abs(retained_score), initial=0.0)) / (1.0 + abs(penalized_objective))
-    if not math.isfinite(raw_kkt) or raw_kkt <= config.tolerance:
+    ratio = (
+        score_units.relative(score, penalized_objective, face=face)
+        if score_units is not None
+        else float(np.max(np.abs(retained_score), initial=0.0)) / (1.0 + abs(penalized_objective))
+    )
+    if not math.isfinite(ratio) or ratio <= config.tolerance:
         raise ValueError(
-            "resolution-limited stationarity requires raw retained KKT above tolerance"
+            "resolution-limited stationarity requires the retained score above tolerance"
         )
     try:
         reconstructed_rank = decompose_gram(
@@ -693,6 +718,7 @@ class DenseSolverResult:
     coefficient_face: PenaltyFace | None = None
     terminal_reduced_rank: RankDecomposition | None = None
     row_shape: tuple[int, int] | None = None
+    score_units: ScoreUnits | None = None
 
     def __post_init__(self) -> None:
         eta = None if self.eta is None else _readonly_finite(self.eta, name="eta")

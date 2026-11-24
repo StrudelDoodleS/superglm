@@ -123,8 +123,15 @@ def estimate_p(
     X, y, sample_weight, offset = validated
     fit_ops._check_random_effect_nesting(model, X)
     _refuse_replication_weights(model, sample_weight)
+    anchors_by_power = {}
     result = _search_power_privately(
-        model, validated, fit_mode=search_mode, p_bounds=p_bounds, xatol=xatol, report=report
+        model,
+        validated,
+        fit_mode=search_mode,
+        p_bounds=p_bounds,
+        xatol=xatol,
+        report=report,
+        anchors_by_power=anchors_by_power,
     )
     result.fit_mode = publish_mode
     if ci_alpha is not None:
@@ -138,7 +145,9 @@ def estimate_p(
     _publish_profiled_family(
         model,
         validated,
-        references,
+        references | {"level_anchors": anchors_by_power.get(result.p_hat)}
+        if publish_mode == "fit_reml"
+        else references,
         fit_mode=publish_mode,
         family=Tweedie(p=result.p_hat),
         parameter="p",
@@ -150,7 +159,9 @@ def estimate_p(
     return result
 
 
-def _search_power_privately(model, validated, *, fit_mode, p_bounds, xatol, report):
+def _search_power_privately(
+    model, validated, *, fit_mode, p_bounds, xatol, report, anchors_by_power
+):
     """The power search on an attempt-local copy of the model.
 
     The result's lazy interval keeps refitting this private model, never the
@@ -162,6 +173,7 @@ def _search_power_privately(model, validated, *, fit_mode, p_bounds, xatol, repo
     profile_workspace = FitWorkspace.start(
         model, mode="estimate_p_profile", validated_inputs=validated
     )
+    profile_workspace.model._profile_anchors_by_power = anchors_by_power
     return search_power(
         profile_workspace.model,
         *validated,
@@ -317,12 +329,14 @@ def _publish_profiled_family(
         ) from exc
     published = synchronize(final_workspace.model)
     _install_refit(model, final_workspace, family)
-    if fit_mode == "fit_reml":
-        from superglm.model import fit_ops
+    from superglm.model import fit_ops
 
+    if fit_mode == "fit_reml":
         fit_ops._record_reml_terminal_best_effort(model, debug_recorder)
         # The published refit warns once, as fit_reml does, at the caller's line.
         fit_ops.warn_published_reml_nonconvergence(model)
+    elif model._result.termination_reason == "mean_space_boundary":
+        fit_ops.warn_published_coefficient_nonconvergence(model)
     return published
 
 
@@ -525,6 +539,7 @@ def estimate_theta(
     theta_bounds=(1e-8, 1e8),
     xatol=1e-2,
     ci_alpha=None,
+    max_reml_iter=None,
     progress_callback=None,
 ):
     """Estimate NB theta and atomically publish one profiled final fit."""
@@ -533,6 +548,7 @@ def estimate_theta(
     publish_mode = _resolve_theta_request(
         model, fit_mode=fit_mode, theta_bounds=theta_bounds, xatol=xatol, ci_alpha=ci_alpha
     )
+    reml_budget = _publication_reml_budget(max_reml_iter, publish_mode, fit_mode)
     report = progress_callback or _ignore_progress
     references = {"X_ref": X, "y_ref": y, "sample_weight_ref": sample_weight, "offset_ref": offset}
     # The family holds a numeric theta, but this call re-estimates it and refits.
@@ -554,6 +570,7 @@ def estimate_theta(
         parameter="theta",
         value=result.theta_hat,
         synchronize=partial(_install_nb_profile, y=validated[1], result=result, ci_alpha=ci_alpha),
+        max_reml_iter=reml_budget,
     )
 
 

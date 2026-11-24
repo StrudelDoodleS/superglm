@@ -752,6 +752,35 @@ def test_a_separated_fit_warns_once_however_many_solves_its_theta_search_ran(mon
     assert runtime_claims(caught) == [model.result.separation_message]
 
 
+@pytest.mark.parametrize("penalty", [0.0, 0.2], ids=["direct", "selection"])
+def test_gaussian_guard_warning_names_dominating_responses(monkeypatch, penalty):
+    import superglm.diagnostics.separation as separation_module
+
+    runtime_finding = separation_module.runtime_finding
+
+    def pinned(*args, **kwargs):
+        # Force the backstop's event without depending on floating-point rounding in the fit.
+        eta = kwargs["eta"].copy()
+        eta[0] += 1
+        return runtime_finding(*args, **(kwargs | {"ratio": 1e35, "eta_unclipped": eta}))
+
+    monkeypatch.setattr(separation_module, "runtime_finding", pinned)
+    x = np.linspace(-1, 1, 100)
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family="gaussian", link="log", features={"x": Numeric()}, selection_penalty=penalty
+    )
+    with pytest.warns(SeparationWarning) as caught:
+        model.fit(frame, np.exp(1 + 0.5 * x))
+
+    (warning,) = caught
+    message = str(warning.message)
+    assert "overflow guard" in message and "['x']" in message
+    assert "a few responses dominate the fit" in message
+    assert "Gamma" in message and "Tweedie" in message and "capping the response" in message
+    assert "separation" not in message and "response boundary" not in message
+
+
 def poisson_curve(seed=3, n=1500):
     rng = np.random.default_rng(seed)
     x = rng.uniform(0.0, 1.0, n)
@@ -1586,3 +1615,29 @@ def test_a_fit_reports_the_build_warnings_where_master_did():
         ).fit(pd.DataFrame({"c": c}), y)
     attributed = [w for w in record if "falling back" in str(w.message)]
     assert [Path(w.filename).name for w in attributed] == ["dm_builder.py"]
+
+
+@pytest.mark.pins_behaviour
+def test_delegated_categorical_build_keeps_warning_attribution():
+    """Preserve master's named warning and module filter when a subclass calls super()."""
+    frame = pd.DataFrame({"band": ["a", "b"] * 20})
+    y = np.array([1.0, 4.0] * 20)
+    model = SuperGLM(
+        family="poisson", features={"band": _WithoutPenalty(base="z", levels=["a", "b", "z"])}
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        warnings.filterwarnings("ignore", category=UserWarning, module=r"^superglm\.dm_builder$")
+        model.fit(frame, y)
+    np.testing.assert_allclose(
+        model.predict(pd.DataFrame({"band": ["a", "b"]})), [1.0, 4.0], rtol=1e-6
+    )
+
+    with pytest.warns(UserWarning) as record:
+        SuperGLM(
+            family="poisson", features={"band": _WithoutPenalty(base="z", levels=["a", "b", "z"])}
+        ).fit(frame, y)
+    (fallback,) = [w for w in record if "falling back" in str(w.message)]
+    assert fallback.category is UserWarning
+    assert str(fallback.message).startswith("Feature 'band': ")
+    assert Path(fallback.filename).name == "dm_builder.py"

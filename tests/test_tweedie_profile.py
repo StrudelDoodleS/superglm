@@ -393,6 +393,42 @@ class TestMaximumLikelihoodPhi:
         assert 1.5 not in profile.candidates
         assert "KKT certificate" in profile.infeasible[1.5]
 
+    def test_a_fixed_lambda_uncertified_qp_has_no_power_score(self, monkeypatch):
+        from dataclasses import replace
+
+        from superglm import Constraint, LambdaPolicy
+        from superglm.profiling.tweedie import _PowerProfile
+
+        x = np.linspace(0.0, 1.0, 100)
+        y = np.random.default_rng(8).poisson(np.exp(x)).astype(float)
+        model = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={
+                "x": Spline(
+                    kind="cr",
+                    k=6,
+                    constraint=Constraint.fit.increasing,
+                    lambda_policy=LambdaPolicy.fixed(1.0),
+                )
+            },
+        )
+        profile = _PowerProfile(model, pd.DataFrame({"x": x}), y, np.ones(len(y)), None, "fit_reml")
+        fit = profile.clone.fit_reml
+
+        def publish_uncertified(*args, **kwargs):
+            fit(*args, **kwargs)
+            clone = profile.clone
+            assert clone._reml_result is None
+            clone._result = replace(
+                clone.result, converged=False, termination_reason="constraint_kkt_incomplete"
+            )
+
+        monkeypatch.setattr(profile.clone, "fit_reml", publish_uncertified)
+        assert profile(1.5) == math.inf
+        assert 1.5 not in profile.candidates
+        assert "KKT certificate" in profile.infeasible[1.5]
+
     def test_a_search_with_every_power_refused_names_the_refusal_not_reml(self):
         """Both bounds and every Brent point sit too close to 1 under plain ML fits."""
         import pandas as pd
@@ -1153,8 +1189,10 @@ class TestMaximumLikelihoodPhi:
         x = rng.uniform(0.0, 1.0, 800)
         y = generate_tweedie_cpg(800, np.exp(0.3 + 0.5 * np.sin(4 * x)), 1.3, 1.5, rng=rng)
         model = SuperGLM(family=TweedieDistribution(p=1.5), features={"x": Spline(n_knots=8)})
-        with pytest.warns(UserWarning, match="search_fit_mode='fit'"):
+        with pytest.warns(UserWarning, match="smoothing parameters did not converge"):
             result = model.estimate_p(pd.DataFrame({"x": x}), y, fit_mode="reml", ci_alpha=0.05)
+        assert sum("smoothing parameters did not converge" in msg for msg in result.warnings) >= 2
+        assert not any("budget" in message for message in result.warnings)
         assert not any("max_iter" in message for message in result.warnings)
         # Disclosed, not refused: the interval exists.
         assert 0.05 in result._ci_cache

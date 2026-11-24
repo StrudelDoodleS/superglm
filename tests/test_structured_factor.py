@@ -823,25 +823,29 @@ def test_centered_estimability_certification_failure_uses_bounded_dense_fallback
     )
 
 
-def test_centered_estimability_certification_failure_raises_when_wide(
+def test_centered_estimability_certification_failure_raises_over_workspace_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import superglm.solvers._structured.geometry as structured_geometry
 
-    operator = _unit_level_centered_operator(513)
+    operator = _unit_level_centered_operator(800)
 
     def fail_numerically(_operator):
         raise np.linalg.LinAlgError("non-convergence")
+
+    def fail_materialization(_operator):
+        pytest.fail("over-budget centered Gram must never be materialized")
 
     monkeypatch.setattr(
         structured_geometry,
         "_independent_block_centered_estimability",
         fail_numerically,
     )
+    monkeypatch.setattr(structured_geometry, "materialize_compact_operator", fail_materialization)
 
     with pytest.raises(
         RuntimeError,
-        match=r"Compact structured estimability certification failed.*bounded dense fallback",
+        match=r"p=800.*64 MiB.*budget",
     ) as caught:
         centered_operator_coefficient_estimable(operator)
     assert isinstance(caught.value.__cause__, np.linalg.LinAlgError)

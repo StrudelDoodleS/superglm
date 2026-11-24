@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -186,6 +188,60 @@ def frequency_book_train():
     train = np.zeros(len(freq), dtype=bool)
     train[order[: int(round(0.8 * len(freq)))]] = True
     return freq[train].reset_index(drop=True)
+
+
+def test_nb2_region_test_excludes_claim_free_r42():
+    from scipy.stats import chi2
+
+    from superglm import NegativeBinomialLS, SuperLSS, cat, s
+    from superglm.diagnostics.separation import SeparationWarning
+
+    freq = _datasets.load_freq_corrected()
+    rows = np.random.default_rng(42).choice(len(freq), size=20_000, replace=False)
+    book = freq.iloc[rows].reset_index(drop=True)
+    X = book[["Region", "Area", "VehGas", "DrivAge"]].assign(log_expo=np.log(book.Exposure))
+    y = book.ClaimNb.to_numpy(dtype=float)
+    r42 = X.Region == "R42"
+    assert r42.sum() == 58 and y[r42].sum() == 0
+    assert book.loc[r42, "Exposure"].sum() == pytest.approx(35.93)
+
+    def fit(keep):
+        family = NegativeBinomialLS()
+        mean = family.mean(
+            cat("Region"), cat("Area"), cat("VehGas"), s("DrivAge", n_knots=8), offset="log_expo"
+        )
+        return SuperLSS(family, mean, family.theta()).fit_reml(X.loc[keep], y[keep])
+
+    with pytest.warns(SeparationWarning, match="mean:Region.*R42") as caught:
+        model = fit(np.ones(len(y), dtype=bool))
+    assert len(caught) == 1
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SeparationWarning)
+        without = fit(~r42)
+        model.predict(X.loc[~r42])
+    term = model.term_test("mean", "Region")
+    reference = without.term_test("mean", "Region")
+    effect = model.term_inference("mean", "Region", simultaneous=False)
+    # R24 is the base. The remaining sorted labels each occupy one leading mean coefficient.
+    columns = [
+        i for i, level in enumerate((v for v in effect.levels if v != "R24"), 1) if level != "R42"
+    ]
+    beta = model.coef_by_predictor_["mean"][columns]
+    cov = model.covariance_[np.ix_(columns, columns)]
+    expected = beta @ np.linalg.solve(cov, beta)
+    assert term.rank == reference.rank == len(columns) == 20
+    assert term.statistic == pytest.approx(expected, rel=1e-12)
+    assert term.p_value == pytest.approx(chi2.sf(expected, 20), rel=1e-12)
+    assert term.statistic == pytest.approx(reference.statistic, rel=2e-3)
+    assert term.p_value == pytest.approx(reference.p_value, rel=0.03)
+    assert "SEP" in term.note and "R42" in term.note
+    j = effect.levels.index("R42")
+    assert sum(effect.separated) == 1 and effect.separated[j]
+    assert np.isnan([effect.se[j], effect.lower[j], effect.upper[j]]).all()
+    with pytest.warns(SeparationWarning, match="mean:Region.*R42") as caught:
+        prediction = model.predict(X.loc[r42])
+    assert len(caught) == 1
+    np.testing.assert_array_equal(prediction, model._require_fitted().predict(X.loc[r42]))
 
 
 def _book_location_terms():

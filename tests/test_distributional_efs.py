@@ -3291,6 +3291,123 @@ def test_flat_objective_may_retain_plateau_reason_after_fresh_raw_convergence(
     assert smoothing.convergence_reason == "objective_plateau"
 
 
+def _script_plateau_steps(monkeypatch, steps):
+    evidence_at = smoothing_loop._fresh_raw_evidence
+    remaining = iter(steps)
+
+    def evidence(layout, lambdas, fit, config, **kwargs):
+        raw = evidence_at(layout, lambdas, fit, config, **kwargs)
+        step = next(remaining)
+        raw_steps = dict.fromkeys(raw.estimated_names, step)
+        proposed, log_steps = smoothing_loop._scaled_proposal(
+            lambdas, raw_steps, raw.estimated_names, 1.0, config
+        )
+        assert raw.update is not None
+        update = replace(raw.update, lambdas=proposed, log_steps=log_steps, raw_log_steps=raw_steps)
+        return replace(raw, maximum=step, update=update)
+
+    monkeypatch.setattr(smoothing_loop, "_fresh_raw_evidence", evidence)
+
+
+@pytest.mark.parametrize("refusal", ["raw_coefficient", "accelerated_objective", "provenance"])
+def test_refused_trial_breaks_strict_plateau_window(monkeypatch, refusal):
+    """A fresh fixed point can stop the search after a refusal broke the score window."""
+    frame, response, predictors = _smooth_fixture()
+    monkeypatch.setattr(smoothing_objective, "joint_laplace_objective", lambda *a, **kw: 0.0)
+    _script_plateau_steps(monkeypatch, (0.25, 0.125, 0.03125, 0.0))
+    accelerated = refusal != "raw_coefficient"
+    if accelerated:
+        _patch_second_iteration_acceleration(monkeypatch)
+    fit_trial = smoothing_loop._fit_fixed_state
+    provenance = smoothing_loop._acceleration_provenance
+    n_trials = 0
+    refused_fit = None
+
+    def fit(*args, **kwargs):
+        nonlocal n_trials, refused_fit
+        n_trials += 1
+        result = fit_trial(*args, **kwargs)
+        if n_trials == 2:
+            if refusal == "raw_coefficient":
+                result = replace(result, converged=False, convergence_reason="max_iterations")
+            refused_fit = result
+        return result
+
+    def trial_objective(result, **kwargs):
+        if result is refused_fit and refusal == "accelerated_objective":
+            return None
+        # The third round's accelerated proposal has a comparable but worse score.
+        return 10.0 if accelerated and n_trials == 4 else 0.0
+
+    def trial_provenance(names, result):
+        key = provenance(names, result)
+        return (*key, "changed") if result is refused_fit and refusal == "provenance" else key
+
+    monkeypatch.setattr(smoothing_loop, "_fit_fixed_state", fit)
+    monkeypatch.setattr(smoothing_loop, "_trial_laplace_objective", trial_objective)
+    monkeypatch.setattr(smoothing_loop, "_acceleration_provenance", trial_provenance)
+    model = fit_dense_distributional(
+        frame,
+        response,
+        family=GaussianLS(),
+        weight_contract=WeightContract(semantics="prior"),
+        predictors=predictors,
+        lambdas={"location:x#wiggle": 0.3, "scale:z#wiggle": 0.2},
+        efs_config=DistributionalEFSConfig(
+            outer="efs",
+            max_iterations=3,
+            plateau_iterations=2,
+            acceleration="multisecant" if accelerated else "none",
+        ),
+    )
+
+    smoothing = model.smoothing
+    assert smoothing is not None
+    assert [len(item.coefficient_fit_indices) for item in smoothing.history] == (
+        [1, 2, 2] if accelerated else [1, 2, 1]
+    )
+    assert smoothing.converged
+    assert smoothing.terminal_raw_max_log_step == 0.0
+    assert smoothing.convergence_reason == "lambda_change"
+
+
+def test_practical_plateau_restarts_after_a_refused_trial(monkeypatch):
+    """The next comparable step starts a new window even if it moves farther."""
+    frame, response, predictors = _smooth_fixture()
+    monkeypatch.setattr(smoothing_objective, "joint_laplace_objective", lambda *a, **kw: 0.0)
+    _script_plateau_steps(monkeypatch, (0.25, 0.125, 0.2, 0.1, 0.05))
+    score = smoothing_loop._trial_laplace_objective
+    n_trials = 0
+
+    def trial_objective(*args, **kwargs):
+        nonlocal n_trials
+        n_trials += 1
+        return None if n_trials == 2 else score(*args, **kwargs)
+
+    monkeypatch.setattr(smoothing_loop, "_trial_laplace_objective", trial_objective)
+    model = fit_dense_distributional(
+        frame,
+        response,
+        family=GaussianLS(),
+        weight_contract=WeightContract(semantics="prior"),
+        predictors=predictors,
+        lambdas={"location:x#wiggle": 0.3, "scale:z#wiggle": 0.2},
+        efs_config=DistributionalEFSConfig(
+            outer="efs",
+            max_iterations=4,
+            plateau_iterations=2,
+            practical_convergence=True,
+            practical_parameter_tolerance=1.0,
+        ),
+    )
+
+    smoothing = model.smoothing
+    assert smoothing is not None
+    assert smoothing.convergence_reason == "practical_plateau"
+    assert [item.raw_backtracks for item in smoothing.history] == [0, 1, 0, 0]
+    assert smoothing.history[2].max_accepted_log_step > smoothing.history[1].max_accepted_log_step
+
+
 def test_default_and_explicit_none_routes_are_bit_identical() -> None:
     frame, response, predictors = _smooth_fixture()
     fit_kwargs = {

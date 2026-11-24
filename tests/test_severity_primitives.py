@@ -46,6 +46,9 @@ The generalized Pareto survival engine (``kernels._pareto_tail``) is held to
 ``64 u`` of each order's largest partial, through ``xi = 0`` and on both sides
 of its series radius ``z = 1/2`` (measured at most 12).
 
+The log-hazard and log-softplus jets use 128u of the input-conditioned
+magnitude through order four, including the roots of higher derivatives.
+
 The measured worst values of ``err / (u E)`` on this grid (x86-64 Linux,
 glibc, AMD EPYC 9645) are pinned in ``_MEASURED``.  The test asserts ``C``,
 never the measurement.
@@ -113,6 +116,36 @@ _A = sorted(
 def _mp_psires(n, a):
     leading = mp.log(a) if n == 0 else (-1) ** (n - 1) * mp.factorial(n - 1) / a**n
     return mp.polygamma(n, a) - leading
+
+
+@pytest.mark.parametrize("inner", [False, True], ids=["log-cdf", "log-softplus"])
+def test_log_hazard_jets_across_the_bernoulli_switch(inner):
+    """Check value and each derivative on both sides of t=1 and into both tails."""
+
+    def reference(x):
+        if inner:
+            return mp.log(mp.log1p(mp.exp(x)))
+        t = mp.exp(x)
+        return mp.log(-mp.expm1(-t)) if t <= 1 else mp.log1p(-mp.exp(-t))
+
+    function = prims.logsoftplus_01234 if inner else prims.log1mexp_exp_01234
+    points = [-1000.0, -230.0, -36.01, -35.99, -2.0, 0.0, 3.0]
+    for t in (1 - 1e-12, 1.0, 1 + 1e-12, 699.9, 700.1, 745.0, 760.0, 801.0):
+        if inner:
+            points.append(t if t > 700 else math.log(math.expm1(t)))
+        else:
+            points.append(math.log(t))
+    for x in points:
+        # In the far left both laws equal x plus an exponentially small correction.
+        with mp.workdps(60 + int(max(0, -x) / math.log(10))):
+            exact = [mp.diff(reference, mp.mpf(x), j) for j in range(6)]
+            for order in range(5):
+                got = function(x, order)
+                for j in range(order + 1):
+                    magnitude = abs(exact[j]) + abs(x * exact[j + 1])
+                    assert abs(got[j] - exact[j]) <= 128 * U * magnitude + TINY, (x, order, j)
+                if x == 0.0:
+                    assert all(math.isnan(v) for v in got[order + 1 :])
 
 
 def _ratio(got, exact, scale) -> float:

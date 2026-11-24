@@ -407,7 +407,9 @@ class _IRLSDirectStructuredStep(_IRLSDirectStep):
                 # a mean-space Newton step taken as the increment on a
                 # truncated structured factor
                 recorder.count("irls_truncated_newton_increments")
-            residual_rows = W * (fit.z - fit.eta) if newton_score is None else newton_score
+            residual_rows = (
+                W * (fit.z - fit.working_response_eta) if newton_score is None else newton_score
+            )
             gradient = np.empty(fit.p + 1, dtype=np.float64)
             gradient[0] = float(np.sum(residual_rows))
             # The intercept entry is in the state's own coordinate (alpha about

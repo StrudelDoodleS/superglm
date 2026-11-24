@@ -91,7 +91,10 @@ from superglm.distributional.revision import (
     ShapeRepairedWarning,
     revised_model,
 )
-from superglm.distributional.separation import validate_separation_policy
+from superglm.distributional.separation import (
+    validate_separation_policy,
+    warn_on_separated_prediction,
+)
 from superglm.distributional.shape_repair import repaired_model
 from superglm.distributional.surfaces import (
     DensityFan,
@@ -521,10 +524,10 @@ class SuperLSS:
 
         A ``Categorical`` level or ``CategoricalInteraction`` cell that carries
         exposure but whose responses all sit on a boundary the family declares
-        for that predictor has no finite effect.  ``"warn"`` (the default)
-        emits a ``SeparationWarning`` naming the cells before any coefficient
-        is fitted; ``"error"`` raises ``SeparationError``; ``"ignore"`` skips
-        the scan.
+        for that predictor has no finite effect. ``"warn"`` (the default)
+        names separated categorical levels after a complete-response fit.
+        ``"error"`` raises ``SeparationError`` at build time and ``"ignore"``
+        skips the scan.
         """
         return self._separation
 
@@ -804,8 +807,10 @@ class SuperLSS:
         counted, so such a fit can do up to 16 further iterations of work.
 
         ``practical_reml`` stops the Fellner--Schall loop after sustained
-        negligible objective and fitted-parameter movement. Set it to ``False``
-        when strict Fellner--Schall stationarity is required.
+        negligible objective and fitted-parameter movement across comparable
+        trials. Set it to ``False`` to disable this approximate plateau stop.
+        The ``lambda_change`` and ``objective_plateau`` reasons both indicate
+        that the Fellner--Schall fixed-point residual met its tolerance.
 
         Historical coefficient fits retain compact evidence by default, with
         row arrays kept only for the terminal fit and recent plateau checks.
@@ -1011,6 +1016,7 @@ class SuperLSS:
         *,
         edited_terms: Sequence[str],
         X_train: FrameLike | EagerFrame | None = None,
+        refresh_training_rows: bool = True,
     ) -> SuperLSS:
         """Return a model that predicts with ``coefficients``; this one is unchanged.
 
@@ -1021,11 +1027,17 @@ class SuperLSS:
         ``coef_by_predictor_`` follow the edit; ``result_``, ``covariance_``, term
         tests and the rest of the inference describe the fit. An edit may write a
         non-zero value onto a coefficient the fit publishes at zero as aliased;
-        its standard error stays 0. The fitted rows are recomputed from the
-        training frame attached, else ``X_train``.
+        its standard error stays 0. The fitted rows are recomputed from the training
+        frame attached, else ``X_train``; a split-scoring predictor may skip them.
         """
         frame = self._training_frame if X_train is None else X_train
-        revised = revised_model(self._require_fitted(), coefficients, edited_terms, frame)
+        revised = revised_model(
+            self._require_fitted(),
+            coefficients,
+            edited_terms,
+            frame,
+            refresh_training_rows=refresh_training_rows,
+        )
         copied = copy.copy(self)
         copied._model = revised
         return copied
@@ -1167,6 +1179,8 @@ class SuperLSS:
         natural scale after applying its inverse link. Gaussian columns are
         ``"location"`` and ``"scale"``; Tweedie columns are ``"mean"``,
         ``"dispersion"`` and ``"power"``. Frame indices are preserved.
+        Rows scored at a separated categorical level use the fitted value and
+        produce a ``SeparationWarning``, as in :meth:`predict`.
 
         Column offsets resolve from ``X``. Array sources require
         ``offsets={parameter: new_array_sum}``; a mixed declaration adds its
@@ -1174,7 +1188,9 @@ class SuperLSS:
         second offset. Predictors without declarations retain the optional
         prediction mapping and its zero default. Values are on the link scale.
         """
-        values = self._require_fitted().predict_parameters(X, offsets=offsets)
+        model = self._require_fitted()
+        values = model.predict_parameters(X, offsets=offsets)
+        warn_on_separated_prediction(model.compiled_predictors, X)
         return pd.DataFrame(
             values,
             columns=self.parameter_names_,
@@ -1208,9 +1224,17 @@ class SuperLSS:
         ``SuperGLM.predict`` does; so do ``predict_parameters`` (in that
         parameter's column), ``predict_cdf`` and ``predict_quantile``. A score
         of such a row is refused.
+
+        Rows scored at a separated categorical level in a parameter used
+        by the default prediction produce one ``SeparationWarning``.
         """
         model = self._require_fitted()
         values = model.predict(X, offsets=offsets)
+        warn_on_separated_prediction(
+            model.compiled_predictors,
+            X,
+            parameters=getattr(model.family, "default_prediction_parameters", None),
+        )
         if isinstance(model.family, VectorDefaultPredictionFamily):
             return pd.DataFrame(
                 values,

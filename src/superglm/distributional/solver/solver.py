@@ -13,6 +13,7 @@ import superglm.distributional.solver.certificate as rank_certificate
 import superglm.distributional.solver.chunks as chunking
 from superglm._group_matrix._group_matrix_algebra import PassFactors
 from superglm._roundoff import gamma
+from superglm.distributional._score import ScoreUnits
 from superglm.distributional.family import (
     DistributionalFamily,
     ExpectedInformationFamily,
@@ -79,6 +80,7 @@ from superglm.reml._compensated import _dot2_quadratic_form, _native_operand
 from superglm.reml._compensated import _nonzero_entries as _penalty_entries
 from superglm.solvers.rank import (
     RankDecomposition,
+    _eigensolver_relative_bar,
     decompose_gram,
     try_decompose_verified_spd_gram,
 )
@@ -111,6 +113,7 @@ class _SolverContext:
     execution_backend_identifier: ExecutionBackendIdentifier
     dense_matrices: tuple[NDArray[np.float64], ...] | None
     coefficient_face: PenaltyFace | None
+    score_units: ScoreUnits
     likelihood_cache: _LikelihoodCache | None = None
     pass_factors: PassFactors | None = None
     # Set only for the reduced fit after a rank-deficient terminal decision:
@@ -122,9 +125,13 @@ class _SolverContext:
     penalty_entries: tuple[NDArray[np.intp], NDArray[np.intp], NDArray[np.float64]] = field(
         init=False, repr=False, compare=False
     )
+    score_normals: NDArray[np.float64] | None = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "penalty_entries", _penalty_entries(self.penalty))
+        subspace = _subspace(self)
+        normals = None if subspace is None else self.score_units.face_normals(subspace)
+        object.__setattr__(self, "score_normals", normals)
 
 
 @dataclass(frozen=True)
@@ -170,6 +177,17 @@ class _DenseObservedReuseSession:
         ) = None
         self._pass_factors = PassFactors()
         self._response: NDArray[np.float64] | None = None
+        self._score_units: tuple[StackedLayout, ResolvedLikelihoodWeights, ScoreUnits] | None = None
+
+    def score_units(self, layout: StackedLayout, matrices, chunk_size, weights) -> ScoreUnits:
+        # Both inputs are immutable within a fit. Coefficients and penalties
+        # do not enter these scales, so smoothing refits share them.
+        held = self._score_units
+        if held is None or held[0] is not layout or held[1] is not weights:
+            units = ScoreUnits.from_layout(layout, matrices, chunk_size, weights)
+            self._score_units = (layout, weights, units)
+            return units
+        return held[2]
 
     def canonical_response(self, response: NDArray[np.float64]) -> NDArray[np.float64]:
         """The session's one copy of a response equal to ``response``.
@@ -437,6 +455,15 @@ def _validated_context(
         layout=layout,
         response=response,
         likelihood_plan=root_likelihood_plan,
+        score_units=(
+            ScoreUnits.from_layout(
+                layout, dense_matrices, resolved_chunk_size, root_likelihood_plan.weights
+            )
+            if _reuse_session is None
+            else _reuse_session.score_units(
+                layout, dense_matrices, resolved_chunk_size, root_likelihood_plan.weights
+            )
+        ),
         penalty=penalty_matrix,
         links=links,
         coefficient_curvature=coefficient_curvature,
@@ -827,10 +854,6 @@ def _half_penalty_quadratic(
     return 0.5 * float(quadratic)
 
 
-def _relative_score(score: NDArray, objective: float) -> float:
-    return float(np.linalg.norm(score, ord=np.inf) / (1.0 + abs(objective)))
-
-
 def _subspace(context: _SolverContext) -> PenaltyFace | RetainedCoordinates | None:
     """The coordinates Newton steps move: a penalty face, or a representative's retained ones."""
     return context.coefficient_face if context.retained is None else context.retained
@@ -848,10 +871,9 @@ def _optimization_score_relative(
     score: NDArray,
     objective: float,
 ) -> float:
-    reduced = _optimization_score(context, score)
-    if reduced.size == 0:
-        return 0.0
-    return _relative_score(reduced, objective)
+    return context.score_units.relative(
+        score, objective, face=_subspace(context), normals=context.score_normals
+    )
 
 
 def _objective_and_step_is_certified(
@@ -1220,6 +1242,8 @@ def _run_iterations(
                 face=_subspace(context),
                 objective=state.penalized_optimizing_log_likelihood,
                 tolerance=config.tolerance,
+                score_units=context.score_units,
+                score_normals=context.score_normals,
             )
         ):
             return finish(True, "score", score_relative)
@@ -1384,10 +1408,7 @@ def _run_iterations(
             accepted.penalized_optimizing_log_likelihood - state.penalized_optimizing_log_likelihood
         ) / (1.0 + abs(state.penalized_optimizing_log_likelihood))
         accepted_step = accepted.coefficients - state.coefficients
-        step_relative = float(
-            np.linalg.norm(accepted_step, ord=np.inf)
-            / (1.0 + np.linalg.norm(accepted.coefficients, ord=np.inf))
-        )
+        step_relative = context.score_units.step_relative(accepted_step, accepted.coefficients)
         accepted_score_relative = _optimization_score_relative(
             context,
             accepted_geometry.score_penalized,
@@ -1629,24 +1650,23 @@ def _certified_terminal_curvature(
         return replace(curvature, telemetry=replace(curvature.telemetry, certified=False))
 
 
-# R's lm.fit and qr tolerance for a linear dependency among a design's columns.
+# The size of R's lm.fit default QR tolerance, used here on centred columns.
 _DESIGN_DEPENDENCY_TOLERANCE = 1e-7
 
 
-def _drops_design_aliases(layout: StackedLayout, rank: RankDecomposition) -> bool:
-    """Whether every direction ``rank`` drops is a near-dependency of the design itself.
+def _drops_design_aliases(layout: StackedLayout, null: NDArray) -> bool:
+    """Whether every dropped direction is a near-dependency of the design itself.
 
     ``X N ~ 0`` is an alias; a direction only the weights flatten is a likelihood boundary
     (Lesaffre and Marx 1993). ``rho = ||X N|| / ||C N||`` on unit columns (Belsley, Kuh and
     Welsch 1980) centred beside an intercept (Marquardt and Snee 1975), so no unit, origin
-    or response decides. The span is one when ``rho <= 1e-7`` on all of it, R's ``lm.fit``
-    and ``qr`` tolerance for a linear dependency, or when ``X N`` is rounding, ``2 k
-    gamma_k`` of the uncentred norms (a constant column, 0 / 0 centred). A centred square
-    within its cancellation, ``3 gamma_{n+2} sum x^2`` (Chan, Golub and LeVeque 1983),
+    or response decides. The span is an alias when ``rho <= 1e-7`` throughout it (the size
+    of R's ``lm.fit`` QR tolerance, read here on centred columns), or when ``X N`` is
+    rounding, ``2 k gamma_k`` of the uncentred norms (a constant column, 0 / 0 centred). A
+    centred square within its cancellation, ``3 gamma_{n+2} sum x^2`` (Chan, Golub and LeVeque 1983),
     counts as zero, which can only refuse an alias. Columns are scaled to unit maximum (the
     test is basis-free); a non-finite span is not an alias.
     """
-    null = rank.null_basis()
     null = null / np.max(np.abs(null), axis=0)
     width = null.shape[1]
     design_gram = np.zeros((width, width))
@@ -1689,32 +1709,11 @@ def _drops_design_aliases(layout: StackedLayout, rank: RankDecomposition) -> boo
     return bool(np.all(np.isfinite(difference)) and np.linalg.eigvalsh(difference)[-1] <= 0.0)
 
 
-def _column_spread(layout: StackedLayout, index: int) -> float:
-    """Root-mean-square of coefficient ``index``'s column, about its mean beside an intercept.
-
-    A column constant to within its centred square's cancellation, ``3 gamma_{n+2}``
-    of its square (Chan, Golub and LeVeque 1983), the intercept's included, is read
-    about zero, as the design test reads it.
-    """
-    state = next(s for s in layout.predictors if index < s.coefficient_slice.stop)
-    local = index - state.coefficient_slice.start - (state.intercept_index is not None)
-    if local < 0:
-        return 1.0
-    unit = np.zeros(state.design.p)
-    unit[local] = 1.0
-    column = state.design.matvec(unit)
-    squared = float(column @ column)
-    centred = float(np.sum((column - column.mean()) ** 2))
-    if state.intercept_index is None or centred <= 3.0 * gamma(state.design.n + 2) * squared:
-        centred = squared
-    return float(np.sqrt(centred / state.design.n))
-
-
 def _reduced_fit_is_stationary(
     run: _OptimizationRun,
     retained: RetainedCoordinates,
     rank: RankDecomposition,
-    layout: StackedLayout,
+    units: ScoreUnits,
     config: DenseSolverConfig,
 ) -> bool:
     """Whether a fit on the retained coefficients is also stationary for the full problem.
@@ -1722,9 +1721,8 @@ def _reduced_fit_is_stationary(
     The optimum under ``beta_J = 0`` is the full problem's when that constraint's
     multiplier vanishes (Lawson and Hanson 1974, ch. 23), read net of the retained
     score, ``d = N_J^-T N'g`` with ``N`` the dropped null basis: ``X N`` and ``S N``
-    vanish for an alias, so ``d`` is rounding. Each ``d_j`` is read per unit of its
-    column's RMS spread, centred beside an intercept as the design test centres it: a
-    relative gradient (Dennis and Schnabel 1983, sec. 7.2), so no unit or origin decides.
+    vanish for an alias, so ``d`` is rounding. Read this covector in the same
+    centred predictor units as the main fit.
     """
     if not run.converged:
         return False
@@ -1735,10 +1733,17 @@ def _reduced_fit_is_stationary(
         multiplier = np.linalg.solve(null[retained.dropped].T, null.T @ score)
     except np.linalg.LinAlgError:
         return False
-    spread = np.array([_column_spread(layout, int(j)) for j in np.flatnonzero(retained.dropped)])
-    multiplier = np.divide(multiplier, spread, out=multiplier, where=spread > 0.0)
+    full = np.zeros_like(score)
+    full[retained.dropped] = multiplier
+    # The certified design may alias a column constant to the last bit with
+    # its intercept. Its dropped multiplier has no resolved variation to
+    # divide by. Use its level only there, never for the live score.
+    level = np.abs(units.centre)
+    constant = retained.dropped & (units.spread <= np.finfo(float).eps * level)
+    if np.any(constant):
+        units = replace(units, spread=np.where(constant, level, units.spread))
     objective = run.state.penalized_optimizing_log_likelihood
-    return _relative_score(multiplier, objective) <= config.tolerance
+    return units.relative(full, objective) <= config.tolerance
 
 
 def _representative_state(
@@ -1767,6 +1772,84 @@ def _representative_state(
     coefficients = state.coefficients - null @ along
     coefficients[dropped] = 0.0
     return _evaluate_state(context, coefficients, phase_recorder=phase_recorder)
+
+
+def _terminal_step_improves_objective(
+    context: _SolverContext,
+    state: _AcceptedState,
+    score: NDArray,
+    rank: RankDecomposition,
+    discarded: NDArray | None,
+    telemetry: CurvatureTelemetry,
+    config: DenseSolverConfig,
+    phase_recorder: FitPhaseRecorder | None,
+) -> bool:
+    """Test whether a terminal direction improves the likelihood beyond tolerance.
+
+    A flat likelihood can have a small gradient even in predictor units.
+    The Newton decrement (Boyd & Vandenberghe §9.5) measures improvement in
+    objective units. Use the terminal factor on its retained space. A
+    fallback metric or cancellation can distort its prediction, so only an
+    actual improvement above tolerance contradicts the coefficient stop.
+    """
+    face = context.coefficient_face
+    retained_score = score if face is None else face.reduce_vector(score)
+    objective = state.penalized_optimizing_log_likelihood
+    limit = max(config.tolerance * (1 + abs(objective)), abs(np.spacing(objective)))
+
+    def improves(candidate: NDArray) -> bool:
+        if not np.all(np.isfinite(candidate)):
+            return False
+        if face is not None:
+            candidate = face.project(candidate)
+        trial = _evaluate_state(
+            context, candidate, phase_recorder=phase_recorder, derivative_order=0
+        )
+        return trial is not None and trial.penalized_optimizing_log_likelihood - objective > limit
+
+    if discarded is not None:
+        # Follow the score jointly in the discarded coordinates. Scale the trial
+        # to a linear gain of twice the limit, then measure the actual gain since
+        # a link wall or limiting distribution can flatten the likelihood.
+        with np.errstate(over="ignore", invalid="ignore"):
+            slopes = discarded.T @ score
+            slope = np.hypot.reduce(slopes)
+            if slope > 0.0 and np.isfinite(slope):
+                direction = discarded @ (slopes / slope)
+                if improves(state.coefficients + (2.0 * limit / slope) * direction):
+                    return True
+    if not telemetry.certified:
+        return False
+    if rank.cholesky_factor is not None and telemetry.actual_source == "observed":
+        # The policy already measured the smallest eigenvalue in these coordinates.
+        # Deduct the eigensolver's absolute accuracy, using ||H|| <= trace(H)
+        # <= p max(diag(H)). Then g'H^-1 g <= p ||g||_inf^2 / lambda_min.
+        # This screens a negligible gain without another solve. A flat direction
+        # or a factor obtained from the rows still gets its actual correction.
+        p = rank.width
+        scale = float(np.max(rank.column_scale))
+        lower = telemetry.minimum_eigenvalue - (p * _eigensolver_relative_bar(p) * scale) * scale
+        if lower > 0.0 and np.max(np.abs(retained_score)) < np.sqrt(lower) * np.sqrt(limit / p):
+            return False
+    correction = rank.solve(retained_score)
+    if not np.all(np.isfinite(correction)):
+        return False
+    predicted_gain = 0.5 * float(retained_score @ correction)
+    if predicted_gain <= limit:
+        return False
+    # A full Newton correction can overshoot even on positive curvature.
+    # Backtrack in coefficient space: the ordinary predictor cap has units
+    # of its own, for example on an identity-linked mean.
+    step = correction if face is None else face.lift_vector(correction)
+    alpha = 1.0
+    for _ in range(config.max_backtracks + 1):
+        candidate = state.coefficients + alpha * step
+        if np.array_equal(candidate, state.coefficients):
+            break
+        if improves(candidate):
+            return True
+        alpha *= config.backtrack_factor
+    return False
 
 
 def _fit_dense_fixed_lambda_core(
@@ -1943,6 +2026,7 @@ def _fit_dense_fixed_lambda_core(
     with measure_phase(phase_recorder, "terminal_observed_retry_fallback"):
         # The stopped state's decision, and after a rank-deficient one the reduced fit's.
         reduced: RetainedCoordinates | None = None
+        discarded = None
         iteration_context = context
         while True:
             observed_geometry = _geometry_from(
@@ -2112,16 +2196,19 @@ def _fit_dense_fixed_lambda_core(
                 accepted_geometry.penalized_curvature,
                 dtype=np.float64,
             )
+            if decomposition.rank < decomposition.width:
+                null = decomposition.null_basis()
+                if context.coefficient_face is not None:
+                    null = context.coefficient_face.null_basis @ null
+                if not _drops_design_aliases(context.layout, null):
+                    discarded = null
+                    break
             if reduced is not None or context.coefficient_face is not None:
                 break
             # Coefficients the design aliases are dropped (Wood, Pya and Saefken 2016,
             # sec. 3.1.2). A direction only the weights flatten keeps its state.
             reduced = RetainedCoordinates.of(decomposition)
-            if (
-                reduced is None
-                or not np.any(state.coefficients[reduced.dropped])
-                or not _drops_design_aliases(context.layout, decomposition)
-            ):
+            if reduced is None or not np.any(state.coefficients[reduced.dropped]):
                 reduced = None
                 break
             # Repeat the Newton iteration to convergence on the retained coefficients,
@@ -2147,7 +2234,7 @@ def _fit_dense_fixed_lambda_core(
             if continued is not None:
                 reduced_runs.append(continued)
             if not _reduced_fit_is_stationary(
-                reduced_runs[-1], reduced, decomposition, context.layout, solver_config
+                reduced_runs[-1], reduced, decomposition, context.score_units, solver_config
             ):
                 # The data resolve a dropped direction: the stopped state and its decision stand.
                 reduced = None
@@ -2171,6 +2258,17 @@ def _fit_dense_fixed_lambda_core(
             terminal_reduced_rank = decomposition
             terminal_rank = face.lift_rank_decomposition(terminal_reduced_rank)
         terminal_score_geometry = observed_geometry
+        if converged and _terminal_step_improves_objective(
+            context,
+            state,
+            terminal_score_geometry.score_penalized,
+            decomposition,
+            discarded,
+            curvature.telemetry,
+            solver_config,
+            phase_recorder,
+        ):
+            converged, reason = False, "material_likelihood_gain"
         # A certified rank that dropped a retained direction; an uncertified band that
         # kept every direction is left to the validator below.
         if (
@@ -2195,6 +2293,7 @@ def _fit_dense_fixed_lambda_core(
                     penalized_objective=state.penalized_optimizing_log_likelihood,
                     face=context.coefficient_face,
                     retained_rank=terminal_reduced_rank,
+                    score_units=context.score_units,
                 )
             except ValueError:
                 converged = False
@@ -2236,6 +2335,7 @@ def _fit_dense_fixed_lambda_core(
             objective_relative_change=objective_relative_change,
             step_relative=step_relative,
             converged=converged,
+            score_units=context.score_units,
             convergence_reason=reason,
             iterations=len(history),
             history=tuple(history),

@@ -1173,14 +1173,18 @@ def _warn_unresolved_rows(model) -> None:
         warnings.warn(message, WeakIdentificationWarning, stacklevel=4)
 
 
-def _warn_mean_space_boundary(model) -> None:
-    """Say in plain words that a fit holds rows at a fitted probability of 0 or 1.
-
-    Rows a direction the factorization truncates carries to the boundary are
-    named by ``_warn_unresolved_rows`` instead.
-    """
+def warn_published_coefficient_nonconvergence(model) -> None:
+    """Disclose the coefficient stop once, after an ordinary fit is published."""
+    if getattr(model, "_discarded_fit", False) or getattr(
+        model, "_suppress_convergence_warning", False
+    ):
+        return
     result = model._result
-    if result.termination_reason != "mean_space_boundary" or result.mean_space_boundary_unresolved:
+    # Other stops warn where they are found, and an unresolved boundary stop is
+    # named with its rows by the unresolved-row warning.
+    if result.termination_reason not in ("max_iter", "mean_space_boundary"):
+        return
+    if result.termination_reason == "mean_space_boundary" and result.mean_space_boundary_unresolved:
         return
     from superglm.diagnostics.convergence import warn_coefficient_nonconvergence
 
@@ -1603,7 +1607,7 @@ def _validate_rule_fit_conflicts(model) -> None:
     the link: an ordered term with special levels (``_refuse_level_rules``)
     and a spline term given a step limit (``refuse_max_step``).
     """
-    from superglm._predictor_compiler import _feature_named_messages
+    from superglm._warn import feature_build_messages, warn_feature
     from superglm.features._spline_subclass_ops import refuse_max_step
     from superglm.features.constraint import rules_of
     from superglm.features.spline import _SplineBase
@@ -1614,7 +1618,7 @@ def _validate_rule_fit_conflicts(model) -> None:
         rules = rules_of(spec)
         if not any(rule.kind in ("cap", "max_step") for rule in rules):
             continue
-        with _feature_named_messages(name):
+        with feature_build_messages(name):
             refuse_level_rules = getattr(spec, "_refuse_level_rules", None)
             if refuse_level_rules is not None:
                 refuse_level_rules()
@@ -1632,11 +1636,11 @@ def _validate_rule_fit_conflicts(model) -> None:
                 )
             cap = next((rule for rule in rules if rule.kind == "cap"), None)
             if cap is not None and getattr(spec, "extrapolation", None) == "extend":
-                warnings.warn(
+                warn_feature(
                     f"{cap.describe()} holds on the training range; with extrapolation='extend' "
                     "the tails beyond the training range are not capped. Use "
                     "extrapolation='clip' to keep predictions inside the cap",
-                    UserWarning,
+                    name,
                     stacklevel=2,
                 )
 
@@ -1801,6 +1805,7 @@ def fit(
         revision=model._fit_revision + 1,
     )
     _install_fit_state(model, candidate)
+    warn_published_coefficient_nonconvergence(model)
     return model
 
 
@@ -1895,7 +1900,6 @@ def _fit_in_workspace(
     )
     runtime_canonicalize.canonicalize_fitted_model(model)
     _warn_unresolved_rows(model)
-    _warn_mean_space_boundary(model)
 
     model._last_fit_meta = {"method": "fit", "discrete": model._discrete}
     _maybe_release_fit_state(model)
@@ -2136,6 +2140,7 @@ def fit_reml(
     )
     durable_retain = bool(getattr(model, "_retain_fit_state", True))
     attempt_kwargs = dict(
+        level_anchors=getattr(model, "_profile_level_anchors", None),
         max_reml_iter=max_reml_iter,
         reml_tol=reml_tol,
         pirls_tol=pirls_tol,
@@ -2264,6 +2269,7 @@ def _fit_reml_in_workspace(
     verbose=False,
     w_correction_order=1,
     durable_retain_fit_state: bool | None = None,
+    level_anchors=None,
 ):
     """Run the complete REML attempt on private mutable model state."""
     from superglm.model.base import (
@@ -2326,6 +2332,8 @@ def _fit_reml_in_workspace(
         pirls_tol=pirls_tol,
         max_pirls_iter=max_pirls_iter,
     )
+
+    from superglm.model.reml_level_hold import REMLLevelHold
 
     if not reml_groups and not _has_monotone:
         logger.warning("fit_reml: no REML-eligible groups found, falling back to fit()")
@@ -2445,6 +2453,12 @@ def _fit_reml_in_workspace(
 
         if estimated_names and not model._discrete:
             _warn_slow_exact_reml(model, lambdas)
+        hold = REMLLevelHold.for_model(
+            model, sample_weight, offset, {} if level_anchors is None else level_anchors
+        )
+        if hold is not None:
+            model._dm = hold.design(model._dm)
+            offset_arr = hold.offset
         best = optimize_reml_best(
             model,
             y=y,
@@ -2466,9 +2480,11 @@ def _fit_reml_in_workspace(
             model_optimize_direct_reml=model_optimize_direct_reml,
             debug_recorder=debug_recorder,
             warm_lambdas=warm_lambdas,
+            level_hold=hold,
         )
         lambdas, n_reml_iter, converged = finalize_reml_fit(
             model,
+            level_hold=hold,
             best=best,
             reml_groups=reml_groups,
             reml_penalties=(

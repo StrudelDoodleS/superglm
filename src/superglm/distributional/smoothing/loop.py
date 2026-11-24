@@ -1199,6 +1199,7 @@ def fit_distributional_efs(
         accepted_log_steps: dict[str, float] | None = None
         accepted_objective: float | None = None
         any_converged_trial = False
+        plateau_eligible = True
         accelerated_fit_index: int | None = None
         raw_backtracks = 0
         proposed_lambdas: Mapping[str, float] = _complete_mapping(
@@ -1279,6 +1280,7 @@ def fit_distributional_efs(
                 )
             )
             any_converged_trial = any_converged_trial or trial_stationary
+            trial_objective = None
             if trial_stationary:
                 with measure_phase(phase_recorder, "efs_update_backtracking"):
                     trial_objective = _trial_laplace_objective(
@@ -1289,25 +1291,26 @@ def fit_distributional_efs(
                         objective_tolerance=outer_config.objective_tolerance,
                         penalty_memo=penalty_memo,
                     )
-                if (
-                    trial_objective is not None
-                    and _acceleration_provenance(estimated_names, trial_fit) == provenance
-                    and _within_ceiling(
-                        current_fit, current_objective, trial_fit, trial_objective, outer_config
-                    )
-                ):
-                    accepted_fit = trial_fit
-                    accepted_fit_index = fit_index
-                    accepted_lambdas = trial_lambdas
-                    accepted_log_steps = trial_log_steps
-                    accepted_objective = trial_objective
-                    acceleration_outcome = "accepted"
-                    proposed_lambdas = trial_lambdas
-                    proposed_log_steps = trial_log_steps
-                    max_proposed_step = max(
-                        (abs(trial_log_steps[name]) for name in estimated_names),
-                        default=0.0,
-                    )
+            if (
+                trial_objective is None
+                or _acceleration_provenance(estimated_names, trial_fit) != provenance
+            ):
+                plateau_eligible = False
+            elif _within_ceiling(
+                current_fit, current_objective, trial_fit, trial_objective, outer_config
+            ):
+                accepted_fit = trial_fit
+                accepted_fit_index = fit_index
+                accepted_lambdas = trial_lambdas
+                accepted_log_steps = trial_log_steps
+                accepted_objective = trial_objective
+                acceleration_outcome = "accepted"
+                proposed_lambdas = trial_lambdas
+                proposed_log_steps = trial_log_steps
+                max_proposed_step = max(
+                    (abs(trial_log_steps[name]) for name in estimated_names),
+                    default=0.0,
+                )
             if accepted_fit is None:
                 assert accelerator is not None
                 accelerator.reject()
@@ -1350,6 +1353,7 @@ def fit_distributional_efs(
                 )
                 any_converged_trial = any_converged_trial or trial_stationary
                 if not trial_stationary:
+                    plateau_eligible = False
                     continue
                 with measure_phase(phase_recorder, "efs_update_backtracking"):
                     trial_objective = _trial_laplace_objective(
@@ -1360,7 +1364,10 @@ def fit_distributional_efs(
                         objective_tolerance=outer_config.objective_tolerance,
                         penalty_memo=penalty_memo,
                     )
-                if trial_objective is not None and _within_ceiling(
+                if trial_objective is None:
+                    plateau_eligible = False
+                    continue
+                if _within_ceiling(
                     current_fit, current_objective, trial_fit, trial_objective, outer_config
                 ):
                     accepted_fit = trial_fit
@@ -1480,7 +1487,12 @@ def fit_distributional_efs(
         # a flat objective and a contracting step before nominating a plateau.
         # The practical policy below accepts its own sustained plateau and keeps
         # the larger strict residual in the result.
-        plateau_run = plateau_run + 1 if objective_change <= outer_config.plateau_tolerance else 0
+        # An unusable trial can force a tiny accepted step while leaving the
+        # objective at the longer step unknown. It breaks both windows.
+        comparable_flat_step = (
+            plateau_eligible and objective_change <= outer_config.plateau_tolerance
+        )
+        plateau_run = plateau_run + 1 if comparable_flat_step else 0
         plateau_qualified = (
             plateau_run >= outer_config.plateau_iterations
             and max_accepted_step <= previous_accepted_step
@@ -1495,19 +1507,20 @@ def fit_distributional_efs(
             )
             practical_run = (
                 practical_run + 1
-                if objective_change <= outer_config.plateau_tolerance
+                if comparable_flat_step
                 and practical_parameter_change <= outer_config.practical_parameter_tolerance
                 and max_accepted_step <= previous_accepted_step
                 and not lower_pressure
                 else 0
             )
-        previous_accepted_step = max_accepted_step
+        previous_accepted_step = max_accepted_step if plateau_eligible else math.inf
 
         # A finite profile can also settle while a penalty continues moving
         # outward. Require substantial accepted probes before this policy may
         # preempt the next cap or endpoint decision; retain the raw pressure.
         outward_plateau = (
             outer_config.practical_convergence
+            and plateau_run >= outer_config.plateau_iterations
             and current_face is None
             and terminal_evidence.maximum > outer_config.tolerance
             and terminal_evidence.update is not None

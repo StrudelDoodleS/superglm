@@ -60,6 +60,7 @@ if _typing.TYPE_CHECKING:
         TwoPieceNormalLSS,
     )
     from superglm.distributional.predictor import Predictor
+    from superglm.distributional.splice import SplitSplice
     from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
     from superglm.export import RatingTableBaseNotRepresentableError, export_rating_tables
     from superglm.features._spline_config import SCOPRetiredWarning, SplineOptionWarning
@@ -224,6 +225,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
     "superglm.distributional.families.tweedie": ("TweedieLSS",),
     "superglm.distributional.families.two_piece": ("TwoPieceLogNormalLSS", "TwoPieceNormalLSS"),
     "superglm.distributional.predictor": ("Predictor",),
+    "superglm.distributional.splice": ("SplitSplice",),
     "superglm.distributions": (
         "Binomial",
         "Gamma",
@@ -472,6 +474,7 @@ __all__ = [
     "warmup",
     "SuperGLM",
     "SuperLSS",
+    "SplitSplice",
     "BoundPredictor",
     "bind_predictor",
     "BoundInteraction",

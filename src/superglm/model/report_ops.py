@@ -18,7 +18,12 @@ from superglm.inference._term_helpers import (
 )
 from superglm.inference.covariance import covariance_selected_diagonal
 from superglm.inference.summary import _CoefRow
-from superglm.model.fit_state import fitted_lambda2, fitted_penalty
+from superglm.model.fit_state import (
+    edited_statistics_fallback_note,
+    edited_statistics_unavailable,
+    fitted_lambda2,
+    fitted_penalty,
+)
 from superglm.penalties.base import selection_shrunk_group_names
 from superglm.profiling._reporting import (
     cached_tweedie_profile_ci,
@@ -106,6 +111,9 @@ def diagnostics(model) -> dict[str, Any]:
             reml_profile.get("reml_laplace_excluded_labels", ()) or ()
         ),
     }
+    statistics_reason = edited_statistics_unavailable(model)
+    if statistics_reason is not None:
+        out["_model"]["fit_statistics_unavailable"] = statistics_reason
     # rows a direction the factorization truncated moves (binomial/log,
     # ``mode_score.truncated_direction_ratio``): at their own maximum, not
     # certifiable at float64 precision, or rising towards the boundary,
@@ -161,6 +169,9 @@ def summary(
 
     level_display = validate_level_display(level_display)
 
+    statistics_reason = edited_statistics_unavailable(model)
+    if statistics_reason is not None:
+        raise RuntimeError(statistics_reason)
     if covariance is not None:
         from superglm.inference.sandwich import bound_covariance
 
@@ -339,6 +350,9 @@ def summary(
             "message",
             "Manual editor edits were applied; fitted inference is reference-only.",
         )
+    fallback = edited_statistics_fallback_note(model)
+    if fallback:
+        model_info["editor_statistics_note"] = fallback
 
     offset_meta = getattr(model, "_editor_offset", None)
     if offset_meta is not None:

@@ -32,6 +32,7 @@ from numpy.typing import NDArray
 
 from superglm._roundoff import gamma
 from superglm._warn import _PACKAGE_PREFIX, warn_caller
+from superglm.distributions import Gaussian
 
 _CONTEXTLIB = contextlib.__file__
 
@@ -371,12 +372,13 @@ def scan_categorical_term(
     sample_weight: NDArray,
     boundaries: tuple[str, ...],
     build_codes: NDArray | None = None,
+    *,
+    include_base: bool = True,
 ) -> list[SeparatedTerm]:
     """Scan one main-effect Categorical term for separated levels.
 
-    Every level of the universe is scanned, base included: with the level's
-    own indicator the recession direction is that coordinate; for the base
-    level it is the intercept walking against every non-base indicator.
+    A level with its own indicator separates along that coordinate. The base
+    level needs an intercept that can walk against every non-base indicator.
     ``build_codes`` are the term's build codes, when the caller holds them;
     the scan reads them instead of coding the column again.
     """
@@ -384,6 +386,8 @@ def scan_categorical_term(
     findings: list[SeparatedTerm] = []
     for boundary in boundaries:
         flags, n_occupied = _separated_flags(codes, len(levels), y, sample_weight, boundary)
+        if not include_base:
+            flags[levels.index(spec._base_level)] = False
         if flags.any():
             findings.append(
                 SeparatedTerm(
@@ -634,7 +638,7 @@ def _total(value: float, digits: str) -> str:
     return format(value, digits) if np.isfinite(value) else "beyond float64"
 
 
-def _line_text(line: SeparatedLine) -> str:
+def _line_text(line: SeparatedLine, *, parameter_effects: bool = False) -> str:
     if line.kind == "cells":
         name = f"{line.term!r} cell {line.label[0]!r} x {line.label[1]!r}"
         base = f"base cell {line.base[0]!r} x {line.base[1]!r}"
@@ -648,7 +652,8 @@ def _line_text(line: SeparatedLine) -> str:
         counted += f", exposure {_total(line.exposure, '.4g')}"
     text = f"  {name}: {counted}, every response {every}"
     if line.is_base:
-        return f"{text}; it is the {base}, which the term's other relativities are measured against"
+        effects = "effects" if parameter_effects else "relativities"
+        return f"{text}; it is the {base}, which the term's other {effects} are measured against"
     if line.fitted is None:
         return text
     totals = [f"fitted {_total(line.fitted, '.3g')} in total"]
@@ -674,6 +679,7 @@ def format_separated_levels(
     mode: str = "warn",
     fitted: bool = False,
     example: str | None = None,
+    parameter_effects: bool = False,
 ) -> str:
     """The disclosure of separated levels and cells, one line each, and what to do.
 
@@ -699,7 +705,14 @@ def format_separated_levels(
         f"{what} {'has' if one else 'have'} rows whose responses are {every}, so the data give "
         f"{'its' if one else 'their'} effect no finite estimate."
     )
-    if fitted:
+    if parameter_effects:
+        opening += " Each affected effect is where the fit stopped."
+        if n_levels:
+            opening += (
+                " Inference flags the separated levels and limits their terms' joint tests "
+                "to the identified contrasts."
+            )
+    elif fitted:
         opening += (
             f" The fitted price for {'it' if one else 'each'} is where the fit stopped, not an "
             "estimate, and predict, summary() and the rating tables carry it; summary() leaves "
@@ -712,19 +725,24 @@ def format_separated_levels(
     for line in lines:
         by_term.setdefault(line.term, []).append(line)
     for term_lines in by_term.values():
-        body.extend(_line_text(line) for line in sorted(term_lines, key=_rank))
+        body.extend(
+            _line_text(line, parameter_effects=parameter_effects)
+            for line in sorted(term_lines, key=_rank)
+        )
     group = "group a level with similar levels " + (
         f"({example})" if example else "(collapse_levels builds the grouping)"
     )
-    # A cap bounds a main effect's levels against its base, not a crossed cell.
-    bound = (
-        "bound it with Constraint.fit.cap or a selection penalty on the term"
-        if n_levels
-        else "put a selection penalty on the crossed term"
-    )
-    remedy = (
-        f"To price {'it' if one else 'them'}: {group}, fit the term as a RandomEffect, or {bound}."
-    )
+    random_effect = "fit the term as a RandomEffect"
+    if parameter_effects:
+        remedies = f"{group} or {random_effect}"
+    elif n_levels:
+        remedies = (
+            f"{group}, {random_effect}, or bound it with Constraint.fit.cap "
+            "or a selection penalty on the term"
+        )
+    else:
+        remedies = f"{group}, {random_effect}, or put a selection penalty on the crossed term"
+    remedy = f"To price {'it' if one else 'them'}: {remedies}."
     if mode == "error":
         remedy += (
             " Pass separation='warn' to fit with this as a warning, or separation='ignore' to "
@@ -740,6 +758,7 @@ def runtime_finding(
     groups: list,
     beta: NDArray,
     *,
+    family: Any,
     ratio: float,
     n_iter: int,
     exhausted_stagnant: bool,
@@ -761,7 +780,10 @@ def runtime_finding(
     if not (pinned or exhausted_stagnant):
         return None
     drifting = drifting_groups(design, groups, beta, eta, eta_unclipped, weights)
-    return RuntimeFinding(format_runtime_message(ratio, n_iter, drifting, pinned), tuple(drifting))
+    message = format_runtime_message(
+        ratio, n_iter, drifting, pinned, unbounded_response=isinstance(family, Gaussian)
+    )
+    return RuntimeFinding(message, tuple(drifting))
 
 
 def drifting_groups(
@@ -835,11 +857,25 @@ def format_runtime_message(
     n_iter: int,
     drifting_groups: list[str],
     pinned: bool,
+    *,
+    unbounded_response: bool = False,
 ) -> str:
     """Terminal-state message for the in-solver backstop (issue #341)."""
     where = ""
     if drifting_groups:
         where = f" (the rows it reached are carried there by group(s): {drifting_groups})"
+    if unbounded_response:
+        stop = (
+            "the linear predictor reached the link's overflow guard"
+            if pinned
+            else "the fit reached its iteration limit with little change in deviance"
+        )
+        return (
+            f"After {n_iter} iterations, {stop}{where} because a few responses dominate the "
+            f"fit (working-weight ratio {w_ratio:.1e}). If appropriate for the response, "
+            "try a family whose variance grows with the mean, such as Gamma or Tweedie, "
+            "or try capping the response before fitting."
+        )
     if pinned:
         how = (
             f"IRLS stopped after {n_iter} iterations with the linear predictor pinned "

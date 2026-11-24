@@ -17,9 +17,11 @@ from typing import Any, Literal, cast
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._frame import EagerFrame
+from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm._predictor_compiler import CompiledPredictorDesign
+from superglm._warn import warn_caller
 from superglm.diagnostics.separation import (
+    SeparatedLevels,
     SeparatedTerm,
     SeparationError,
     SeparationWarning,
@@ -28,7 +30,9 @@ from superglm.diagnostics.separation import (
     emit_level_curve_separation,
     format_factor_smooth_canonical,
     format_factor_smooth_separation,
+    format_separated_levels,
     format_separation_message,
+    level_lines,
     scan_categorical_term,
     scan_interaction_term,
 )
@@ -95,6 +99,7 @@ def scan_predictor_separation(
     weights: NDArray,
     *,
     boundaries: Sequence[tuple[str, ...]],
+    bounds: ResponseBounds | None,
 ) -> list[SeparatedTerm]:
     """Separated levels and crossed cells on every predictor that can separate.
 
@@ -110,13 +115,30 @@ def scan_predictor_separation(
     if len(boundary_tuple) != len(compiled_tuple):
         raise ValueError("boundaries must supply one tuple per compiled predictor")
     response = np.asarray(y, dtype=np.float64)
+    if bounds is not None:
+        censored = bounds.censored_rows()
+        if censored.size:
+            # A censoring limit is not an exact observation, except on the boundary
+            # itself: Y <= 0 on a support that starts at 0 is Y = 0, and Y >= 1 on
+            # one that ends at 1 is Y = 1. Other limits take an interior value for
+            # this scan of the 0 and 1 boundaries; censoring has its own scan.
+            side = bounds.side[censored]
+            limit = response[censored]
+            at_zero = (side < 0) & (limit <= 0.0)
+            at_one = (side > 0) & (limit >= 1.0)
+            response = response.copy()
+            response[censored] = np.where(at_zero, 0.0, np.where(at_one, 1.0, 0.5))
     weight_values = np.asarray(weights, dtype=np.float64)
     findings: list[SeparatedTerm] = []
     curves: list = []
     level_curves: list = []
+    # Read lazily: loading a fitted SuperLSS must not import the SuperGLM model package.
+    from superglm.model.separated_levels import record_separated_levels
+
     for predictor, predictor_boundaries in zip(compiled_tuple, boundary_tuple, strict=True):
         if not predictor_boundaries:
             continue
+        n_terms = len(predictor.compiled.specs) + len(predictor.compiled.interaction_specs)
         for record in predictor.compiled.separation_records:
             if record[0] == "curve":
                 curves.extend(record[2])
@@ -124,17 +146,23 @@ def scan_predictor_separation(
                 level_curves.append((f"{predictor.name}:{record[1]}", record[2]))
             elif record[0] == "cat":
                 _, term, spec, column = record
-                findings.extend(
-                    scan_categorical_term(
-                        f"{predictor.name}:{term}",
-                        spec,
-                        column,
-                        response,
-                        weight_values,
-                        predictor_boundaries,
-                        predictor.compiled.scan_codes.pop(term, None),
-                    )
+                codes = predictor.compiled.scan_codes.pop(term, None)
+                # A fit-time cap does not bound the rule-free covariance used for inference.
+                found = scan_categorical_term(
+                    f"{predictor.name}:{term}",
+                    spec,
+                    column,
+                    response,
+                    weight_values,
+                    predictor_boundaries,
+                    codes,
+                    # Without an intercept the base is pinned only when nothing else
+                    # in the predictor can carry a constant (a numeric column of ones).
+                    include_base=predictor.intercept or n_terms > 1,
                 )
+                findings.extend(found)
+                # An empty record too: it tells a scanned term from one saved before the record.
+                record_separated_levels(spec, found)
             else:
                 _, term, left_spec, right_spec, left, right, left_name, right_name = record
                 findings.extend(
@@ -156,6 +184,52 @@ def scan_predictor_separation(
     emit_curve_separation(curves, "warn")
     emit_level_curve_separation(level_curves)
     return findings
+
+
+def disclose_predictor_separation(
+    findings: list[SeparatedTerm], compiled: Sequence[CompiledPredictor], weights: NDArray
+) -> None:
+    """Warn about levels and crossed cells once the candidate is ready to publish."""
+    if findings:
+        specs = {
+            f"{predictor.name}:{term}": spec
+            for predictor in compiled
+            for terms in (predictor.compiled.specs, predictor.compiled.interaction_specs)
+            for term, spec in terms.items()
+        }
+        lines = level_lines(SeparatedLevels(findings, specs, weights, None, False, None))
+        warn_caller(format_separated_levels(lines, parameter_effects=True), SeparationWarning)
+
+
+def warn_on_separated_prediction(
+    compiled: Sequence[CompiledPredictor],
+    X: FrameLike | EagerFrame,
+    *,
+    parameters: tuple[str, ...] | None = None,
+) -> None:
+    """Collect the hits across predictors after scoring has validated the input."""
+    recorded = [
+        (predictor.name, name, spec)
+        for predictor in compiled
+        if parameters is None or predictor.name in parameters
+        for name, spec in predictor.compiled.specs.items()
+        if isinstance(spec, Categorical) and getattr(spec, "_separated_levels_at_fit", ())
+    ]
+    if not recorded:
+        return
+
+    from superglm.model.separated_levels import (
+        predicted_separated_levels,
+        warn_separated_predictions,
+    )
+
+    frame = as_eager_frame(X)
+    hits: list[str] = []
+    for parameter, name, spec in recorded:
+        hit = predicted_separated_levels(f"{parameter}:{name}", spec, frame.column_array(name))
+        if hit:
+            hits.append(hit)
+    warn_separated_predictions(hits)
 
 
 def record_factor_smooth_levels(

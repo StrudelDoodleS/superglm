@@ -22,6 +22,7 @@ import pandas as pd
 import scipy.sparse as sp
 from numpy.typing import NDArray
 
+from superglm._warn import warn_feature
 from superglm.features.categorical import (
     _grouping_labels,
     _validate_categorical_levels,
@@ -33,7 +34,7 @@ from superglm.features.constraint import (
     ConstraintRules,
     rules_of,
 )
-from superglm.features.piecewise import Piecewise
+from superglm.features.piecewise import _PIECEWISE_BUILD, Piecewise
 from superglm.features.polynomial import Polynomial
 from superglm.types import GroupInfo, LinearConstraintSet
 
@@ -1335,6 +1336,7 @@ class OrderedCategorical:
         *,
         reporting_weight: NDArray[np.floating] | None,
         geometry_weight: NDArray[np.floating] | None,
+        feature_name: str | None = None,
     ) -> GroupInfo | list[GroupInfo]:
         """Build with explicit outer reporting mass and inner geometry mass."""
         x = self._canonical(np.asarray(x).ravel())
@@ -1346,7 +1348,7 @@ class OrderedCategorical:
         else:
             self._refuse_unknown_training_levels(x)
 
-        return self._build_spline(x, reporting_weight, geometry_weight)
+        return self._build_spline(x, reporting_weight, geometry_weight, feature_name=feature_name)
 
     def _refuse_unknown_training_levels(self, x: NDArray) -> None:
         """Refuse, as a fit, training levels outside the declaration or its grouping.
@@ -1382,6 +1384,8 @@ class OrderedCategorical:
         self,
         numeric: NDArray[np.float64],
         sample_weight: NDArray | None,
+        *,
+        feature_name: str | None,
     ) -> GroupInfo | list[GroupInfo]:
         """Build the inner basis on the mapped numeric axis.
 
@@ -1390,13 +1394,19 @@ class OrderedCategorical:
         """
         from dataclasses import replace
 
-        from superglm.features.spline import OneValueError, _SplineBase
+        from superglm.features.spline import _SPLINE_BUILD, OneValueError, _SplineBase
 
         inner = self._basis_spline
+        build = inner.build
+        warning_context = (
+            {"feature_name": feature_name}
+            if getattr(build, "__func__", None) in (_SPLINE_BUILD, _PIECEWISE_BUILD)
+            else {}
+        )
         if isinstance(inner, _SplineBase):
             self._place_basis_rules()
             try:
-                info = inner.build(numeric, sample_weight=sample_weight)
+                info = build(numeric, sample_weight=sample_weight, **warning_context)
             except OneValueError:
                 # The spline's message names a level score and its kind=, which
                 # an ordered term has neither of; it takes its kind in basis=.
@@ -1420,7 +1430,7 @@ class OrderedCategorical:
                 monotone_engine="qp",
                 raw_to_solver_map=info.projection,
             )
-        info = inner.build(numeric, sample_weight=sample_weight)
+        info = build(numeric, sample_weight=sample_weight, **warning_context)
         if isinstance(info, GroupInfo):
             # Both parametric bases are an unpenalized main block, like the
             # specials block. Polynomial is too, unlike the numeric-axis term:
@@ -1434,11 +1444,15 @@ class OrderedCategorical:
         x: NDArray,
         reporting_weight: NDArray | None,
         geometry_weight: NDArray | None,
+        *,
+        feature_name: str | None,
     ) -> GroupInfo | list[GroupInfo]:
         """Map levels to the numeric axis and delegate to the inner basis."""
         self._choose_base(x, reporting_weight)
         if not self.has_specials:
-            return self._build_inner_info(self._map_to_numeric(x), geometry_weight)
+            return self._build_inner_info(
+                self._map_to_numeric(x), geometry_weight, feature_name=feature_name
+            )
 
         special_mask = self._special_mask(x)
         # The declared mask splits the design: a pinned special has no
@@ -1455,14 +1469,14 @@ class OrderedCategorical:
             self._special_display[j] for j in range(len(self._specials)) if not effective[j] > 0.0
         ]
         if self._pinned_specials:
-            warnings.warn(
+            warn_feature(
                 f"OrderedCategorical special level(s) "
                 f"{sorted(self._pinned_specials, key=str)} have no effective training rows "
                 "and are pinned to zero contribution for this fit: no indicator column is "
                 "emitted for them. Each remains a known level, and its rows predict with no "
                 "contribution from this term. Supply rows carrying weight, or drop the "
                 "level from specials=.",
-                UserWarning,
+                feature_name,
                 stacklevel=2,
             )
 
@@ -1474,7 +1488,9 @@ class OrderedCategorical:
             if geometry_weight is None
             else np.asarray(geometry_weight, dtype=np.float64).ravel()[ordered_mask]
         )
-        spline_info = self._build_inner_info(ordered_numeric, ordered_geometry_weight)
+        spline_info = self._build_inner_info(
+            ordered_numeric, ordered_geometry_weight, feature_name=feature_name
+        )
         # The spline bases reachable here return exactly one GroupInfo, which
         # the two-block contract assumes.
         if not isinstance(spline_info, GroupInfo):

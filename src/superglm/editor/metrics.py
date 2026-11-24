@@ -8,6 +8,7 @@ import numpy as np
 
 from superglm._utils import _explained_deviance, weighted_row_sum
 from superglm._weight_units import unit_log_likelihood
+from superglm.editor.apply import model_for_split_scoring
 from superglm.editor.errors import no_quote_message
 from superglm.editor.evaluation import (
     EvaluationDataset,
@@ -101,9 +102,7 @@ def metrics_payload(
     model_revision: int | None = None,
     request_sequence: int | None = None,
 ) -> dict[str, Any]:
-    # Metrics compare the immutable original fit with the in-force editor model
-    # on the retained training frame. Manual coefficient-edit metrics are
-    # prediction diagnostics; structural refits are fitted-model metrics.
+    # Compare both models on the same requested split.
     metric = metric if metric in METRIC_LABELS else "deviance"
     revision = session.model_revision if model_revision is None else int(model_revision)
     calm = unavailable_evidence(
@@ -135,7 +134,11 @@ def metrics_payload(
             "error": "No evaluation data is available.",
         }
 
-    selected_model = reference_model if source == "original" else session.to_model()
+    selected_model = (
+        reference_model
+        if source == "original"
+        else model_for_split_scoring(session.model, session.terms)
+    )
     original_metrics = compute_dataset_metrics(reference_model, eval_dataset)
     edited_metrics = compute_dataset_metrics(selected_model, eval_dataset)
     return metric_comparison_payload(
