@@ -1637,6 +1637,36 @@ class TestCoefficientsTheFitDoesNotDetermine:
         assert np.isfinite(intercept.p)
         assert cov.intercept_estimable and not cov.coefficient_estimable.any()
 
+    def test_a_constant_column_beside_one_of_tiny_spread_leaves_the_intercept_undetermined(self):
+        """A constant column aliases the intercept, whatever another column's scale.
+
+        ``near_constant = 1 + 2**-32 u`` has a column scale ``2**-32`` of the others',
+        so read in one norm with the constant column its share hides that column's.
+        Appending the intercept's contrast raises the design's rank, and
+        ``determines`` agrees with ``intercept_estimable`` and
+        ``coefficient_estimable`` on every unit contrast: the summary gives the
+        intercept no error.
+        """
+        u = np.tile([-1.0, -1.0, 1.0, 1.0], 32)
+        v = np.tile([-1.0, 1.0, -1.0, 1.0], 32)
+        frame = pd.DataFrame(
+            {"constant": np.ones(128), "near_constant": 1.0 + 2.0**-32 * u, "other": v}
+        )
+        model = SuperGLM(family="gaussian", features={c: Numeric() for c in frame}).fit(
+            frame, 2.0 * u + v + 0.25 * u * v
+        )
+        cov = model.sandwich_covariance()
+        assert self._rank_gain(model, np.eye(4)[0]) == 1
+        assert not cov.intercept_estimable and np.isnan(cov.se[0])
+        np.testing.assert_array_equal(
+            cov.determines(np.eye(4)), np.r_[cov.intercept_estimable, cov.coefficient_estimable]
+        )
+        intercept = next(
+            r for r in model.summary(covariance=cov)._coef_rows if r.name == "Intercept"
+        )
+        assert intercept.se is None or np.isnan(intercept.se)
+        assert intercept.p is None or np.isnan(intercept.p)
+
     def test_separated_level_is_blank_in_the_result_and_the_summary_dictionary(self):
         x = np.repeat(["A", "B", "C"], 30)
         y = np.tile([0.0, 1.0, 2.0], 30)

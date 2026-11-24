@@ -351,7 +351,8 @@ def _undetermined_directions(
     """The bread's null directions as ``RankDecomposition.is_estimable`` reads them, or ``None``.
 
     ``None`` where the bread determines every direction.  A column of scale zero
-    (constant on the scored rows) is undetermined on its own, at unit scale.
+    (constant on the scored rows) keeps scale zero, which ``UndeterminedDirections``
+    tests on its own.
     """
     if p_active == 0:
         return None
@@ -366,15 +367,13 @@ def _undetermined_directions(
         norms = np.linalg.norm(dual, axis=0)
         kept = norms > np.finfo(np.float64).eps
         dual = dual[:, kept] / norms[kept]
-    structural = np.flatnonzero(~scaled)
+    if dual.shape[1] == 0 and np.all(scaled):
+        return None
     # The share is homogeneous in ``scale``: a power of two (exact) puts its largest at one.
     scale = np.ldexp(scale, -int(np.frexp(np.max(scale))[1]))
-    basis = np.zeros((p_active, dual.shape[1] + structural.size))
-    basis[scaled, : dual.shape[1]] = dual / scale[scaled, None]
-    basis[structural, dual.shape[1] + np.arange(structural.size)] = 1.0
-    if basis.shape[1] == 0:
-        return None
-    return UndeterminedDirections(shift, np.where(scaled, scale, 1.0), basis)
+    basis = np.zeros((p_active, dual.shape[1]))
+    basis[scaled] = dual / scale[scaled, None]
+    return UndeterminedDirections(shift, scale, basis)
 
 
 def _solve_matrix(bread_solver: Any, rhs: NDArray) -> NDArray:

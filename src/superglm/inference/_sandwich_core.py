@@ -144,43 +144,62 @@ class UndeterminedDirections:
     A reader reports ``t' theta`` over ``theta = [intercept, active slopes]``.  Its
     slope part in the bread's centred coordinates is ``c = t_slopes + t_0 shift`` (the
     public intercept is the centred one plus ``shift' beta``), and ``t`` is determined
-    where ``||U' c|| <= sqrt(eps) ||c / scale||``: the share of ``c`` along the bread's
-    null directions read in its column scale, with ``U`` those directions divided by
-    their scaled norms.  That is ``RankDecomposition.is_estimable``, the test the
+    where both of ``RankDecomposition.is_estimable``'s tests pass, the test the
     default readers apply to a level contrast and that decides
-    ``coefficient_estimable``.  ``basis`` is ``None`` for a bread that kept no null
-    record (a truncated structured factor), which determines only ``c = 0``.
+    ``coefficient_estimable``: ``||c_z|| <= sqrt(eps) ||c||`` on the columns of
+    scale zero (constant on the scored rows, ``scale`` zero here), and
+    ``||U' c_s|| <= sqrt(eps) ||c_s / scale||`` on the others, the share of ``c`` along
+    the bread's null directions read in its column scale, with ``U`` (``basis``,
+    zero on the scale-zero rows) those directions divided by their scaled norms.  A
+    scale-zero column is tested apart: inside one norm, a column of small scale
+    would hide it.  ``basis`` is ``None`` for a bread that kept no null record (a
+    truncated structured factor), which determines only ``c = 0``.
     """
 
     shift: NDArray
     scale: NDArray
     basis: NDArray | None
 
-    def metrics(self) -> tuple[NDArray, NDArray]:
-        """``(J U U' J', J diag(scale)^-2 J')`` over ``theta``, with ``J = [shift'; I]``.
+    def metrics(self) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+        """``J M J'`` over ``theta`` for each norm ``determined`` compares, ``J = [shift'; I]``.
 
-        A reader's error ``sqrt(t' V t)`` read with ``V`` replaced by each gives
-        ``||U' c||`` and ``||c / scale||``, so one pass of the reader's own contrast map
-        decides every row it reports (``determined``).  Without a null record both are
-        the second, and every ``c != 0`` reads share one.
+        ``M`` is ``U U'``, ``diag(scale)^-2`` on the scaled columns, the indicator of
+        the scale-zero columns, and the identity.  A reader's error ``sqrt(t' V t)``
+        read with ``V`` replaced by each gives ``||U' c_s||``, ``||c_s / scale||``,
+        ``||c_z||`` and ``||c||``, so one pass of the reader's own contrast map decides
+        every row it reports.  Without a null record the first is the second, and
+        every ``c != 0`` reads share one.
         """
-        weight = 1.0 / (self.scale * self.scale)
-        size = np.diag(np.r_[0.0, weight])
-        size[0, 1:] = size[1:, 0] = self.shift * weight
-        size[0, 0] = math.fsum(self.shift * self.shift * weight)
+        scaled = self.scale > 0.0
+        weight = np.zeros_like(self.scale)
+        weight[scaled] = 1.0 / (self.scale[scaled] * self.scale[scaled])
+        size = self._through_shift(weight)
+        structural = self._through_shift((~scaled).astype(np.float64))
+        total = self._through_shift(np.ones_like(self.scale))
         if self.basis is None:
-            return size, size
+            return size, size, structural, total
         along_slopes = np.vstack([self.shift @ self.basis, self.basis])
-        return along_slopes @ along_slopes.T, size
+        return along_slopes @ along_slopes.T, size, structural, total
+
+    def _through_shift(self, weight: NDArray) -> NDArray:
+        """``J diag(weight) J'``, its intercept entry summed exactly."""
+        out = np.diag(np.r_[0.0, weight])
+        out[0, 1:] = out[1:, 0] = self.shift * weight
+        out[0, 0] = math.fsum(self.shift * self.shift * weight)
+        return out
 
     @staticmethod
-    def determined(along: NDArray, size: NDArray) -> NDArray[np.bool_]:
-        """Rows whose share ``along / size`` is within ``RankDecomposition.is_estimable``'s cut."""
+    def determined(
+        along: NDArray, size: NDArray, structural: NDArray, total: NDArray
+    ) -> NDArray[np.bool_]:
+        """Rows within both of ``RankDecomposition.is_estimable``'s cuts, the norms of ``metrics``."""
         from superglm.solvers.rank import SHARED_RANK_POLICY
 
-        along = np.asarray(along, dtype=np.float64)
-        size = np.asarray(size, dtype=np.float64)
-        return along <= SHARED_RANK_POLICY.factor_rcond * size
+        cut = SHARED_RANK_POLICY.factor_rcond
+        along, size, structural, total = (
+            np.asarray(norm, dtype=np.float64) for norm in (along, size, structural, total)
+        )
+        return (along <= cut * size) & (structural <= cut * total)
 
 
 @dataclass(frozen=True)
@@ -293,9 +312,11 @@ class SandwichCovariance:
         if record is None:
             return np.ones(len(rows), dtype=bool)
         slopes = rows[:, 1:] + rows[:, :1] * record.shift
-        size = np.linalg.norm(slopes / record.scale, axis=1)
+        scaled = record.scale > 0.0
+        size = np.linalg.norm(slopes[:, scaled] / record.scale[scaled], axis=1)
         along = size if record.basis is None else np.linalg.norm(slopes @ record.basis, axis=1)
-        return record.determined(along, size)
+        structural = np.linalg.norm(slopes[:, ~scaled], axis=1)
+        return record.determined(along, size, structural, np.linalg.norm(slopes, axis=1))
 
     def require_available(self, binding: FitBinding | None = None) -> SandwichCovariance:
         """Validate availability, then the fit binding, before a reader consumes this covariance."""

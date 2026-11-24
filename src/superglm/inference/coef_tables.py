@@ -522,19 +522,18 @@ def build_coef_rows(
                 _group_edf_cache[ag.name] = float(np.sum(edf[ag.sl]))
         return _group_edf_cache
 
-    # The slope blocks of the two metrics a robust fit's level and curve errors are read
+    # The slope blocks of the metrics a robust fit's level and curve errors are read
     # with (``UndeterminedDirections.metrics``), formed once, or none.
     undetermined = sandwich_covariance.undetermined if is_sandwich else None
-    undetermined_metrics: tuple[NDArray, NDArray] | None = None
+    undetermined_metrics: tuple[NDArray, ...] | None = None
     if undetermined is not None:
-        along_full, size_full = undetermined.metrics()
-        undetermined_metrics = (along_full[1:, 1:], size_full[1:, 1:])
+        undetermined_metrics = tuple(metric[1:, 1:] for metric in undetermined.metrics())
 
     def _feature_se(feature_name):
         """A term's level or curve errors from the slope covariance (``feature_se_from_cov``).
 
         A robust covariance blanks each one whose contrast the fit does not determine:
-        the term's own map, read with the covariance replaced by the two metrics of
+        the term's own map, read with the covariance replaced by each metric of
         ``UndeterminedDirections``, gives every row's share along the undetermined
         directions.
         """
@@ -557,8 +556,8 @@ def build_coef_rows(
         se = read(_cov_from_aug(covariance_slope_view(XtWX_inv_aug)))
         if undetermined is None or undetermined_metrics is None:
             return se
-        along, size = undetermined_metrics
-        return np.where(undetermined.determined(read(along), read(size)), se, np.nan)
+        norms = [read(metric) for metric in undetermined_metrics]
+        return np.where(undetermined.determined(*norms), se, np.nan)
 
     def _curve_se_range(feature_name):
         """Compute curve SE min/max for a spline feature."""
