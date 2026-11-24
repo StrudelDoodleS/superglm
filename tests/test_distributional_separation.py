@@ -71,14 +71,16 @@ def _tweedie_model(**kwargs):
 # nearest semidefinite curvature and discloses it.
 
 
-def test_separated_level_warns_before_fitting_and_names_both_predictors() -> None:
+def test_separated_level_warns_once_and_names_both_predictors() -> None:
     frame, y, exposure = _separated_tweedie_fixture()
     with pytest.warns(SeparationWarning) as record:
         _tweedie_model().fit(frame, y, sample_weight=exposure, lambdas={"mean:x#wiggle": 1.0})
-    message = str(record[0].message)
+    caught = [item for item in record if item.category is SeparationWarning]
+    assert len(caught) == 1
+    message = str(caught[0].message)
     assert "'mean:region'" in message and "'dispersion:region'" in message
     assert "'d'" in message
-    assert "collapse" in message
+    assert "where the fit stopped" in message
 
 
 def test_a_fitted_model_keeps_no_per_row_level_codes_once_the_scan_has_read_them() -> None:
