@@ -12,6 +12,7 @@ zeros and ones the leaf means carry.  Section numbers refer to
 
 from __future__ import annotations
 
+import tracemalloc
 import warnings
 from dataclasses import replace
 from fractions import Fraction
@@ -401,6 +402,71 @@ def test_the_pass_adds_each_row_once_and_makes_no_sparse_product(monkeypatch) ->
     assert sum(written) == sum(levels) * n
 
 
+@pytest.mark.parametrize("design, chunk_size", [("cut", 16), ("cut", 8192), ("short", 8192)])
+def test_the_pair_scratch_is_sized_by_the_chunk_not_by_a_leafs_levels(
+    design, chunk_size, monkeypatch
+) -> None:
+    """Traced bytes of the indicator step beyond the scatter it returns, chunk by chunk.
+
+    ``cut``: one leaf of 768 rows, each on its own level of a 768-level
+    effect, beside a 2-level effect and 112 dense columns.  A 16-row chunk
+    takes 16 of that leaf's 768 pairs and sums those alone (a signed pass
+    reads the other 752 from the stored mean), and with the leaf in one chunk
+    the two effects' joint table is 769 by 3.  ``short``: 4,096 leaves of two
+    rows on three levels beside 90 dense columns.  The step holds the pair
+    sums (a row for each pair the chunk's rows take, at most ``rows + 1``) and
+    the scratch that centres them (the longest segment's pairs), ``width + 3``
+    wide; three joint tables of the longest segment; and vectors of the
+    chunk's rows and the border's width, allowed 32 of each.  Fails with a
+    dense row per cell of a touched leaf (769 by 115 for the 16-row chunk), a
+    spare row for every segment (``short``), or joint tables as squares of
+    the larger side (three of 769 by 769).  Byte counts, never wall time.
+    """
+    rng = np.random.default_rng(90)
+    if design == "cut":
+        levels, width = (768, 2), 112
+        leaf = np.r_[np.zeros(768, dtype=np.intp), 1 + np.arange(12)]
+        crossed = [np.r_[np.arange(768), np.arange(12)], np.arange(len(leaf)) % 2]
+    else:
+        levels, width = (3,), 90
+        leaf = np.repeat(np.arange(4096), 2)
+        crossed = [rng.integers(0, 3, len(leaf))]
+    n, q = len(leaf), width + sum(levels)
+    layout, matrices = _design(
+        leaf, list(zip(crossed, levels, strict=True)), rng.normal(size=(n, width))
+    )
+    weights = rng.uniform(0.3, 2.0, n)
+    data = build_nested_leaf_statistics(layout, matrices, weights, chunk_size=chunk_size)
+    passes = (
+        (weights, {}),
+        (rng.normal(size=n) * weights, dict(mean=data.mean, center=data.center)),
+    )
+    step, excess = moments._indicator_pairs, []
+
+    def traced(*args):
+        held = tracemalloc.get_traced_memory()[0]
+        tracemalloc.reset_peak()
+        scatter, *pairs = step(*args)
+        rows, longest = len(args[6]), int(np.max(np.diff(args[5])))
+        table = np.prod([min(longest, k) + 1 for k in levels]) if len(levels) > 1 else 0
+        allowed = (rows + 1 + min(longest, max(levels))) * (width + 3) + 3 * table + 32 * (rows + q)
+        used = tracemalloc.get_traced_memory()[1] - held - scatter.nbytes
+        excess.append(used - 8 * allowed)
+        return scatter, *pairs
+
+    monkeypatch.setattr(moments, "_indicator_pairs", traced)
+    for a, options in passes:  # the kernels compile, or load, outside the trace
+        build_nested_leaf_statistics(layout, matrices, a, chunk_size=chunk_size, **options)
+    excess.clear()
+    tracemalloc.start()
+    try:
+        for a, options in passes:
+            build_nested_leaf_statistics(layout, matrices, a, chunk_size=chunk_size, **options)
+    finally:
+        tracemalloc.stop()
+    assert excess and max(excess) <= 0
+
+
 @pytest.mark.parametrize("chain", ["lone", "nested"])
 def test_a_border_without_a_random_effect_never_enters_the_pair_kernels(chain, monkeypatch) -> None:
     """One random effect, or a nested chain alone, beside splines and categoricals.
@@ -436,7 +502,8 @@ def test_a_border_without_a_random_effect_never_enters_the_pair_kernels(chain, m
     def refused(*args):
         raise AssertionError("a pair kernel ran without a random effect in the border")
 
-    for name in ("_pair_sums", "_center_pairs", "_pair_block", "_crossed_blocks"):
+    kernels = ("_pair_sums", "_center_pairs", "_pair_block", "_crossed_blocks", "_absent_levels")
+    for name in kernels:
         monkeypatch.setattr(moments, name, refused)
     for left, right in zip(free, statistics(), strict=True):
         for name in ("mean", "within", "absolute", "deviation"):

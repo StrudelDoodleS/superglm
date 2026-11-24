@@ -155,22 +155,21 @@ def _shifted_sums(rows, a, reference, out):  # pragma: no cover - compiled
 # of its two factors before the other, as a row's ``(a d_j) d_k`` does: the
 # product of two means underflows where the entry itself does not.
 @njit(cache=True)
-def _pair_sums(own, bounds, a, error, weighted, sums):  # pragma: no cover - compiled
+def _pair_sums(own, bounds, spare, a, error, weighted, sums):  # pragma: no cover - compiled
     """Add each row of a chunk to its pair's sums: one entry a row.
 
-    ``own[r]`` is row ``r``'s pair among the chunk's ``P`` pairs, or negative
-    for a row with no level, which goes to its segment's spare row ``P +
-    segment``.  ``sums`` ``(P + segments, width + 3)`` gains ``a x``
-    (``weighted``'s row), then ``a``, ``error`` and ``max(-a, 0)``.  A row of
-    zero weight adds its ``error`` alone.
+    ``own[r]`` is row ``r``'s pair among the chunk's pairs, or negative for a
+    row with no level, which goes to its segment's spare row
+    ``spare[segment]``.  That row of ``sums`` ``(pairs and spare rows, width +
+    3)`` gains ``a x`` (``weighted``'s row), then ``a``, ``error`` and
+    ``max(-a, 0)``.  A row of zero weight adds its ``error`` alone.
     """
     width = weighted.shape[1]
-    pairs = sums.shape[0] - (len(bounds) - 1)
     for segment in range(len(bounds) - 1):
         for row in range(bounds[segment], bounds[segment + 1]):
             pair = own[row]
             if pair < 0:
-                pair = pairs + segment
+                pair = spare[segment]
             weight = a[row]
             sums[pair, width + 1] += error[row]
             if weight == 0.0:
@@ -206,42 +205,49 @@ def _other_sums(sums, spare, count, width, rest, carry):  # pragma: no cover - c
 
 @njit(cache=True)
 def _center_pairs(
-    sums, pair_bounds, column, mean, centered, mass, out
+    sums, pair_bounds, spare, column, mean, deviation, mass, out
 ):  # pragma: no cover - compiled
-    """Centre a chunk's pair sums on their leaf means: ``centered[t] = (1 - m_t) sums[t] - m_t R_t``.
+    """Centre a chunk's pair sums on their leaf means: ``(1 - m_t) sums[t] - m_t R_t``.
 
     Segment ``s`` holds the pairs ``pair_bounds[s]:pair_bounds[s + 1]`` and the
-    spare row ``P + s`` of ``sums``; ``R_t`` sums its other rows
-    (``_other_sums``).  The ``a x`` columns of ``centered`` are added to row
-    ``column[t]`` of ``out``, and ``mass[t] = (1 - m_t)^2 E_t + m_t^2 R_t`` on
-    the ``error`` column.
+    spare row ``spare[s]`` of ``sums``; ``R_t`` sums its other rows
+    (``_other_sums``), in scratch one segment long.  The ``a x`` columns are
+    added to row ``column[t]`` of ``out``, the last three kept in
+    ``deviation[t]``, and ``mass[t] = E_t (1 - m_t)^2 + R_t m_t^2`` on the
+    ``error`` column.
     """
-    pairs, columns = centered.shape
+    columns = sums.shape[1]
     width = columns - 3
-    carry = np.empty(columns)
+    longest = 0
+    for segment in range(len(pair_bounds) - 1):
+        longest = max(longest, pair_bounds[segment + 1] - pair_bounds[segment])
+    rest, carry = np.empty((longest, columns)), np.empty(columns)
     for segment in range(len(pair_bounds) - 1):
         lo, hi = pair_bounds[segment], pair_bounds[segment + 1]
-        _other_sums(sums[lo:hi], sums[pairs + segment], hi - lo, columns, centered[lo:hi], carry)
+        _other_sums(sums[lo:hi], sums[spare[segment]], hi - lo, columns, rest, carry)
         for t in range(lo, hi):
             m = mean[t]
             u = 1.0 - m
-            mass[t] = sums[t, width + 1] * u * u + centered[t, width + 1] * m * m
-            for j in range(columns):
-                centered[t, j] = u * sums[t, j] - m * centered[t, j]
+            other = rest[t - lo]
+            mass[t] = sums[t, width + 1] * u * u + other[width + 1] * m * m
             for j in range(width):
-                out[column[t], j] += centered[t, j]
+                out[column[t], j] += u * sums[t, j] - m * other[j]
+            for j in range(3):
+                deviation[t, j] = u * sums[t, width + j] - m * other[width + j]
 
 
 @njit(cache=True)
-def _pair_block(pair_bounds, column, mean, weight, offset, out):  # pragma: no cover - compiled
+def _pair_block(
+    pair_bounds, spare, column, mean, weight, offset, out
+):  # pragma: no cover - compiled
     """Add one indicator block's own ``sum_r a_r (x_r - m)(x_r - m)'`` to ``out``, from its pair weights.
 
-    With ``u = 1 - m`` and ``w`` the pair sums of ``a`` (``weight``, the spare
-    rows after the pairs), a leaf adds ``w_j u_j^2 + m_j^2 R_j`` at ``(j, j)``
-    and ``m_j m_k R_jk - (w_j u_j m_k + w_k m_j u_k)`` at ``(j, k)`` and
-    ``(k, j)``: ``R_j`` and ``R_jk`` the weight of the leaf's rows outside pair
-    ``j``, and outside pairs ``j`` and ``k``.  Pair ``t`` is row ``column[t]``
-    of ``out`` and column ``offset + column[t]``.
+    With ``u = 1 - m`` and ``w`` the pair sums of ``a`` (``weight``, a
+    segment's spare row at ``spare[segment]``), a leaf adds ``w_j u_j^2 + R_j
+    m_j^2`` at ``(j, j)`` and ``R_jk m_j m_k - (w_j u_j m_k + w_k m_j u_k)`` at
+    ``(j, k)`` and ``(k, j)``: ``R_j`` and ``R_jk`` the weight of the leaf's
+    rows outside pair ``j``, and outside pairs ``j`` and ``k``.  Pair ``t`` is
+    row ``column[t]`` of ``out`` and column ``offset + column[t]``.
     """
     pairs = len(column)
     after = np.empty(pairs)
@@ -251,7 +257,7 @@ def _pair_block(pair_bounds, column, mean, weight, offset, out):  # pragma: no c
         for t in range(hi - 1, lo - 1, -1):
             after[t - lo] = running
             running += weight[t]
-        before = weight[pairs + segment]
+        before = weight[spare[segment]]
         for j in range(lo, hi):
             mj, wj = mean[j], weight[j]
             uj = 1.0 - mj
@@ -276,29 +282,37 @@ def _crossed_blocks(
     and pair ``k`` of ``y``, one entry a row (the last index of either holds
     its rows with no level).  Centring along ``y`` gives ``sum_{r in t} a_r
     (y_rk - m_k)``, the pair sums of ``x``, and centring those along ``x`` the
-    block: the row sum regrouped twice (``_other_sums``).
+    block: the row sum regrouped twice (``_other_sums``).  The three tables
+    share flat scratch the size of the largest leaf's ``joint``, each shaped
+    as its sweep reads it.
     """
-    segments, size = len(bounds) - 1, 1
+    segments, size, side = len(bounds) - 1, 1, 1
     for segment in range(segments):
-        size = max(size, 1 + bounds_x[segment + 1] - bounds_x[segment])
-        size = max(size, 1 + bounds_y[segment + 1] - bounds_y[segment])
-    joint, sums, rest = np.empty((size, size)), np.empty((size, size)), np.empty((size, size))
-    carry = np.empty(size)
+        count_x = 1 + bounds_x[segment + 1] - bounds_x[segment]
+        count_y = 1 + bounds_y[segment + 1] - bounds_y[segment]
+        size, side = max(size, count_x * count_y), max(side, count_x, count_y)
+    joint_flat, sums_flat, rest_flat = np.empty(size), np.empty(size), np.empty(size)
+    carry = np.empty(side)
     for segment in range(segments):
         x0, y0 = bounds_x[segment], bounds_y[segment]
         count_x, count_y = bounds_x[segment + 1] - x0, bounds_y[segment + 1] - y0
+        joint = joint_flat[: (count_y + 1) * (count_x + 1)].reshape(count_y + 1, count_x + 1)
         for k in range(count_y + 1):
             for t in range(count_x + 1):
                 joint[k, t] = 0.0
         for row in range(bounds[segment], bounds[segment + 1]):
-            t = own_x[row] - x0 if own_x[row] >= 0 else count_x
-            k = own_y[row] - y0 if own_y[row] >= 0 else count_y
+            t, k = own_x[row], own_y[row]
+            t = t - x0 if t >= 0 else count_x
+            k = k - y0 if k >= 0 else count_y
             joint[k, t] += a[row]
+        rest = rest_flat[: count_y * (count_x + 1)].reshape(count_y, count_x + 1)
         _other_sums(joint, joint[count_y], count_y, count_x + 1, rest, carry)
+        sums = sums_flat[: (count_x + 1) * count_y].reshape(count_x + 1, count_y)
         for k in range(count_y):
             mk = mean_y[y0 + k]
             for t in range(count_x + 1):
                 sums[t, k] = (1.0 - mk) * joint[k, t] - mk * rest[k, t]
+        rest = rest_flat[: count_x * count_y].reshape(count_x, count_y)
         _other_sums(sums, sums[count_x], count_x, count_y, rest, carry)
         for t in range(count_x):
             mt, row_x = mean_x[x0 + t], column_x[x0 + t]
@@ -307,6 +321,25 @@ def _crossed_blocks(
                 row_y = column_y[y0 + k]
                 out[row_x, offset + row_y] += value
                 out[row_y, offset + row_x] += value
+
+
+@njit(cache=True)
+def _absent_levels(absent, shift, piece, width, out):  # pragma: no cover - compiled
+    """Add to ``out`` a piece's scatter on the indicator columns none of its rows takes.
+
+    Every row's centred value on such a column ``i`` (``absent``) is
+    ``shift[i] = -m_i``, so its row of ``sum_r a_r (x_r - m)(x_r - m)'`` is
+    ``shift[i]`` times ``piece``, the piece's ``sum_r a_r (x_r - m)`` over all
+    columns, and its column the mirror.  ``shift`` is zero off ``absent``.
+    """
+    for i in absent:
+        for c in range(len(piece)):
+            out[i, c] += shift[i] * piece[c]
+    for t in range(len(shift)):
+        value = piece[width + t]
+        if shift[t] == 0.0 and value != 0.0:
+            for i in absent:
+                out[t, width + i] += value * shift[i]
 
 
 @njit(cache=True)
@@ -469,7 +502,8 @@ def _warmup_leaf_kernels() -> None:
     _center_rows(f2, f2, f2, f1, f1, one, f2, f1, f2, f2)
     _shifted_sums(f2, f1, f1, f1)
     sums = np.zeros((1, 3))
-    _pair_sums(i64, one, f1, f1, f2, sums)
-    _center_pairs(sums, one, i64, f1, np.zeros((0, 3)), f1, f2)
-    _pair_block(one, i64, f1, np.zeros(1), 0, f2)
+    _pair_sums(i64, one, i64, f1, f1, f2, sums)
+    _center_pairs(sums, one, i64, i64, f1, np.zeros((0, 3)), f1, f2)
+    _pair_block(one, i64, i64, f1, np.zeros(1), 0, f2)
     _crossed_blocks(one, f1, i64, one, i64, f1, i64, one, i64, f1, 0, f2)
+    _absent_levels(i64, f1, f1, 0, f2)
