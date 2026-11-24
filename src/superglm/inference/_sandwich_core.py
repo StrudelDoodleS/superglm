@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -109,8 +109,36 @@ class FitBinding:
 
 
 @dataclass(frozen=True)
+class CoefficientBlock:
+    """Where one term's coefficients sit in ``slope_covariance``.
+
+    The layout a ``GroupSlice`` gives the readers (``name``, ``feature_name``,
+    ``start``, ``end``, ``sl``, ``size``, ``subgroup_type``), copied out of the
+    model so a result shares no object with the fit it describes.
+    """
+
+    name: str
+    start: int
+    end: int
+    feature_name: Hashable
+    subgroup_type: str | None = None
+
+    @property
+    def size(self) -> int:
+        return self.end - self.start
+
+    @property
+    def sl(self) -> slice:
+        return slice(self.start, self.end)
+
+
+@dataclass(frozen=True)
 class SandwichTelemetry:
-    """Work counts and workspace sizes for one sandwich-covariance computation."""
+    """Work counts and workspace sizes for one sandwich-covariance computation.
+
+    ``peak_bytes`` is the dense workspace the request was budgeted for (the
+    count ``max_memory`` caps) and ``retained_bytes`` what the result keeps.
+    """
 
     scored_rows: int
     positive_weight_rows: int
@@ -159,7 +187,7 @@ class SandwichCovariance:
     se: NDArray | None = None
     coefficient_estimable: NDArray[np.bool_] | None = None
     intercept_estimable: bool = True
-    active_groups: tuple[GroupSlice, ...] = ()
+    active_groups: tuple[CoefficientBlock, ...] = ()
     penalized_group_names: frozenset[str] = frozenset()
     telemetry: SandwichTelemetry | None = None
 
@@ -274,7 +302,16 @@ def build_available_covariance(
         se=_freeze(np.asarray(se, dtype=np.float64)),
         coefficient_estimable=_freeze(np.asarray(coefficient_estimable, dtype=bool)),
         intercept_estimable=bool(intercept_estimable),
-        active_groups=tuple(active_groups),
+        active_groups=tuple(
+            CoefficientBlock(
+                name=group.name,
+                start=int(group.start),
+                end=int(group.end),
+                feature_name=group.feature_name,
+                subgroup_type=group.subgroup_type,
+            )
+            for group in active_groups
+        ),
         penalized_group_names=frozenset(penalized_group_names),
         telemetry=telemetry,
     )
@@ -490,64 +527,63 @@ def resolve_workspace_budget(
 
 
 class ScaledGramAccumulator:
-    """Power-of-two guarded symmetric PSD Gram accumulator ``sum Z_b' Z_b``.
+    """Symmetric Gram ``sum Z_b' Z_b`` with every column held at its own power of two.
 
-    Keeps intermediate squares well inside binary64's normal exponent range
-    without changing mantissa bits, and optionally applies an exact binary
-    exponent shift ``2**final_power_shift`` on finalization.
+    Column ``j`` is scaled by ``2**-e_j``, ``e_j`` the binary exponent of its
+    largest entry so far, before the product, and entry ``(i, j)`` is restored
+    by ``2**(e_i + e_j)``.  Both scalings are exact, so a predictor's units
+    move its covariance entries' exponents and none of their digits, and no
+    square leaves the normal range while the entry it belongs to is
+    representable.  ``final_power_shift`` adds one more exact exponent.
     """
 
     def __init__(self, width: int, *, final_power_shift: int = 0) -> None:
         self.width = int(width)
         self._final_power_shift = int(final_power_shift)
-        self._scale_exp: int | None = None
+        self._exponents = np.zeros(self.width, dtype=np.intc)
+        self._seen = np.zeros(self.width, dtype=bool)
         self._gram = np.zeros((self.width, self.width), dtype=np.float64)
 
     def add_rows(self, rows: NDArray) -> None:
         """Accumulate ``rows.T @ rows`` for a ``(m, width)`` chunk."""
         if rows.shape[0] == 0 or self.width == 0:
             return
-        max_abs = float(np.max(np.abs(rows)))
-        if max_abs == 0.0:
-            return
-        if not math.isfinite(max_abs):
+        largest = np.max(np.abs(rows), axis=0)
+        if not np.all(np.isfinite(largest)):
             self._gram.fill(np.nan)
             return
-        exp_chunk = math.frexp(max_abs)[1]
-        if self._scale_exp is None:
-            self._scale_exp = exp_chunk
-            scaled = np.ldexp(rows, -exp_chunk)
-            self._gram += scaled.T @ scaled
-            return
-        if exp_chunk > self._scale_exp:
-            diff = self._scale_exp - exp_chunk
-            # 2 * diff < -1074 underflows the old smaller contribution completely.
-            self._gram = (
-                np.ldexp(self._gram, 2 * diff) if 2 * diff >= -1074 else np.zeros_like(self._gram)
-            )
-            self._scale_exp = exp_chunk
-            scaled = np.ldexp(rows, -exp_chunk)
-            self._gram += scaled.T @ scaled
-            return
-        diff = exp_chunk - self._scale_exp
-        if diff >= -500:
-            scaled = np.ldexp(rows, -self._scale_exp)
+        present = largest > 0.0
+        exponents = np.frexp(largest)[1].astype(np.intc)
+        # A column that outgrows its exponent takes the new one; what it has
+        # accumulated moves down with it, and whatever that underflows is below
+        # the rounding of the entries the larger rows now add.
+        grow = np.where(present & self._seen, np.maximum(exponents - self._exponents, 0), 0)
+        grow = grow.astype(np.intc)
+        if np.any(grow):
+            with np.errstate(under="ignore"):
+                self._gram = np.ldexp(self._gram, -(grow[:, None] + grow[None, :]))
+        self._exponents = np.where(present & ~self._seen, exponents, self._exponents + grow)
+        self._exponents = self._exponents.astype(np.intc)
+        self._seen |= present
+        with np.errstate(under="ignore"):
+            scaled = np.ldexp(rows, -self._exponents)
             self._gram += scaled.T @ scaled
 
     def finalize(self, multiplier: float = 1.0) -> NDArray | None:
-        """Return symmetric PSD ``multiplier * 2**final_power_shift * sum Z' Z``, or ``None``."""
+        """Return symmetric ``multiplier * 2**final_power_shift * sum Z' Z``, or ``None``."""
         if not np.all(np.isfinite(self._gram)):
             return None
-        sym = 0.5 * (self._gram + self._gram.T)
-        if self._scale_exp is None or multiplier == 0.0:
+        if multiplier == 0.0 or not np.any(self._seen):
             return np.zeros((self.width, self.width), dtype=np.float64)
-        m_mantissa, m_exp = math.frexp(float(multiplier))
-        total_exp = 2 * self._scale_exp + self._final_power_shift + m_exp
+        mantissa, multiplier_exponent = math.frexp(float(multiplier))
+        restore = (
+            self._exponents[:, None]
+            + self._exponents[None, :]
+            + np.intc(self._final_power_shift + multiplier_exponent)
+        )
         with np.errstate(over="ignore", under="ignore"):
-            out = np.ldexp(sym * m_mantissa, total_exp)
-        if not np.all(np.isfinite(out)):
-            return None
-        return 0.5 * (out + out.T)
+            out = np.ldexp((0.5 * mantissa) * (self._gram + self._gram.T), restore)
+        return out if np.all(np.isfinite(out)) else None
 
 
 def _shewchuk_grow(partials: list[float], value: float) -> None:
@@ -587,10 +623,6 @@ class ClusterScoreAccumulator:
         self.totals = np.zeros((self.n_clusters, self.width), dtype=np.float64)
         self.abs_totals = np.zeros((self.n_clusters, self.width), dtype=np.float64)
 
-    @property
-    def buffer_bytes(self) -> int:
-        return int(self.totals.nbytes + self.abs_totals.nbytes)
-
     def add_chunk(self, start: int, stop: int, chunk_scores: NDArray) -> None:
         chunk_codes = self._codes[start:stop]
         pos = chunk_codes >= 0
@@ -610,12 +642,19 @@ class ClusterScoreAccumulator:
         self.totals[unique_c] += indicator @ s_pos
         self.abs_totals[unique_c] += indicator @ np.abs(s_pos)
 
-    def cancelled_clusters(self) -> NDArray[np.intp]:
-        """Return indices of clusters that experienced > 4 bits of cancellation."""
-        cancelled = np.any(
-            (self.abs_totals > 0.0) & (self.abs_totals > 16.0 * np.abs(self.totals)),
-            axis=1,
-        )
+    def cancelled_clusters(self, *, max_chunk_rows: int = 8192) -> NDArray[np.intp]:
+        """Return the clusters that lost more than 4 bits to cancellation.
+
+        Decided a batch of clusters at a time, and the absolute sums, which are
+        read for nothing else, are released with the decision.
+        """
+        cancelled = np.zeros(self.n_clusters, dtype=bool)
+        for start in range(0, self.n_clusters, max_chunk_rows):
+            batch = slice(start, start + max_chunk_rows)
+            cancelled[batch] = np.any(
+                self.abs_totals[batch] > 16.0 * np.abs(self.totals[batch]), axis=1
+            )
+        self.abs_totals = np.empty((0, self.width), dtype=np.float64)
         return np.flatnonzero(cancelled)
 
     def refine_cancelled(
@@ -706,6 +745,7 @@ __all__ = [
     "UNAVAILABLE_REASONS",
     "BreadCurvature",
     "ClusterScoreAccumulator",
+    "CoefficientBlock",
     "FitBinding",
     "SandwichCovType",
     "SandwichCovariance",

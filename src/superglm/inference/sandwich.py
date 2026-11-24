@@ -60,7 +60,11 @@ from superglm.model.state_ops import (
     _public_intercept_shift,
     _rank_active_state,
 )
-from superglm.penalties.base import penalty_can_zero_groups, penalty_targets_group
+from superglm.penalties.base import (
+    penalty_can_zero_groups,
+    penalty_targets_group,
+    selection_shrunk_group_names,
+)
 from superglm.penalties.group_elastic_net import GroupElasticNet
 from superglm.penalties.ridge import Ridge
 from superglm.reml.observed_geometry import (
@@ -103,6 +107,24 @@ _UNBOUND_MESSAGE = (
     "This model keeps no record of the rows it was fitted on, so a sandwich covariance "
     "cannot be tied to it; refit the model."
 )
+
+
+def _dense_workspace_bytes(
+    q: int, n_clusters: int | None, chunk_rows: int, *, bread_columns: int = 0
+) -> int:
+    """Bytes of the dense float64 arrays one request holds at once, each at its peak.
+
+    Five ``q x q`` arrays while the Gram is restored to covariance units (the
+    accumulator, the result and the temporaries between them); six square
+    arrays of ``bread_columns`` for a bread formed here (penalty, Gram, Hessian
+    and its factorization); the two ``G x q`` cluster buffers; and six
+    ``chunk_rows x q`` arrays in a replay chunk (the scores, their
+    positive-weight copy, the solve's right-hand side, solution and result, and
+    the scaled copy the Gram takes).  The fit's per-row vectors (predictor,
+    mean, score, curvature) are its own size and are not dense workspace.
+    """
+    cluster = 16 * n_clusters * q if n_clusters else 0
+    return 40 * q * q + 48 * bread_columns * bread_columns + cluster + 48 * chunk_rows * q
 
 
 def fit_binding_for_superglm(model: Any) -> FitBinding | None:
@@ -654,7 +676,7 @@ def compute_superglm_sandwich_covariance(
         )
 
     penalty = fitted_penalty(model)
-    if penalty_can_zero_groups(penalty):
+    if penalty_can_zero_groups(penalty) and selection_shrunk_group_names(penalty, model._groups):
         return build_unavailable_covariance(
             unavailable_reason="selection_penalty",
             message=(
@@ -667,16 +689,22 @@ def compute_superglm_sandwich_covariance(
             weight_semantics=weight_semantics,
         )
 
+    # A fit whose shape rows bind nowhere is the unconstrained optimum (no multiplier is
+    # active), and ``RankInfo.face`` is ``None`` exactly there.  A row that binds, a fit
+    # that kept no such record, and the SCOP engine's reparameterized fit are refused.
+    shape_rows = any(g.constraints is not None or g.monotone_engine == "qp" for g in model._groups)
     if (
-        any(g.constraints is not None or g.monotone_engine is not None for g in model._groups)
+        any(g.monotone_engine not in (None, "qp") for g in model._groups)
         or getattr(solver, "scop_inference", None) is not None
         or (solver.rank_info is not None and solver.rank_info.face is not None)
+        or (shape_rows and solver.rank_info is None)
     ):
         return build_unavailable_covariance(
             unavailable_reason="active_constraints",
             message=(
-                "Shape-constrained or active-face fits lie on a constrained parameter space "
-                "where unconstrained estimating-equation sandwich covariance does not apply."
+                "A shape constraint binds at the fitted coefficients, so they sit on the "
+                "boundary of the constrained space, where the unconstrained estimating "
+                "equation's sandwich covariance does not apply."
             ),
             binding=binding,
             n_obs=model._dm.n,
@@ -813,23 +841,26 @@ def compute_superglm_sandwich_covariance(
     p_active = int(X_active.p)
     q = 1 + p_active
 
-    cov_bytes = 8 * q * q
-    cluster_bytes = (16 * n_clusters * q) if n_clusters is not None else 0
-    cov_cap = budget if max_memory is not None else min(budget // 4, 64 << 20)
-    total_cap = budget if max_memory is not None else min(budget // 2, 256 << 20)
-    if cov_bytes > cov_cap or (cov_bytes + cluster_bytes) > total_cap:
+    # One cap covers every dense array the request holds at once
+    # (``_dense_workspace_bytes``), and the replay chunk takes what the rest leaves.
+    workspace_cap = budget if max_memory is not None else min(budget // 2, 1 << 30)
+
+    def over_budget(needed: int) -> SandwichCovariance:
         return build_unavailable_covariance(
             unavailable_reason="workspace_budget_exceeded",
             message=(
-                f"Dense sandwich workspace ({(cov_bytes + cluster_bytes) / (1 << 20):.1f} MiB "
-                f"for q={q}"
+                f"The dense workspace of this request ({needed / (1 << 20):.1f} MiB for q={q}"
                 + (f", G={n_clusters}" if n_clusters is not None else "")
-                + f") exceeds workspace budget ({total_cap / (1 << 20):.1f} MiB)."
+                + f") exceeds its budget ({workspace_cap / (1 << 20):.1f} MiB); "
+                "pass a larger max_memory."
             ),
             binding=binding,
             n_obs=n_rows,
             weight_semantics=weight_semantics,
         )
+
+    if _dense_workspace_bytes(q, n_clusters, 1) > workspace_cap:
+        return over_budget(_dense_workspace_bytes(q, n_clusters, 1))
 
     lam2_solver = scale_penalties(fitted_lambda2(model), exponent)
     penalized_group_names, ridge_lam = _penalized_active_groups(
@@ -841,7 +872,7 @@ def compute_superglm_sandwich_covariance(
     bread_solver: Any = None
     bread_reused = False
     n_factorizations = 0
-    bread_extra_bytes = 0
+    bread_columns = 0
 
     if backend == "structured":
         assert isinstance(linear_state, StructuredLinearSystemState)
@@ -909,6 +940,10 @@ def compute_superglm_sandwich_covariance(
             bread_full_rank = int(bread_solver.rank) == p_active
             bread_reused = True
         else:
+            bread_columns = p_active
+            needed = _dense_workspace_bytes(q, n_clusters, 1, bread_columns=bread_columns)
+            if needed > workspace_cap:
+                return over_budget(needed)
             S_active = np.array(
                 _active_penalty_matrix(
                     list(model._dm.group_matrices),
@@ -970,7 +1005,6 @@ def compute_superglm_sandwich_covariance(
                 bread_sum_h = sum_h
                 hessian = 0.5 * (data_gram + data_gram.T) + S_active
 
-            bread_extra_bytes = 16 * p_active * p_active
             if nonnegative:
                 try:
                     decomp = decompose_gram_if_authoritative(hessian)
@@ -1061,13 +1095,22 @@ def compute_superglm_sandwich_covariance(
         else bread_full_rank
     )
 
-    chunk_rows = max(1, min(_MAX_CHUNK_ROWS, _TARGET_CHUNK_BYTES // max(16 * q, 1)))
     leaf_parts = _design_leaf_parts(X_active) if p_active > 0 else None
     parts_tuple = () if leaf_parts is None else leaf_parts.parts
     held_design_bytes = 0 if leaf_parts is None else int(leaf_parts.held)
+    fixed_bytes = held_design_bytes + _dense_workspace_bytes(
+        q, n_clusters, 0, bread_columns=bread_columns
+    )
+    chunk_rows = min(
+        _MAX_CHUNK_ROWS,
+        _TARGET_CHUNK_BYTES // (16 * q),
+        (workspace_cap - fixed_bytes) // (48 * q),
+    )
+    if chunk_rows < 1:
+        return over_budget(fixed_bytes + 48 * q)
+    peak_bytes = fixed_bytes + 48 * chunk_rows * q
 
     n_chunks = 0
-    peak_chunk_bytes = 0
 
     if not clustered:
         # Unclustered HC0 / HC1
@@ -1124,7 +1167,6 @@ def compute_superglm_sandwich_covariance(
             pos_chunk = pos[start:stop]
             if not np.any(pos_chunk):
                 continue
-            m_chunk = stop - start
             s_chunk = row_score_base[start:stop]
 
             if p_active > 0:
@@ -1161,7 +1203,6 @@ def compute_superglm_sandwich_covariance(
                     g0 *= sqrt_w[start:stop][pos_chunk]
                 z_pub = (g0 / bread_sum_h)[:, None]
 
-            peak_chunk_bytes = max(peak_chunk_bytes, int(m_chunk * q * 16))
             gram_acc.add_rows(z_pub)
 
         cov_pub = gram_acc.finalize(multiplier=correction_factor)
@@ -1192,10 +1233,9 @@ def compute_superglm_sandwich_covariance(
                     row_scale=s_chunk,
                     out=chunk_scores[:, 1:],
                 )
-            peak_chunk_bytes = max(peak_chunk_bytes, int(chunk_scores.nbytes))
             acc.add_chunk(start, stop, chunk_scores)
 
-        cancelled = acc.cancelled_clusters()
+        cancelled = acc.cancelled_clusters(max_chunk_rows=chunk_rows)
         if len(cancelled) > 0:
 
             def _exact_rows(indices: NDArray[np.intp]) -> NDArray:
@@ -1230,7 +1270,7 @@ def compute_superglm_sandwich_covariance(
                 [math.fsum(G_mat[:, col]) / float(n_clusters) for col in range(q)],
                 dtype=np.float64,
             )
-            G_mat = G_mat - mean_cluster[None, :]
+            G_mat -= mean_cluster[None, :]
 
         gram_acc = ScaledGramAccumulator(q)
         for c_start in range(0, n_clusters, chunk_rows):
@@ -1247,7 +1287,6 @@ def compute_superglm_sandwich_covariance(
             gram_acc.add_rows(z_pub)
 
         cov_pub = gram_acc.finalize(multiplier=correction_factor)
-        peak_chunk_bytes = max(peak_chunk_bytes, acc.buffer_bytes)
 
     if cov_pub is None or not np.all(np.isfinite(cov_pub)):
         return build_unavailable_covariance(
@@ -1274,11 +1313,6 @@ def compute_superglm_sandwich_covariance(
         se[1 + ag.start : 1 + ag.end][blank] = np.nan
 
     retained_bytes = int(cov_pub.nbytes + se.nbytes + coef_estimable.nbytes)
-    peak_bytes = int(
-        retained_bytes
-        + held_design_bytes
-        + max(bread_extra_bytes, peak_chunk_bytes + cluster_bytes)
-    )
     telemetry = SandwichTelemetry(
         scored_rows=n_rows,
         positive_weight_rows=n_pos,

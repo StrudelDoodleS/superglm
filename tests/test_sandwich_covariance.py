@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import pickle
 import shutil
 import subprocess
+import tracemalloc
 
 import numpy as np
 import pandas as pd
@@ -27,6 +29,7 @@ from superglm import (
     LogLink,
     NegativeBinomial,
     Numeric,
+    OrderedCategorical,
     Piecewise,
     Poisson,
     ProbitLink,
@@ -1505,3 +1508,117 @@ class TestWaldTestsACovarianceCanCarry:
         assert rows["x"].ref_df == 3.0
         # the ridge-shrunk coefficient itself still carries no z or p
         assert rows["z"].z is None and rows["z"].p is None and np.isfinite(rows["z"].se)
+
+
+class TestUnitsAndWorkspace:
+    def test_a_change_of_units_moves_exponents_and_no_digits(self):
+        """Predictors rescaled by 2**332 and 2**-332 rescale their errors and nothing else.
+
+        One exponent for the whole Gram squared the small column's influence
+        (about 1e-200 of the large one) to zero.
+        """
+        rng = np.random.default_rng(19)
+        x = np.tile([-1.0, 1.0], 32)
+        z = np.tile([-1.0, -1.0, 1.0, 1.0], 16)
+        y = 0.5 * x + 0.5 * z + rng.normal(size=64)
+
+        def fitted(frame):
+            model = SuperGLM(family="gaussian", features={"x": Numeric(), "z": Numeric()})
+            return model.fit(frame, y).sandwich_covariance()
+
+        base = fitted(pd.DataFrame({"x": x, "z": z}))
+        scale = 2.0**332
+        scaled = fitted(pd.DataFrame({"x": x * scale, "z": z / scale}))
+        assert scaled.available
+        np.testing.assert_allclose(scaled.se, base.se * [1.0, 1.0 / scale, scale], rtol=1e-9)
+        np.testing.assert_allclose(scaled.covariance[1, 2], base.covariance[1, 2], rtol=1e-9)
+
+    def test_the_cap_covers_every_dense_buffer_and_sizes_the_chunks(self):
+        """``max_memory`` bounds the cluster buffers, the covariance and the replay chunk together."""
+        n, width, n_clusters = 4096, 48, 2048
+        rng = np.random.default_rng(823)
+        frame = pd.DataFrame(rng.normal(size=(n, width)), columns=[f"c{i}" for i in range(width)])
+        y = 0.1 * frame.to_numpy() @ rng.normal(size=width) + rng.normal(size=n)
+        model = SuperGLM(family="gaussian", features={c: Numeric() for c in frame}).fit(frame, y)
+        cluster = np.arange(n) % n_clusters
+        free = model.sandwich_covariance(cluster=cluster, center=True)
+
+        cap = 2_000_000
+        tracemalloc.start()
+        try:
+            capped = model.sandwich_covariance(cluster=cluster, center=True, max_memory=cap)
+            traced = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        assert capped.available
+        assert capped.telemetry.peak_bytes <= cap
+        assert capped.telemetry.n_chunks > free.telemetry.n_chunks
+        np.testing.assert_allclose(capped.covariance, free.covariance, rtol=1e-10, atol=1e-18)
+        # the fit's own per-row vectors are outside the cap: 32 of them is a wide envelope
+        assert traced <= cap + 32 * 8 * n
+
+        # both G x q cluster buffers alone fill this cap: nothing is left for the rest
+        q = 1 + width
+        refused = model.sandwich_covariance(
+            cluster=cluster, center=True, max_memory=16 * n_clusters * q + 8 * q * q
+        )
+        assert not refused.available
+        assert refused.unavailable_reason == "workspace_budget_exceeded"
+
+    def test_the_result_shares_no_mutable_descriptor_with_the_model(self):
+        rng = np.random.default_rng(31)
+        X = pd.DataFrame({"x": rng.normal(size=40)})
+        model = SuperGLM(family="gaussian", features={"x": Numeric()}).fit(
+            X, X["x"].to_numpy() + rng.normal(size=40)
+        )
+        cov = model.sandwich_covariance()
+        block = cov.active_groups[0]
+        assert (block.name, block.start, block.end, block.size) == ("x", 0, 1, 1)
+        assert not any(block is group for group in model._groups)
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            block.end = block.start  # type: ignore[misc]
+
+
+class TestFitsThatAreRegularAfterAll:
+    def test_a_shape_rule_that_binds_nowhere_is_the_unconstrained_fit(self):
+        x = np.linspace(-1.0, 1.0, 120)
+        X = pd.DataFrame({"x": x})
+        y = 3.0 * x + 0.06 * np.sin(27.0 * x)
+
+        def fitted(constraint):
+            return SuperGLM(
+                family="gaussian", features={"x": Spline(kind="ps", k=6, constraint=constraint)}
+            ).fit(X, y)
+
+        ruled, free = fitted(Constraint.fit.increasing), fitted(None)
+        assert ruled._solver_pirls_result().rank_info.face is None
+        cov = ruled.sandwich_covariance()
+        assert cov.available, cov.message
+        np.testing.assert_allclose(
+            ruled.term_inference("x", covariance=cov).se_log_relativity,
+            free.term_inference("x", covariance=free.sandwich_covariance()).se_log_relativity,
+            rtol=1e-8,
+        )
+
+    def test_a_selection_penalty_with_no_target_is_the_unpenalized_fit(self):
+        X = pd.DataFrame({"band": list("abcdefgh") * 20})
+        y = np.tile(np.arange(8.0), 20) + np.sin(np.arange(160.0))
+
+        def fitted(lambda1):
+            return SuperGLM(
+                family="gaussian",
+                features={
+                    "band": OrderedCategorical(
+                        order=list("abcdefgh"), basis=Piecewise(breaks=["d"])
+                    )
+                },
+                penalty=GroupLasso(lambda1=lambda1),
+            ).fit(X, y)
+
+        lasso, free = fitted(1.0), fitted(0.0)
+        assert not any(group.penalized for group in lasso._groups)
+        cov = lasso.sandwich_covariance()
+        assert cov.available, cov.message
+        np.testing.assert_allclose(
+            cov.covariance, free.sandwich_covariance().covariance, rtol=1e-10
+        )

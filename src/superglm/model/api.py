@@ -1295,8 +1295,11 @@ class SuperGLM:
             ``"auto"`` centres penalised fits and leaves unpenalised fits
             uncentred.
         max_memory : int or str, optional
-            Override the workspace byte budget for dense covariance and cluster
-            buffers (e.g. ``"128M"``).
+            Cap, in bytes or as ``"128M"``, on the dense workspace the request
+            holds at once: the covariance, a bread it has to form, the cluster
+            score sums and the replay chunk, whose rows shrink to fit. A
+            request that cannot fit returns ``workspace_budget_exceeded``. The
+            fit's own per-row vectors are outside the cap.
 
         Returns
         -------
