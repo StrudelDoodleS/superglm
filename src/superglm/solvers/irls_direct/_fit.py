@@ -1581,6 +1581,23 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         self.termination_reason: TerminationReason
         self.mode_bar, self.committed = mode_bar, committed
 
+    @property
+    def working_response_eta(self) -> NDArray:
+        """Origin of z before subtracting the offset in the working least squares."""
+        offset = self.offset
+        if offset is not None and type(self.family) is Tweedie and type(self.link) is LogLink:
+            lower = (self.eta_unclipped < self.eta) & (offset < 0)
+            if np.any(lower):
+                # The guarded mean supplies score and curvature. A negative fixed
+                # offset may itself cross the lower guard: retain its contribution
+                # to z, while limiting the free predictor at the same guard as usual.
+                origin = self.eta.copy()
+                origin[lower] = np.maximum(
+                    self.eta_unclipped[lower], self.eta[lower] + offset[lower]
+                )
+                return origin
+        return self.eta
+
     def _working(self, it: int) -> None:
         committed, family, link = self.committed, self.family, self.link
         recorder, mean_space = self.recorder, self.mean_space
@@ -1590,13 +1607,13 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
 
         # Working quantities from current eta/mu (already computed)
         _t0 = time.perf_counter()
-        working_rows = self.curvature.working_rows(self.mu, self.eta)
+        working_rows = self.curvature.working_rows(self.mu, self.working_response_eta)
         W = working_rows.weights
         z = working_rows.response
         # the mean space's Newton rows once engaged, in score form
         # (``_IRLSDirectMeanSpaceOverlay.newton_rows``)
         newton_score: NDArray | None = None
-        if mean_space is not None and mean_space.engaged:
+        if mean_space is not None and mean_space.available:
             newton_rows = mean_space.newton_rows(self, committed)
             if newton_rows is not None:
                 W, newton_score, z = newton_rows
@@ -1798,7 +1815,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                 link=self.link,
                 y=self.y,
                 mu=self.mu,
-                eta=self.eta,
+                eta=self.working_response_eta,
                 sample_weight=self.weights,
                 prefer_observed=False,
             )

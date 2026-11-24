@@ -80,3 +80,65 @@ def test_the_corrected_book_has_the_published_totals():
     # severity file records for them.
     assert int(block.sum()) == 9_139
     assert int(book.loc[block, "ClaimNb"].sum()) == 302
+
+
+@BOOK_SKIP
+def test_reml_exports_the_held_r42_price_on_the_corrected_book(tmp_path):
+    from dataclasses import replace
+
+    from openpyxl import load_workbook
+
+    from superglm import Categorical, Spline, SuperGLM
+
+    from .test_rating_table_prediction_equivalence import _block_multiplier
+
+    book = _datasets.load_freq_corrected()
+    book = book.iloc[np.random.default_rng(42).choice(len(book), 20000, replace=False)]
+    X = book[["Region", "Area", "VehGas", "DrivAge"]].reset_index(drop=True)
+    y = book.ClaimNb.to_numpy(float)
+    exposure = book.Exposure.to_numpy(float)
+    offset = np.log(exposure)
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0,
+        features={
+            "Region": Categorical(),
+            "Area": Categorical(),
+            "VehGas": Categorical(),
+            "DrivAge": Spline(n_knots=8),
+        },
+    ).fit_reml(X, y, offset=offset)
+    prediction = model.predict(X, offset=offset)
+    options = dict(offset=offset, continuous_kind="ppform")
+    payload = model.rating_table_payload(X, y, **options)
+    path = tmp_path / "R42.xlsx"
+    model.export_rating_tables(path, X, y, **options)
+    sheet = load_workbook(path, data_only=True).worksheets[0]
+    from_payload = exposure * payload.base_relativity
+    from_sheet = exposure * sheet["C2"].value
+    for block in payload.main_effects:
+        if block.name not in X:
+            continue  # the caller supplied log exposure
+        from_payload *= _block_multiplier(block, X)
+        header = next(
+            cell
+            for row in sheet.iter_rows()
+            for cell in row
+            if cell.value == block.table.columns[0]
+            and sheet.cell(cell.row, cell.column + 1).value == block.table.columns[1]
+        )
+        cells = sheet.iter_rows(
+            min_row=header.row + 1,
+            max_row=header.row + len(block.table),
+            min_col=header.column,
+            max_col=header.column + len(block.table.columns) - 1,
+            values_only=True,
+        )
+        from_sheet *= _block_multiplier(
+            replace(block, table=pd.DataFrame(cells, columns=block.table.columns)), X
+        )
+    np.testing.assert_allclose(from_payload, prediction, rtol=1e-12)
+    np.testing.assert_allclose(from_sheet, prediction, rtol=1e-12)
+    r42 = (X.Region == "R42").to_numpy()
+    assert r42.sum() == 58
+    assert prediction[r42].sum() == pytest.approx(0.000898, rel=0.05)

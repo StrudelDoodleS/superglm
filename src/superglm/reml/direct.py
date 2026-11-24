@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 import time as _time
 from collections.abc import Mapping
+from functools import partial
 from typing import Any
 
 import numpy as np
@@ -281,6 +282,7 @@ def optimize_direct_reml(
     trace_run: TraceRun | None = None,
     warm_lambdas: Mapping[str, float] | None = None,
     presolve: bool | None = None,
+    level_hold=None,
     lambda_box: LambdaBox | None = None,
     separation: str = "warn",
 ) -> REMLResult:
@@ -363,6 +365,7 @@ def optimize_direct_reml(
             trace_run=trace_run,
             warm_lambdas=warm_lambdas,
             lambda_box=box,
+            level_hold=level_hold,
             separation=separation,
         )
 
@@ -546,6 +549,7 @@ def optimize_direct_reml(
             start_out=presolve_start,
             start_objective_tol=_PRESOLVE_OBJECTIVE_TOL,
             lambda_box=box,
+            level_hold=level_hold,
             separation="record",
         )
         warm_lambdas = {
@@ -626,7 +630,12 @@ def optimize_direct_reml(
             )
         )
         _t0 = _time.perf_counter()
-        boot_result, boot_inv, boot_xtwx = fit_irls_direct(
+        bootstrap_fit = (
+            fit_irls_direct
+            if level_hold is None
+            else partial(level_hold.bootstrap, fit_irls_direct)
+        )
+        boot_result, boot_inv, boot_xtwx = bootstrap_fit(
             X=dm,
             y=y,
             weights=sample_weight,

@@ -16,6 +16,31 @@ from superglm.solvers.working_rows import (
 )
 
 
+@pytest.mark.parametrize("quantity", ["step", "weight", "score", "first", "second"])
+def test_binomial_log_lower_tail_fisher_rows(quantity):
+    from superglm.distributions import clip_mu
+    from superglm.reml.w_derivatives import compute_d2W_deta2, compute_dW_deta
+
+    family, link = Binomial(), LogLink()
+    eta = np.array([-20.0, -80.0, -20.0, -80.0, -80.0])
+    y = np.array([0.0, 0.0, 1.0, 0.25, 1.0])
+    w = np.array([2.0, 3.0, 0.5, 4.0, 0.0])
+    p = np.exp(eta)
+    mu = clip_mu(p, family)
+    rows = coefficient_working_rows(
+        distribution=family, link=link, y=y, mu=mu, eta=eta, sample_weight=w, prefer_observed=False
+    )
+    step = rows.response - eta
+    actual, expected = {
+        "step": (step, np.where(w > 0, y / p - 1, 0)),
+        "weight": (rows.weights, w * p / (1 - p)),
+        "score": (rows.weights * step, w * (y - p) / (1 - p)),
+        "first": (compute_dW_deta(link, family, mu, eta, w), w * p / (1 - p) ** 2),
+        "second": (compute_d2W_deta2(link, family, mu, eta, w), w * p * (1 + p) / (1 - p) ** 3),
+    }[quantity]
+    np.testing.assert_allclose(actual, expected, rtol=8 * np.finfo(float).eps, atol=0)
+
+
 def test_gaussian_identity_preserves_exact_constant_working_rows() -> None:
     y = np.array([1.0, -3.0, 7.5])
     eta = np.array([1.0e16, -1.0e16, 3.0])

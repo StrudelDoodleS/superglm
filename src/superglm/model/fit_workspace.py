@@ -13,6 +13,7 @@ _ATTEMPT_RUNTIME_OPTIONS = (
     # Profile-search design cache: shared BY REFERENCE so every candidate
     # workspace fills and reads the same dict (fit_ops._fetch_or_build_design).
     "_profile_design_cache",
+    "_profile_level_anchors",
 )
 _SUBCLASS_STATE_NAMES = "_fit_workspace_subclass_state_names"
 
