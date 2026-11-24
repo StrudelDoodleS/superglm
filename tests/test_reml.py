@@ -2426,27 +2426,42 @@ class TestREMLWarmStart:
         assert len(record["gradient"]) == len(record["curvature"]) == 2
         assert info["converged"]
 
-    @pytest.mark.parametrize("discrete", [False, True])
-    def test_a_dead_search_beside_a_live_shoulder_certifies(self, discrete, monkeypatch):
+    @pytest.mark.parametrize(
+        ("discrete", "start", "certifies"),
+        [(False, 1e9, True), (True, 1e8, True), (False, 1e8, False)],
+        ids=["exact", "discrete", "exact-above-the-flat-bar"],
+    )
+    def test_a_dead_search_beside_a_live_shoulder_certifies(
+        self, discrete, start, certifies, monkeypatch
+    ):
         """Every line-search trial is made worse, so the first search dies.
 
         The dead-search exit certifies on its first-order precision floor;
         the second-order check gates only the score-test exit.  Beside a live
         shoulder whose gradient is under that floor -- a weak smooth started
-        at 1e8 on the exact engine, a ti pair's margins at 1e8 beside held
-        mains on the discrete shared-tensor search -- the exit certifies
-        (converged_at_precision), with the shoulder still marked in the last
-        freeze record.  Each step there is shoulder-only, so the guard that
-        keeps the Newton decrement off a shoulder step is reached: without it
-        the decrement reads Newton terms this step never formed (both
-        fixtures raise).  The exit's reason is at its comment in
+        at 1e9 on the exact engine (score 1.5e-5), a ti pair's margins at 1e8
+        beside held mains on the discrete shared-tensor search -- the exit
+        certifies (converged_at_precision), with the shoulder still marked in
+        the last freeze record.  Each step there is shoulder-only, so the
+        guard that keeps the Newton decrement off a shoulder step is reached:
+        without it the decrement reads Newton terms this step never formed
+        (both fixtures raise).  The exit's reason is at its comment in
         ``reml/direct.py``; the native-Windows flip once blamed on round 2's
         refusal here was the unsigned shoulder read.
+
+        The floor is never looser than the score a live search must reach
+        (``dead_search_score_bar``: 1e-4 per unit log lambda at the default
+        tolerance).  The same smooth started at 1e8 has a score of 1.5e-4,
+        under the relative floor ``1e-7 (1 + |V|)`` = 2.3e-4 that certified
+        it before and over 1e-4: its dead search is disclosed as not
+        converged, and the term is an ordinary live one, not a shoulder
+        beside a hold.
         """
         import dataclasses
 
         import superglm.reml.direct as direct_module
         import superglm.reml.discrete as discrete_module
+        from superglm import ConvergenceWarning
 
         if discrete:
             real_objective = discrete_module.reml_laml_objective
@@ -2492,7 +2507,7 @@ class TestREMLWarmStart:
                 },
                 interactions=[("x1", "x2")],
             )
-            start = {"x1:x2:margin_x1": 1e8, "x1:x2:margin_x2": 1e8}
+            start = {"x1:x2:margin_x1": start, "x1:x2:margin_x2": start}
         else:
             eta = 0.3 + 0.1 * np.sin(3 * np.pi * x2)
             model = SuperGLM(
@@ -2502,16 +2517,25 @@ class TestREMLWarmStart:
                 features={"x2": Spline(kind="ps", k=10)},
             )
             X = X[["x2"]]
-            start = {"x2": 1e8}
+            start = {"x2": start}
         y = rng.poisson(np.exp(eta)).astype(float)
 
-        info = model.fit_reml(X, y, lambda2_init=start).reml_diagnostics()
-        assert info["termination_reason"] == "converged_at_precision"
-        assert info["converged"]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            info = model.fit_reml(X, y, lambda2_init=start).reml_diagnostics()
         freeze = info["profile"]["reml_freeze_decision"]
         shoulders = [
             name for name, on in zip(freeze["names"], freeze["shoulder"], strict=True) if on
         ]
+        if not certifies:
+            dead = info["profile"]["reml_dead_line_search"]
+            assert 1e-4 < dead["active_gradient_norm"] < 1e-7 * (1.0 + abs(info["objective"]))
+            assert info["termination_reason"] == "line_search_failed"
+            assert not info["converged"] and not shoulders
+            assert any(issubclass(w.category, ConvergenceWarning) for w in caught)
+            return
+        assert info["termination_reason"] == "converged_at_precision"
+        assert info["converged"]
         assert shoulders and set(shoulders) <= set(start)
 
     def test_a_scalar_keeps_the_cold_start(self):

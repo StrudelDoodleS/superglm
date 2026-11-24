@@ -956,13 +956,13 @@ def test_a_row_without_weight_never_reaches_the_structured_row_forms(monkeypatch
     rows without a weight derivative, the dense routes' rule
     (``test_leverage_route_never_forms_a_row_without_weight``), so every
     gradient is finite and the fit stops at the derivative-Gram fit's
-    objective: within the stopping rule's ``tau (1 + |V|)``, plus the freeze
-    bar per unit of log lambda along any direction either fit froze or clipped
+    objective: within the stopping rule's ``tau (1 + |V|)``, plus the hold
+    bar per unit of log lambda along any direction either fit held or clipped
     (``reml.convergence``, as ``tests/test_nested_structured_fit.py`` bounds a
     variance at its boundary).  Mutation: with every row formed the fit raises
     ``StructuredSolverError``.
     """
-    from superglm.reml.convergence import _freeze_gradient_bar, _score_scale
+    from superglm.reml.convergence import _score_scale, hold_score_bar
     from superglm.solvers.centered_system import grouped_augmented_row_quadratic_forms
 
     frame, y = _grouped_poisson_frame()
@@ -1014,9 +1014,8 @@ def test_a_row_without_weight_never_reaches_the_structured_row_forms(monkeypatch
         flat |= (rho[-1] <= np.log(1e-6) + 1e-12) | (rho[-1] >= np.log(1e10) - 1e-12)
     objective = gram._reml_result.objective
     flat_change = float(np.sum(np.abs(rho[1] - rho[0])[flat]))
-    bound = _REML_TOL * _score_scale(objective) + _freeze_gradient_bar(objective, _REML_TOL) * (
-        flat_change
-    )
+    hold_bar = hold_score_bar(objective, _REML_TOL)
+    bound = _REML_TOL * _score_scale(objective) + hold_bar * flat_change
     assert abs(leverage._reml_result.objective - objective) <= bound
 
 

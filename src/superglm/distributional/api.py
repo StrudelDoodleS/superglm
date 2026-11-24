@@ -778,7 +778,7 @@ class SuperLSS:
         retain_history_rows: bool = False,
         practical_reml_parameter_tol: float = 1.0e-3,
         reml_plateau_tol: float = 1.0e-7,
-        outer: Literal["efs", "efs+finish", "efs+newton"] | None = None,
+        outer: Literal["efs", "efs+finish", "efs+newton", "efs+stationary"] | None = None,
         phase_recorder: FitPhaseRecorder | None = None,
         truncation: BoundPair = None,
         censored: CensoredRows = None,
@@ -797,7 +797,11 @@ class SuperLSS:
         in log lambda, aiming for a stationary point of the LAML over the
         smoothing-parameter box (Wood, Pya and Saefken 2016, section 3.1).
         ``"efs+newton"`` hands to those Newton steps after a shorter warm-up, on
-        any Fellner-Schall stop. ``smoothing_convergence_reason_`` and
+        any Fellner-Schall stop. ``"efs+stationary"`` requires the projected
+        profile score at the returned fit. A flat term must have small
+        curvature and a score below 1e-4 nats per log lambda at default
+        fidelity. Tightening ``reml_tol`` tightens that bar proportionally.
+        ``smoothing_convergence_reason_`` and
         ``smoothing_certified_`` report how a fit stopped. The default ``None``
         runs ``"efs+finish"``, except where a family's curvature jumps
         (``TwoPieceNormalLSS`` and ``TwoPieceLogNormalLSS``): Newton's smoothness
@@ -848,8 +852,10 @@ class SuperLSS:
         with fit_record(self, "fit_reml", locals()):
             if method != "efs":
                 raise NotImplementedError("SuperLSS currently supports only method='efs'")
-            if outer not in ("efs", "efs+finish", "efs+newton"):
-                raise ValueError("outer must be None, 'efs', 'efs+finish' or 'efs+newton'")
+            if outer not in ("efs", "efs+finish", "efs+newton", "efs+stationary"):
+                raise ValueError(
+                    "outer must be None, 'efs', 'efs+finish', 'efs+newton' or 'efs+stationary'"
+                )
             if initial_lambda is not None and (
                 isinstance(initial_lambda, bool)
                 or not isinstance(initial_lambda, int | float)
