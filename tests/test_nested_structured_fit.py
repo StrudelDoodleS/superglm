@@ -726,16 +726,16 @@ def test_a_variance_at_its_boundary_converges_on_the_leverage_route(
 ) -> None:
     """A random-effect variance at zero: the leverage route converges where the Grams do.
 
-    Near the boundary the noise direction is flat, so each route freezes it
-    wherever its gradient falls below the freeze bar ``max(0.1 tau, 1e-7) (1 +
-    |V|)`` (``reml.convergence``), or reaches the ``1e10`` clip, and the two
-    routes stop it at different lambdas.  Along it the objective may still fall
-    by up to that bar per unit of log lambda, and along the others by the
-    stopping rule's ``tau (1 + |V|)``: the routes' objectives agree within the
+    Near the boundary the noise direction is flat, so each route holds it
+    wherever its gradient falls below the hold bar (``hold_score_bar`` in
+    ``reml.convergence``), or reaches the ``1e10`` clip, and the two routes
+    stop it at different lambdas.  Along it the objective may still fall by up
+    to that bar per unit of log lambda, and along the others by the stopping
+    rule's ``tau (1 + |V|)``: the routes' objectives agree within the
     sum.  The stop's cross terms read from the nested factor's penalty block in
     place of its cross block fail here on the structured backend.
     """
-    from superglm.reml.convergence import _freeze_gradient_bar, _score_scale
+    from superglm.reml.convergence import _score_scale, hold_score_bar
 
     data = _noise_data(family)
     gram = _fit(family, direct_solve, data=data, extra=("noise",))
@@ -757,9 +757,8 @@ def test_a_variance_at_its_boundary_converges_on_the_leverage_route(
 
     objective = gram._reml_result.objective
     flat_change = np.sum(np.abs(rho["leverage_tables"] - rho["derivative_grams"])[flat])
-    bound = REML_TOL * _score_scale(objective) + _freeze_gradient_bar(objective, REML_TOL) * (
-        flat_change
-    )
+    hold_bar = hold_score_bar(objective, REML_TOL)
+    bound = REML_TOL * _score_scale(objective) + hold_bar * flat_change
     assert abs(leverage._reml_result.objective - objective) <= bound
 
 

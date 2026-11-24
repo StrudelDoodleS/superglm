@@ -56,6 +56,7 @@ and fitted.
    :nosignatures:
 
    ~superglm.SuperGLM.summary
+   ~superglm.SuperGLM.sandwich_covariance
    ~superglm.SuperGLM.term_inference
    ~superglm.SuperGLM.simultaneous_bands
    ~superglm.SuperGLM.random_effects

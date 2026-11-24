@@ -14,6 +14,7 @@ methods that produce them are documented on the
 
    superglm.TermInference
    superglm.InteractionInference
+   superglm.SandwichCovariance
    superglm.RandomEffectResult
    superglm.FactorSmoothResult
    superglm.SplineRedundancyReport

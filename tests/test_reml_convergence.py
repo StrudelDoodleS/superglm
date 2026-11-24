@@ -105,18 +105,10 @@ def test_freeze_judges_curvature_relative_to_the_strongest_direction() -> None:
 def test_freeze_holds_a_convex_tail_but_not_a_concave_shoulder() -> None:
     """A flat direction is held as at a virtual bound (Wood's working
     infinity), which projected Newton allows only when descent leads into
-    that bound.  Both directions below are flat by the gradient and
-    curvature bars (objective 8.5e4, freeze bar 8.5e-3): the convex tail
-    (g = -6e-3, H = +6e-3, a 1/lambda tail toward infinity) is held; the
-    concave shoulder (g = +1.8e-3, H = -1.9e-3: the measured VehAge x
-    VehBrand[B4] state at lambda = 1e4 on freMTPL2 as published, mains and
-    10 pairs, optimum near 7.8) is not,
-    because its trust-region model promises 5 * 1.8e-3 + 12.5 * 1.9e-3
-    against a resolution of 8.5e-5.  Without a step bound the hold is the
-    first-order one it always was (mutation check: the PR #487 head held
-    both)."""
-    gradient = np.array([-6e-3, 1.8e-3, 40.0])
-    hess = np.diag([6e-3, -1.9e-3, 3.0])
+    that bound. Only the tail below the absolute score bar can be held.
+    The second term has a resolvable decrease toward the interior."""
+    gradient = np.array([-6e-5, 1.8e-5, -6e-3])
+    hess = np.diag([6e-5, -1.9e-5, 6e-3])
     ranks = np.array([10.0, 10.0, 10.0])
     estimated = np.ones(3, dtype=bool)
 
@@ -166,24 +158,24 @@ def test_negative_curvature_on_a_tail_falling_into_the_plateau_is_not_a_shoulder
     resolution 3.7e-6), which the unsigned ratio took for a shoulder.  The
     mirrored read (g = +2.66e-4) is one.
     """
-    gradient = np.array([-2.66e-4, 2.66e-4])
-    hess = np.diag([-1.41e-4, -1.41e-4])
-    estimated = np.ones(2, dtype=bool)
+    gradient = np.array([-2.66e-4, 2.66e-5, -2.66e-5])
+    hess = np.diag([-1.41e-4, -1.41e-5, -1.41e-5])
+    estimated = np.ones(3, dtype=bool)
     live = concave_live_directions(
         gradient, hess, estimated, objective=3714.8, tolerance=1e-9, step_bound=5.0
     )
-    np.testing.assert_array_equal(live, [False, True])
+    np.testing.assert_array_equal(live, [False, True, False])
     decision = freeze_flat_directions(
         gradient,
         hess,
-        np.array([4.0, 4.0]),
+        np.full(3, 4.0),
         estimated,
         objective=3714.8,
         tolerance=1e-9,
         step_bound=5.0,
     )
-    np.testing.assert_array_equal(decision.frozen, [True, False])
-    np.testing.assert_array_equal(decision.shoulder, [False, True])
+    np.testing.assert_array_equal(decision.frozen, [False, False, True])
+    np.testing.assert_array_equal(decision.shoulder, [False, True, False])
 
 
 def test_freeze_normalizes_curvature_by_penalty_rank() -> None:
@@ -379,23 +371,21 @@ def _forbidden(*args, **kwargs):
     ],
     ids=["masked-below-the-bar", "no-mask"],
 )
-def test_a_stop_with_nothing_masked_live_and_no_shoulder_stands_unrevalidated(
+def test_a_held_term_with_new_curvature_is_released_even_below_the_free_score_bar(
     gradient, previously_frozen
 ) -> None:
-    """The freeze decision is not remade: the masked direction's gradient is
-    under the live bar, or there is no mask at all (``None`` is "nothing was
-    held", whatever the gradient), and no direction is a shoulder.  Nothing
-    is written to the profile."""
+    """Curvature alone can change the free set. With no held term no reread is needed."""
     profile: dict = {}
     stop, refused = _revalidate(
         gradient,
         np.diag([2.0, 3.0]),
         None if previously_frozen is None else np.array(previously_frozen),
         profile,
-        freeze=_forbidden,
+        freeze=_forbidden if previously_frozen is None else freeze_flat_directions,
     )
-    assert (stop, refused) == (True, False)
-    assert profile == {}
+    assert stop == (previously_frozen is None)
+    assert not refused
+    assert bool(profile.get("reml_freeze_revalidated")) == (previously_frozen is not None)
 
 
 def test_a_live_masked_gradient_whose_mask_survives_revalidation_lets_the_stop_stand() -> None:
@@ -480,13 +470,14 @@ def test_dead_feasible_exit_classifies_against_the_resolved_tolerance() -> None:
     """A dead feasible line search at reml_tol=1e-3 with the active
     gradient at 1e-5 of scale has met the precision the caller asked for;
     holding it to the 1e-7 floor misreported it as line_search_failed."""
-    loose = classify_dead_feasible_exit(0.1, objective=1e4, tolerance=1e-3)
+    loose = classify_dead_feasible_exit(0.09, objective=1e4, tolerance=1e-3)
     tight = classify_dead_feasible_exit(0.1, objective=1e4, tolerance=1e-11)
-    tight_resolved = classify_dead_feasible_exit(1e-4, objective=1e4, tolerance=1e-11)
+    tight_resolved = classify_dead_feasible_exit(9e-5, objective=1e4, tolerance=1e-11)
 
     assert loose == "converged_at_precision"
     assert tight == "line_search_failed"
     assert tight_resolved == "converged_at_precision"
+    assert classify_dead_feasible_exit(2e-4, objective=1e4, tolerance=1e-11) == "line_search_failed"
 
 
 def test_dead_feasible_exit_resolves_a_negligible_predicted_decrease() -> None:
@@ -533,7 +524,7 @@ def test_decrement_arm_never_grants_a_gradient_orders_above_the_bar() -> None:
 
     Mutation: removing the ceiling grants ``far`` and ``at_ceiling``."""
     objective, tolerance = 2060.7156437253107, 1e-9
-    bar = max(FLAT_DIRECTION_FREEZE_FLOOR, tolerance) * (1.0 + objective)
+    bar = 1e-4
     negligible = 1e-12 * tolerance * (1.0 + objective)
 
     def classify(gradient):

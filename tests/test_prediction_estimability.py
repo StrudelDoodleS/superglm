@@ -62,7 +62,11 @@ ALIASED_NEW = pd.DataFrame(
 )
 
 # master (bfff7a074)'s ``predict`` on ROW_J_NEW and ALIASED_NEW, as float.hex (native
-# OpenBLAS; master's own Haswell values differ by at most 1.3e-12 relative)
+# OpenBLAS; master's own Haswell values differ by at most 1.3e-12 relative).  The
+# ("spline", "fit_reml") row is the price at the REML stop that holds a flat term only
+# under a score of 1e-4 (#604): 3.4e-6 from the ``reml_tol=1e-12`` price, where master's
+# stop, which held the two flat by-level terms at scores of 1.0e-4 and 1.8e-4, is 9.2e-6
+# from it.  Haswell and SkylakeX agree on it to 1.6e-15 relative.
 MASTER_PRICES = {
     ("numeric", "fit"): [
         "0x1.ff76266bff2d6p-1",
@@ -86,11 +90,11 @@ MASTER_PRICES = {
         "0x1.bb027f00887e8p-1",
     ],
     ("spline", "fit_reml"): [
-        "0x1.ff76266bff2d1p-1",
-        "0x1.0368ce18b7269p+0",
-        "0x1.121eb5112a7c2p+0",
-        "0x1.00425a81e50e1p+0",
-        "0x1.cdf5cce3b3ea6p-1",
+        "0x1.ff76266bff2d4p-1",
+        "0x1.0368dd0aef3b3p+0",
+        "0x1.121ecb7acb276p+0",
+        "0x1.0042bcabd141dp+0",
+        "0x1.cdf558a061a6fp-1",
     ],
     ("aliased", "fit"): [
         "0x1.66a690271d49bp-1",

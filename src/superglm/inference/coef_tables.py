@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Hashable
+from collections.abc import Callable, Hashable
 from typing import Any
 
 import numpy as np
@@ -78,16 +78,21 @@ def _ordered_piecewise_structural_rows(
     b_main: NDArray,
     V_b_main: NDArray,
     alpha: float,
+    *,
+    is_sandwich: bool = False,
+    sandwich_penalized: bool = False,
+    wald_df_limit: int | None = None,
+    determines: Callable[[NDArray], NDArray[np.bool_]] | None = None,
 ) -> list[_CoefRow]:
     """Structural contrast rows for an OrderedCategorical Piecewise basis.
 
     One slope-change Wald row per stated break and one curvature row per
     segment of degree >= 2 (a single z row for one curvature freedom, a joint
-    chi-square family row for more). These are ordinary linear-model tests of
-    a fixed-knot design -- Smith (1979), Am. Statist. 33(2):57-62 -- and the
-    honest vocabulary under C0 seams, where per-segment orthogonal per-power
-    z-statistics do not exist (the segments share their joint values, so
-    within-segment components are not free parameters).
+    chi-square family row for more): ordinary linear-model tests of a
+    fixed-knot design (Smith 1979, Am. Statist. 33(2):57-62). Under C0 seams
+    the segments share their joint values, so per-segment per-power z-tests
+    do not exist. ``determines`` (a robust covariance's, over the block's
+    coefficients) leaves a row it does not determine its estimate alone.
     """
     from scipy.stats import chi2 as chi2_dist
 
@@ -98,16 +103,23 @@ def _ordered_piecewise_structural_rows(
     def _level_at(knot_index: int) -> str:
         return str(levels[int(round(float(knots[knot_index])))])
 
+    def undetermined(contrasts: NDArray) -> bool:
+        return determines is not None and not bool(np.all(determines(np.atleast_2d(contrasts))))
+
     rows: list[_CoefRow] = []
     for structural in inner.ordered_structural_rows():
         if structural.kind == "slope_change":
             contrast = structural.contrast
             estimate = float(contrast @ b_main)
+            name = f"{feature_name}[slope-change @ {_level_at(structural.index)}]"
+            if undetermined(contrast):
+                rows.append(_CoefRow(name=name, group=feature_label, coef=estimate))
+                continue
             se_val = covariance_contrast_se(V_b_main, contrast)
             z, p, ci_lo, ci_hi = _compute_coef_stats(estimate, se_val, alpha)
             rows.append(
                 _CoefRow(
-                    name=f"{feature_name}[slope-change @ {_level_at(structural.index)}]",
+                    name=name,
                     group=feature_label,
                     coef=estimate,
                     se=se_val,
@@ -125,6 +137,15 @@ def _ordered_piecewise_structural_rows(
             coef_val = float(b_main[indices[0]])
             contrast = np.zeros(len(b_main))
             contrast[indices[0]] = 1.0
+            if undetermined(contrast):
+                rows.append(
+                    _CoefRow(
+                        name=f"{feature_name}[curvature {segment_label}]",
+                        group=feature_label,
+                        coef=coef_val,
+                    )
+                )
+                continue
             se_val = covariance_contrast_se(V_b_main, contrast)
             z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
             rows.append(
@@ -147,13 +168,26 @@ def _ordered_piecewise_structural_rows(
             )
         else:
             V_family = V_b_main[np.ix_(indices, indices)]
-        stat = float("nan")
-        p_val = float("nan")
-        try:
-            stat = covariance_wald_statistic(b_family, V_family)
-            p_val = 1.0 - chi2_dist.cdf(stat, float(indices.size))
-        except np.linalg.LinAlgError:
-            pass
+        stat: float | None = float("nan")
+        p_val: float | None = float("nan")
+        ref_df: float | None = float(indices.size)
+        if is_sandwich:
+            if sandwich_penalized or undetermined(np.eye(len(b_main))[indices]):
+                stat = p_val = ref_df = None
+            else:
+                from superglm.inference._sandwich_core import wald_block_statistic
+
+                stat, p_val = wald_block_statistic(
+                    b_family, np.asarray(V_family, dtype=np.float64), df_limit=wald_df_limit
+                )
+                if stat is None:
+                    ref_df = None
+        else:
+            try:
+                stat = covariance_wald_statistic(b_family, V_family)
+                p_val = 1.0 - chi2_dist.cdf(stat, float(indices.size))
+            except np.linalg.LinAlgError:
+                pass
         rows.append(
             _CoefRow(
                 name=f"{feature_name}[curvature {segment_label}]",
@@ -164,7 +198,7 @@ def _ordered_piecewise_structural_rows(
                 group_norm=float(np.linalg.norm(b_family)),
                 wald_chi2=stat,
                 wald_p=p_val,
-                ref_df=float(indices.size),
+                ref_df=ref_df,
                 subgroup_type="curvature",
             )
         )
@@ -203,6 +237,7 @@ def build_coef_rows(
     recorded_likelihood_size: float | None = None,
     selection_shrunk_group_names: set[str] | None = None,
     rules_enforced: bool = True,
+    sandwich_covariance: Any | None = None,
 ) -> list[_CoefRow]:
     """Build coefficient table rows for summary output.
 
@@ -316,6 +351,32 @@ def build_coef_rows(
             return max(float(recorded_likelihood_size) - effective_df, 1.0)
         return max(float(n_obs) - effective_df, 1.0)
 
+    is_sandwich = sandwich_covariance is not None
+    sandwich_penalized_groups: frozenset[str] = (
+        frozenset(sandwich_covariance.penalized_group_names) if is_sandwich else frozenset()
+    )
+    wald_df_limit = sandwich_covariance.wald_df_limit if is_sandwich else None
+
+    def _se_from_var(var: NDArray | float) -> Any:
+        if is_sandwich:
+            return np.sqrt(np.maximum(var, 0.0))
+        return standard_errors(var, result, known_scale=known_scale)
+
+    def _cov_from_aug(mat: Any) -> Any:
+        if is_sandwich:
+            return mat
+        return coefficient_covariance(mat, result, known_scale=known_scale)
+
+    def _coef_stats_for(
+        coef_val: float,
+        se_val: float,
+        group_name: str | None = None,
+    ) -> tuple[float | None, float | None, float, float]:
+        z_v, p_v, lo_v, hi_v = _compute_coef_stats(coef_val, se_val, alpha)
+        if is_sandwich and group_name is not None and group_name in sandwich_penalized_groups:
+            return None, None, lo_v, hi_v
+        return z_v, p_v, lo_v, hi_v
+
     # Compute per-group SEs from augmented inverse (accounts for intercept).
     # The augmented inverse has intercept at row/col 0; feature blocks start at 1.
     se_dict: dict[str, NDArray] = {}
@@ -336,7 +397,7 @@ def build_coef_rows(
                     XtWX_inv_aug,
                     augmented_indices,
                 )
-                se_dict[g.name] = standard_errors(var_diag, result, known_scale=known_scale)
+                se_dict[g.name] = _se_from_var(var_diag)
         if g.name in selected_names:
             se_dict[g.name] = se_dict[g.name].astype(float, copy=True)
             se_dict[g.name][~coefficient_estimable[g.sl]] = np.nan
@@ -369,7 +430,11 @@ def build_coef_rows(
         XtWX_inv_aug,
         augmented_reference_contrast,
     )
-    icpt_se = float(standard_errors(icpt_var, result, known_scale=known_scale))
+    icpt_se = float(_se_from_var(icpt_var))
+    # The reported intercept is at each ordered term's base level: blank where the fit
+    # does not determine that contrast, not only the unadjusted intercept.
+    if is_sandwich and not sandwich_covariance.determines(augmented_reference_contrast)[0]:
+        icpt_se = float("nan")
 
     rows: list[_CoefRow] = []
     # The coefficients a separated level or cell moves (``separated_coefficients``,
@@ -380,6 +445,49 @@ def build_coef_rows(
 
     def moves(column: int) -> bool:
         return separated is not None and bool(separated[column])
+
+    def _block_determines(start: int) -> Callable[[NDArray], NDArray[np.bool_]] | None:
+        """``determines`` of a robust covariance for contrasts of the block at ``start``, or none."""
+        covariance = sandwich_covariance
+        if covariance is None:
+            return None
+
+        def determines(contrasts: NDArray) -> NDArray[np.bool_]:
+            rows = np.zeros((len(contrasts), covariance.n_params))
+            rows[:, start : start + contrasts.shape[1]] = contrasts
+            return covariance.determines(rows)
+
+        return determines
+
+    def _block_wald_for(
+        b_block: NDArray,
+        V_block: NDArray,
+        g_slice: slice,
+        group_name: str,
+    ) -> tuple[float | None, float | None, float | None]:
+        from scipy.stats import chi2 as chi2_dist
+
+        ref_df_val = float(len(b_block))
+        if is_sandwich:
+            # The penalty that voids an ordinary Wald test is the one on this block.
+            if group_name in sandwich_penalized_groups:
+                return None, None, None
+            if not np.all(coefficient_estimable[g_slice]):
+                return None, None, None
+            if any(moves(idx) for idx in range(g_slice.start, g_slice.stop)):
+                return None, None, None
+            from superglm.inference._sandwich_core import wald_block_statistic
+
+            stat_v, p_v = wald_block_statistic(b_block, V_block, df_limit=wald_df_limit)
+            if stat_v is None:
+                return None, None, None
+            return stat_v, p_v, ref_df_val
+        try:
+            stat_v = covariance_wald_statistic(b_block, V_block)
+            p_v = 1.0 - chi2_dist.cdf(stat_v, ref_df_val)
+            return stat_v, p_v, ref_df_val
+        except np.linalg.LinAlgError:
+            return float("nan"), float("nan"), ref_df_val
 
     # Intercept row
     z, p, ci_lo, ci_hi = _compute_coef_stats(intercept, icpt_se, alpha)
@@ -445,15 +553,46 @@ def build_coef_rows(
                 _group_edf_cache[ag.name] = float(np.sum(edf[ag.sl]))
         return _group_edf_cache
 
+    # The slope blocks of the metrics a robust fit's level and curve errors are read
+    # with (``UndeterminedDirections.metrics``), formed once, or none.
+    undetermined = sandwich_covariance.undetermined if is_sandwich else None
+    undetermined_metrics: tuple[NDArray, ...] | None = None
+    if undetermined is not None:
+        undetermined_metrics = tuple(metric[1:, 1:] for metric in undetermined.metrics())
+
+    def _feature_se(feature_name):
+        """A term's level or curve errors from the slope covariance (``feature_se_from_cov``).
+
+        A robust covariance blanks each one whose contrast the fit does not determine:
+        the term's own map, read with the covariance replaced by each metric of
+        ``UndeterminedDirections``, gives every row's share along the undetermined
+        directions.
+        """
+
+        # Use the feature block of the augmented inverse for correct marginal SEs
+        def read(covariance):
+            return np.asarray(
+                feature_se_from_cov(
+                    feature_name,
+                    covariance,
+                    active_groups,
+                    result,
+                    groups,
+                    specs,
+                    interaction_specs,
+                ),
+                dtype=np.float64,
+            )
+
+        se = read(_cov_from_aug(covariance_slope_view(XtWX_inv_aug)))
+        if undetermined is None or undetermined_metrics is None:
+            return se
+        norms = [read(metric) for metric in undetermined_metrics]
+        return np.where(undetermined.determined(*norms), se, np.nan)
+
     def _curve_se_range(feature_name):
         """Compute curve SE min/max for a spline feature."""
-        # Use the feature block of the augmented inverse for correct marginal SEs
-        Cov_active = coefficient_covariance(
-            covariance_slope_view(XtWX_inv_aug), result, known_scale=known_scale
-        )
-        se_curve = feature_se_from_cov(
-            feature_name, Cov_active, active_groups, result, groups, specs, interaction_specs
-        )
+        se_curve = _feature_se(feature_name)
         # One SE per level, and for a specials term that includes the FREE levels,
         # whose uncertainty is not a point on the curve. Every other statistic on
         # the ordered-spline row describes the spline block; _term_ops already
@@ -475,7 +614,7 @@ def build_coef_rows(
             XtWX_inv_aug,
             augmented_indices,
         )
-        return coefficient_covariance(covariance, result, known_scale=known_scale)
+        return _cov_from_aug(covariance)
 
     def _spline_enrichment(g_name, spec):
         d = spline_group_enrichment(g_name, spec, _get_group_edf_map(), reml_lambdas, lambda2)
@@ -566,18 +705,7 @@ def build_coef_rows(
                 else 0.0
             )
 
-            Cov_active = coefficient_covariance(
-                covariance_slope_view(XtWX_inv_aug), result, known_scale=known_scale
-            )
-            se_levels = feature_se_from_cov(
-                g.feature_name,
-                Cov_active,
-                active_groups,
-                result,
-                groups,
-                specs,
-                interaction_specs,
-            )
+            se_levels = _feature_se(g.feature_name)
             raw = spec.reconstruct(beta_combined)
             inner_kind = spec.basis_kind
 
@@ -591,9 +719,11 @@ def build_coef_rows(
                     if active_group is not None:
                         active_pairs.append((feature_group, active_group))
 
-                stat = float("nan")
-                p_val = float("nan")
-                ref_df = float(sum(fg.size for fg in smooth_groups))
+                stat: float | None = None if is_sandwich else float("nan")
+                p_val: float | None = None if is_sandwich else float("nan")
+                ref_df: float | None = (
+                    None if is_sandwich else float(sum(fg.size for fg in smooth_groups))
+                )
                 curve_se_min = float("nan")
                 curve_se_max = float("nan")
                 beta_active = (
@@ -603,32 +733,31 @@ def build_coef_rows(
                 )
 
                 if active_pairs:
-                    active_indices = np.concatenate(
-                        [np.arange(ag.start, ag.end) for _, ag in active_pairs]
-                    )
-                    augmented_indices = active_indices + 1
-                    V_b_j = coefficient_covariance(
-                        covariance_selected_block(XtWX_inv_aug, augmented_indices),
-                        result,
-                        known_scale=known_scale,
-                    )
-                    R_a = _get_R_factor()
-                    edf, edf1 = _get_influence_edf()
-                    edf1_j = float(np.sum(edf1[active_indices]))
-                    X_j = R_a[:, active_indices]
-                    res_df = _wood_residual_df(edf)
-
-                    try:
-                        stat, p_val, ref_df = _wood_test(
-                            [fg for fg, _ in active_pairs],
-                            beta_active,
-                            X_j,
-                            V_b_j,
-                            edf1_j,
-                            res_df,
+                    if not is_sandwich:
+                        active_indices = np.concatenate(
+                            [np.arange(ag.start, ag.end) for _, ag in active_pairs]
                         )
-                    except np.linalg.LinAlgError:
-                        pass
+                        augmented_indices = active_indices + 1
+                        V_b_j = _cov_from_aug(
+                            covariance_selected_block(XtWX_inv_aug, augmented_indices)
+                        )
+                        R_a = _get_R_factor()
+                        edf, edf1 = _get_influence_edf()
+                        edf1_j = float(np.sum(edf1[active_indices]))
+                        X_j = R_a[:, active_indices]
+                        res_df = _wood_residual_df(edf)
+
+                        try:
+                            stat, p_val, ref_df = _wood_test(
+                                [fg for fg, _ in active_pairs],
+                                beta_active,
+                                X_j,
+                                V_b_j,
+                                edf1_j,
+                                res_df,
+                            )
+                        except np.linalg.LinAlgError:
+                            pass
                     curve_se_min, curve_se_max = _curve_se_range(g.feature_name)
 
                 _, s_lam, s_kind, s_knot_strat, s_bnd, s_penalty = _spline_enrichment(
@@ -673,10 +802,11 @@ def build_coef_rows(
                 main_group = smooth_groups[0]
                 b_main = beta[main_group.sl]
                 se_main = se_dict[main_group.name]
-                stat = float("nan")
-                p_val = float("nan")
-                ref_df = float(main_group.size)
+                stat = None if is_sandwich else float("nan")
+                p_val = None if is_sandwich else float("nan")
+                ref_df = None if is_sandwich else float(main_group.size)
                 V_b_main: NDArray | None = None
+                main_determines = None
                 if smooth_active:
                     ag = next(
                         (a for a in active_groups if a.name == main_group.name),
@@ -684,13 +814,10 @@ def build_coef_rows(
                     )
                     if ag is not None:
                         V_b_main = _augmented_group_block(ag)
-                        from scipy.stats import chi2 as chi2_dist
-
-                        try:
-                            stat = covariance_wald_statistic(b_main, V_b_main)
-                            p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
-                        except np.linalg.LinAlgError:
-                            pass
+                        main_determines = _block_determines(1 + ag.start)
+                        stat, p_val, ref_df = _block_wald_for(
+                            b_main, V_b_main, main_group.sl, main_group.name
+                        )
                 rows.append(
                     _CoefRow(
                         name=feature_label,
@@ -719,7 +846,7 @@ def build_coef_rows(
                     for i in range(main_group.size):
                         coef_val = float(b_main[i])
                         se_val = float(se_main[i]) if len(se_main) > i else 0.0
-                        z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                        z, p, ci_lo, ci_hi = _coef_stats_for(coef_val, se_val, main_group.name)
                         rows.append(
                             _CoefRow(
                                 name=f"{g.feature_name}[P{powers[i]}]",
@@ -746,6 +873,10 @@ def build_coef_rows(
                             b_main,
                             V_b_main,
                             alpha,
+                            is_sandwich=is_sandwich,
+                            sandwich_penalized=main_group.name in sandwich_penalized_groups,
+                            wald_df_limit=wald_df_limit,
+                            determines=main_determines,
                         )
                     )
 
@@ -799,9 +930,9 @@ def build_coef_rows(
             _mono_engine = _engine_tag(spec, g.monotone_engine)
             _mono_repaired = g.feature_name in _mono_repairs
             if active:
-                stat = float("nan")
-                p_val = float("nan")
-                ref_df = float(g.size)
+                stat = None if is_sandwich else float("nan")
+                p_val = None if is_sandwich else float("nan")
+                ref_df = None if is_sandwich else float(g.size)
                 curve_se_min = float("nan")
                 curve_se_max = float("nan")
 
@@ -809,27 +940,20 @@ def build_coef_rows(
                 V_b_j = _augmented_group_block(ag)
 
                 if is_linear_subgroup:
-                    from scipy.stats import chi2 as chi2_dist
-
-                    try:
-                        stat = covariance_wald_statistic(b_g, V_b_j)
-                        ref_df = float(g.size)
-                        p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
-                    except np.linalg.LinAlgError:
-                        pass
-
+                    stat, p_val, ref_df = _block_wald_for(b_g, V_b_j, g.sl, g.name)
                     curve_se_min, curve_se_max = _curve_se_range(g.feature_name)
                 else:
-                    R_a = _get_R_factor()
-                    edf, edf1 = _get_influence_edf()
-                    edf1_j = float(np.sum(edf1[ag.sl]))
-                    X_j = R_a[:, ag.sl]
-                    res_df = _wood_residual_df(edf)
+                    if not is_sandwich:
+                        R_a = _get_R_factor()
+                        edf, edf1 = _get_influence_edf()
+                        edf1_j = float(np.sum(edf1[ag.sl]))
+                        X_j = R_a[:, ag.sl]
+                        res_df = _wood_residual_df(edf)
 
-                    try:
-                        stat, p_val, ref_df = _wood_test([g], b_g, X_j, V_b_j, edf1_j, res_df)
-                    except Exception:
-                        pass
+                        try:
+                            stat, p_val, ref_df = _wood_test([g], b_g, X_j, V_b_j, edf1_j, res_df)
+                        except Exception:
+                            pass
 
                     curve_se_min, curve_se_max = _curve_se_range(g.feature_name)
 
@@ -894,7 +1018,7 @@ def build_coef_rows(
             for i, level in enumerate(spec._non_base):
                 coef_val = float(b_g[i])
                 se_val = float(se_g[i])
-                z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                z, p, ci_lo, ci_hi = _coef_stats_for(coef_val, se_val, g.name)
                 blank = moves(g.start + i)
                 n_obs_i, exp_share_i, thin_i = diag.get(i, (None, None, False))
                 # a blank row's interval is not shown, so no note about it is either
@@ -922,23 +1046,24 @@ def build_coef_rows(
 
         elif isinstance(spec, SplineCategorical):
             if active:
-                stat = float("nan")
-                p_val = float("nan")
-                ref_df = float(g.size)
+                stat = None if is_sandwich else float("nan")
+                p_val = None if is_sandwich else float("nan")
+                ref_df = None if is_sandwich else float(g.size)
 
-                ag = next(a for a in active_groups if a.name == g.name)
-                V_b_j = _augmented_group_block(ag)
+                if not is_sandwich:
+                    ag = next(a for a in active_groups if a.name == g.name)
+                    V_b_j = _augmented_group_block(ag)
 
-                R_a = _get_R_factor()
-                edf, edf1 = _get_influence_edf()
-                edf1_j = float(np.sum(edf1[ag.sl]))
-                X_j = R_a[:, ag.sl]
-                res_df = _wood_residual_df(edf)
+                    R_a = _get_R_factor()
+                    edf, edf1 = _get_influence_edf()
+                    edf1_j = float(np.sum(edf1[ag.sl]))
+                    X_j = R_a[:, ag.sl]
+                    res_df = _wood_residual_df(edf)
 
-                try:
-                    stat, p_val, ref_df = _wood_test([g], b_g, X_j, V_b_j, edf1_j, res_df)
-                except Exception:
-                    pass
+                    try:
+                        stat, p_val, ref_df = _wood_test([g], b_g, X_j, V_b_j, edf1_j, res_df)
+                    except Exception:
+                        pass
 
                 _edf_map = _get_group_edf_map()
                 rows.append(
@@ -979,7 +1104,7 @@ def build_coef_rows(
             for i in range(g.size):
                 coef_val = float(b_g[i])
                 se_val = float(se_g[i]) if len(se_g) > i else 0.0
-                z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                z, p, ci_lo, ci_hi = _coef_stats_for(coef_val, se_val, g.name)
                 rows.append(
                     _CoefRow(
                         name=f"{g.name}[P{powers[i]}]",
@@ -995,20 +1120,9 @@ def build_coef_rows(
 
         elif isinstance(spec, PolynomialCategorical):
             if active:
-                stat = float("nan")
-                p_val = float("nan")
-                ref_df = float(g.size)
-
                 ag = next(a for a in active_groups if a.name == g.name)
                 V_b_j = _augmented_group_block(ag)
-
-                from scipy.stats import chi2 as chi2_dist
-
-                try:
-                    stat = covariance_wald_statistic(b_g, V_b_j)
-                    p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
-                except np.linalg.LinAlgError:
-                    pass
+                stat, p_val, ref_df = _block_wald_for(b_g, V_b_j, g.sl, g.name)
 
                 rows.append(
                     _CoefRow(
@@ -1039,7 +1153,7 @@ def build_coef_rows(
             for i, (lev1, lev2) in enumerate(spec._pairs):
                 coef_val = float(b_g[i])
                 se_val = float(se_g[i])
-                z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                z, p, ci_lo, ci_hi = _coef_stats_for(coef_val, se_val, g.name)
                 blank = moves(g.start + i)
                 rows.append(
                     _CoefRow(
@@ -1059,7 +1173,7 @@ def build_coef_rows(
             for i, level in enumerate(spec._non_base):
                 coef_val = float(b_g[i])
                 se_val = float(se_g[i])
-                z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                z, p, ci_lo, ci_hi = _coef_stats_for(coef_val, se_val, g.name)
                 rows.append(
                     _CoefRow(
                         name=f"{g.name}[{level}]",
@@ -1078,7 +1192,7 @@ def build_coef_rows(
                 for i in range(g.size):
                     coef_val = float(b_g[i])
                     se_val = float(se_g[i])
-                    z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                    z, p, ci_lo, ci_hi = _coef_stats_for(coef_val, se_val, g.name)
                     rows.append(
                         _CoefRow(
                             name=f"{g.name}[{i}]" if g.size > 1 else g.name,
@@ -1092,18 +1206,9 @@ def build_coef_rows(
                         )
                     )
             elif active:
-                stat = float("nan")
-                p_val = float("nan")
-                ref_df = float(g.size)
                 ag = next(a for a in active_groups if a.name == g.name)
                 V_b_j = _augmented_group_block(ag)
-                from scipy.stats import chi2 as chi2_dist
-
-                try:
-                    stat = covariance_wald_statistic(b_g, V_b_j)
-                    p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
-                except np.linalg.LinAlgError:
-                    pass
+                stat, p_val, ref_df = _block_wald_for(b_g, V_b_j, g.sl, g.name)
                 _edf_map = _get_group_edf_map()
                 rows.append(
                     _CoefRow(
@@ -1137,23 +1242,24 @@ def build_coef_rows(
             ti_edf = _edf_map.get(g.name) if _edf_map else None
             ti_lam = _resolve_group_lambda(g.name, reml_lambdas, lambda2)
             if active:
-                stat = float("nan")
-                p_val = float("nan")
-                ref_df = float(g.size)
+                stat = None if is_sandwich else float("nan")
+                p_val = None if is_sandwich else float("nan")
+                ref_df = None if is_sandwich else float(g.size)
 
-                ag = next(a for a in active_groups if a.name == g.name)
-                V_b_j = _augmented_group_block(ag)
+                if not is_sandwich:
+                    ag = next(a for a in active_groups if a.name == g.name)
+                    V_b_j = _augmented_group_block(ag)
 
-                R_a = _get_R_factor()
-                edf, edf1 = _get_influence_edf()
-                edf1_j = float(np.sum(edf1[ag.sl]))
-                X_j = R_a[:, ag.sl]
-                res_df = _wood_residual_df(edf)
+                    R_a = _get_R_factor()
+                    edf, edf1 = _get_influence_edf()
+                    edf1_j = float(np.sum(edf1[ag.sl]))
+                    X_j = R_a[:, ag.sl]
+                    res_df = _wood_residual_df(edf)
 
-                try:
-                    stat, p_val, ref_df = _wood_test([g], b_g, X_j, V_b_j, edf1_j, res_df)
-                except Exception:
-                    pass
+                    try:
+                        stat, p_val, ref_df = _wood_test([g], b_g, X_j, V_b_j, edf1_j, res_df)
+                    except Exception:
+                        pass
 
                 rows.append(
                     _CoefRow(
@@ -1189,7 +1295,7 @@ def build_coef_rows(
             num_edf = gedf.get(g.name, 0.0) if active else 0.0
             coef_display = float(b_g[0])
             se_display = float(se_g[0])
-            z, p, ci_lo, ci_hi = _compute_coef_stats(coef_display, se_display, alpha)
+            z, p, ci_lo, ci_hi = _coef_stats_for(coef_display, se_display, g.name)
             rows.append(
                 _CoefRow(
                     name=g.name,
@@ -1224,7 +1330,7 @@ def build_coef_rows(
                 if shrunk:
                     z = p = ci_lo = ci_hi = None
                 else:
-                    z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+                    z, p, ci_lo, ci_hi = _coef_stats_for(coef_val, se_val, g.name)
                 rows.append(
                     _CoefRow(
                         name=f"{g.name}[{float(knots[knot_index]):.10g}]",
@@ -1242,20 +1348,14 @@ def build_coef_rows(
             # the summary's parametric and smooth buckets. The whole-term test is a J+1 df chi-square on
             # all coefficients jointly (flat term), not a Wood smooth test: no smoothing parameter was
             # estimated.
-            stat = float("nan")
-            p_val = float("nan")
-            ref_df = float(g.size)
+            stat = None if is_sandwich else float("nan")
+            p_val = None if is_sandwich else float("nan")
+            ref_df = None if is_sandwich else float(g.size)
             reportable = active and not shrunk
             if reportable:
-                from scipy.stats import chi2 as chi2_dist
-
                 ag = next(a for a in active_groups if a.name == g.name)
                 V_b_j = _augmented_group_block(ag)
-                try:
-                    stat = covariance_wald_statistic(b_g, V_b_j)
-                    p_val = 1.0 - chi2_dist.cdf(stat, ref_df)
-                except np.linalg.LinAlgError:
-                    pass
+                stat, p_val, ref_df = _block_wald_for(b_g, V_b_j, g.sl, g.name)
             rows.append(
                 _CoefRow(
                     name=g.name,
@@ -1277,7 +1377,7 @@ def build_coef_rows(
         else:
             coef_val = float(b_g[0])
             se_val = float(se_g[0]) if len(se_g) > 0 else 0.0
-            z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
+            z, p, ci_lo, ci_hi = _coef_stats_for(coef_val, se_val, g.name)
             rows.append(
                 _CoefRow(
                     name=g.name,
@@ -1344,6 +1444,7 @@ def build_basis_detail(
     alpha=0.05,
     coefficient_estimable_override=None,
     selected_group_names=None,
+    sandwich_covariance=None,
 ):
     """Build per-coefficient detail for active 1-D spline groups.
 
@@ -1352,6 +1453,10 @@ def build_basis_detail(
     """
     from superglm.features.spline import _SplineBase
 
+    is_sandwich = sandwich_covariance is not None
+    sandwich_penalized_groups: frozenset[str] = (
+        frozenset(sandwich_covariance.penalized_group_names) if is_sandwich else frozenset()
+    )
     beta = result.beta
     selected_names = (
         selected_group_name_set(result, groups)
@@ -1393,10 +1498,16 @@ def build_basis_detail(
             XtWX_inv_aug,
             augmented_indices,
         )
-        se_arr = standard_errors(var_diag, result, known_scale=known_scale)
+        se_arr = (
+            np.sqrt(np.maximum(var_diag, 0.0))
+            if is_sandwich
+            else standard_errors(var_diag, result, known_scale=known_scale)
+        )
+        se_arr = se_arr.astype(float, copy=True)
         se_arr[~coefficient_estimable[g.sl]] = np.nan
 
         rows = []
+        withhold_zp = is_sandwich and g.name in sandwich_penalized_groups
         for i in range(g.size):
             coef_val = float(b_g[i])
             se_val = float(se_arr[i])
@@ -1407,8 +1518,8 @@ def build_basis_detail(
                     basis_index=i,
                     coef=coef_val,
                     se=se_val,
-                    z=z,
-                    p=p,
+                    z=None if withhold_zp else z,
+                    p=None if withhold_zp else p,
                     ci_low=ci_lo,
                     ci_high=ci_hi,
                 )

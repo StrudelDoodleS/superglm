@@ -57,6 +57,7 @@ from superglm.distributional.solver.chunks import ChunkSize
 from superglm.distributional.solver.solver import _DenseObservedReuseSession
 from superglm.distributional.timing import FitPhaseRecorder, measure_phase
 from superglm.reml.convergence import (
+    FLAT_DIRECTION_FREEZE_FLOOR,
     evaluate_reml_candidate,
     freeze_flat_directions,
     project_reml_gradient,
@@ -260,7 +261,7 @@ def should_hand_off(
     """
     if not isinstance(config, DistributionalEFSConfig):
         raise TypeError("config must be DistributionalEFSConfig")
-    if config.outer != "efs+newton":
+    if config.outer not in ("efs+newton", "efs+stationary"):
         return False
     if reason is not None:
         if reason in NO_HANDOFF_REASONS:
@@ -698,8 +699,9 @@ def run_newton_endgame(
     loop's own are; a convergence check that makes no trial leaves no record.
     """
     config = efs_config
-    tolerance = float(config.tolerance)
-    cap_bar = tolerance if cap_tolerance is None else float(cap_tolerance)
+    stationary = config.outer == "efs+stationary"
+    tolerance = config.stationarity_tolerance
+    cap_bar = config.tolerance if cap_tolerance is None else float(cap_tolerance)
     released = {} if upper_bounds is None else dict(upper_bounds)
     if budget is not None:
         remaining = int(budget)
@@ -854,20 +856,45 @@ def run_newton_endgame(
             bound_window=0.0,
         )
         fs_stepped = certificate >= np.abs(gradient)
-        blocking = certificate > tolerance * score_scale
+        score_bar = config.score_bar(objective)
+        blocking = certificate > score_bar
         ranks_by_name = {
             component.name: component.rank for component in current.evidence.components
         }
         penalty_ranks = np.array([ranks_by_name.get(name, 1.0) for name in names])
-        freeze = freeze_flat_directions(
-            projected,
-            estimate,
-            penalty_ranks,
-            estimated_mask,
-            objective=objective,
-            tolerance=tolerance,
-        )
+
+        def classify(curvature):
+            return freeze_flat_directions(
+                projected,
+                curvature,
+                penalty_ranks,
+                estimated_mask,
+                objective=objective,
+                tolerance=tolerance,
+                step_bound=config.max_log_step if stationary else None,
+                gradient_bar=None
+                if stationary
+                else max(0.1 * tolerance, FLAT_DIRECTION_FREEZE_FLOOR) * score_scale,
+            )
+
+        freeze = classify(derivatives.penalty_hessian if stationary else estimate)
+        checked_curvature = None
+        if stationary and np.any(freeze.frozen & (projected > 0.0)):
+            # A positive score descends away from the upper tail. The penalty
+            # Hessian omits likelihood derivatives that can turn it concave.
+            # Check the actual row before holding an inward-pulling term.
+            try:
+                checked_curvature = derivative_pass(True, workspace)
+            except LamlDerivativeError:
+                return finish("gradient_unresolved", derivatives, None)
+            assert checked_curvature.hessian is not None
+            estimate = checked_curvature.hessian
+            freeze = classify(estimate)
         frozen = np.asarray(freeze.frozen, dtype=bool)
+        if stationary:
+            # Only outward scores are projected off a bound. Curvature coupled
+            # to such a term must not displace the free Newton coordinates.
+            frozen = frozen | (projected != gradient)
         stop_gradient = np.where(frozen, 0.0, projected)
         candidate = evaluate_reml_candidate(
             iteration=accepted_count,
@@ -875,6 +902,7 @@ def run_newton_endgame(
             previous_objective=previous_objective,
             projected_gradient=stop_gradient,
             tolerance=tolerance,
+            gradient_bar=score_bar,
         )
         norm = float(candidate.projected_gradient_norm)
         active = ~frozen & ~fs_stepped
@@ -899,11 +927,17 @@ def run_newton_endgame(
                 name
                 for k, name in enumerate(names)
                 if current.lambdas[name] == upper_lambda(name)
-                and gradient[k] < -cap_bar * score_scale
+                and gradient[k] < -(score_bar if stationary else cap_bar * score_scale)
             )
             if caps:
                 return finish("cap_pressure", published, norm, caps)
             return finish("stationary", published, norm)
+
+        if stationary and frozen.all():
+            # Every direction at this accepted coefficient mode passed the
+            # current gradient/curvature or outward-bound test. There is no
+            # Newton block to differentiate a second time.
+            return converged_outcome(checked_curvature or derivatives)
 
         # A third arm beside Wood's criterion, on the objective's scale: the
         # Newton decrement 0.5 * g' H^-1 g must be below the bar too. A bound on
@@ -918,8 +952,9 @@ def run_newton_endgame(
                 remaining_gain = float(-0.5 * stop_gradient @ probe_step)
             except np.linalg.LinAlgError:
                 remaining_gain = math.inf
-        if candidate.converged and positive_definite and remaining_gain <= tolerance * score_scale:
-            return converged_outcome(derivatives)
+        viable_curvature = positive_definite and not bool(np.any(freeze.shoulder))
+        if candidate.converged and viable_curvature and remaining_gain <= tolerance * score_scale:
+            return converged_outcome(checked_curvature or derivatives)
         if bool(np.any(blocking)):
             # Within its certificate the gradient cannot be told from zero: the
             # endgame can make no certified progress on such a component.
@@ -932,6 +967,7 @@ def run_newton_endgame(
                 previous_objective=previous_objective,
                 projected_gradient=effective,
                 tolerance=tolerance,
+                gradient_bar=score_bar,
             )
             if limited.converged:
                 return finish("gradient_unresolved", derivatives, norm)
@@ -968,7 +1004,7 @@ def run_newton_endgame(
                 hessian_trusted = False
                 hessian: NDArray[np.float64] | None = None
                 try:
-                    hessian_pass = derivative_pass(True, workspace)
+                    hessian_pass = checked_curvature or derivative_pass(True, workspace)
                 except LamlDerivativeError:
                     hessian_pass = None
                 if hessian_pass is not None:
@@ -1032,7 +1068,7 @@ def run_newton_endgame(
             if not np.any(step != 0.0):
                 # Nothing to move (every direction frozen or at a bound): a
                 # gradient under the bar is the stationary point.
-                if norm < tolerance * score_scale:
+                if not stationary and norm < score_bar:
                     return converged_outcome(recorded)
                 return finish("objective_rejected", recorded, norm)
 
@@ -1089,7 +1125,7 @@ def run_newton_endgame(
                 # Every trial collapsed onto the current point: nothing to move.
                 newton_count -= 1
                 remaining += 1
-                if norm < tolerance * score_scale:
+                if not stationary and norm < score_bar:
                     return converged_outcome(recorded)
                 return finish("objective_rejected", recorded, norm)
             accepted = accepted_fit is not None
@@ -1133,7 +1169,7 @@ def run_newton_endgame(
                 continue
             # A dead line search with the gradient under the bar is convergence
             # at precision (the scalar path's classify_dead_feasible_exit).
-            if norm < tolerance * score_scale:
+            if not stationary and norm < score_bar:
                 return converged_outcome(recorded)
             return finish("objective_rejected", recorded, norm)
         workspace.clear()

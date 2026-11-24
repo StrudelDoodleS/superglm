@@ -10,6 +10,7 @@ from importlib import import_module
 from superglm._lazy import attach
 
 if _typing.TYPE_CHECKING:
+    from superglm.inference._sandwich_core import SandwichCovariance
     from superglm.inference._term_types import (
         InteractionInference,
         SmoothCurve,
@@ -24,6 +25,7 @@ if _typing.TYPE_CHECKING:
 # Each name is read from its module on first access (``superglm._lazy``), so importing a sibling
 # such as ``inference._term_types`` loads neither the summaries nor the design machinery.
 _LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
+    "superglm.inference._sandwich_core": ("SandwichCovariance",),
     "superglm.inference._term_types": (
         "InteractionInference",
         "SmoothCurve",
@@ -90,6 +92,7 @@ __all__ = [
     "ModelMetrics",
     "ModelSummary",
     "RandomEffectResult",
+    "SandwichCovariance",
     "SmoothCurve",
     "SplineMetadata",
     "TermInference",
