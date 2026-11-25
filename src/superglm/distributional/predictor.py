@@ -39,11 +39,13 @@ from superglm.types import FeatureSpec, PenaltyComponent
 
 
 class ShapeConstraintIgnoredWarning(UserWarning):
-    """A feature asked for a shape constraint the fit cannot apply.
+    """A feature asked for a fit-time shape constraint the fit cannot apply.
 
-    SuperLSS enforces ``Constraint.fit`` rules (``distributional/shape.py``) and
-    has no post-fit repair; ``fit_path`` takes no constraint rows. Each fits the
-    term unconstrained, for the rules it cannot apply, and says so.
+    SuperLSS warns when a term states no constraint rows for the rule, when a
+    cap or a step limit sits on a link that does not multiply, or when the rule
+    cannot be applied as written; ``SuperGLM.fit_path`` warns because it takes
+    no constraint rows. Each fits the term unconstrained, for the rules it
+    cannot apply, and says so.
     """
 
 
