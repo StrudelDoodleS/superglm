@@ -677,6 +677,84 @@ def test_a_single_ordered_term_keeps_its_whole_term_test(basis) -> None:
             )
 
 
+_NUMERIC_TWIN_BASES = {
+    "spline": lambda: Spline(n_knots=6),
+    "piecewise": lambda: Piecewise(breaks=[0.5]),
+}
+
+
+def _numeric_twin_fit(names, basis):
+    """Numeric terms of one kind on one column, as in #740's numeric case."""
+    x = np.tile(np.linspace(0.0, 1.0, 40), 4)
+    y = np.sin(3.0 * x) + np.cos(np.arange(160.0))
+    X = pd.DataFrame({name: x for name in names})
+    features = {name: _NUMERIC_TWIN_BASES[basis]() for name in names}
+    return SuperGLM(family="gaussian", features=features).fit(X, y), X, y
+
+
+def _numeric_test_rows(summary, names):
+    return {r.name: r for r in summary._coef_rows if r.coef is None and r.name in names}
+
+
+@pytest.mark.parametrize("basis", list(_NUMERIC_TWIN_BASES))
+def test_twin_numeric_terms_carry_no_whole_term_test(basis) -> None:
+    """Twin numeric terms: neither whole-term test is formed on any default summary (#740).
+
+    The ordered rule, on a spline's Wood test of ``X_term beta_term`` and a piecewise
+    term's chi-square of ``beta_term = 0``: moving the effect between the twins leaves the
+    fit, so both raise the design's rank when appended.  At b7e5b3d98 the default summary
+    showed the spline twins Wood p 0.99999 and 0.9997, and piecewise ``u`` chi2 25.2.
+    """
+    model, X, y = _numeric_twin_fit(["u", "v"], basis)
+    for name in ("u", "v"):
+        group = next(g for g in model._groups if g.name == name)
+        design = _design(model)[:, 1 + group.start : 1 + group.end]
+        function = np.zeros((len(design), len(model.result.beta)))
+        function[:, group.sl] = design
+        assert _rank_gain(model, np.eye(len(model.result.beta))[group.sl]) > 0
+        assert _rank_gain(model, function) > 0
+    other = X.iloc[:120].reset_index(drop=True), y[:120] + 0.5
+    for summary in (
+        model.summary(),
+        model.metrics(X, y).summary(),
+        model.metrics(*other).summary(),
+    ):
+        rows = _numeric_test_rows(summary, ("u", "v"))
+        assert set(rows) == {"u", "v"}
+        for row in rows.values():
+            assert row.wald_chi2 is None and row.wald_p is None and row.ref_df is None, row.name
+            assert row.estimable is False, row.name
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("basis", list(_NUMERIC_TWIN_BASES))
+def test_a_single_numeric_term_keeps_its_whole_term_test(basis) -> None:
+    """Control (pins): one numeric term keeps its whole-term test on both summaries.
+
+    The piecewise row is the Wald chi-square ``b' V^-1 b`` of its unpenalized block, ``V``
+    the Gaussian ``phi (X'X)^-1`` block; the spline row is Wood's test, at the figures
+    b7e5b3d98 gave (tolerances for the REML fit's convergence, not the test).
+    """
+    model, X, y = _numeric_twin_fit(["u"], basis)
+    if basis == "piecewise":
+        design = _design(model)
+        coef, *_ = np.linalg.lstsq(design, y, rcond=None)
+        residual = y - design @ coef
+        phi = float(residual @ residual) / (len(y) - design.shape[1])
+        V = phi * np.linalg.inv(design.T @ design)[1:, 1:]
+        b = coef[1:]
+        expected = [float(b @ np.linalg.solve(V, b)), 2.0]
+    else:
+        expected = [25.11705310752398, 6.91538004484533]
+    for summary in (model.summary(), model.metrics(X, y).summary()):
+        row = _numeric_test_rows(summary, ("u",))["u"]
+        assert row.estimable is True
+        rtol = 1e-9 if basis == "piecewise" else 1e-6
+        np.testing.assert_allclose([row.wald_chi2, row.ref_df], expected, rtol=rtol)
+        if basis == "spline":
+            np.testing.assert_allclose(row.wald_p, 0.0012851369121335832, rtol=1e-5)
+
+
 def _term_inference_errors(model, name):
     """``term_inference(name)``'s level and curve errors, the curve's at the base removed."""
     inference = model.term_inference(name)

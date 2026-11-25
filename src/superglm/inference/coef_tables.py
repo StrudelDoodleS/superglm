@@ -507,6 +507,15 @@ def build_coef_rows(
                 return False
         return True
 
+    def _block_test_withheld(g_slice: slice) -> bool:
+        """Whether the default path withholds a chi-square of ``beta = 0`` on the block at ``g_slice``.
+
+        Each coefficient is a tested contrast, and every one must be ``_determined``.
+        """
+        return not is_sandwich and not np.all(
+            _mask_determines(g_slice)(np.eye(g_slice.stop - g_slice.start))
+        )
+
     def _block_determines(start: int) -> Callable[[NDArray], NDArray[np.bool_]] | None:
         """``determines`` of a robust covariance for contrasts of the block at ``start``, or none."""
         covariance = sandwich_covariance
@@ -1049,9 +1058,14 @@ def build_coef_rows(
 
                 ag = next(a for a in active_groups if a.name == g.name)
                 V_b_j = _augmented_group_block(ag)
+                test_undetermined = False
 
                 if is_linear_subgroup:
-                    stat, p_val, ref_df = _block_wald_for(b_g, V_b_j, g.sl, g.name)
+                    test_undetermined = _block_test_withheld(g.sl)
+                    if test_undetermined:
+                        stat = p_val = ref_df = None
+                    else:
+                        stat, p_val, ref_df = _block_wald_for(b_g, V_b_j, g.sl, g.name)
                     curve_se_min, curve_se_max = _curve_se_range(g.feature_name)
                 else:
                     if not is_sandwich:
@@ -1060,11 +1074,17 @@ def build_coef_rows(
                         edf1_j = float(np.sum(edf1[ag.sl]))
                         X_j = R_a[:, ag.sl]
                         res_df = _wood_residual_df(edf)
+                        test_undetermined = not _function_determined([g], X_j)
 
-                        try:
-                            stat, p_val, ref_df = _wood_test([g], b_g, X_j, V_b_j, edf1_j, res_df)
-                        except Exception:
-                            pass
+                        if test_undetermined:
+                            stat = p_val = ref_df = None
+                        else:
+                            try:
+                                stat, p_val, ref_df = _wood_test(
+                                    [g], b_g, X_j, V_b_j, edf1_j, res_df
+                                )
+                            except Exception:
+                                pass
 
                     curve_se_min, curve_se_max = _curve_se_range(g.feature_name)
 
@@ -1085,6 +1105,7 @@ def build_coef_rows(
                         curve_se_min=curve_se_min,
                         curve_se_max=curve_se_max,
                         subgroup_type=g.subgroup_type,
+                        estimable=not test_undetermined,
                         edf=s_edf,
                         smoothing_lambda=s_lam,
                         spline_kind=s_kind,
@@ -1463,7 +1484,10 @@ def build_coef_rows(
             p_val = None if is_sandwich else float("nan")
             ref_df = None if is_sandwich else float(g.size)
             reportable = active and not shrunk
-            if reportable:
+            test_undetermined = reportable and _block_test_withheld(g.sl)
+            if test_undetermined:
+                stat = p_val = ref_df = None
+            elif reportable:
                 ag = next(a for a in active_groups if a.name == g.name)
                 V_b_j = _augmented_group_block(ag)
                 stat, p_val, ref_df = _block_wald_for(b_g, V_b_j, g.sl, g.name)
@@ -1481,6 +1505,7 @@ def build_coef_rows(
                     # Names the row for what it is in both renderers, which
                     # otherwise label every group-test row "spline".
                     subgroup_type="piecewise",
+                    estimable=not test_undetermined,
                     edf=pw_edf,
                 )
             )
