@@ -10,6 +10,7 @@ from superglm.reml.convergence import (
     FLAT_DIRECTION_CURVATURE_ANCHOR,
     FLAT_DIRECTION_CURVATURE_REL,
     FLAT_DIRECTION_FREEZE_FLOOR,
+    bound_held_directions,
     classify_dead_feasible_exit,
     concave_live_directions,
     evaluate_reml_candidate,
@@ -37,6 +38,25 @@ def test_project_reml_gradient_respects_fixed_and_active_bounds() -> None:
 
     np.testing.assert_array_equal(projected, np.array([0.0, 0.0, 0.0, 6.0, -7.0]))
     np.testing.assert_array_equal(gradient, np.array([-3.0, 4.0, 5.0, 6.0, -7.0]))
+
+
+def test_bound_held_directions_are_the_estimated_scores_the_projection_zeroes() -> None:
+    """Held: an outward score within the window of either bound, read alike by stop and step."""
+    #                    upper  lower  fixed  inward at each  in window  outside it  no score
+    gradient = np.array([-3.0, 4.0, 5.0, 6.0, -7.0, 2.0, -2.0, 0.0])
+    rho = np.array([10.0, -10.0, 0.0, 10.0, -10.0, -9.995, 9.98, -10.0])
+    estimated = np.array([True, True, False, True, True, True, True, True])
+    box = {"log_lower": -10.0, "log_upper": 10.0}
+
+    held = bound_held_directions(gradient, rho, estimated, **box)
+
+    np.testing.assert_array_equal(held, [True, True, False, False, False, True, False, False])
+    projected = project_reml_gradient(gradient, rho, estimated, **box)
+    np.testing.assert_array_equal(projected, np.where(held | ~estimated, 0.0, gradient))
+    np.testing.assert_array_equal(
+        bound_held_directions(gradient, rho, estimated, **box, bound_window=0.0),
+        held & (rho != -9.995),
+    )
 
 
 def test_project_reml_gradient_rejects_misaligned_inputs() -> None:

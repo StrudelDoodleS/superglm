@@ -40,6 +40,7 @@ from superglm.group_matrix import (
 from superglm.links import stabilize_eta
 from superglm.reml.convergence import (
     FLAT_DIRECTION_FREEZE_FLOOR,
+    bound_held_directions,
     classify_dead_feasible_exit,
     coefficient_walk_guard_stopped,
     concave_live_directions,
@@ -1280,7 +1281,12 @@ def optimize_discrete_reml_cached_w(
         # Concave shoulders take the trust-region boundary step below, not
         # the flipped-curvature Newton step (``freeze_flat_directions``).
         shoulder_d = np.asarray(freeze_decision.shoulder, dtype=bool)
-        active_idx_d = np.where(~frozen_d & ~shoulder_d)[0]
+        # Projected Newton: a direction its bound holds takes no step and stays
+        # out of the Newton system (``bound_held_directions``).
+        bound_held_d = bound_held_directions(
+            grad, rho_clipped, estimated_mask, log_lower=log_lo, log_upper=log_hi
+        )
+        active_idx_d = np.where(~frozen_d & ~shoulder_d & ~bound_held_d)[0]
         stop_criterion_frozen_d = frozen_d.copy()
         if profile is not None:
             profile["reml_freeze_decision"] = freeze_record(

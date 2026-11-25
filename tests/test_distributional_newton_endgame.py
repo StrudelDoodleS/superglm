@@ -9,13 +9,15 @@ from __future__ import annotations
 import dataclasses
 import math
 import pickle
+import warnings
 
 import numpy as np
 import pandas as pd
 import pytest
 from scipy.optimize import minimize
 
-from superglm.distributional import NegativeBinomialLS, Predictor, TweedieLSS
+from superglm import SuperLSS, s
+from superglm.distributional import GaussianLS, NegativeBinomialLS, Predictor, TweedieLSS
 from superglm.distributional.model import fit_dense_distributional
 from superglm.distributional.results.iteration import DistributionalEFSConfig
 from superglm.distributional.results.solver import DenseSolverConfig
@@ -685,3 +687,38 @@ def test_unavailable_gradient_after_cap_release_retains_uncertified_fit(monkeypa
     assert restored.convergence_reason == "derivative_unavailable"
     assert restored.beyond_cap_components == result.beyond_cap_components
     assert restored.terminal_gradient is None and not restored.matched_certified
+
+
+@pytest.mark.parametrize("outer", [None, "efs+newton"], ids=["default", "efs+newton"])
+def test_endgame_steps_a_free_term_beside_one_its_cap_holds(outer) -> None:
+    """A smoothing parameter held at its cap leaves the other's Newton step alone (#735).
+
+    Both terms start at a cap of 10. The second term's optimum lies beyond it and
+    the first's two decades below it. A Newton step solved with the held term
+    and clipped afterwards moved the first term uphill: the default search
+    returned it at the cap, 116 nats above the Fellner-Schall search's stop, and
+    ``efs+newton`` ended on a rejected line search.
+    """
+    rng = np.random.default_rng(7)
+    x1 = np.sort(rng.uniform(0.0, 1.0, 600))
+    x2 = np.clip(x1 + 0.15 * rng.normal(size=600), -0.5, 1.5)
+    y = np.sin(12.0 * np.pi * x1) + 0.3 * np.sin(2.0 * x2) + 1e-3 * rng.normal(size=600)
+    frame = pd.DataFrame({"x1": x1, "x2": x2})
+
+    def stop(outer):
+        family = GaussianLS()
+        model = SuperLSS(family, family.location(s("x1", k=12), s("x2", k=12)), family.scale())
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit_reml(frame, y, max_lambda=10.0, outer=outer)
+        return model._require_fitted().smoothing
+
+    fellner_schall, fitted = stop("efs"), stop(outer)
+    assert fitted.convergence_reason == "lambda_cap_unresolved"
+    assert fitted.unresolved_upper_bound == ("location:x2#wiggle",)
+    assert fitted.lambdas["location:x2#wiggle"] == 10.0
+    assert fitted.objective <= fellner_schall.objective
+    free = "location:x1#wiggle"
+    assert math.log(fitted.lambdas[free] / fellner_schall.lambdas[free]) == pytest.approx(
+        0.0, abs=1e-2
+    )

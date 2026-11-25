@@ -667,6 +667,34 @@ class REMLCandidateConvergence:
     converged: bool
 
 
+def bound_held_directions(
+    gradient: NDArray,
+    rho: NDArray,
+    estimated_mask: NDArray,
+    *,
+    log_lower: float | NDArray,
+    log_upper: float | NDArray,
+    bound_window: float = 0.01,
+) -> NDArray[np.bool_]:
+    """Estimated directions within ``bound_window`` of a bound whose score points out of the box.
+
+    The binding set of projected Newton for ``log_lower <= rho <= log_upper``
+    (Bertsekas 1982, SIAM J. Control Optim. 20(2), sec. 2), with a fixed
+    window. The stop reads these scores as zero (``project_reml_gradient``),
+    and the Newton step holds these directions and solves on the others alone:
+    a step solved with them and clipped to the box afterwards need not descend
+    (his fig. 1), as their Hessian coupling still moves the free directions.
+    """
+    score = np.asarray(gradient, dtype=np.float64)
+    log_lambda = np.asarray(rho, dtype=np.float64)
+    estimated = np.asarray(estimated_mask, dtype=bool)
+    if score.shape != log_lambda.shape or score.shape != estimated.shape:
+        raise ValueError("gradient, rho, and estimated_mask must have identical shapes")
+    upper = (log_lambda >= log_upper - bound_window) & (score < 0.0)
+    lower = (log_lambda <= log_lower + bound_window) & (score > 0.0)
+    return estimated & (upper | lower)
+
+
 def project_reml_gradient(
     gradient: NDArray,
     rho: NDArray,
@@ -677,17 +705,16 @@ def project_reml_gradient(
     bound_window: float = 0.01,
 ) -> NDArray:
     """Project fixed and outward-pointing bound scores to zero."""
-    score = np.asarray(gradient, dtype=np.float64)
-    log_lambda = np.asarray(rho, dtype=np.float64)
-    estimated = np.asarray(estimated_mask, dtype=bool)
-    if score.shape != log_lambda.shape or score.shape != estimated.shape:
-        raise ValueError("gradient, rho, and estimated_mask must have identical shapes")
-
-    projected = score.copy()
-    fixed = ~estimated
-    upper_stationary = estimated & (log_lambda >= log_upper - bound_window) & (score < 0.0)
-    lower_stationary = estimated & (log_lambda <= log_lower + bound_window) & (score > 0.0)
-    projected[fixed | upper_stationary | lower_stationary] = 0.0
+    held = bound_held_directions(
+        gradient,
+        rho,
+        estimated_mask,
+        log_lower=log_lower,
+        log_upper=log_upper,
+        bound_window=bound_window,
+    )
+    projected = np.array(gradient, dtype=np.float64)
+    projected[~np.asarray(estimated_mask, dtype=bool) | held] = 0.0
     return projected
 
 

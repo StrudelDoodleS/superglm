@@ -33,6 +33,7 @@ from superglm.links import CloglogLink, LogitLink, LogLink, ProbitLink
 from superglm.reml._leverage_rows import reads_row_supports
 from superglm.reml.convergence import (
     FLAT_DIRECTION_FREEZE_FLOOR,
+    bound_held_directions,
     classify_dead_feasible_exit,
     coefficient_walk_guard_stopped,
     concave_live_directions,
@@ -1436,7 +1437,7 @@ def optimize_direct_reml(
             held_newton_model is not None
             and stop_criterion_frozen is not None
             and mode_certified
-            and not np.any(stop_grad[stop_criterion_frozen])
+            and not np.any(np.delete(stop_grad, held_newton_model[1]))
             and newton_step_settled(
                 step_left := held_step_left(), held_newton_model[2], bar=step_bar
             )
@@ -1525,6 +1526,11 @@ def optimize_direct_reml(
                 & (np.abs(proj_grad) <= max_newton_step * diagonal)
             )
             frozen = frozen & ~in_reach
+        # Projected Newton: a direction its bound holds takes no step and stays
+        # out of the Newton system (``bound_held_directions``).
+        bound_held = bound_held_directions(
+            grad, rho_clipped, estimated_mask, log_lower=log_lo, log_upper=log_hi
+        )
         active_idx = np.where(~frozen)[0]
         stop_criterion_frozen = frozen.copy()
         if profile is not None:
@@ -1573,7 +1579,7 @@ def optimize_direct_reml(
         # Modified Newton: eigendecompose, flip negatives, floor small eigenvalues.
         # A concave shoulder instead steps to the trust-region boundary (the
         # step cap) downhill (More & Sorensen 1979).
-        newton_idx = np.where(~frozen & ~shoulder)[0] if shoulder.any() else active_idx
+        newton_idx = np.where(~frozen & ~shoulder & ~bound_held)[0]
         delta = np.zeros(m)
         if newton_idx.size:
             if newton_idx.size < m:
@@ -1649,7 +1655,7 @@ def optimize_direct_reml(
         )
         dead_predicted_decrease = (
             None
-            if max_delta > max_newton_step or bool(shoulder.any())
+            if max_delta > max_newton_step or bool(shoulder.any()) or not newton_idx.size
             else newton_predicted_decrease(
                 grad_sub, eigvals_h, eigvecs_h, eigenvalue_floor=eig_floor
             )

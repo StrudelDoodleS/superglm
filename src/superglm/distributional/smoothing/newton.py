@@ -1010,10 +1010,10 @@ def run_newton_endgame(
             estimate = checked_curvature.hessian
             freeze = classify(estimate)
         frozen = np.asarray(freeze.frozen, dtype=bool)
-        if stationary:
-            # Only outward scores are projected off a bound. Curvature coupled
-            # to such a term must not displace the free Newton coordinates.
-            frozen = frozen | (projected != gradient)
+        # Only outward scores are projected off a bound. Curvature coupled to
+        # such a term must not displace the free Newton coordinates
+        # (``bound_held_directions``).
+        frozen = frozen | (projected != gradient)
         stop_gradient = np.where(frozen, 0.0, projected)
         candidate = evaluate_reml_candidate(
             iteration=accepted_count,
