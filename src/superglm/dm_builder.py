@@ -8,9 +8,9 @@ than a model instance.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import numpy as np
 import scipy.sparse as sp
@@ -1498,11 +1498,146 @@ def _group_has_lambda(gm, g, lambdas):
     return False
 
 
+def _sparse_rows(gm, sample_weight):
+    return gm.B, sample_weight
+
+
+def _level_rows(gm, sample_weight):
+    return gm.B_level, sample_weight[gm.row_idx]
+
+
+def _level_bin_rows(gm, sample_weight):
+    weights = np.bincount(gm.bin_idx_level, weights=sample_weight[gm.row_idx], minlength=gm.n_bins)
+    return gm.B_unique, weights
+
+
+def _bin_rows(gm, sample_weight):
+    return gm.B_unique, np.bincount(gm.bin_idx, weights=sample_weight, minlength=gm.n_bins)
+
+
+def _tensor_rows(gm, sample_weight):
+    if gm.omega_components is not None and gm.projection is None:
+        # Discrete tensors keep fixed centred coordinates with explicit
+        # marginal penalties: a lambda update changes S(lambda), not the
+        # packed design, as in mgcv bam(discrete=TRUE).
+        return None
+    return _bin_rows(gm, sample_weight)
+
+
+def _carry_level(gm, new_gm):
+    new_gm.spline_cat_level = gm.spline_cat_level
+    new_gm.spline_cat_feature = gm.spline_cat_feature
+    carry_level_support(gm, new_gm)
+    carry_binned_codes(gm, new_gm)
+    return new_gm
+
+
+def _sparse_copy(gm, R_inv):
+    return SparseSSPGroupMatrix(gm.B, R_inv)
+
+
+def _level_copy(gm, R_inv):
+    if gm.B is None:
+        new_gm = SplineCategoricalGroupMatrix._from_level_rows(
+            gm.B_level, R_inv, gm.row_idx, gm.n_rows
+        )
+    else:
+        new_gm = SplineCategoricalGroupMatrix(gm.B, R_inv, gm.row_idx)
+    return _carry_level(gm, new_gm)
+
+
+def _level_bin_copy(gm, R_inv):
+    # type(gm), not the parent: every REML lambda update comes through
+    # here, and a lossless block must not be downgraded to a binned one.
+    new_gm = type(gm)(
+        gm.B_unique, R_inv, gm.bin_idx_level, gm.row_idx, n_rows=gm.n_rows, bin_idx_is_level=True
+    )
+    return _carry_level(gm, new_gm)
+
+
+def _tensor_copy(gm, R_inv):
+    new_gm = DiscretizedTensorGroupMatrix(
+        gm.B1_unique_t,
+        gm.B2_unique_t,
+        gm.idx1,
+        gm.idx2,
+        gm.B_unique,
+        R_inv,
+        gm.bin_idx,
+        tensor_id=gm.tensor_id,
+        raw_channels=gm._current_raw_channels(),
+    )
+    carry_binned_codes(gm, new_gm)
+    return new_gm
+
+
+def _bin_copy(gm, R_inv):
+    # type(gm) preserves subclass semantics (e.g. lossless support
+    # compression) across the per-lambda rebuild.
+    return type(gm)(gm.B_unique, R_inv, gm.bin_idx)
+
+
+class _Rebuild(NamedTuple):
+    """How one storage class is whitened again at new lambdas.
+
+    ``rows`` gives the basis rows and weights the whitening reads (``None``
+    keeps the group), ``copy`` a new group of the same storage at a new
+    ``R_inv``, and ``term_roots`` whether the whitening reads the group's
+    term roots and the copy carries them.
+    """
+
+    storage: type
+    rows: Callable
+    copy: Callable
+    term_roots: bool = True
+
+
+# Subclasses before their parents. A group of no listed class keeps its design.
 # Discrete tensor interactions are not constrained against one another: ``ti()``
 # marginals are centred, so ``ti(a, b) + ti(a, c)`` span jointly identifiable
 # surfaces, and a cross-Gram null space would keep the directions a tensor
 # shares least, discarding the fitted surface on a holey joint support.  As on
 # the exact path, the penalty and shared rank policy handle degenerate directions.
+_REBUILDS = (
+    _Rebuild(SparseSSPGroupMatrix, _sparse_rows, _sparse_copy),
+    _Rebuild(SplineCategoricalGroupMatrix, _level_rows, _level_copy),
+    _Rebuild(DiscretizedSplineCategoricalGroupMatrix, _level_bin_rows, _level_bin_copy),
+    # Unlike every other class, a binned tensor whitens without its term roots
+    # and does not carry them to the rebuilt group.
+    _Rebuild(DiscretizedTensorGroupMatrix, _tensor_rows, _tensor_copy, term_roots=False),
+    _Rebuild(DiscretizedSSPGroupMatrix, _bin_rows, _bin_copy),
+)
+_CARRIED = ("omega", "projection", "omega_components", "component_types", "lambda_policies")
+
+
+def _rebuilt_group(gm, g, lambdas: dict[str, float], sample_weight: NDArray):
+    """``gm`` whitened again at ``lambdas``, or ``gm`` itself where its design stays."""
+    # Earlier saved groups have no flag and retain their original policy.
+    if not getattr(gm, "reparametrize", True):
+        return gm
+    rebuild = next((entry for entry in _REBUILDS if isinstance(gm, entry.storage)), None)
+    if rebuild is None or not _group_has_lambda(gm, g, lambdas) or gm.omega is None:
+        return gm
+    read = rebuild.rows(gm, sample_weight)
+    if read is None:
+        return gm
+    B, weights = read
+    lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
+    roots = getattr(gm, "term_roots", None) if rebuild.term_roots else None
+    R_inv_local = None
+    if gm.projection is None:
+        R_inv = compute_R_inv(B, omega_eff, weights, lam)
+    else:
+        penalty = _whitening_penalty(_projected_penalty(gm, omega_eff), roots, g.name, lambdas)
+        R_inv_local = compute_projected_R_inv(B, gm.projection, penalty, weights, lam)
+        R_inv = gm.projection @ R_inv_local
+    new_gm = rebuild.copy(gm, R_inv)
+    for name in _CARRIED:
+        setattr(new_gm, name, getattr(gm, name))
+    new_gm.R_inv_local = None if getattr(gm, "R_inv_local", None) is None else R_inv_local
+    new_gm.term_roots = roots
+    new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
+    return new_gm
 
 
 def rebuild_design_matrix_with_lambdas(
@@ -1516,197 +1651,9 @@ def rebuild_design_matrix_with_lambdas(
     Recomputes R_inv for groups that use SSP and have an updated lambda.
     Fixed-coordinate groups keep their design as the smoothing penalty changes.
     """
-    new_gms: list[GroupMatrix] = []
-    for gm, g in zip(dm.group_matrices, groups):
-        # Earlier saved groups have no flag and retain their original policy.
-        if not getattr(gm, "reparametrize", True):
-            new_gms.append(gm)
-            continue
-        if isinstance(gm, SparseSSPGroupMatrix) and _group_has_lambda(gm, g, lambdas):
-            if gm.omega is None:
-                new_gms.append(gm)
-                continue
-            lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
-            R_inv_local = None
-            if gm.projection is not None:
-                P = gm.projection
-                omega_proj = _projected_penalty(gm, omega_eff)
-                penalty = _whitening_penalty(
-                    omega_proj, getattr(gm, "term_roots", None), g.name, lambdas
-                )
-                R_inv_local = compute_projected_R_inv(gm.B, P, penalty, sample_weight, lam)
-                R_inv_new = P @ R_inv_local
-            else:
-                R_inv_new = compute_R_inv(gm.B, omega_eff, sample_weight, lam)
-            new_gm = SparseSSPGroupMatrix(gm.B, R_inv_new)
-            new_gm.omega = gm.omega
-            new_gm.projection = gm.projection
-            new_gm.R_inv_local = None if getattr(gm, "R_inv_local", None) is None else R_inv_local
-            new_gm.term_roots = getattr(gm, "term_roots", None)
-            new_gm.omega_components = gm.omega_components
-            new_gm.component_types = gm.component_types
-            new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
-            new_gm.lambda_policies = gm.lambda_policies
-            new_gms.append(new_gm)
-        elif isinstance(gm, SplineCategoricalGroupMatrix) and _group_has_lambda(gm, g, lambdas):
-            if gm.omega is None:
-                new_gms.append(gm)
-                continue
-            lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
-            level_weight = sample_weight[gm.row_idx]
-            R_inv_local = None
-            if gm.projection is not None:
-                P = gm.projection
-                omega_proj = _projected_penalty(gm, omega_eff)
-                penalty = _whitening_penalty(
-                    omega_proj, getattr(gm, "term_roots", None), g.name, lambdas
-                )
-                R_inv_local = compute_projected_R_inv(gm.B_level, P, penalty, level_weight, lam)
-                R_inv_new = P @ R_inv_local
-            else:
-                R_inv_new = compute_R_inv(gm.B_level, omega_eff, level_weight, lam)
-            if gm.B is None:
-                new_gm = SplineCategoricalGroupMatrix._from_level_rows(
-                    gm.B_level, R_inv_new, gm.row_idx, gm.n_rows
-                )
-            else:
-                new_gm = SplineCategoricalGroupMatrix(gm.B, R_inv_new, gm.row_idx)
-            new_gm.omega = gm.omega
-            new_gm.projection = gm.projection
-            new_gm.R_inv_local = None if getattr(gm, "R_inv_local", None) is None else R_inv_local
-            new_gm.term_roots = getattr(gm, "term_roots", None)
-            new_gm.omega_components = gm.omega_components
-            new_gm.component_types = gm.component_types
-            new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
-            new_gm.lambda_policies = gm.lambda_policies
-            new_gm.spline_cat_level = gm.spline_cat_level
-            new_gm.spline_cat_feature = gm.spline_cat_feature
-            carry_level_support(gm, new_gm)
-            carry_binned_codes(gm, new_gm)
-            new_gms.append(new_gm)
-        elif isinstance(gm, DiscretizedSplineCategoricalGroupMatrix) and _group_has_lambda(
-            gm, g, lambdas
-        ):
-            if gm.omega is None:
-                new_gms.append(gm)
-                continue
-            lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
-            level_weight = np.bincount(
-                gm.bin_idx_level,
-                weights=sample_weight[gm.row_idx],
-                minlength=gm.n_bins,
-            )
-            R_inv_local = None
-            if gm.projection is not None:
-                P = gm.projection
-                omega_proj = _projected_penalty(gm, omega_eff)
-                penalty = _whitening_penalty(
-                    omega_proj, getattr(gm, "term_roots", None), g.name, lambdas
-                )
-                R_inv_local = compute_projected_R_inv(
-                    gm.B_unique,
-                    P,
-                    penalty,
-                    level_weight,
-                    lam,
-                )
-                R_inv_new = P @ R_inv_local
-            else:
-                R_inv_new = compute_R_inv(gm.B_unique, omega_eff, level_weight, lam)
-            # type(gm), not the parent: every REML lambda update comes through
-            # here, and a lossless block must not be downgraded to a binned one.
-            new_gm = type(gm)(
-                gm.B_unique,
-                R_inv_new,
-                gm.bin_idx_level,
-                gm.row_idx,
-                n_rows=gm.n_rows,
-                bin_idx_is_level=True,
-            )
-            new_gm.omega = gm.omega
-            new_gm.projection = gm.projection
-            new_gm.R_inv_local = None if getattr(gm, "R_inv_local", None) is None else R_inv_local
-            new_gm.term_roots = getattr(gm, "term_roots", None)
-            new_gm.omega_components = gm.omega_components
-            new_gm.component_types = gm.component_types
-            new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
-            new_gm.lambda_policies = gm.lambda_policies
-            new_gm.spline_cat_level = gm.spline_cat_level
-            new_gm.spline_cat_feature = gm.spline_cat_feature
-            carry_level_support(gm, new_gm)
-            carry_binned_codes(gm, new_gm)
-            new_gms.append(new_gm)
-        elif isinstance(gm, DiscretizedTensorGroupMatrix) and _group_has_lambda(gm, g, lambdas):
-            if gm.omega is None:
-                new_gms.append(gm)
-                continue
-            if gm.omega_components is not None and gm.projection is None:
-                # Discrete tensors keep fixed centred coordinates with explicit
-                # marginal penalties: a lambda update changes S(lambda), not the
-                # packed design, as in mgcv bam(discrete=TRUE).
-                new_gms.append(gm)
-                continue
-            lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
-            exposure_agg = np.bincount(gm.bin_idx, weights=sample_weight, minlength=gm.n_bins)
-            if gm.projection is not None:
-                P = gm.projection
-                omega_proj = _projected_penalty(gm, omega_eff)
-                R_inv_local = compute_projected_R_inv(gm.B_unique, P, omega_proj, exposure_agg, lam)
-                R_inv_new = P @ R_inv_local
-            else:
-                R_inv_new = compute_R_inv(gm.B_unique, omega_eff, exposure_agg, lam)
-            new_gm = DiscretizedTensorGroupMatrix(
-                gm.B1_unique_t,
-                gm.B2_unique_t,
-                gm.idx1,
-                gm.idx2,
-                gm.B_unique,
-                R_inv_new,
-                gm.bin_idx,
-                tensor_id=gm.tensor_id,
-                raw_channels=gm._current_raw_channels(),
-            )
-            carry_binned_codes(gm, new_gm)
-            new_gm.omega = gm.omega
-            new_gm.projection = gm.projection
-            if getattr(gm, "R_inv_local", None) is not None:
-                new_gm.R_inv_local = R_inv_local
-            new_gm.omega_components = gm.omega_components
-            new_gm.component_types = gm.component_types
-            new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
-            new_gm.lambda_policies = gm.lambda_policies
-            new_gms.append(new_gm)
-        elif isinstance(gm, DiscretizedSSPGroupMatrix) and _group_has_lambda(gm, g, lambdas):
-            if gm.omega is None:
-                new_gms.append(gm)
-                continue
-            lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
-            exposure_agg = np.bincount(gm.bin_idx, weights=sample_weight, minlength=gm.n_bins)
-            R_inv_local = None
-            if gm.projection is not None:
-                P = gm.projection
-                omega_proj = _projected_penalty(gm, omega_eff)
-                penalty = _whitening_penalty(
-                    omega_proj, getattr(gm, "term_roots", None), g.name, lambdas
-                )
-                R_inv_local = compute_projected_R_inv(gm.B_unique, P, penalty, exposure_agg, lam)
-                R_inv_new = P @ R_inv_local
-            else:
-                R_inv_new = compute_R_inv(gm.B_unique, omega_eff, exposure_agg, lam)
-            # type(gm) preserves subclass semantics (e.g. lossless support
-            # compression) across the per-lambda rebuild.
-            new_gm = type(gm)(gm.B_unique, R_inv_new, gm.bin_idx)
-            new_gm.omega = gm.omega
-            new_gm.projection = gm.projection
-            new_gm.R_inv_local = None if getattr(gm, "R_inv_local", None) is None else R_inv_local
-            new_gm.term_roots = getattr(gm, "term_roots", None)
-            new_gm.omega_components = gm.omega_components
-            new_gm.component_types = gm.component_types
-            new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
-            new_gm.lambda_policies = gm.lambda_policies
-            new_gms.append(new_gm)
-        else:
-            new_gms.append(gm)
+    new_gms = [
+        _rebuilt_group(gm, g, lambdas, sample_weight) for gm, g in zip(dm.group_matrices, groups)
+    ]
     rebuilt = DesignMatrix(new_gms, dm.n, dm.p)
     rebuilt._centered_pattern_plan = dm._centered_pattern_plan
     # RandomEffect matrices pass through unchanged, so their nesting tests do too.
