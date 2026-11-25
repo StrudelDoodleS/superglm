@@ -309,21 +309,26 @@ def should_discretize(spec: FeatureSpec, model_discrete: bool) -> bool:
     return type(spec) in _BUILT_IN_SPLINES and spline_bins(spec, model_discrete)
 
 
+def _has_ordered_parent(ispec: Any, specs: Mapping[str, FeatureSpec]) -> bool:
+    """Whether an interaction has an OrderedCategorical parent, which it never bins on.
+
+    OC margins live on <= n_levels score points; there is nothing for
+    fit-time discretization to compress, and discretizing reads raw columns
+    as float64, which label data cannot be.
+    """
+    from superglm.features.ordered_categorical import OrderedCategorical
+
+    parents = getattr(ispec, "parent_names", ())
+    return any(isinstance(specs.get(p), OrderedCategorical) for p in parents)
+
+
 def should_discretize_tensor_interaction(
     ispec: Any, specs: dict[str, FeatureSpec], model_discrete: bool
 ) -> bool:
     """Check if a tensor interaction should use fit-time discretization."""
     from superglm.features.interaction import TensorInteraction
-    from superglm.features.ordered_categorical import OrderedCategorical
 
-    if any(
-        isinstance(specs.get(p), OrderedCategorical) for p in getattr(ispec, "parent_names", ())
-    ):
-        # OC margins live on <= n_levels score points; there is nothing for
-        # fit-time discretization to compress, and discretizing
-        # reads raw columns as float64, which label data cannot be.
-        return False
-    if not isinstance(ispec, TensorInteraction):
+    if _has_ordered_parent(ispec, specs) or not isinstance(ispec, TensorInteraction):
         return False
     p1, p2 = ispec.parent_names
     return should_discretize(specs[p1], model_discrete) and should_discretize(
@@ -336,16 +341,8 @@ def should_discretize_spline_categorical_interaction(
 ) -> bool:
     """Check if a spline-categorical interaction should use spline support compression."""
     from superglm.features.interaction import SplineCategorical
-    from superglm.features.ordered_categorical import OrderedCategorical
 
-    if any(
-        isinstance(specs.get(p), OrderedCategorical) for p in getattr(ispec, "parent_names", ())
-    ):
-        # OC margins live on <= n_levels score points; there is nothing for
-        # fit-time discretization to compress, and discretizing
-        # reads raw columns as float64, which label data cannot be.
-        return False
-    if not isinstance(ispec, SplineCategorical):
+    if _has_ordered_parent(ispec, specs) or not isinstance(ispec, SplineCategorical):
         return False
     spline_name, _cat_name = ispec.parent_names
     return should_discretize(specs[spline_name], model_discrete)
