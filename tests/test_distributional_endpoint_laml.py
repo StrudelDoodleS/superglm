@@ -3751,13 +3751,15 @@ def _joint_terminal_analytic_failure(
     *,
     retain_history_rows: bool = False,
 ) -> tuple[tuple[str, str], DistributionalEFSResult]:
-    calls = 0
+    failed: list[str] = []
     real_derivative = smoothing_faces.evaluate_endpoint_laplace_derivative
 
     def fail_second_terminal_direction(*args: object, **kwargs: object):
-        nonlocal calls
-        calls += 1
-        if calls == 4:
+        # The second component is promoted alone, so the face of both first takes its
+        # direction at the terminal check, however many derivatives the search took before.
+        face_names = kwargs["endpoint_face"].component_names  # type: ignore[attr-defined]
+        if len(face_names) == 2 and kwargs["component_name"] == face_names[1]:
+            failed.append(face_names[1])
             raise EndpointLaplaceError("test mutation")
         return real_derivative(*args, **kwargs)  # type: ignore[arg-type]
 
@@ -3765,7 +3767,7 @@ def _joint_terminal_analytic_failure(
         smoothing_faces, "evaluate_endpoint_laplace_derivative", fail_second_terminal_direction
     )
     names, smoothing = _two_face_efs_fit(retain_history_rows=retain_history_rows)
-    assert calls == 4
+    assert failed == [names[1]]
     return names, smoothing
 
 

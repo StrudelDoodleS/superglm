@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
@@ -38,6 +39,7 @@ from superglm.distributional.smoothing.authority import (
 )
 from superglm.distributional.smoothing.endpoint_laml import (
     EndpointDirectionEvidence,
+    EndpointLaplaceDerivative,
     EndpointLaplaceError,
     evaluate_endpoint_laplace_derivative,
     resolve_endpoint_direction,
@@ -137,6 +139,37 @@ class _FaceRecheck:
     retraction: _FaceRetraction | None
 
 
+class _EndpointDerivativeMemo:
+    """The endpoint derivatives taken at one face fit.
+
+    Within a search ``evaluate_endpoint_laplace_derivative`` is a function of the
+    endpoint fit and the component: the endpoint face is the fit's own and the
+    finite face is that face without the component. A promotion and the
+    revalidation of the stop it ends on assess one fit, so the second finds the
+    derivative here and makes no further pass over the rows.
+    Owner: the smoothing loop; lifetime: that loop; assessing another fit empties it.
+    A lookup matches only the same fit object, which is held weakly.
+    """
+
+    __slots__ = ("_fit", "_taken")
+
+    def __init__(self) -> None:
+        self._fit: weakref.ReferenceType[DenseSolverResult] | None = None
+        self._taken: dict[str, EndpointLaplaceDerivative] = {}
+
+    def derivative(
+        self, *args, component_name: str, endpoint_fit: DenseSolverResult, **kwargs
+    ) -> EndpointLaplaceDerivative:
+        """``evaluate_endpoint_laplace_derivative`` of these arguments, taken once."""
+        if self._fit is None or self._fit() is not endpoint_fit:
+            self._fit, self._taken = weakref.ref(endpoint_fit), {}
+        if component_name not in self._taken:
+            self._taken[component_name] = evaluate_endpoint_laplace_derivative(
+                *args, component_name=component_name, endpoint_fit=endpoint_fit, **kwargs
+            )
+        return self._taken[component_name]
+
+
 def _face_no_higher(
     endpoint_objective: float,
     endpoint_fit: DenseSolverResult,
@@ -180,6 +213,7 @@ def _check_face_direction(
     chunk_size: ChunkSize | None,
     phase_recorder: FitPhaseRecorder | None,
     _reuse_session: _DenseObservedReuseSession | None = None,
+    derivatives: _EndpointDerivativeMemo | None = None,
 ) -> _FaceDirectionAttempt:
     """Evaluate one τ = 0+ direction, refusing unstable fit provenance.
 
@@ -287,7 +321,7 @@ def _check_face_direction(
             objective_tolerance=objective_tolerance,
         )
         try:
-            analytic = evaluate_endpoint_laplace_derivative(
+            analytic = (derivatives or _EndpointDerivativeMemo()).derivative(
                 family,
                 layout,
                 y,
@@ -339,6 +373,7 @@ def _assess_joint_face_directions(
     chunk_size: ChunkSize | None,
     phase_recorder: FitPhaseRecorder | None,
     _reuse_session: _DenseObservedReuseSession | None = None,
+    derivatives: _EndpointDerivativeMemo | None = None,
 ) -> _JointFaceDirectionAttempt:
     """Evaluate named directions from one strict common exact-face fit.
 
@@ -419,10 +454,11 @@ def _assess_joint_face_directions(
         return refused("joint_objective_rejected", endpoint_fit)
 
     component_directions: list[tuple[str, EndpointDirectionEvidence]] = []
+    derivatives = derivatives or _EndpointDerivativeMemo()
     with measure_phase(phase_recorder, "efs_update_backtracking"):
         for name, finite_face in finite_faces:
             try:
-                analytic = evaluate_endpoint_laplace_derivative(
+                analytic = derivatives.derivative(
                     family,
                     layout,
                     y,
@@ -501,6 +537,7 @@ def _try_joint_exact_face(
     chunk_size: ChunkSize | None,
     phase_recorder: FitPhaseRecorder | None,
     _reuse_session: _DenseObservedReuseSession | None = None,
+    derivatives: _EndpointDerivativeMemo | None = None,
 ) -> tuple[_FacePromotion | None, _JointFaceDirectionAttempt | None]:
     """Assess all capped non-active components from one common exact-face fit."""
 
@@ -550,6 +587,7 @@ def _try_joint_exact_face(
         chunk_size=chunk_size,
         phase_recorder=phase_recorder,
         _reuse_session=_reuse_session,
+        derivatives=derivatives,
     )
     if not _joint_direction_is_endpoint(attempt):
         return None, attempt
@@ -585,6 +623,7 @@ def _try_exact_face(
     chunk_size: ChunkSize | None,
     phase_recorder: FitPhaseRecorder | None,
     _reuse_session: _DenseObservedReuseSession | None = None,
+    derivatives: _EndpointDerivativeMemo | None = None,
 ) -> tuple[_FacePromotion | None, _FaceDirectionAttempt | None]:
     """Promote one capped coordinate only after a resolved τ = 0+ test."""
     if not terminal_evidence.unresolved_upper_bound:
@@ -621,6 +660,7 @@ def _try_exact_face(
         chunk_size=chunk_size,
         phase_recorder=phase_recorder,
         _reuse_session=_reuse_session,
+        derivatives=derivatives,
     )
     check = attempt.check
     if check is None:
@@ -671,6 +711,7 @@ def _recheck_exact_face(
     phase_recorder: FitPhaseRecorder | None,
     _reuse_session: _DenseObservedReuseSession | None = None,
     other_caps_stationary: bool = False,
+    derivatives: _EndpointDerivativeMemo | None = None,
 ) -> _FaceRecheck:
     """Revalidate every active component at the terminal finite smoothing state.
 
@@ -714,6 +755,7 @@ def _recheck_exact_face(
                 chunk_size=chunk_size,
                 phase_recorder=phase_recorder,
                 _reuse_session=_reuse_session,
+                derivatives=derivatives,
             )
         check = None if attempt is None else attempt.check
         direction_resolved = (

@@ -48,6 +48,7 @@ from superglm.distributional.smoothing.evidence import (
 from superglm.distributional.smoothing.faces import (
     _assess_joint_face_directions,
     _direction_leaves_face,
+    _EndpointDerivativeMemo,
     _face_assessment_refusal_iteration,
     _face_retraction_iteration,
     _face_revalidation_iteration,
@@ -243,6 +244,7 @@ def fit_distributional_efs(
         raise TypeError("efs_config must be DistributionalEFSConfig")
     reuse_session = _DenseObservedReuseSession()
     penalty_memo = _PenaltyEvaluationMemo()
+    endpoint_derivatives = _EndpointDerivativeMemo()
 
     with measure_phase(phase_recorder, "layout_penalty_assembly"):
         current_lambdas, initial, lambda_units = prepare_distributional_initialization(
@@ -906,6 +908,7 @@ def fit_distributional_efs(
                 chunk_size=chunk_size,
                 phase_recorder=phase_recorder,
                 _reuse_session=reuse_session,
+                derivatives=endpoint_derivatives,
             )
             if promotion is None and assessment_attempt is None:
                 promotion, assessment_attempt = _try_exact_face(
@@ -923,6 +926,7 @@ def fit_distributional_efs(
                     chunk_size=chunk_size,
                     phase_recorder=phase_recorder,
                     _reuse_session=reuse_session,
+                    derivatives=endpoint_derivatives,
                 )
             if promotion is None:
                 if handed_over:
@@ -1133,6 +1137,7 @@ def fit_distributional_efs(
                             chunk_size=chunk_size,
                             phase_recorder=phase_recorder,
                             _reuse_session=reuse_session,
+                            derivatives=endpoint_derivatives,
                         )
                     if _joint_direction_is_endpoint(joint_attempt):
                         source_fit_index = terminal_fit_index
@@ -1287,6 +1292,7 @@ def fit_distributional_efs(
                     chunk_size=chunk_size,
                     phase_recorder=phase_recorder,
                     _reuse_session=reuse_session,
+                    derivatives=endpoint_derivatives,
                     other_caps_stationary=endgame_stationary,
                 )
                 resolved_directions: dict[str, EndpointDirectionEvidence] = {}

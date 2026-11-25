@@ -144,6 +144,40 @@ def test_a_plateau_earned_in_the_last_round_keeps_its_terminal_checks() -> None:
     assert (short.converged, short.convergence_reason) == (False, "max_iterations")
 
 
+def test_a_face_promoted_at_the_stop_is_revalidated_on_the_derivative_taken_there(
+    monkeypatch,
+) -> None:
+    """A promotion and the revalidation that follows it assess one fit: its derivative is taken once.
+
+    Under ``"efs"`` the plateau ``x`` earned promotes ``z``'s face and goes straight
+    to the strict stop, which revalidates the face at the promotion's own fit. An
+    endpoint derivative costs three passes over the rows (a design product for each
+    predictor and one curvature assembly), and the revalidation publishes the one
+    the promotion took. Mutation check: without the search's memo the same fit and
+    component are evaluated twice.
+    """
+    from superglm.distributional.smoothing import faces
+
+    evaluate, taken = faces.evaluate_endpoint_laplace_derivative, []
+
+    def recorded(*args, **kwargs):
+        taken.append(kwargs["component_name"])
+        return evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(faces, "evaluate_endpoint_laplace_derivative", recorded)
+    _model, smoothing = _fit("efs", **_PLATEAU)
+
+    promotion, revalidation = smoothing.history[-2:]
+    assert promotion.activated_face_components == (_Z,)
+    assert revalidation.revalidated_face_components == (_Z,)
+    assert revalidation.endpoint_direction_evidence.decision == "endpoint"
+    assert (
+        revalidation.endpoint_direction_evidence.analytic_derivative
+        == promotion.endpoint_direction_evidence.analytic_derivative
+    )
+    assert taken == [_Z]
+
+
 def test_a_search_out_of_rounds_before_judging_its_held_cap_says_so() -> None:
     """A cap the trial reached and no assessment has refused is not reported as unresolved.
 
