@@ -1071,6 +1071,207 @@ def test_the_intercept_search_leaves_a_plateau_by_more_than_its_rounding(lowest)
     assert best == pytest.approx(-40.0, abs=1e-6)
 
 
+@pytest.mark.parametrize("last_bit", ["rises", "falls"])
+def test_newtons_search_leaves_a_plateau_by_its_slope_whatever_its_last_bit(last_bit):
+    # A saturated logit link holds the likelihood level in the intercept to its rounding,
+    # while the link's derivative there (about exp(-eta) since dc993a120, where it was 0) keeps
+    # a slope that points off the plateau. At ee8758965 a first trial higher in its last bit
+    # ended its side as a wall, the bracket closed on the start and the held intercept was
+    # published: under OpenBLAS's Haswell kernel the trial came out 2e-15 higher (37.638 for
+    # -2.3367 in test_a_continued_repair_at_the_zero_curve_takes_the_dropped_terms_intercept),
+    # under SkylakeX 7e-15 lower, and the walk found the optimum. Forced: off the start the
+    # plateau is one bit higher, or one bit lower; below -30 units the objective is a
+    # parabola, with its minimum at -40.
+    from superglm.distributional.shape_repair import _newton_minimum
+
+    level, rows = 100.0, 300
+    bit = np.spacing(level) * (1.0 if last_bit == "rises" else -1.0)
+
+    def probe(t: float) -> tuple[float, tuple[float, float, float]]:
+        if t < -30.0:
+            return level + (t + 40.0) ** 2 / 10.0 - 10.0, ((t + 40.0) / 5.0, 0.2, level)
+        # Downhill towards the parabola and concave, as a saturated logit's shoulder is.
+        return (level if t == 0.0 else level + bit), (1e-15, -1e-15, level)
+
+    assert _newton_minimum(probe, 0.0, 1.0, rows) == pytest.approx(-40.0, abs=1e-6)
+
+
+@pytest.mark.parametrize("last_bit", ["rises", "falls"])
+@pytest.mark.parametrize("start_on", ["plateau", "slope"])
+def test_the_intercept_search_crosses_a_later_plateau_by_more_than_its_rounding(start_on, last_bit):
+    # Past its first step the search still read its values by their last bits. At 1a25a5d66 a
+    # plateau met after that step ended the walk wherever a step came out no lower than the
+    # one before it, and Brent's window was taken to hold the optimum wherever its end came out
+    # a bit higher than its result: the plateau was published for an optimum beyond it. Forced:
+    # the search reaches a plateau from another above it, or down a slope inside Brent's window;
+    # off the first point it reaches there the plateau is one bit higher, or one bit lower;
+    # below -300 units the objective is a parabola, with its minimum at -400.
+    from superglm.distributional.shape_repair import _derivative_free_minimum
+
+    level, rounding = 90.0, 1e-12
+    bit = np.spacing(level) * (1.0 if last_bit == "rises" else -1.0)
+    edge, first = (-30.0, -50.0) if start_on == "plateau" else (-2.0, -4.0)
+
+    def objective(t: float) -> float:
+        if t < -300.0:
+            return level + (t + 400.0) ** 2 / 1000.0 - 10.0
+        if t < edge:
+            return level if t > first else level + bit
+        return level + 10.0 if start_on == "plateau" else level + 5.0 * (t - edge)
+
+    best = _derivative_free_minimum(objective, 0.0, 1.0, rounding=rounding)
+    assert best == pytest.approx(-400.0, abs=1e-4)
+
+
+def test_the_intercept_search_leaves_a_plateau_with_no_end_at_its_first_step():
+    # A likelihood that saturates below the start has no minimum beyond its plateau. At
+    # 1a25a5d66 the walk went on for as long as each step came out lower in its last bits, and
+    # published wherever they stopped falling. Forced: below -30 units the objective is level,
+    # one bit lower at each doubling of the shift as far as -1024; the bracket closed between
+    # -724 and -2013 units. The plateau is now walked for 2**20 units, in growing steps, and
+    # with nothing lower found the search ends where it met the plateau: its fifth step of
+    # the golden ratio from Brent's window of 4 units.
+    from superglm.distributional.shape_repair import _derivative_free_minimum
+
+    level, rounding = 90.0, 1e-12
+    reads: set[float] = set()
+
+    def objective(t: float) -> float:
+        reads.add(t)
+        if t < -30.0:
+            return level - np.spacing(level) * min(int(np.log2(-t)), 10)
+        return level + 10.0
+
+    best = _derivative_free_minimum(objective, 0.0, 1.0, rounding=rounding)
+    assert best == pytest.approx(-4.0 * ((1.0 + np.sqrt(5.0)) / 2.0) ** 5, abs=1e-5)
+    # the plateau's walk is logarithmic in its length, and Brent's two runs do not depend on it
+    assert len(reads) <= 200
+
+
+@pytest.mark.parametrize("last_bit", ["rises", "falls"])
+def test_a_plateau_entered_inside_brents_window_is_published_at_the_windows_end(last_bit):
+    # A likelihood that saturates inside Brent's first window is level from there to the
+    # window's end and on, with no minimum beyond. Brent's result is one of the plateau's
+    # points, chosen by its last bits, which differ by BLAS kernel; the window's end is the
+    # same on every build. It reads as Brent's result does (their values within the rounding
+    # each carries, and below the start as well), so the search holds it, and with nothing
+    # lower for 2**20 units publishes it. Forced: a slope down to -2 units and level below;
+    # past -3 the plateau is one bit higher, or one bit lower.
+    from superglm.distributional.shape_repair import _derivative_free_minimum
+
+    level, rounding = 90.0, 1e-12
+    bit = np.spacing(level) * (1.0 if last_bit == "rises" else -1.0)
+
+    def objective(t: float) -> float:
+        if t < -2.0:
+            return level if t > -3.0 else level + bit
+        return level + 5.0 * (t + 2.0)
+
+    best = _derivative_free_minimum(objective, 0.0, 1.0, rounding=rounding)
+    assert best == pytest.approx(-4.0, abs=1e-6)
+
+
+def _shift_taken(log_likelihoods, derivatives=None) -> float:
+    """The intercept shift ``_profiled_merit`` takes for a lone parameter on the identity link
+    whose rows have log-likelihoods ``log_likelihoods(t)`` at the shift ``t``. With
+    ``derivatives(t)``, their slopes and curvatures in it, Newton's search runs; without, the
+    link has no second derivative and the derivative-free search does."""
+    from types import SimpleNamespace
+
+    from superglm.distributional.shape_repair import _profiled_merit
+
+    def evaluate_natural(response, theta, plan, *, derivative_order):
+        t = float(theta[0, 0])
+        score, hessian = derivatives(t) if derivatives else ([], [])
+        return SimpleNamespace(
+            optimizing_log_likelihood=np.array(log_likelihoods(t)),
+            valid=None,
+            score=np.array(score)[:, None],
+            hessian_packed=np.array(hessian)[:, None],
+        )
+
+    link = SimpleNamespace(deriv_inverse=np.ones_like)
+    if derivatives:
+        link.deriv2_inverse = np.zeros_like
+    predictor = SimpleNamespace(name="mean", link=link, intercept_index=0)
+    fitted = SimpleNamespace(
+        family=SimpleNamespace(bind_likelihood=lambda *_: None, evaluate_natural=evaluate_natural),
+        layout=SimpleNamespace(predictor=lambda name: predictor, predictors=[predictor]),
+        result=SimpleNamespace(penalty=np.zeros((1, 1))),
+        parameter_from_eta=lambda eta, index: eta[:, index],
+    )
+    n = len(log_likelihoods(0.0))
+    rows = SimpleNamespace(response=np.zeros(n), likelihood_weights=None, observation=None)
+    eta = np.zeros((n, 1))
+    return _profiled_merit(fitted, rows, None, np.zeros(1), "mean", 1.0, eta_base=eta)[0]
+
+
+def test_a_shift_lower_in_its_last_bit_is_not_taken_where_the_rows_cancel():
+    # A re-estimate is taken where it is lower than the held intercept by more than the
+    # rounding of the two sums. At 1a25a5d66 that rounding was scaled by the total, where the
+    # searches scale theirs by the rows' absolute sum: with log-likelihoods above and below
+    # zero the total cancels, the allowance fell inside the sum's rounding, and a shift level
+    # with the held intercept was published or not by its last bit. Forced: rows of 1024 and
+    # -1024 and one of their last places, which puts the likelihood one bit higher a unit up,
+    # where its slope is zero; the two sums can carry twelve.
+    bit = np.spacing(1024.0)
+
+    def log_likelihoods(t: float) -> list[float]:
+        return [1024.0, -1024.0, bit if t == 1.0 else 0.0]
+
+    def derivatives(t: float) -> tuple[list[float], list[float]]:
+        return [0.0, 0.0, 8.0 * bit * (1.0 - t)], [0.0, 0.0, -8.0 * bit]
+
+    assert _shift_taken(log_likelihoods, derivatives) == 0.0
+
+
+def test_a_later_plateau_is_read_by_the_rounding_of_its_own_sums():
+    # A sum's rounding follows its rows' sizes, which change along the search. Here the rows
+    # at the held intercept do not cancel and their sum carries 1e-13, while below -30 units
+    # rows of 2**20 and -2**20 do and theirs carries 3e-9. A step along that plateau one bit
+    # of 2**20 higher (2e-10) is a rise by the start's rounding, as it was by strict order at
+    # 1a25a5d66, where the walk ended on it and -44.36 was published; by the rounding of the two
+    # sums compared it is level, and the walk goes on to the minimum 400 units down.
+    big = 2.0**20
+    bit = np.spacing(big)
+
+    def log_likelihoods(t: float) -> list[float]:
+        if t >= -30.0:
+            return [0.0, 0.0, -100.0]
+        if t >= -300.0:
+            return [big, -big, -90.0 if t > -50.0 else -90.0 - bit]
+        return [big, -big, -80.0 - (t + 400.0) ** 2 / 1000.0]
+
+    assert _shift_taken(log_likelihoods) == pytest.approx(-400.0, abs=1e-2)
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("case", ["sol", "end_below_the_held", "end_reads_as_low"])
+def test_a_trial_whose_sum_is_uncertain_does_not_displace_a_lower_point_already_found(case):
+    """Pins the shift origin/master publishes, about -1, on Sol's case from #748 and two more.
+
+    The objective is 80 + (t + 1)**2, and between 3 and 5 units rows of 2**55 and -2**55
+    cancel, so the sum there carries a rounding of 96. Brent's first window finds the minimum
+    at -1 (80, against 81 at the held intercept); its upper end (105) is level with that only
+    by its own rounding. At 7c917b063 the walk took that end for its lowest point and Brent's
+    result for one of a plateau's points: the search returned 4, which is not below the held
+    intercept by the two sums' rounding, and the held intercept was published. With the held
+    intercept at 300 the end is below it and was published, at 105. Where the uncertain
+    stretch reads two last places above the minimum, the held intercept was published too.
+    """
+    lowest, held = 80.0, 300.0 if case == "end_below_the_held" else 81.0
+
+    def log_likelihoods(t: float) -> list[float]:
+        value = held if t == 0.0 else lowest + (t + 1.0) ** 2
+        if not 3.0 < t < 5.0:
+            return [0.0, 0.0, -value]
+        if case == "end_reads_as_low":
+            value = lowest + 2.0 * np.spacing(lowest)
+        return [2.0**55, -(2.0**55), -value]
+
+    assert _shift_taken(log_likelihoods) == pytest.approx(-1.0, abs=1e-6)
+
+
 def test_a_probe_whose_likelihood_overflows_is_a_wall_of_the_intercept_search():
     # Sol's case: the scale's offset runs from -100 to 0, so a trial shift of the scale
     # intercept far enough down overflows the Gaussian likelihood. At 19a6ab028 that raised
@@ -1774,7 +1975,8 @@ def test_a_continued_projection_at_the_apex_to_rounding_is_published_as_the_zero
     assert record.intercept_shift == pytest.approx(4.55323, abs=1e-4)
 
 
-def test_a_continued_repair_at_the_zero_curve_takes_the_dropped_terms_intercept():
+@pytest.mark.parametrize("past", [40.0, -40.0])
+def test_a_continued_repair_at_the_zero_curve_takes_the_dropped_terms_intercept(past):
     # A generalized gamma's shape under the logit link, its term edited to a falling curve and
     # its intercept to 40 past the fit's, where the link is saturated and the likelihood flat in
     # the intercept. The continuation reaches the zero curve, the dropped term. At ddda43d45 the
@@ -1782,6 +1984,9 @@ def test_a_continued_repair_at_the_zero_curve_takes_the_dropped_terms_intercept(
     # merit -27.709; at 6a5120117 the dropped term's profile reached -27.908 but the zero
     # curve's, from the continued repair's scale, stopped on the plateau at -5.77, and the tie
     # was refused. The zero curve takes the dropped term's profile, the minimum SciPy finds.
+    # 40 below the fit's, the plateau is level to the last bit with a slope of 4e-19 off it:
+    # at ee8758965 Newton's search took its first trial, no lower, for a wall, and the held
+    # intercept was published on every kernel, under SkylakeX with a term of norm 1.03.
     from scipy.optimize import minimize_scalar
 
     rng = np.random.default_rng(814672207)
@@ -1807,7 +2012,7 @@ def test_a_continued_repair_at_the_zero_curve_takes_the_dropped_terms_intercept(
     falling = -0.3 * (x - 0.5) + 0.03 * np.sin(12.0 * x)
     beta[columns] = np.linalg.lstsq(_term_of(fitted, "shape").transform(x), falling, rcond=None)[0]
     fitted_intercept = float(beta[index])
-    beta[index] = fitted_intercept + 40.0
+    beta[index] = fitted_intercept + past
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", EditedCoefficientsWarning)
         revised = model._with_revised_coefficients(beta, edited_terms=["shape:x"])
@@ -1835,6 +2040,64 @@ def test_a_continued_repair_at_the_zero_curve_takes_the_dropped_terms_intercept(
     assert published[index] == pytest.approx(least.x, abs=1e-5)
     rounding = 4.0 * len(y) * np.finfo(np.float64).eps / 2.0 * abs(least.fun)
     assert score(published[index]) <= least.fun + rounding
+
+
+# The revision of test_a_continued_repair_at_the_zero_curve_takes_the_dropped_terms_intercept,
+# 40 above and 40 below the fit's intercept, repaired: each line is the published shape
+# intercept and the largest published coefficient of the term.
+_SATURATED_INTERCEPT_FIXTURE = """
+import warnings
+
+import numpy as np
+import pandas as pd
+
+from superglm import Constraint, SuperLSS, s
+from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
+
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(814672207)
+x = rng.uniform(0.0, 1.0, 300)
+shape = 2.0 + 6.0 * x
+y = rng.gamma(shape, np.exp(0.5 - 0.8 * x + 0.25 * np.sin(12.0 * x)) / shape)
+X = pd.DataFrame({"x": x})
+family = GeneralizedGammaLSS()
+term = s("x", kind="bs", k=6, constraint=Constraint.postfit.increasing)
+model = SuperLSS(family, family.mean(), family.scale(), family.shape(term, link="logit"))
+model.fit(X, y, lambdas={"shape:x#wiggle": 1.0})
+fitted = model._model
+columns = fitted.layout.term_slices["shape:x"]
+index = fitted.layout.predictor("shape").intercept_index
+basis = next(p for p in fitted.compiled_predictors if p.name == "shape").compiled.specs["x"]
+falling = -0.3 * (x - 0.5) + 0.03 * np.sin(12.0 * x)
+for past in (40.0, -40.0):
+    beta = np.array(fitted.coefficients, dtype=np.float64)
+    beta[columns] = np.linalg.lstsq(basis.transform(x), falling, rcond=None)[0]
+    beta[index] += past
+    revised = model._with_revised_coefficients(beta, edited_terms=["shape:x"])
+    revised.apply_shape_postfit()
+    published = np.asarray(revised._model.coefficients, dtype=np.float64)
+    print(repr(float(published[index])), repr(float(np.max(np.abs(published[columns])))))
+"""
+
+
+@pytest.mark.slow
+def test_a_repair_from_a_saturated_intercept_is_the_same_on_every_blas_kernel():
+    """A term repaired from an intercept on a saturated link's plateau, 40 above or 40 below
+    the fit's, is published dropped at one intercept, whichever OpenBLAS kernel runs it.
+
+    The plateau's last bits differ by kernel, and the dropped term's profile has one optimum.
+    """
+    from tests.test_shape_postfit import _kernel_outcomes
+
+    outcomes = _kernel_outcomes(
+        _SATURATED_INTERCEPT_FIXTURE, ("Haswell", "Zen", "SkylakeX", "Sandybridge")
+    )
+    published = {kernel: np.array(lines, dtype=np.float64) for kernel, lines in outcomes.items()}
+    for kernel, rows in published.items():
+        assert rows.shape == (2, 2) and not rows[:, 1].any(), (kernel, rows)
+    intercepts = np.array([rows[:, 0] for rows in published.values()])
+    # Newton's search locates the optimum to sqrt(u) of the shape's scale on its link.
+    assert np.ptp(intercepts) <= 1e-6, published
 
 
 def test_a_session_follows_a_refit_in_place_that_changed_a_categorical_reference():
