@@ -29,6 +29,14 @@ class SparseGroupLasso:
         Optional modifier (e.g. Adaptive).
     """
 
+    # It can zero a whole group; only without its elementwise L1 part
+    # (alpha 0) does it read each group through its norm alone.
+    _zeros_groups = True
+
+    @property
+    def _reads_groups_by_norm(self) -> bool:
+        return self.alpha == 0
+
     def __init__(
         self,
         lambda1: float | Literal["auto"] | None = None,

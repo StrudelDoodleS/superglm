@@ -1151,12 +1151,8 @@ def build_design_matrix(
     # selection penalty's objective only when that penalty reads each group
     # through its norm; an elementwise L1 part, or a penalty not known to,
     # keeps the declared coordinates.
-    from superglm.penalties import GroupElasticNet, GroupLasso, Ridge, SparseGroupLasso
-
-    eigenbasis_turn = (
-        selection_penalty is None
-        or isinstance(selection_penalty, (Ridge, GroupLasso, GroupElasticNet))
-        or (isinstance(selection_penalty, SparseGroupLasso) and selection_penalty.alpha == 0)
+    eigenbasis_turn = selection_penalty is None or getattr(
+        selection_penalty, "_reads_groups_by_norm", False
     )
 
     compiled = compile_predictor_design(

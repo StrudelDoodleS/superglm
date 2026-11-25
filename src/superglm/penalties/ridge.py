@@ -25,6 +25,11 @@ class Ridge:
         explicitly requests automatic calibration.
     """
 
+    # Its L2 update reads each group through its norm and shrinks it
+    # continuously, so it never zeroes a whole group.
+    _reads_groups_by_norm = True
+    _zeros_groups = False
+
     def __init__(
         self,
         lambda1: float | Literal["auto"] | None = None,
