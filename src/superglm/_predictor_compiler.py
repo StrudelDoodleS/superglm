@@ -83,12 +83,25 @@ def _bins_as_built_in(name: str, term: Any, asks: bool) -> bool:
     return False
 
 
+@dataclass(frozen=True)
+class BinnedRows:
+    """A binned block's rows: its basis at the distinct rows, each row's bin, each bin's weight.
+
+    A discrete tensor's block also holds the tensor's build and its id.
+    """
+
+    B_unique: NDArray
+    bin_idx: NDArray
+    exposure_agg: NDArray
+    tensor: DiscreteTensorBuildResult | None = None
+    tensor_id: int = -1
+
+
 def _sz_supports_population_turn(
     info: GroupInfo,
     name: str,
     lambda2: float | dict,
-    binned_basis: NDArray | None,
-    bins: NDArray | None,
+    binned: BinnedRows | None,
     labels: NDArray,
     weights: NDArray,
     response: NDArray | None,
@@ -117,9 +130,8 @@ def _sz_supports_population_turn(
     members = declared.basis
     if info.projection is not None:
         members = info.projection @ members
-    if binned_basis is not None:
-        assert bins is not None
-        columns = (binned_basis @ members)[bins]
+    if binned is not None:
+        columns = (binned.B_unique @ members)[binned.bin_idx]
     else:
         assert info.columns is not None
         columns = info.columns @ members
@@ -408,9 +420,7 @@ def compile_predictor_design(
 
         # Check if this feature should use fit-time discretization
         use_discrete = _bins_as_built_in(name, spec, spline_bins(spec, model_discrete))
-        B_unique = None
-        bin_idx = None
-        exposure_agg = None
+        binned: BinnedRows | None = None
 
         engine = shape_engine(spec)
 
@@ -441,6 +451,7 @@ def compile_predictor_design(
             # (should_discretize).
             B_unique = cast(_SplineBase, spec)._basis_matrix(bin_centers).toarray()
             exposure_agg = np.bincount(bin_idx, weights=sample_weight, minlength=len(bin_centers))
+            binned = BinnedRows(B_unique, bin_idx, exposure_agg)
 
             if getattr(spec, "select", False):
                 info = build_select_group_info(spec, None, projection_penalty)
@@ -530,11 +541,9 @@ def compile_predictor_design(
             gm, r_inv, n_cols = _process_info(
                 info,
                 group_name=_group_name(name, info),
-                B_unique=B_unique,
-                bin_idx=bin_idx,
                 sample_weight=sample_weight,
-                exposure_agg=exposure_agg,
                 lambda2=lambda2,
+                binned=binned,
                 eigenbasis_turn=eigenbasis_turn,
                 term_coordinates=term_coordinates
                 and all(
@@ -542,8 +551,7 @@ def compile_predictor_design(
                         info,
                         name,
                         lambda2,
-                        B_unique,
-                        bin_idx,
+                        binned,
                         X.column_array(label),
                         sample_weight,
                         separation_response,
@@ -695,11 +703,7 @@ def compile_predictor_design(
         use_discrete_tensor, use_discrete_spline_cat, use_discrete_factor_smooth = binned_routes[
             iname
         ]
-        B_unique_inter = None
-        bin_idx_inter = None
-        exposure_agg_inter = None
-        tensor_build: DiscreteTensorBuildResult | None = None
-        tensor_id = tensor_ids.get(iname, -1)
+        binned: BinnedRows | None = None
         if use_discrete_factor_smooth:
             n_bins_factor_smooth = resolve_discrete_n_bins(p1, ispec, n_bins_config)
             result = ispec.build_discrete(
@@ -721,12 +725,16 @@ def compile_predictor_design(
                 precision_weight=sample_weight,
             )
             result = tensor_build.infos
-            B_unique_inter = tensor_build.B_joint
-            bin_idx_inter = tensor_build.pair_idx
-            exposure_agg_inter = np.bincount(
-                bin_idx_inter,
-                weights=sample_weight,
-                minlength=B_unique_inter.shape[0],
+            binned = BinnedRows(
+                tensor_build.B_joint,
+                tensor_build.pair_idx,
+                np.bincount(
+                    tensor_build.pair_idx,
+                    weights=sample_weight,
+                    minlength=tensor_build.B_joint.shape[0],
+                ),
+                tensor=tensor_build,
+                tensor_id=tensor_ids[iname],
             )
         elif use_discrete_spline_cat:
             n_bins_spline = resolve_discrete_n_bins(p1, specs[p1], n_bins_config)
@@ -786,13 +794,9 @@ def compile_predictor_design(
                 records.append(("level_curve", iname, list(ispec._separated_ranges)))
 
         pi_kwargs: dict[str, Any] = dict(
-            B_unique=B_unique_inter,
-            bin_idx=bin_idx_inter,
             sample_weight=sample_weight,
-            exposure_agg=exposure_agg_inter,
             lambda2=lambda2,
-            tensor_build=tensor_build,
-            tensor_id=tensor_id,
+            binned=binned,
             eigenbasis_turn=eigenbasis_turn,
             term_coordinates=term_coordinates,
         )

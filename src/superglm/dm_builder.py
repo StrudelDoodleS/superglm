@@ -20,6 +20,7 @@ from superglm._frame import EagerFrame
 from superglm._group_matrix._binned_codes import carry_binned_codes, certify_binned_codes
 from superglm._group_matrix._level_partition import carry_level_support, certify_level_partitions
 from superglm._predictor_compiler import (
+    BinnedRows,
     CompiledPredictorDesign,
     compile_predictor_design,
 )
@@ -45,7 +46,6 @@ from superglm.links import Link, resolve_link
 from superglm.solvers._structured.selection import carry_nesting_cache
 from superglm.solvers.dispersion import PRIOR_WEIGHTS, validate_weight_semantics
 from superglm.types import (
-    DiscreteTensorBuildResult,
     FeatureSpec,
     GroupInfo,
     GroupSlice,
@@ -810,17 +810,223 @@ def _in_term_coordinates(info: GroupInfo) -> GroupInfo:
     )
 
 
+def _fixed_qp_lambdas(info: GroupInfo, group_name: str, lambda2: float | dict) -> float | dict:
+    """``lambda2``, or a fixed-lambda QP block's own policy values for its first whitening.
+
+    The fixed-lambda QP fits in this first basis without a REML rebuild.
+    Its nested null axes keep the weak component when weighting the
+    sum. Whiten at the actual weights so the active-set search does
+    not take its steps in coordinates graded by the lambda ratio.
+    """
+    policies = info.lambda_policies
+    if (
+        info.monotone_engine == "qp"
+        and policies
+        and all(policy.mode == "fixed" for policy in policies.values())
+    ):
+        return {f"{group_name}:{key}": policy.value for key, policy in policies.items()}
+    return lambda2
+
+
+def _whitening(info, group_name, lambda2, rows, weights, term_roots, in_term):
+    """``(R_inv, R_inv_local)`` of a block that whitens (``info.uses_ssp``) on ``rows``."""
+    P = info.projection
+    if P is None:
+        lam, omega = _applied_penalty(info, group_name, lambda2)
+        R_inv = compute_R_inv(rows, omega, weights, lam)
+        # No projection: constraints are in raw space, same as R_inv input.
+        return R_inv, R_inv
+    if in_term:
+        lambda2 = _fixed_qp_lambdas(info, group_name, lambda2)
+    lam, omega = _applied_penalty(info, group_name, lambda2)
+    penalty = _whitening_penalty(omega, term_roots, group_name, lambda2)
+    R_inv_local = compute_projected_R_inv(rows, P, penalty, weights, lam)
+    return P @ R_inv_local, R_inv_local
+
+
+def _block_transform(
+    info, group_name, sample_weight, lambda2, binned, in_term, term_roots, eigenbasis_turn
+):
+    """``(R_inv, R_inv_local)``: the block's map to solver coordinates, ``None`` for its own."""
+    if info.uses_ssp:
+        if binned is None:
+            return _whitening(
+                info, group_name, lambda2, info.columns, sample_weight, term_roots, in_term
+            )
+        return _whitening(
+            info, group_name, lambda2, binned.B_unique, binned.exposure_agg, term_roots, in_term
+        )
+    P = info.projection
+    if P is None:
+        return None, None
+    R_inv_local = None
+    if eigenbasis_turn:
+        # A binned main effect is read on its distinct rows and bin weights.
+        # A binned tensor has no columns and one penalty per margin, so the
+        # turn never applies to it.
+        main = binned is not None and binned.tensor is None
+        R_inv_local = _dominant_penalty_eigenbasis(
+            info,
+            binned.B_unique if main else info.columns,
+            binned.exposure_agg if main else sample_weight,
+            group_name,
+            lambda2,
+            # Declared roots turn the range in place. A tensor's fixed
+            # coordinates declare none and take the eigenbasis.
+            term_coordinates=term_roots is not None,
+        )
+    return (P if R_inv_local is None else P @ R_inv_local), R_inv_local
+
+
+def _storage_group(info, R_inv, binned, ssp_supports):
+    """The cheapest exact storage of a block's rows at ``R_inv`` (``None``: rows unmapped)."""
+    if binned is not None:
+        # A binned block without a projection holds its bins' rows unmapped.
+        R = np.eye(info.n_cols, dtype=np.float64) if R_inv is None else R_inv
+        tensor = binned.tensor
+        if tensor is None:
+            return DiscretizedSSPGroupMatrix(binned.B_unique, R, binned.bin_idx)
+        return DiscretizedTensorGroupMatrix(
+            tensor.B1_unique,
+            tensor.B2_unique,
+            tensor.idx1,
+            tensor.idx2,
+            binned.B_unique,
+            R,
+            binned.bin_idx,
+            tensor_id=binned.tensor_id,
+            raw_channels=tensor.raw_channels,
+        )
+    if info.row_support is None and not sp.issparse(info.columns):
+        return DenseGroupMatrix(info.columns if R_inv is None else info.columns @ R_inv)
+    if R_inv is not None or info.penalty_matrix is not None or info.penalty_components is not None:
+        R = np.eye(info.n_cols, dtype=np.float64) if R_inv is None else R_inv
+        return _build_ssp_group(info.columns, R, ssp_supports, info.row_support)
+    # Only a tensor leaves its columns to its row support, and a tensor block
+    # is penalised or projected: these are sparse.
+    assert info.columns is not None
+    if info.supports_row_compression:
+        return _build_unpenalized_sparse_group(info.columns, info.n_cols)
+    # cast, not a runtime check: the checker cannot narrow by sp.issparse above.
+    return SparseGroupMatrix(cast(sp.spmatrix, info.columns))
+
+
+def _coded_group(info: GroupInfo) -> GroupMatrix:
+    """A block held by its level codes: a factor smooth, a random effect or a categorical."""
+    if info.structured_kind == "factor_smooth":
+        factor_basis = (
+            info.factor_smooth_basis_unique
+            if info.factor_smooth_basis_unique is not None
+            else info.factor_smooth_basis
+        )
+        return FactorSmoothGroupMatrix(
+            factor_basis,
+            info.factor_smooth_codes,
+            info.factor_smooth_n_levels,
+            natural_map=info.factor_smooth_transform,
+            levels=info.factor_smooth_levels,
+            repeated_penalty_components=info.repeated_penalty_components,
+            factor_basis=info.factor_smooth_factor_basis,
+            lambda_policies=info.lambda_policies,
+            bin_idx=info.factor_smooth_bin_idx,
+        )
+    if info.structured_kind == "random_effect":
+        return RandomEffectGroupMatrix(
+            info.cat_codes,
+            info.n_cols,
+            lambda_policies=info.lambda_policies,
+            nested_in=info.random_effect_nested_in,
+        )
+    return CategoricalGroupMatrix(info.cat_codes, info.n_cols)
+
+
+def _spline_by_level_group(info, group_name, sample_weight, lambda2, in_term, term_roots):
+    """``(group, R_inv, R_inv_local)`` of one level of a spline-by-category term.
+
+    The level is held on its own rows, or on their distinct support when the
+    term found one (``spline_cat_basis_unique``).
+    """
+    mask = np.asarray(info.spline_cat_mask, dtype=bool)
+    row_idx = np.flatnonzero(mask)
+    support = info.spline_cat_basis_unique is not None and info.spline_cat_bin_idx is not None
+    if support:
+        rows: sp.spmatrix | NDArray = np.asarray(info.spline_cat_basis_unique, dtype=np.float64)
+        bin_idx_level = np.asarray(info.spline_cat_bin_idx, dtype=np.intp)
+        if not info.spline_cat_bin_idx_is_level:
+            bin_idx_level = bin_idx_level[row_idx]
+        weights = np.bincount(
+            bin_idx_level, weights=sample_weight[row_idx], minlength=rows.shape[0]
+        )
+    else:
+        rows = sp.csr_matrix(info.spline_cat_basis)[row_idx]
+        weights = sample_weight[row_idx]
+    if info.uses_ssp:
+        R_inv, R_inv_local = _whitening(
+            info, group_name, lambda2, rows, weights, term_roots, in_term
+        )
+    else:
+        R_inv = (
+            np.eye(info.n_cols, dtype=np.float64) if info.projection is None else info.projection
+        )
+        R_inv_local = None
+    if not support:
+        gm = SplineCategoricalGroupMatrix._from_level_rows(rows, R_inv, row_idx, len(mask))
+    else:
+        # Same storage, different contract: the lossless support indexes
+        # exact distinct rows, so the class must not claim the binned route.
+        level_cls = (
+            SupportCompressedSplineCategoricalGroupMatrix
+            if info.spline_cat_support_lossless
+            else DiscretizedSplineCategoricalGroupMatrix
+        )
+        if info.spline_cat_bin_idx_is_level:
+            gm = level_cls(
+                rows, R_inv, bin_idx_level, row_idx, n_rows=len(mask), bin_idx_is_level=True
+            )
+        else:
+            gm = level_cls(rows, R_inv, info.spline_cat_bin_idx, row_idx)
+    gm.spline_cat_level = info.spline_cat_level
+    gm.spline_cat_feature = info.spline_cat_feature
+    return gm, R_inv, R_inv_local
+
+
+def _attach_penalty(gm, info: GroupInfo, in_term: bool, *, components: bool = True) -> None:
+    """Hold the block's penalty on its group, in the coordinates the group's columns span.
+
+    A projected block outside term coordinates states it on the raw basis, ``P omega P'``.
+    """
+    P = None if in_term else info.projection
+    if info.penalty_matrix is not None and hasattr(gm, "omega"):
+        gm.omega = info.penalty_matrix if P is None else P @ info.penalty_matrix @ P.T
+    if components and info.penalty_components is not None and hasattr(gm, "omega_components"):
+        gm.omega_components = (
+            info.penalty_components
+            if P is None
+            else [(suffix, P @ omega_j @ P.T) for suffix, omega_j in info.penalty_components]
+        )
+        gm.component_types = info.component_types
+        if info.lambda_policies is not None:
+            gm.lambda_policies = info.lambda_policies
+
+
+def _attach_coordinates(gm, info: GroupInfo, in_term: bool, R_inv_local, term_roots, n_cols):
+    """Hold a projected block's projection, and in term coordinates its term-to-solver map."""
+    if info.projection is None:
+        return
+    if hasattr(gm, "projection"):
+        gm.projection = info.projection
+    if in_term:
+        gm.R_inv_local = np.eye(n_cols) if R_inv_local is None else R_inv_local
+        gm.term_roots = term_roots
+
+
 def _process_info(
     info: GroupInfo,
     *,
     group_name: str,
-    B_unique: NDArray | None = None,
-    bin_idx: NDArray | None = None,
     sample_weight: NDArray,
-    exposure_agg: NDArray | None = None,
     lambda2: float | dict,
-    tensor_build: DiscreteTensorBuildResult | None = None,
-    tensor_id: int = -1,
+    binned: BinnedRows | None = None,
     ssp_supports: dict | None = None,
     eigenbasis_turn: bool = True,
     term_coordinates: bool = False,
@@ -828,7 +1034,8 @@ def _process_info(
     """Compute R_inv and construct a GroupMatrix from a single GroupInfo.
 
     Returns the group, its block of the combined R_inv (None without a
-    reparametrization), and its width. Subgroups share row support via ``ssp_supports``.
+    reparametrization), and its width. ``binned`` holds a binned block's
+    distinct rows. Subgroups share row support via ``ssp_supports``.
     ``eigenbasis_turn=False`` keeps a raw block in its declared coordinates.
     ``group_name`` is the block's group, which a ``lambda2`` mapping keys.
 
@@ -836,8 +1043,6 @@ def _process_info(
     coordinates beside ``R_inv_local``. Lifting and re-projecting would round
     onto the null space. Consumers read the map via ``penalty_coordinate_map``.
     """
-    use_discrete = B_unique is not None
-    use_tensor = tensor_build is not None
     if isinstance(info.columns, np.ndarray) and (
         info.penalty_matrix is not None or info.penalty_components is not None
     ):
@@ -857,298 +1062,33 @@ def _process_info(
                 strict=True,
             )
         )
-    R_inv: NDArray | None = None
     # R_inv_local: SSP transform in post-identifiability space (projected -> solver).
     # Used to compose constraints that are already in post-identifiability space.
-    R_inv_local: NDArray | None = None
-    is_spline_cat = info.spline_cat_mask is not None and (
+    if info.spline_cat_mask is not None and (
         info.spline_cat_basis is not None
         or (info.spline_cat_basis_unique is not None and info.spline_cat_bin_idx is not None)
-    )
-
-    if is_spline_cat:
-        mask = np.asarray(info.spline_cat_mask, dtype=bool)
-        row_idx = np.flatnonzero(mask)
-        if info.spline_cat_basis_unique is not None and info.spline_cat_bin_idx is not None:
-            B_support: sp.spmatrix | NDArray = np.asarray(
-                info.spline_cat_basis_unique,
-                dtype=np.float64,
-            )
-            bin_idx_level = np.asarray(info.spline_cat_bin_idx, dtype=np.intp)
-            if not info.spline_cat_bin_idx_is_level:
-                bin_idx_level = bin_idx_level[row_idx]
-            level_weight = np.bincount(
-                bin_idx_level,
-                weights=sample_weight[row_idx],
-                minlength=B_support.shape[0],
-            )
-            B_for: sp.spmatrix | NDArray = B_support
-            use_discrete_spline_cat = True
-        else:
-            B_full = sp.csr_matrix(info.spline_cat_basis)
-            B_level = B_full[row_idx]
-            B_for = B_level
-            level_weight = sample_weight[row_idx]
-            use_discrete_spline_cat = False
-        if info.projection is not None:
-            P = info.projection
-            if info.uses_ssp:
-                lam, omega = _applied_penalty(info, group_name, lambda2)
-                penalty = _whitening_penalty(omega, term_roots, group_name, lambda2)
-                R_inv_local = compute_projected_R_inv(B_for, P, penalty, level_weight, lam)
-                R_inv = P @ R_inv_local
-            else:
-                R_inv = P
-                R_inv_local = None
-            omega_full = (
-                info.penalty_matrix
-                if in_term
-                else (P @ info.penalty_matrix @ P.T if info.penalty_matrix is not None else None)
-            )
-        elif info.uses_ssp:
-            lam, omega = _applied_penalty(info, group_name, lambda2)
-            R_inv = compute_R_inv(B_for, omega, level_weight, lam)
-            R_inv_local = R_inv
-            omega_full = info.penalty_matrix
-        else:
-            R_inv = np.eye(info.n_cols, dtype=np.float64)
-            R_inv_local = None
-            omega_full = info.penalty_matrix
-
-        n_cols = R_inv.shape[1]
-        if use_discrete_spline_cat:
-            # Same storage, different contract: the lossless support indexes
-            # exact distinct rows, so the class must not claim the binned route.
-            spline_cat_cls = (
-                SupportCompressedSplineCategoricalGroupMatrix
-                if info.spline_cat_support_lossless
-                else DiscretizedSplineCategoricalGroupMatrix
-            )
-            if info.spline_cat_bin_idx_is_level:
-                gm = spline_cat_cls(
-                    B_support,
-                    R_inv,
-                    bin_idx_level,
-                    row_idx,
-                    n_rows=len(mask),
-                    bin_idx_is_level=True,
-                )
-            else:
-                gm = spline_cat_cls(
-                    B_support,
-                    R_inv,
-                    info.spline_cat_bin_idx,
-                    row_idx,
-                )
-        else:
-            gm = SplineCategoricalGroupMatrix._from_level_rows(B_level, R_inv, row_idx, len(mask))
-        gm.spline_cat_level = info.spline_cat_level
-        gm.spline_cat_feature = info.spline_cat_feature
-        if omega_full is not None:
-            gm.omega = omega_full
-        if info.projection is not None:
-            gm.projection = info.projection
-            if in_term:
-                gm.R_inv_local = np.eye(n_cols) if R_inv_local is None else R_inv_local
-                gm.term_roots = term_roots
-
-    elif info.projection is not None:
-        P = info.projection
-        if info.uses_ssp:
-            B_for = B_unique if use_discrete else info.columns
-            exp_for = exposure_agg if use_discrete else sample_weight
-            # The fixed-lambda QP fits in this first basis without a REML rebuild.
-            # Its nested null axes keep the weak component when weighting the
-            # sum. Whiten at the actual weights so the active-set search does
-            # not take its steps in coordinates graded by the lambda ratio.
-            policies = info.lambda_policies
-            if (
-                in_term
-                and info.monotone_engine == "qp"
-                and policies
-                and all(policy.mode == "fixed" for policy in policies.values())
-            ):
-                lambda2 = {f"{group_name}:{key}": policy.value for key, policy in policies.items()}
-            lam, omega = _applied_penalty(info, group_name, lambda2)
-            penalty = _whitening_penalty(omega, term_roots, group_name, lambda2)
-            R_inv_local = compute_projected_R_inv(B_for, P, penalty, exp_for, lam)
-            R_inv = P @ R_inv_local
-        else:
-            # A binned main effect is read on its distinct rows and bin weights.
-            # A binned tensor has no columns and one penalty per margin, so the
-            # turn never applies to it.
-            binned = use_discrete and not use_tensor
-            R_inv_local = (
-                _dominant_penalty_eigenbasis(
-                    info,
-                    B_unique if binned else info.columns,
-                    exposure_agg if binned else sample_weight,
-                    group_name,
-                    lambda2,
-                    # Declared roots turn the range in place. A tensor's fixed
-                    # coordinates declare none and take the eigenbasis.
-                    term_coordinates=term_roots is not None,
-                )
-                if eigenbasis_turn
-                else None
-            )
-            R_inv = P if R_inv_local is None else P @ R_inv_local
-        n_cols = R_inv.shape[1]
-        if in_term:
-            omega_full, omega_parts = info.penalty_matrix, info.penalty_components
-        else:
-            omega_full = P @ info.penalty_matrix @ P.T if info.penalty_matrix is not None else None
-            omega_parts = (
-                None
-                if info.penalty_components is None
-                else [(suffix, P @ omega_j @ P.T) for suffix, omega_j in info.penalty_components]
-            )
-        if use_tensor:
-            gm: GroupMatrix = DiscretizedTensorGroupMatrix(
-                tensor_build.B1_unique,
-                tensor_build.B2_unique,
-                tensor_build.idx1,
-                tensor_build.idx2,
-                B_unique,
-                R_inv,
-                bin_idx,
-                tensor_id=tensor_id,
-                raw_channels=tensor_build.raw_channels,
-            )
-        elif use_discrete:
-            gm = DiscretizedSSPGroupMatrix(B_unique, R_inv, bin_idx)
-        elif info.row_support is not None or sp.issparse(info.columns):
-            gm = _build_ssp_group(info.columns, R_inv, ssp_supports, info.row_support)
-        else:
-            gm = DenseGroupMatrix(info.columns @ R_inv)
-        if omega_full is not None and hasattr(gm, "omega"):
-            gm.omega = omega_full
-        if hasattr(gm, "projection"):
-            gm.projection = P
-        if in_term:
-            gm.R_inv_local = np.eye(n_cols) if R_inv_local is None else R_inv_local
-            cast(SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix, gm).term_roots = term_roots
-        if omega_parts is not None and hasattr(gm, "omega_components"):
-            gm.omega_components = omega_parts
-            gm.component_types = info.component_types
-            if info.lambda_policies is not None:
-                gm.lambda_policies = info.lambda_policies
-
-    elif info.uses_ssp:
-        B_for = B_unique if use_discrete else info.columns
-        exp_for = exposure_agg if use_discrete else sample_weight
-        lam, omega = _applied_penalty(info, group_name, lambda2)
-        R_inv = compute_R_inv(B_for, omega, exp_for, lam)
-        # No projection — constraints are in raw space, same as R_inv input
-        R_inv_local = R_inv
-        n_cols = R_inv.shape[1]
-        if use_tensor:
-            gm = DiscretizedTensorGroupMatrix(
-                tensor_build.B1_unique,
-                tensor_build.B2_unique,
-                tensor_build.idx1,
-                tensor_build.idx2,
-                B_unique,
-                R_inv,
-                bin_idx,
-                tensor_id=tensor_id,
-                raw_channels=tensor_build.raw_channels,
-            )
-            gm.omega = info.penalty_matrix
-        elif use_discrete:
-            gm = DiscretizedSSPGroupMatrix(B_unique, R_inv, bin_idx)
-            gm.omega = info.penalty_matrix
-        elif info.row_support is not None or sp.issparse(info.columns):
-            gm = _build_ssp_group(info.columns, R_inv, ssp_supports, info.row_support)
-            gm.omega = info.penalty_matrix
-        else:
-            gm = DenseGroupMatrix(info.columns @ R_inv)
-        if info.penalty_components is not None and hasattr(gm, "omega_components"):
-            gm.omega_components = info.penalty_components
-            gm.component_types = info.component_types
-            if info.lambda_policies is not None:
-                gm.lambda_policies = info.lambda_policies
-
+    ):
+        gm, R_inv, R_inv_local = _spline_by_level_group(
+            info, group_name, sample_weight, lambda2, in_term, term_roots
+        )
+        _attach_penalty(gm, info, in_term, components=False)
+    elif (
+        binned is None
+        and info.projection is None
+        and not info.uses_ssp
+        and (
+            info.structured_kind in ("factor_smooth", "random_effect") or info.cat_codes is not None
+        )
+    ):
+        gm, R_inv, R_inv_local = _coded_group(info), None, None
     else:
-        n_cols = info.n_cols
-        R_inv = None
-        if use_discrete:
-            # A binned block without a projection holds its bins' rows unmapped.
-            identity = np.eye(info.n_cols, dtype=np.float64)
-            if use_tensor:
-                gm = DiscretizedTensorGroupMatrix(
-                    tensor_build.B1_unique,
-                    tensor_build.B2_unique,
-                    tensor_build.idx1,
-                    tensor_build.idx2,
-                    B_unique,
-                    identity,
-                    bin_idx,
-                    tensor_id=tensor_id,
-                    raw_channels=tensor_build.raw_channels,
-                )
-            else:
-                gm = DiscretizedSSPGroupMatrix(B_unique, identity, bin_idx)
-            if info.penalty_matrix is not None:
-                gm.omega = info.penalty_matrix
-            if info.penalty_components is not None:
-                gm.omega_components = info.penalty_components
-                gm.component_types = info.component_types
-                if info.lambda_policies is not None:
-                    gm.lambda_policies = info.lambda_policies
-        elif info.structured_kind == "factor_smooth":
-            factor_basis = (
-                info.factor_smooth_basis_unique
-                if info.factor_smooth_basis_unique is not None
-                else info.factor_smooth_basis
-            )
-            gm = FactorSmoothGroupMatrix(
-                factor_basis,
-                info.factor_smooth_codes,
-                info.factor_smooth_n_levels,
-                natural_map=info.factor_smooth_transform,
-                levels=info.factor_smooth_levels,
-                repeated_penalty_components=info.repeated_penalty_components,
-                factor_basis=info.factor_smooth_factor_basis,
-                lambda_policies=info.lambda_policies,
-                bin_idx=info.factor_smooth_bin_idx,
-            )
-        elif info.structured_kind == "random_effect":
-            gm = RandomEffectGroupMatrix(
-                info.cat_codes,
-                info.n_cols,
-                lambda_policies=info.lambda_policies,
-                nested_in=info.random_effect_nested_in,
-            )
-        elif info.cat_codes is not None:
-            gm = CategoricalGroupMatrix(info.cat_codes, info.n_cols)
-        elif info.row_support is not None or sp.issparse(info.columns):
-            if info.penalty_matrix is not None or info.penalty_components is not None:
-                gm = _build_ssp_group(
-                    info.columns,
-                    np.eye(info.n_cols, dtype=np.float64),
-                    ssp_supports,
-                    info.row_support,
-                )
-                if info.penalty_matrix is not None:
-                    gm.omega = info.penalty_matrix
-                if info.penalty_components is not None:
-                    gm.omega_components = info.penalty_components
-                    gm.component_types = info.component_types
-                    if info.lambda_policies is not None:
-                        gm.lambda_policies = info.lambda_policies
-            else:
-                # Only a tensor leaves its columns to its row support, and a
-                # tensor block is penalised or projected: these are sparse.
-                assert info.columns is not None
-                if info.supports_row_compression:
-                    gm = _build_unpenalized_sparse_group(info.columns, info.n_cols)
-                else:
-                    # cast, not a runtime check: the checker cannot narrow by
-                    # the enclosing branch condition, sp.issparse(info.columns).
-                    gm = SparseGroupMatrix(cast(sp.spmatrix, info.columns))
-        else:
-            gm = DenseGroupMatrix(info.columns)
+        R_inv, R_inv_local = _block_transform(
+            info, group_name, sample_weight, lambda2, binned, in_term, term_roots, eigenbasis_turn
+        )
+        gm = _storage_group(info, R_inv, binned, ssp_supports)
+        _attach_penalty(gm, info, in_term)
+    n_cols = info.n_cols if R_inv is None else R_inv.shape[1]
+    _attach_coordinates(gm, info, in_term, R_inv_local, term_roots, n_cols)
 
     if info.penalty_in_term_coordinates and isinstance(
         gm, (SparseSSPGroupMatrix, DiscretizedSSPGroupMatrix)
