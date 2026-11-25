@@ -34,7 +34,7 @@ from superglm import NegativeBinomialLS, SuperLSS, cat, interaction, re, s, term
 from superglm.distributional import GaussianLS
 from superglm.distributional.smoothing.penalty_face import build_penalty_face
 from superglm.distributional.solver.packing import packed_pairs
-from superglm.features import Numeric
+from superglm.features import CubicRegressionSpline, Numeric
 from superglm.features.interaction import SplineCategorical
 
 from ._traced_memory import own_traced_peak
@@ -1414,6 +1414,11 @@ def test_a_power_of_two_rescaled_design_reaches_the_same_certified_rank(terminal
     assert calls == [1, 1]
 
 
+class _DataCoordinateSpline(CubicRegressionSpline):
+    """A subclass states no penalty null coordinates, so its block keeps the data's coordinates."""
+
+
+@pytest.mark.pins_behaviour
 def test_a_row_decided_fit_keeps_the_stable_saturated_smoothing_step(terminal):
     """A near pair decided from the rows does not stop a saturated spline's smoothing at its start.
 
@@ -1425,6 +1430,13 @@ def test_a_row_decided_fit_keeps_the_stable_saturated_smoothing_step(terminal):
     declining the stable form whenever the rank was decided from the rows
     reports convergence at the starting smoothing parameter, with no
     smoothing iteration (sol-review, round 8).
+
+    The spline keeps the data's coordinates (``_DataCoordinateSpline``, the
+    ``cr`` spline of ``k = 5``), where the saturated penalty's rounding widens
+    the band to the near pair. Held in its penalty's null coordinates,
+    superglm's own spline reaches ``max_lambda`` in three steps and leaves the
+    fit on its straight line, with no penalty left to widen the band: the pair
+    is then decided without the rows.
     """
     rng = np.random.default_rng(3)
     u = np.repeat(rng.uniform(-1, 1, 256), 4)
@@ -1434,7 +1446,9 @@ def test_a_row_decided_fit_keeps_the_stable_saturated_smoothing_step(terminal):
     family = GaussianLS(scale_floor=0)
     model = SuperLSS(
         family,
-        family.location(s("u", kind="cr", k=5), term("x", Numeric()), term("z", Numeric())),
+        family.location(
+            term("u", _DataCoordinateSpline(n_knots=3)), term("x", Numeric()), term("z", Numeric())
+        ),
         family.scale(),
         discrete=False,
     )

@@ -82,6 +82,18 @@ lower piece, lowers V to -1.406637 in two accepted steps and stops
 ``objective_rejected``; it does not climb to -1.3906. Every other entry,
 including the other seven ``+newton`` cases, reproduced within the record's
 tolerances (coefficients to 2.4e-14).
+
+Restated 2026-11-24, when a spline's block moved to coordinates that hold its
+penalty's null space exactly (#659). The coefficient vector is in the solver's
+coordinates, which that change rotates (by 0.42 to 0.46 on these cases), so the
+record now holds each parameter's linear predictor on every 30th row instead,
+which no choice of coordinates moves. The predictors were recorded on the fits
+that reproduce the previous record's coefficients (to 2.4e-11), and nothing
+else in the record changed. Against those fits the rotated ones reproduce the
+predictors to 5.1e-11 on all 900 rows, their standard errors to 2.7e-10, the
+objectives to 9.1e-12 and the unsaturated lambdas to 7.8e-12 in log, with every
+convergence reason and iteration count the same. The covariance trace and
+Frobenius norm stay: the rotation is orthogonal, and they reproduced to 3.5e-11.
 """
 
 from __future__ import annotations
@@ -213,13 +225,17 @@ def _cases():
     }, frame
 
 
-def _record(model: SuperLSS) -> dict[str, object]:
+# The rows whose linear predictors the record holds: 30 of the frame's 900.
+_LINK_ROWS = slice(None, None, 30)
+
+
+def _record(model: SuperLSS, frame: pd.DataFrame) -> dict[str, object]:
     fitted = model._require_fitted()
-    coef = np.array(list(model.coef_.values()), dtype=np.float64)
+    link = model.predict_link(frame.iloc[_LINK_ROWS]).to_numpy(dtype=np.float64)
     covariance = np.asarray(model.covariance_, dtype=np.float64)
     smoothing = fitted.smoothing
     payload: dict[str, object] = {
-        "coefficients": [float(value) for value in coef],
+        "link": [float(value) for value in link.ravel()],
         "covariance_trace": float(np.trace(covariance)),
         "covariance_frobenius": float(np.linalg.norm(covariance)),
     }
@@ -284,14 +300,12 @@ def _drifting(model: SuperLSS) -> dict[str, float]:
 
 def _assert_close(name: str, computed: dict[str, object], recorded: dict[str, object]) -> None:
     assert set(computed) == set(recorded), f"{name}: recorded fields differ"
-    # Scale near-zero coefficients like the rest instead of imposing a tighter floor.
-    computed_coefficients = np.asarray(computed["coefficients"])
-    recorded_coefficients = np.asarray(recorded["coefficients"])
-    coefficient_error = np.max(
-        np.abs(computed_coefficients - recorded_coefficients)
-        / (1.0 + np.abs(recorded_coefficients))
-    )
-    assert coefficient_error <= 1e-8, f"{name}: coefficients moved ({coefficient_error=:.3g})"
+    # Scale near-zero predictors like the rest instead of imposing a tighter floor.
+    computed_link = np.asarray(computed["link"])
+    recorded_link = np.asarray(recorded["link"])
+    assert computed_link.shape == recorded_link.shape, f"{name}: recorded rows differ"
+    link_error = np.max(np.abs(computed_link - recorded_link) / (1.0 + np.abs(recorded_link)))
+    assert link_error <= 1e-8, f"{name}: linear predictors moved ({link_error=:.3g})"
     for field in ("covariance_trace", "covariance_frobenius"):
         assert abs(computed[field] - recorded[field]) <= 1e-8 * abs(recorded[field]), (
             f"{name}: {field} moved"
@@ -369,18 +383,18 @@ def _compute() -> dict[str, dict[str, object]]:
         fixed = model_from_templates(family=family, predictors=predictors).fit(
             frame, y, lambdas={key: 1.0 * per_knot[key] for key in _wiggle_names(predictors)}
         )
-        out[f"{name}:fixed"] = _record(fixed)
+        out[f"{name}:fixed"] = _record(fixed, frame)
         # The record predates automatic initialization. Keep its numerical
         # configuration fixed; default-start behavior has its own regressions.
         starts = {key: 0.1 * value for key, value in per_knot.items()}
         reml = model_from_templates(family=family, predictors=predictors).fit_reml(
             frame, y, outer="efs", initial_lambda=0.1, lambdas=starts
         )
-        out[f"{name}:reml"] = _in_recorded_units(_record(reml), per_knot)
+        out[f"{name}:reml"] = _in_recorded_units(_record(reml, frame), per_knot)
         newton = model_from_templates(family=family, predictors=predictors).fit_reml(
             frame, y, outer="efs+newton", initial_lambda=0.1, lambdas=starts
         )
-        out[f"{name}:reml+newton"] = _in_recorded_units(_record(newton), per_knot)
+        out[f"{name}:reml+newton"] = _in_recorded_units(_record(newton, frame), per_knot)
     return out
 
 

@@ -16,11 +16,12 @@ not place a suppressed term's lambda to the comparison's 1e-6: ``VehAge:VehBrand
 7.1e4 with its score under 1e-4 (#604), at 1.5e8 under ``reml_tol=1e-12``, and stopped at 488
 while a score of ``1e-7 (1 + |V|)`` = 0.018 was held, where one of its variances was 25% larger.
 A change to where the search stops rebuilds the fixture at the new stop (mgcv on the exported
-design and penalties); it does not loosen the comparison.  The main splines now hold their exact
-null space in their own coordinates, so the solver-to-B-spline maps of the coordinates mgcv
-fitted, at the fixture's lambdas, accompany it (``mgcv_gamma_severity_spline_maps.json``), and
-the refit is compared in those coordinates.  Anchored to the freMTPL2 book: it skips without
-both parquet files and fails under ``SUPERGLM_REQUIRE_DATA=1``.
+design and penalties); it does not loosen the comparison.  The main splines and the
+interactions now hold their exact null spaces in their own coordinates, so the
+solver-to-B-spline maps of the coordinates mgcv fitted, at the fixture's lambdas, accompany it
+(``mgcv_gamma_severity_spline_maps.json`` and ``mgcv_gamma_severity_interaction_maps.npz``),
+and the refit is compared in those coordinates.  Anchored to the freMTPL2 book: it skips
+without both parquet files and fails under ``SUPERGLM_REQUIRE_DATA=1``.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ import numpy as np
 import pytest
 
 from . import _datasets
-from .test_penalized_standard_errors import dense_raw_standard_errors
+from .test_penalized_standard_errors import dense_raw_standard_errors, fixture_contrasts
 
 _FREQ_SKIP_REASON = _datasets.skip_reason("freMTPL2freq.parquet")
 _SEV_SKIP_REASON = _datasets.skip_reason("freMTPL2sev.parquet")
@@ -65,17 +66,18 @@ def test_every_severity_book_coefficient_has_mgcvs_bayesian_standard_error() -> 
     """All 614 standard errors are printed and are mgcv's ``Vp`` ones.
 
     ``SE^2 / phi`` against mgcv's ``Vp / phi`` at the fixture's stated tolerance, 1e-6
-    (measured 1.2e-7 under the SkylakeX and Haswell OpenBLAS kernels, whose REML stop differs
-    from the fixture's by 1.2e-9 in ``VehAge:VehBrand[B14]``'s lambda; the tree that built the
-    fixture reproduced it to 5.0e-12; both engines stop PIRLS at a tolerance, so it is set 100
-    times looser than the coefficients' 2.4e-9); the coefficients to 1e-6 of the largest and
-    the EDF to 1e-8.  The raw standard errors are also the dense inverse's of
-    ``[1 X]' W [1 X] + S`` built from the design and penalty (``kappa u`` about 1e-11; rtol
-    1e-9).  On master 398 coefficients and the 10 ``VehBrand`` rows were blank
+    (measured 1.0e-7 under the SkylakeX and Haswell OpenBLAS kernels, whose REML stop differs
+    from the fixture's by 1.0e-7 in ``BonusMalus:VehBrand[B11]``'s lambda; the tree that built
+    the fixture reproduced it to 5.0e-12; both engines stop PIRLS at a tolerance, so it is set
+    100 times looser than the coefficients' 6.1e-9); the coefficients to 1e-6 of the largest
+    and the EDF to 1e-8 (measured 3.6e-9).  The raw standard errors are also the dense
+    inverse's of ``[1 X]' W [1 X] + S`` built from the design and penalty (``kappa u`` about
+    1e-11; rtol 1e-9).  On master 398 coefficients and the 10 ``VehBrand`` rows were blank
     before #681.  A rotation changes a spline coefficient's own SE; its original linear
-    contrast and variance are invariant, so the main splines are compared after mapping to
-    the fixture's coordinates.  The maps belong to the fixture's lambdas: those of master's
-    earlier stop leave the main splines' ``SE^2`` 1.1e-4 from mgcv's.
+    contrast and variance are invariant, so the main splines and the interactions are
+    compared after mapping to the fixture's coordinates.  The maps belong to the fixture's
+    lambdas, and come from the refit the fixture was built from: those of master's earlier
+    stop leave the main splines' ``SE^2`` 1.1e-4 from mgcv's and an interaction's 0.99.
     """
     fixture = json.loads(_FIXTURE.read_text(encoding="utf-8"))
     books = _books()
@@ -99,19 +101,10 @@ def test_every_severity_book_coefficient_has_mgcvs_bayesian_standard_error() -> 
     assert not np.any(np.isnan(se)), f"{int(np.isnan(se).sum())} standard errors blank"
     phi = model.result.phi
     vp = np.asarray(fixture["mgcv_se_vp"]) ** 2 / fixture["phi"]
-    observed_vp = se**2 / phi
-    beta = np.r_[model.result.intercept, model.result.beta]
     maps = json.loads((_FIXTURE.parent / "mgcv_gamma_severity_spline_maps.json").read_text("utf-8"))
-    for g, gm in zip(model._groups, model._dm.group_matrices, strict=True):
-        if g.name in maps:
-            original = np.asarray(maps[g.name])
-            to_original = np.linalg.lstsq(original, gm.R_inv, rcond=None)[0]
-            np.testing.assert_allclose(original @ to_original, gm.R_inv, rtol=1e-10, atol=1e-12)
-            sl = slice(1 + g.start, 1 + g.end)
-            cov = metrics._active_info[3][sl, sl]
-            np.testing.assert_allclose(observed_vp[sl], np.diag(cov), rtol=1e-9)
-            observed_vp[sl] = np.diag(to_original @ cov @ to_original.T)
-            beta[sl] = to_original @ beta[sl]
+    with np.load(_FIXTURE.parent / "mgcv_gamma_severity_interaction_maps.npz") as interactions:
+        maps.update(interactions)
+    beta, observed_vp = fixture_contrasts(model, metrics, se, maps)
     np.testing.assert_allclose(observed_vp, vp, rtol=fixture["tolerances"]["se_relative"])
     raw = np.concatenate([np.atleast_1d(metrics.coefficient_se_raw[g.name]) for g in model._groups])
     np.testing.assert_allclose(raw, dense_raw_standard_errors(model, X), rtol=1e-9)

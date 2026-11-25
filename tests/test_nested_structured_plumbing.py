@@ -738,15 +738,16 @@ def _indicator_case(n: int = 3000, leaves: int = 400) -> tuple[DesignMatrix, lis
     return DesignMatrix(matrices, n=n, p=start), groups
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("chunk_size", [7, 64, 3000])
 def test_sparse_indicator_blocks_give_the_dense_pass_statistics(chunk_size) -> None:
     """Random-effect border blocks skip their exact zeros and match the dense pass.
 
     The sparse route (every random-effect block, by type, one of them with a
-    level on most rows) forms each row's centred entries only on its leaf's
-    levels; every other entry is an exact zero of the dense pass.  Both passes
-    therefore sum the same nonzero terms, in another order, so each is within
-    the cut-leaf test's ``gamma`` of the exact statistic and they differ by
+    level on most rows) sums each leaf's rows by the level they take, on the
+    leaf's levels only; every other entry is an exact zero of the dense pass.
+    Both passes therefore sum the same nonzero terms, grouped differently, so
+    each is within the cut-leaf test's ``gamma`` of the exact statistic and they differ by
     twice that, on non-negative weights, on weights with rounding-negative
     rows and for a signed pass about the data means.  The nested-in random
     effect is constant within leaves: its means are exact and its scatter rows
@@ -806,6 +807,7 @@ def test_sparse_indicator_blocks_give_the_dense_pass_statistics(chunk_size) -> N
             np.testing.assert_array_equal(sparse.deviation[:, nested], 0.0)
 
 
+@pytest.mark.pins_behaviour
 def test_the_sparse_indicator_pass_never_materializes_its_blocks() -> None:
     """A 512-level crossed block with two levels per leaf: the pass stays below one dense chunk.
 
@@ -813,7 +815,7 @@ def test_the_sparse_indicator_pass_never_materializes_its_blocks() -> None:
     holds the ``(K, q)`` means (in its own column order and the layout's), a
     few ``q x q`` products (the scatter, its compensation, the chunk's product
     and indicator block, the compensated addition's temporaries) and its
-    row-level arrays with two entries a row.  The budget allows three of the
+    row-level arrays with one entry a row.  The budget allows three of the
     first, eight of the second and 32 floats a chunk row; one dense chunk is
     more than all of that.
     """

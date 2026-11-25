@@ -39,6 +39,7 @@ from superglm import (
     Spline,
     SuperGLM,
 )
+from superglm.features.interaction import TensorInteraction
 from superglm.model.fit_state import fitted_lambda2
 from superglm.reml.penalty_algebra import build_penalty_matrix
 
@@ -105,6 +106,34 @@ def undetermined_slopes(A: np.ndarray) -> np.ndarray:
 def data_undetermined(model, frame) -> np.ndarray:
     """``undetermined_slopes`` of the fit's own rows at its fitted weights."""
     return undetermined_slopes(np.sqrt(_working_weights(model, frame))[:, None] * _design(model))
+
+
+def fixture_contrasts(model, metrics, se, original_maps):
+    """Express fitted coefficients and marginal variances in mgcv's recorded coordinates.
+
+    The fixture maps are the solver-to-raw-basis maps of these models in the coordinates
+    mgcv fitted: on daf11a862, and for the severity book on the refit its fixture was built from.
+    A level curve's R_inv already includes its spline projection. A tensor's
+    R_inv starts in centred marginal coordinates, so prepend both projections.
+    """
+    beta = np.r_[model.result.intercept, model.result.beta]
+    variances = se**2 / model.result.phi
+    for g, gm in zip(model._groups, model._dm.group_matrices, strict=True):
+        if g.name not in original_maps:
+            continue
+        current = gm.R_inv
+        tensor = model._interaction_specs.get(g.feature_name)
+        if isinstance(tensor, TensorInteraction):
+            current = np.kron(tensor._marginal1.projection, tensor._marginal2.projection) @ current
+        original = original_maps[g.name]
+        to_original = np.linalg.lstsq(original, current, rcond=None)[0]
+        np.testing.assert_allclose(original @ to_original, current, rtol=1e-10, atol=1e-12)
+        sl = slice(1 + g.start, 1 + g.end)
+        covariance = metrics._active_info[3][sl, sl]
+        np.testing.assert_allclose(variances[sl], np.diag(covariance), rtol=1e-9)
+        variances[sl] = np.diag(to_original @ covariance @ to_original.T)
+        beta[sl] = to_original @ beta[sl]
+    return beta, variances
 
 
 def _flat(model, se: dict) -> np.ndarray:
@@ -443,6 +472,7 @@ def _recorded_separation(case: str):
 
 
 # -------------------------------------------------------------------- row A: the mgcv oracle
+@pytest.mark.pins_behaviour
 def test_a_thin_level_shows_mgcvs_bayesian_standard_errors():
     """A spline by a factor with a thin level: every SE is printed, and is mgcv's ``Vp``.
 
@@ -475,10 +505,10 @@ def test_a_thin_level_shows_mgcvs_bayesian_standard_errors():
         dense_raw_standard_errors(model, frame),
         rtol=1e-10,
     )
-    phi = model.result.phi
+    with np.load(FIXTURES / "mgcv_thin_level_spline_maps.npz") as maps:
+        beta, variances = fixture_contrasts(model, metrics, se, maps)
     vp = np.asarray(fixture["mgcv_se_vp"]) ** 2 / fixture["phi"]
-    np.testing.assert_allclose(se**2 / phi, vp, rtol=1e-6)
-    beta = np.r_[model.result.intercept, model.result.beta]
+    np.testing.assert_allclose(variances, vp, rtol=1e-6)
     mgcv = np.asarray(fixture["mgcv_coef"])
     assert np.max(np.abs(beta - mgcv)) <= 1e-6 * np.max(np.abs(mgcv))
     assert model.result.effective_df == pytest.approx(fixture["measured"]["edf_mgcv"], rel=1e-8)
