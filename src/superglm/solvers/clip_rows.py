@@ -28,6 +28,7 @@ import math
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
+import scipy.linalg
 from numpy.typing import NDArray
 
 from superglm.distributions import Binomial, Distribution, clip_mu
