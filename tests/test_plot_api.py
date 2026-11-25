@@ -1100,3 +1100,200 @@ class TestPlotlyMainEffects:
         ):
             with pytest.raises(ImportError, match="plotly is required"):
                 fitted_model.plot(engine="plotly")
+
+
+# ── drawn values equal the fitted term ─────────────────────────
+#
+# A reader takes three numbers off a main-effect chart: the relativity
+# exp(eta), the pointwise interval exp(eta -/+ z se) with z the normal 97.5%
+# quantile, and the simultaneous band exp(eta -/+ c se). These tests read the
+# drawn artists back and compare them with those closed forms, label by label.
+# exp has relative condition number |arg|, so a drawn value agrees with the
+# closed form to a few roundings of that size.
+
+_UNIT_ROUNDOFF = 2.0**-53
+_Z_95 = 1.959963984540054  # scipy.stats.norm.ppf(0.975)
+
+
+def _assert_exp_close(actual, arg):
+    arg = np.asarray(arg, dtype=np.float64)
+    rtol = 16.0 * _UNIT_ROUNDOFF * (1.0 + float(np.max(np.abs(arg))))
+    np.testing.assert_allclose(np.asarray(actual, dtype=np.float64), np.exp(arg), rtol=rtol, atol=0)
+
+
+def _assert_exp_difference_close(actual, arg_hi, arg_lo):
+    """``actual`` equals exp(arg_hi) - exp(arg_lo), an error-bar length."""
+    arg_hi = np.asarray(arg_hi, dtype=np.float64)
+    arg_lo = np.asarray(arg_lo, dtype=np.float64)
+    scale = float(np.max(np.exp(np.maximum(arg_hi, arg_lo))))
+    big = float(np.max(np.abs(np.concatenate([arg_hi, arg_lo]))))
+    atol = 32.0 * _UNIT_ROUNDOFF * (1.0 + big) * scale
+    np.testing.assert_allclose(
+        np.asarray(actual, dtype=np.float64), np.exp(arg_hi) - np.exp(arg_lo), rtol=0, atol=atol
+    )
+
+
+def _eta_se(ti):
+    return (
+        np.asarray(ti.log_relativity, dtype=np.float64),
+        np.asarray(ti.se_log_relativity, dtype=np.float64),
+    )
+
+
+def _line_by_label(ax, label):
+    lines = [line for line in ax.lines if line.get_label() == label]
+    assert len(lines) == 1, f"expected one line labelled {label!r}, got {len(lines)}"
+    return lines[0]
+
+
+def _band_edges(ax, label, x):
+    """Lower and upper y of the filled band ``label`` at each x, from its polygon."""
+    bands = [c for c in ax.collections if c.get_label() == label]
+    assert len(bands) == 1, f"expected one band labelled {label!r}, got {len(bands)}"
+    vertices = np.concatenate([path.vertices for path in bands[0].get_paths()])
+    lower = np.empty(len(x))
+    upper = np.empty(len(x))
+    for i, xi in enumerate(x):
+        ys = vertices[vertices[:, 0] == xi, 1]
+        assert ys.size >= 2, f"band {label!r} has no edge at x={xi}"
+        lower[i], upper[i] = ys.min(), ys.max()
+    return lower, upper
+
+
+class TestDrawnValuesMatchFit:
+    def test_matplotlib_spline_panel_draws_fitted_curve_and_both_bands(self, fitted_model):
+        """The spline curve and its two bands are exp(eta), exp(eta -/+ z se) and exp(eta -/+ c se);
+        a band drawn at zero width or at the wrong level would pass a presence check."""
+        import matplotlib
+
+        matplotlib.use("Agg")
+
+        ti = fitted_model.term_inference("age", simultaneous=True)
+        x = np.asarray(ti.x, dtype=np.float64)
+        eta, se = _eta_se(ti)
+        c = float(ti.critical_value_simultaneous)
+        # max_i |Z_i| >= |Z_1| bounds c below by z; the union bound over the
+        # grid's points bounds it above (Bonferroni).
+        from scipy.stats import norm
+
+        assert _Z_95 < c <= norm.ppf(1.0 - 0.025 / len(x))
+
+        ax = fitted_model.plot("age", ci="both").axes[0]
+        line = _line_by_label(ax, "Relativity")
+        np.testing.assert_array_equal(line.get_xdata(), x)
+        _assert_exp_close(line.get_ydata(), eta)
+
+        lower, upper = _band_edges(ax, "95% pointwise CI", x)
+        _assert_exp_close(lower, eta - _Z_95 * se)
+        _assert_exp_close(upper, eta + _Z_95 * se)
+        lower, upper = _band_edges(ax, "95% simultaneous band", x)
+        _assert_exp_close(lower, eta - c * se)
+        _assert_exp_close(upper, eta + c * se)
+
+    def test_matplotlib_numeric_panel_draws_per_unit_relativity_and_interval(self, fitted_model):
+        """A numeric term's flat line and band sit at exp(beta) and exp(beta -/+ z se);
+        a rescaled per-unit factor would pass a figure-type check."""
+        import matplotlib
+
+        matplotlib.use("Agg")
+
+        ti = fitted_model.term_inference("density")
+        eta, se = _eta_se(ti)
+        assert eta.shape == (1,)
+
+        ax = fitted_model.plot("density").axes[0]
+        line_y = np.asarray(_line_by_label(ax, "Relativity").get_ydata(), dtype=np.float64)
+        _assert_exp_close(line_y, np.full(line_y.shape, eta[0]))
+
+        bands = [c for c in ax.collections if c.get_label() == "95% pointwise CI"]
+        assert len(bands) == 1
+        band_y = np.concatenate([path.vertices[:, 1] for path in bands[0].get_paths()])
+        _assert_exp_close(band_y.min(), eta - _Z_95 * se)
+        _assert_exp_close(band_y.max(), eta + _Z_95 * se)
+
+    def test_matplotlib_categorical_panel_puts_each_level_over_its_label(self, fitted_model):
+        """Each level's point and error bar stand over that level's tick label;
+        drawing one level's relativity over another's label would pass a figure-type check."""
+        import matplotlib
+
+        matplotlib.use("Agg")
+
+        ti = fitted_model.term_inference("region")
+        eta, se = _eta_se(ti)
+        levels = [str(level) for level in ti.levels]
+        assert len(set(np.round(eta, 6))) == len(levels), "fixture needs distinct level effects"
+
+        ax = fitted_model.plot("region").axes[0]
+        tick_x = {
+            tick.get_text(): float(pos) for pos, tick in zip(ax.get_xticks(), ax.get_xticklabels())
+        }
+        assert sorted(tick_x) == sorted(levels)
+
+        assert len(ax.containers) == 1
+        data_line, _caplines, (bars,) = ax.containers[0].lines
+        point_x = np.asarray(data_line.get_xdata(), dtype=np.float64)
+        point_y = np.asarray(data_line.get_ydata(), dtype=np.float64)
+        segments = bars.get_segments()
+        for k, level in enumerate(levels):
+            (i,) = np.flatnonzero(point_x == tick_x[level])
+            _assert_exp_close(point_y[i], eta[k])
+            seg = np.asarray(segments[i], dtype=np.float64)
+            np.testing.assert_array_equal(seg[:, 0], tick_x[level])
+            _assert_exp_close(seg[:, 1].min(), eta[k] - _Z_95 * se[k])
+            _assert_exp_close(seg[:, 1].max(), eta[k] + _Z_95 * se[k])
+
+    @pytest.mark.skipif(not PLOTLY_AVAILABLE, reason="plotly not installed")
+    def test_plotly_explorer_draws_spline_curve_and_both_bands(self, fitted_model):
+        """The explorer's spline curve and filled bands trace exp(eta), exp(eta -/+ z se) and
+        exp(eta -/+ c se); a widened or collapsed band edge would pass a trace-name check."""
+        ti = fitted_model.term_inference("age", simultaneous=True)
+        x = np.asarray(ti.x, dtype=np.float64)
+        eta, se = _eta_se(ti)
+        c = float(ti.critical_value_simultaneous)
+        fig = fitted_model.plot(engine="plotly", ci="both")
+
+        (curve,) = [
+            t
+            for t in fig.data
+            if t.name == "Relativity" and len(t.x) == len(x) and t.mode == "lines"
+        ]
+        np.testing.assert_array_equal(np.asarray(curve.x, dtype=np.float64), x)
+        _assert_exp_close(curve.y, eta)
+
+        loop_x = np.concatenate([x, x[::-1]])
+        for name, crit in (("95% pointwise CI", _Z_95), ("95% simultaneous band", c)):
+            (band,) = [t for t in fig.data if t.name == name and t.fill == "toself"]
+            np.testing.assert_array_equal(np.asarray(band.x, dtype=np.float64), loop_x)
+            _assert_exp_close(band.y, np.concatenate([eta + crit * se, (eta - crit * se)[::-1]]))
+
+    @pytest.mark.skipif(not PLOTLY_AVAILABLE, reason="plotly not installed")
+    def test_plotly_explorer_draws_each_level_and_slope_with_its_interval(self, fitted_model):
+        """Each categorical marker and the numeric bar carry their own exp(eta) and interval
+        lengths; a reversed level trace would pass a trace-name check."""
+        fig = fitted_model.plot(engine="plotly")
+        relativity = [t for t in fig.data if t.name == "Relativity"]
+
+        ti = fitted_model.term_inference("region")
+        eta, se = _eta_se(ti)
+        levels = [str(level) for level in ti.levels]
+        # The explorer clips error bars at max(5 x the largest relativity, 10);
+        # the comparison below needs every interval inside that cap.
+        assert np.max(np.exp(eta + _Z_95 * se)) < max(5.0 * np.max(np.exp(eta)), 10.0)
+        (markers,) = [t for t in relativity if [str(v) for v in t.x] == levels]
+        by_label = {str(v): k for k, v in enumerate(markers.x)}
+        for k, level in enumerate(levels):
+            i = by_label[level]
+            _assert_exp_close(markers.y[i], eta[k])
+            _assert_exp_difference_close(
+                [markers.error_y.array[i]], [eta[k] + _Z_95 * se[k]], [eta[k]]
+            )
+            _assert_exp_difference_close(
+                [markers.error_y.arrayminus[i]], [eta[k]], [eta[k] - _Z_95 * se[k]]
+            )
+
+        ti = fitted_model.term_inference("density")
+        eta, se = _eta_se(ti)
+        (bar,) = [t for t in relativity if list(t.x) == ["per unit"]]
+        _assert_exp_close(bar.y, eta)
+        _assert_exp_difference_close(bar.error_y.array, eta + _Z_95 * se, eta)
+        _assert_exp_difference_close(bar.error_y.arrayminus, eta, eta - _Z_95 * se)
