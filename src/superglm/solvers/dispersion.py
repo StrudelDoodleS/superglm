@@ -179,41 +179,22 @@ def profile_likelihood_scale(
     ``deviance`` is the (penalized) deviance at the fitted mean. None where the family has
     no profile or the profile has no interior optimum (a zero deviance, no residual size).
     """
-    from superglm.distributions import Gamma, Gaussian
-    from superglm.reml.scale import (
-        gaussian_reml_scale_phi,
-        prepare_gamma_reml_scale_data,
-        prepare_tweedie_reml_scale_data,
-        profile_gamma_reml_scale,
-        profile_tweedie_reml_scale,
-    )
+    from superglm.reml.scale import prepare_reml_scale_data
 
     deviance, nullity = float(deviance), float(nullity)
     if not (math.isfinite(deviance) and deviance > 0.0):
         return None
     try:
-        if isinstance(distribution, Gaussian):
-            size = dispersion_likelihood_size(sample_weight, weight_semantics=weight_semantics)
-            if size - nullity <= 0.0:
-                return None
-            return gaussian_reml_scale_phi(deviance, size, nullity)
-        if isinstance(distribution, Gamma):
-            data = prepare_gamma_reml_scale_data(
-                y, sample_weight, weight_semantics=weight_semantics
-            )
-            if 2.0 * data.sum_weight <= nullity:
-                return None
-            return profile_gamma_reml_scale(data, deviance, nullity).phi
-        if isinstance(distribution, Tweedie):
-            data = prepare_tweedie_reml_scale_data(
-                y, sample_weight, distribution.p, weight_semantics=weight_semantics
-            )
-            return profile_tweedie_reml_scale(data, deviance, nullity).phi
+        profile = prepare_reml_scale_data(
+            distribution, y, sample_weight, weight_semantics=weight_semantics
+        )
+        if profile is None or profile.no_residual_size(nullity):
+            return None
+        return profile.phi(deviance, nullity)
     except (ValueError, FloatingPointError, OverflowError):
         # Rows the exact likelihood cannot profile (no positive response, a weight the
         # contract forbids): the caller publishes its Pearson pair and says so.
         return None
-    return None
 
 
 def lifted_ml_scale(

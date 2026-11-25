@@ -29,9 +29,6 @@ from superglm.diagnostics.separation import (
     validate_solver_separation_mode,
 )
 from superglm.distributions import (
-    Gamma,
-    Gaussian,
-    Tweedie,
     scale_is_known,
 )
 from superglm.group_matrix import DesignMatrix
@@ -90,12 +87,7 @@ from superglm.reml.penalty_algebra import (
 )
 from superglm.reml.penalty_support import PenaltyNumericalError
 from superglm.reml.result import REMLResult
-from superglm.reml.scale import (
-    prepare_reml_scale_data,
-    profile_gamma_reml_scale,
-    profile_gaussian_reml_scale,
-    profile_tweedie_reml_scale,
-)
+from superglm.reml.scale import prepare_reml_scale_data, tweedie_rows
 from superglm.reml.w_derivatives import reml_w_correction, validate_w_correction_order
 from superglm.solvers._structured.selection import (
     record_auto_backend_decision,
@@ -384,16 +376,8 @@ def optimize_direct_reml(
 
     scale_known = scale_is_known(distribution)
     pair = pair_of(distribution, link)
-    (
-        likelihood_size,
-        saturated_log_weight,
-        gamma_scale_data,
-        tweedie_scale_data,
-    ) = prepare_reml_scale_data(
-        distribution,
-        y,
-        sample_weight,
-        weight_semantics=weight_semantics,
+    scale_profile = prepare_reml_scale_data(
+        distribution, y, sample_weight, weight_semantics=weight_semantics
     )
     use_observed_geometry = (
         isinstance(dm, DesignMatrix)
@@ -715,32 +699,8 @@ def optimize_direct_reml(
             coefficient_width=dm.p,
         )
         penalized_deviance = float(boot_result.deviance + pq_boot)
-        if isinstance(distribution, Gaussian):
-            assert likelihood_size is not None
-            boot_scale = profile_gaussian_reml_scale(
-                penalized_deviance,
-                likelihood_size,
-                boot_penalty_nullity,
-                saturated_log_weight=saturated_log_weight or 0.0,
-            )
-            boot_phi = boot_scale.phi
-            boot_inv_phi = boot_scale.inverse_phi
-        elif isinstance(distribution, Gamma):
-            assert gamma_scale_data is not None
-            boot_scale = profile_gamma_reml_scale(
-                gamma_scale_data,
-                penalized_deviance,
-                boot_penalty_nullity,
-            )
-            boot_phi = boot_scale.phi
-            boot_inv_phi = boot_scale.inverse_phi
-        elif isinstance(distribution, Tweedie):
-            assert tweedie_scale_data is not None
-            boot_scale = profile_tweedie_reml_scale(
-                tweedie_scale_data,
-                penalized_deviance,
-                boot_penalty_nullity,
-            )
+        if scale_profile is not None:
+            boot_scale = scale_profile.profile(penalized_deviance, boot_penalty_nullity)
             boot_phi = boot_scale.phi
             boot_inv_phi = boot_scale.inverse_phi
         else:
@@ -1071,11 +1031,8 @@ def optimize_direct_reml(
             hessian_rank=objective_hessian_rank,
             S_override=S_cand,
             reml_penalties=penalties,
-            likelihood_size=likelihood_size,
-            saturated_log_weight=saturated_log_weight,
+            scale_profile=scale_profile,
             weight_semantics=weight_semantics,
-            gamma_scale_data=gamma_scale_data,
-            tweedie_scale_data=tweedie_scale_data,
             return_evaluation=True,
         )
 
@@ -1906,11 +1863,8 @@ def optimize_direct_reml(
                     hessian_rank=trial_hessian_rank,
                     S_override=S_trial,
                     reml_penalties=penalties,
-                    likelihood_size=likelihood_size,
-                    saturated_log_weight=saturated_log_weight,
+                    scale_profile=scale_profile,
                     weight_semantics=weight_semantics,
-                    gamma_scale_data=gamma_scale_data,
-                    tweedie_scale_data=tweedie_scale_data,
                     return_evaluation=True,
                 )
             except PenaltyNumericalError:
@@ -2257,7 +2211,7 @@ def optimize_direct_reml(
         objective_history=objective_history,
         curvature_source="observed" if use_observed_geometry else "fisher",
         termination_reason=termination_reason,
-        tweedie_scale_data=tweedie_scale_data,
+        tweedie_scale_data=tweedie_rows(scale_profile),
         mean_space_restorations=n_mean_space_restorations,
         lambda_box=box,
         bound_pressure=best_bound_pressure,

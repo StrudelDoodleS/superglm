@@ -31,7 +31,7 @@ from superglm.diagnostics.separation import (
     disclose_solver_separation,
     validate_solver_separation_mode,
 )
-from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu, scale_is_known
+from superglm.distributions import clip_mu, scale_is_known
 from superglm.dm_builder import rebuild_design_matrix_with_lambdas
 from superglm.group_matrix import (
     DesignMatrix,
@@ -87,12 +87,7 @@ from superglm.reml.result import (
     _map_beta_between_bases,
     _map_centred_state_between_bases,
 )
-from superglm.reml.scale import (
-    prepare_reml_scale_data,
-    profile_gamma_reml_scale,
-    profile_gaussian_reml_scale,
-    profile_tweedie_reml_scale,
-)
+from superglm.reml.scale import prepare_reml_scale_data, tweedie_rows
 from superglm.solvers._structured.assembly import (
     solve_cached_structured,
 )
@@ -585,16 +580,8 @@ def optimize_discrete_reml_cached_w(
         penalty_caches=penalty_caches,
     )
     scale_known = scale_is_known(distribution)
-    (
-        likelihood_size,
-        saturated_log_weight,
-        gamma_scale_data,
-        tweedie_scale_data,
-    ) = prepare_reml_scale_data(
-        distribution,
-        y,
-        sample_weight,
-        weight_semantics=weight_semantics,
+    scale_profile = prepare_reml_scale_data(
+        distribution, y, sample_weight, weight_semantics=weight_semantics
     )
     # The REML curvature is a function of family and link
     # (``classify_binned_reml_curvature``); the working model, the result and
@@ -829,32 +816,8 @@ def optimize_discrete_reml_cached_w(
             coefficient_width=p,
         )
         penalized_deviance = float(boot_result.deviance + pq_boot)
-        if isinstance(distribution, Gaussian):
-            assert likelihood_size is not None
-            boot_scale = profile_gaussian_reml_scale(
-                penalized_deviance,
-                likelihood_size,
-                M_p,
-                saturated_log_weight=saturated_log_weight or 0.0,
-            )
-            boot_phi = boot_scale.phi
-            boot_inv_phi = boot_scale.inverse_phi
-        elif isinstance(distribution, Gamma):
-            assert gamma_scale_data is not None
-            boot_scale = profile_gamma_reml_scale(
-                gamma_scale_data,
-                penalized_deviance,
-                M_p,
-            )
-            boot_phi = boot_scale.phi
-            boot_inv_phi = boot_scale.inverse_phi
-        elif isinstance(distribution, Tweedie):
-            assert tweedie_scale_data is not None
-            boot_scale = profile_tweedie_reml_scale(
-                tweedie_scale_data,
-                penalized_deviance,
-                M_p,
-            )
+        if scale_profile is not None:
+            boot_scale = scale_profile.profile(penalized_deviance, M_p)
             boot_phi = boot_scale.phi
             boot_inv_phi = boot_scale.inverse_phi
         else:
@@ -1071,11 +1034,8 @@ def optimize_discrete_reml_cached_w(
             S_override=S_cand,
             reml_penalties=penalties,
             tensor_pair_evaluations=cand_tensor_pair_evals,
-            likelihood_size=likelihood_size,
-            saturated_log_weight=saturated_log_weight,
+            scale_profile=scale_profile,
             weight_semantics=weight_semantics,
-            gamma_scale_data=gamma_scale_data,
-            tweedie_scale_data=tweedie_scale_data,
             return_evaluation=True,
         )
 
@@ -1675,11 +1635,8 @@ def optimize_discrete_reml_cached_w(
                 S_override=S_trial,
                 reml_penalties=penalties,
                 tensor_pair_evaluations=trial_tensor_pair_evals,
-                likelihood_size=likelihood_size,
-                saturated_log_weight=saturated_log_weight,
+                scale_profile=scale_profile,
                 weight_semantics=weight_semantics,
-                gamma_scale_data=gamma_scale_data,
-                tweedie_scale_data=tweedie_scale_data,
             )
             if isinstance(trial_obj, REMLObjectiveEvaluation):
                 raise TypeError("Trial objective must be scalar when return_evaluation=False")
@@ -2025,11 +1982,8 @@ def optimize_discrete_reml_cached_w(
         S_override=S_final,
         reml_penalties=penalties,
         tensor_pair_evaluations=final_tensor_pair_evals,
-        likelihood_size=likelihood_size,
-        saturated_log_weight=saturated_log_weight,
+        scale_profile=scale_profile,
         weight_semantics=weight_semantics,
-        gamma_scale_data=gamma_scale_data,
-        tweedie_scale_data=tweedie_scale_data,
     )
     _t_objective += _time.perf_counter() - _t0
     # Publish the final refit; the POI loop's working-model surrogates must
@@ -2113,7 +2067,7 @@ def optimize_discrete_reml_cached_w(
         objective=float(best_obj),
         curvature_source=reml_curvature,
         termination_reason=termination_reason,
-        tweedie_scale_data=tweedie_scale_data,
+        tweedie_scale_data=tweedie_rows(scale_profile),
         reml_penalties=penalties,
         lambda_box=box,
         bound_pressure=last_bound_pressure,

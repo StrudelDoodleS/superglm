@@ -353,12 +353,7 @@ def test_direct_gamma_prepares_rows_once_and_reuses_reduced_stats(
     def counted_prepare(distribution, actual_y, actual_weights, *, weight_semantics):
         nonlocal prepare_calls
         prepare_calls += 1
-        return (
-            None,
-            None,
-            real_prepare(actual_y, actual_weights, weight_semantics=weight_semantics),
-            None,
-        )
+        return real_prepare(actual_y, actual_weights, weight_semantics=weight_semantics)
 
     fit_calls = 0
 
@@ -371,7 +366,7 @@ def test_direct_gamma_prepares_rows_once_and_reuses_reduced_stats(
         return result, np.eye(1), np.eye(1)
 
     def captured_objective(*args, **kwargs):
-        forwarded_ids.append(id(kwargs["gamma_scale_data"]))
+        forwarded_ids.append(id(kwargs["scale_profile"]))
         return real_objective(*args, **kwargs)
 
     monkeypatch.setattr(direct, "prepare_reml_scale_data", counted_prepare)

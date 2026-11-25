@@ -240,9 +240,10 @@ class Distribution(Protocol):
 
     Optional declarations, each with the default a family that omits it takes:
     mean_domain (a ``MeanDomain``; positive means), response_support (a
-    ``ResponseSupport``; any finite response) and prior_weights_in_normalizer
+    ``ResponseSupport``; any finite response), prior_weights_in_normalizer
     (the density's normalizer carries ``log w``, so a prior weight must be
-    strictly positive; False).
+    strictly positive; False) and scale_profile (the dispersion's exact REML
+    profile on a fit's rows; a Gaussian-shaped approximation, with a warning).
     """
 
     @property
@@ -333,6 +334,14 @@ class Gaussian:
         """Gaussian unit deviance: (y - μ)^2."""
         return (y - mu) ** 2
 
+    def scale_profile(self, y: NDArray, sample_weight: NDArray, *, weight_semantics: str):
+        """The dispersion's REML profile on these rows (``reml.scale``)."""
+        from superglm.reml.scale import GaussianScaleProfile, gaussian_reml_scale_terms
+
+        return GaussianScaleProfile(
+            *gaussian_reml_scale_terms(sample_weight, weight_semantics=weight_semantics)
+        )
+
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
         """Gaussian log-likelihood with dispersion φ = σ²."""
         # Any normal positive phi is the fitted one; only zero (an exact fit) is floored.
@@ -393,6 +402,12 @@ class Gamma:
         if np.any(close):
             deviance[close] = _vector_deviance_from_t(delta[close])
         return 2.0 * deviance
+
+    def scale_profile(self, y: NDArray, sample_weight: NDArray, *, weight_semantics: str):
+        """The dispersion's REML profile on these rows (``reml.scale``)."""
+        from superglm.reml.scale import prepare_gamma_reml_scale_data
+
+        return prepare_gamma_reml_scale_data(y, sample_weight, weight_semantics=weight_semantics)
 
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
         """Gamma log-likelihood. Shape k = 1/φ."""
@@ -630,6 +645,16 @@ class Tweedie:
         from superglm._tweedie import tweedie_unit_deviance
 
         return tweedie_unit_deviance(y, mu, self.p)
+
+    def scale_profile(self, y: NDArray, sample_weight: NDArray, *, weight_semantics: str):
+        """The dispersion's REML profile on these rows (``reml.scale``)."""
+        from superglm.reml.scale import TweedieScaleProfile, prepare_tweedie_reml_scale_data
+
+        return TweedieScaleProfile(
+            prepare_tweedie_reml_scale_data(
+                y, sample_weight, self.p, weight_semantics=weight_semantics
+            )
+        )
 
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
         """Tweedie log-likelihood via the Dunn–Smyth series."""

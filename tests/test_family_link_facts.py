@@ -68,7 +68,12 @@ from superglm.reml.observed_geometry import (
     classify_binned_reml_curvature,
     classify_reml_curvature,
 )
-from superglm.reml.scale import prepare_reml_scale_data
+from superglm.reml.scale import (
+    GammaScaleProfileData,
+    GaussianScaleProfile,
+    TweedieScaleProfile,
+    prepare_reml_scale_data,
+)
 from superglm.solvers.dispersion import family_default_weight_semantics
 from superglm.solvers.irls_state import (
     _irls_objective_scale,
@@ -238,12 +243,13 @@ def _reml_curvature(family, link) -> str:
 
 
 def _scale_profile(family) -> str | None:
-    size, _, gamma, tweedie = prepare_reml_scale_data(
-        family, _PROBE_Y, _PROBE_W, weight_semantics="frequency"
-    )
-    arms = {"gaussian": size, "gamma": gamma, "tweedie": tweedie}
-    filled = [name for name, arm in arms.items() if arm is not None]
-    return filled[0] if filled else None
+    profile = prepare_reml_scale_data(family, _PROBE_Y, _PROBE_W, weight_semantics="frequency")
+    names = {
+        GaussianScaleProfile: "gaussian",
+        GammaScaleProfileData: "gamma",
+        TweedieScaleProfile: "tweedie",
+    }
+    return None if profile is None else names[type(profile)]
 
 
 def _domain_rows(family, link) -> tuple[bool, ...] | None:

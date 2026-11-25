@@ -1665,7 +1665,7 @@ def test_gamma_observed_total_gradient_matches_refitted_laml_finite_difference()
             hessian_rank=geometry.hessian_rank,
             S_override=penalty,
             reml_penalties=[component],
-            gamma_scale_data=scale_data,
+            scale_profile=scale_data,
             return_evaluation=True,
             weight_semantics="frequency",
         )
@@ -1794,7 +1794,7 @@ def test_gamma_observed_order2_hessian_matches_refitted_gradient_finite_differen
             hessian_rank=geometry.hessian_rank,
             S_override=penalty,
             reml_penalties=[component],
-            gamma_scale_data=scale_data,
+            scale_profile=scale_data,
             return_evaluation=True,
             weight_semantics="frequency",
         )
@@ -2048,7 +2048,7 @@ def _evaluate_refitted_observed_laml(
         hessian_rank=geometry.hessian_rank,
         S_override=penalty,
         reml_penalties=[problem.component],
-        gamma_scale_data=gamma_scale_data,
+        scale_profile=gamma_scale_data,
         return_evaluation=True,
         weight_semantics="frequency",
     )
