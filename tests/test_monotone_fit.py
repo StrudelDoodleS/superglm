@@ -1400,3 +1400,33 @@ def test_a_rejected_qp_step_publishes_the_face_of_the_iterate_it_returns(monkeyp
     np.testing.assert_array_equal(kept.beta, held.beta)
     np.testing.assert_array_equal(kept.rank_info.face_rows, held.rank_info.face_rows)
     assert kept.effective_df == held.effective_df
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "discrete"])
+@pytest.mark.parametrize(
+    "basis", [BSplineSmooth, CubicRegressionSpline, PSpline], ids=["bs", "cr", "ps"]
+)
+@pytest.mark.parametrize("direction", ["increasing", "decreasing"])
+def test_monotone_fit_recovers_its_monotone_truth(basis, direction, discrete):
+    """A monotone fit of a monotone sigmoid tracks the sigmoid. A term its rules held
+    flat would still pass a no-decrease check, but misses the truth by about 0.4 RMS."""
+    rng = np.random.default_rng(42)
+    n = 500
+    sign = 1.0 if direction == "increasing" else -1.0
+    x = np.sort(rng.uniform(0.0, 1.0, n))
+    y = sign / (1.0 + np.exp(-10.0 * (x - 0.5))) + rng.normal(0.0, 0.1, n)
+    model = SuperGLM(
+        family=Gaussian(),
+        selection_penalty=0,
+        discrete=discrete,
+        features={"x": basis(n_knots=10, constraint=getattr(Constraint.fit, direction))},
+    )
+    model.fit(pd.DataFrame({"x": x}), y)
+
+    grid = np.linspace(0.02, 0.98, 200)
+    pred = model.predict(pd.DataFrame({"x": grid}))
+    truth = sign / (1.0 + np.exp(-10.0 * (grid - 0.5)))
+    assert np.min(sign * np.diff(pred)) >= -1e-8
+    # Noise SD 0.1 over 500 rows and about ten coefficients gives a pointwise error
+    # near 0.1 * sqrt(10 / 500) = 0.014; the bar is several times that.
+    assert np.sqrt(np.mean((pred - truth) ** 2)) < 0.05
