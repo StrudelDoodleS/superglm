@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -17,10 +16,7 @@ from superglm.solvers.clip_rows import (
     likelihood_deviance,
     likelihood_working_rows,
     note_held_against,
-    score_cancellation,
-    tail_rows,
 )
-from superglm.solvers.mode_score import column_sums, one_hot_columns
 
 if TYPE_CHECKING:
     from superglm.solvers.irls_direct._fit import _IRLSDirectFit
@@ -36,14 +32,14 @@ class _IRLSDirectClipOverlay:
     """A binomial fit's rows where the working clip holds one, on every route.
 
     Held (``clip``) when the clip can hold a row against its outcome
-    (``clip_rows.clip_can_hold_against``), else ``None``; it keeps no reference to the fit. While
-    ``ClipRows`` is ``working`` it does nothing until the loop ends, so a fit ending clear of such
-    rows is the solver's own bit for bit; ``moves_to_likelihood`` then counts rows held against
-    their outcome, once. With any, a pair declaring tail rows moves to ``likelihood`` and carries
-    on; one declaring none, or past float64, ends ``clip_held``. Under ``likelihood`` held rows read
-    the likelihood in their unclipped predictor (``clip_rows.tail_rows``): ``deviance`` (merit,
-    stop, published) and ``patched`` (working weight and response); rows inside the guard keep the
-    solver's arithmetic, and ``judge`` lets a deviance stop stand only where the scores cancel.
+    (``clip_rows.clip_can_hold_against``), else ``None``; it keeps no reference to the fit.
+    While ``ClipRows`` is ``working`` it does nothing until the loop ends, so a fit ending
+    clear of such rows is the solver's own bit for bit; ``moves_to_likelihood`` then counts
+    rows held against their outcome, once. With any, a pair declaring tail rows moves to
+    ``likelihood`` and carries on; one declaring none, or past float64, ends ``clip_held``.
+    Under ``likelihood`` held rows read the likelihood in their unclipped predictor
+    (``clip_rows.tail_rows``): ``deviance`` (merit, stop, published) and ``patched``
+    (working weight and response); rows inside the guard keep the solver's arithmetic.
     """
 
     __slots__ = ("rows", "declared", "held_against", "unfinished", "information_underflowed")
@@ -184,49 +180,6 @@ class _IRLSDirectClipOverlay:
         fit.recorder.count("irls_clip_likelihood_switches")
         self.unfinished = it + 1 >= fit.max_iter
         return not self.unfinished
-
-    def judge(self, fit: _IRLSDirectFit) -> None:
-        """A deviance stop on the likelihood's rows stands only where the retained state's scores cancel.
-
-        A held row's deviance is flat in its tail, so the deviance can stand
-        still far from the root of the score.  The stop rule runs this after
-        a deviance criterion that passed (``_IRLSDirectConvergence.judge``):
-        every coefficient's penalised score must be within ``sqrt(tol)`` of
-        the size of its own terms (``clip_rows.score_cancellation``, which
-        derives the tolerance).  A stop that fails goes on, and its numbers
-        are the ones published, so a fit whose likelihood has no root runs to
-        its budget.  A constrained fit's stop is its QP's: a coefficient on a
-        constraint has a score its multiplier offsets.
-        """
-        if not self.likelihood or fit.qp is not None:
-            return
-        dm, beta, weights = fit.dm, fit.retained.beta, fit.weights
-        carried = weights > 0.0
-        score = np.zeros(dm.n)
-        score[carried] = (
-            weights[carried]
-            * tail_rows(fit.link, fit.y[carried], fit.retained.eta_unclipped[carried])[1]
-        )
-        size = np.abs(score)
-        gradient = np.r_[np.sum(score), dm.rmatvec(score) - fit.penalty_matvec(beta)]
-        # a column's terms sum to at least |x_j' |s||, and to exactly that in a one-hot block:
-        # the others are summed entry by entry only where that bound does not settle them
-        data_size = np.abs(dm.rmatvec(size))
-        penalty_size = fit.penalty_matvec(beta, magnitude=True)
-        bar = math.sqrt(fit.tol)
-        with np.errstate(invalid="ignore"):
-            settled = np.abs(gradient[1:]) <= bar * (data_size + penalty_size)
-        unsettled = np.flatnonzero(~settled & ~one_hot_columns(dm))
-        if unsettled.size:
-            zeros = np.zeros(dm.n)
-            data_size[unsettled] = column_sums(
-                dm, unsettled, np.zeros(dm.p), (size, zeros, zeros), carried
-            )[0]
-        ratio = score_cancellation(gradient, np.r_[np.sum(size), data_size + penalty_size])
-        if ratio > bar:
-            fit.converged_this_iter = False
-            fit.convergence_label = "likelihood_score"
-            fit.convergence_value, fit.convergence_tolerance = ratio, bar
 
     def final(
         self, converged: bool, termination_reason: TerminationReason
