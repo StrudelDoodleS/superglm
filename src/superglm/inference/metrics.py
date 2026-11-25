@@ -76,7 +76,12 @@ from superglm.solvers.centered_system import (
     penalty_factor,
     weighted_mean_pair,
 )
-from superglm.solvers.clip_rows import HeldRows, held_likelihood_rows, on_likelihood_rows
+from superglm.solvers.clip_rows import (
+    HeldRows,
+    held_likelihood_rows,
+    likelihood_information,
+    on_likelihood_rows,
+)
 from superglm.solvers.dispersion import likelihood_scale_method, scale_method
 from superglm.solvers.mode_score import corrected_two_pass_pair
 from superglm.solvers.rank import (
@@ -1165,13 +1170,20 @@ class ModelMetrics:
             W = self._fit_working_weights
         else:
             eta, mu = self._working_eta_mu
+            prior = self._geometry_prior_weights
             W = fisher_working_weights(
                 distribution=self._family,
                 link=self._link,
                 mu=mu,
                 eta=eta,
-                sample_weight=self._geometry_prior_weights,
+                sample_weight=prior,
             )
+            # A binomial row the working clip holds reads the likelihood's information, as the
+            # fit's own rows do (``_solver_space_working_weights``): the same rows give the same
+            # standard errors and leverage, whichever frame holds them.  An unpriced row is its
+            # stand-in, which the clip does not hold.
+            raw = np.where(self._unpriced, eta, self._raw_eta)
+            W = likelihood_information(self._family, self._link, raw, eta, mu, prior, W)
 
         uses_fitted_rank = self._working_weights_match_fit(W)
         # The training rows of a constrained fit, by identity or by content,

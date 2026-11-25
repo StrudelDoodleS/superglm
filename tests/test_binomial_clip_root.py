@@ -609,6 +609,50 @@ def test_information_float64_cannot_hold_is_published_as_none(response):
     assert model.summary()._coef_rows[0].se > 1e100
 
 
+@pytest.mark.parametrize(
+    ("retain_fit_state", "copied"),
+    [(True, True), (False, False), (False, True)],
+    ids=["copied_frame", "compact_fit", "compact_fit_copied_frame"],
+)
+@pytest.mark.parametrize("slope", [False, True], ids=["intercept", "slope"])
+def test_the_same_rows_give_the_same_inference_in_any_frame(slope, retain_fit_state, copied):
+    """``metrics()`` on an equal copy of the fit's rows, or on a fit that kept no design, reads the same information.
+
+    Every row sits past the mean floor on the side of its outcome, so each
+    is held and its Fisher information is ``w p (1 - p)`` at its own
+    predictor, not the clip's.  The reference is the weighted information
+    ``X' W X``: the intercept's error and each row's leverage ``W_i x_i' (X' W
+    X)^-1 x_i``.  The unfixed evaluation formed both from clipped weights on
+    a copied frame (error 6,683.10 for 1,993.11) and the leverage from them
+    on a fit that kept no design (1.3e6 times too large on the +-35 rows).
+    """
+    offset = np.tile([-19.0, 19.0, -35.0, 35.0], 10)
+    y, n = (offset > 0.0).astype(float), len(offset)
+    weights = 1.0 + (np.arange(n) % 3)
+    x = np.linspace(-1.0, 1.0, n)
+    frame = pd.DataFrame({"x": x}) if slope else pd.DataFrame(index=range(n))
+    model = SuperGLM(
+        family="binomial",
+        link="logit",
+        features={"x": Numeric()} if slope else {},
+        weight_semantics="frequency",
+        retain_fit_state=retain_fit_state,
+    )
+    model.fit(frame, y, offset=offset, sample_weight=weights)
+    X = np.column_stack([np.ones(n)] + ([x] if slope else []))
+    coefficients = np.r_[model.result.intercept, np.asarray(model.result.beta, dtype=float)]
+    _, rows = _score_information_rows("logit", y, X @ coefficients + offset)
+    information = weights * rows
+    covariance = np.linalg.inv(X.T @ (X * information[:, None]))
+    metrics = model.metrics(
+        frame.copy() if copied else frame, y, sample_weight=weights, offset=offset
+    )
+    np.testing.assert_allclose(metrics.intercept_se_raw, math.sqrt(covariance[0, 0]), rtol=1e-9)
+    np.testing.assert_allclose(
+        metrics.leverage, information * np.einsum("ij,jk,ik->i", X, covariance, X), rtol=1e-9
+    )
+
+
 @pytest.mark.pins_behaviour
 def test_rows_held_on_the_side_of_their_outcome_leave_the_fit_at_the_root():
     """Pins: a fit whose held rows all agree with their outcome is already at the root.
