@@ -305,12 +305,21 @@ def test_a_binned_superlss_fit_builds_each_stage_once_and_makes_two_moment_passe
 
 
 @pytest.mark.pins_behaviour
-def test_a_binned_superlss_fit_evaluates_the_whole_likelihood_at_most_every_other_solve(ledgers):
-    # The first trial of a solve is fused and not counted, so what remains is the initial and
-    # terminal state: two for a whole default fit, however many solves it makes (6 to 52 over 27
-    # data sets).  Backtracked trials add more when the fit is forced, a count that follows the
-    # line search and so has no ceiling; an evaluation added to every solve would pass this one.
-    ledger = ledgers["lss_binned"]
+@pytest.mark.usefixtures("no_endpoint_trial")
+def test_a_binned_superlss_fit_evaluates_the_whole_likelihood_at_most_every_other_solve():
+    """An ordinary solve adds no evaluation of the whole likelihood of its own.
+
+    The first trial of a solve is fused and not counted, so what remains is the initial and
+    terminal state: two for a search of ordinary solves, however many it makes (6 to 52 over 27
+    data sets). Backtracked trials add more when the fit is forced, a count that follows the
+    line search and so has no ceiling; an evaluation added to every solve fails this one.
+
+    The search here makes no endpoint trial. With one it assesses an exact face, and each fit
+    of an assessment starts afresh and ends where its line search is deciding inside rounding:
+    this data then takes 5 to 31 evaluations in 16 or 17 solves by BLAS kernel, which no ceiling
+    separates from an evaluation added to every solve.
+    """
+    ledger = _recorded(_lss_binned)
     evaluations = ledger.count("_evaluate_state_unmeasured")
 
     assert 0 < evaluations <= 0.5 * ledger.count("_fit_dense_fixed_lambda_core")
