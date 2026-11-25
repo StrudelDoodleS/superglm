@@ -78,8 +78,8 @@ from superglm.solvers.centered_system import (
 )
 from superglm.solvers.clip_rows import (
     HeldRows,
+    exported_information,
     held_likelihood_rows,
-    likelihood_information,
     on_likelihood_rows,
 )
 from superglm.solvers.dispersion import likelihood_scale_method, scale_method
@@ -1168,6 +1168,7 @@ class ModelMetrics:
         rank_info = getattr(self._result, "rank_info", None)
         if self._fit_geometry_matches and self._dm is not None:
             W = self._fit_working_weights
+            underflowed = bool(getattr(self._result, "information_underflowed", False))
         else:
             eta, mu = self._working_eta_mu
             prior = self._geometry_prior_weights
@@ -1183,7 +1184,9 @@ class ModelMetrics:
             # standard errors and leverage, whichever frame holds them.  An unpriced row is its
             # stand-in, which the clip does not hold.
             raw = np.where(self._unpriced, eta, self._raw_eta)
-            W = likelihood_information(self._family, self._link, raw, eta, mu, prior, W)
+            W, underflowed = exported_information(self._family, self._link, raw, eta, mu, prior, W)
+        # rows that hold none of the likelihood's information show no standard error
+        self.__dict__["_information_underflowed"] = underflowed
 
         uses_fitted_rank = self._working_weights_match_fit(W)
         # The training rows of a constrained fit, by identity or by content,
@@ -1642,10 +1645,19 @@ class ModelMetrics:
         _ = self._active_info
         return self.__dict__.get("_contrast_estimable")
 
+    @property
+    def _current_information_underflowed(self) -> bool:
+        """Whether float64 holds none of the likelihood's information on these rows
+        (``clip_rows.information_underflowed``): no coefficient is then determined.
+        """
+        _ = self._active_info
+        return bool(self.__dict__.get("_information_underflowed", False))
+
     @cached_property
     def _current_coefficient_estimable(self) -> NDArray:
         """Coefficient estimability under this diagnostic design and weights."""
-        _ = self._active_info
+        if self._current_information_underflowed:
+            return np.zeros(len(self._result.beta), dtype=bool)
         cached = self.__dict__.get("_coefficient_estimable")
         if cached is not None:
             return cached
@@ -1791,6 +1803,8 @@ class ModelMetrics:
     def _intercept_standard_error(self, *, scaled: bool) -> float:
         separated = self._separated_coefficients
         if separated is not None and separated[-1]:
+            return np.nan
+        if self._current_information_underflowed:
             return np.nan
         _, _, _, XtWX_inv_aug, _ = self._active_info
         icpt_var = float(XtWX_inv_aug[0, 0])
@@ -2033,6 +2047,7 @@ class ModelMetrics:
             test_bases=term_test_bases(self._model) if wood_inference else None,
             coefficient_estimable_override=self._current_coefficient_estimable,
             contrast_estimable=self._current_contrast_estimable,
+            information_underflowed=self._current_information_underflowed,
             selected_group_names=selected_names,
             group_matrices=(
                 self._dm.group_matrices if self._uses_fit_design and self._dm is not None else None

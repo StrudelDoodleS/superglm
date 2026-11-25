@@ -628,23 +628,78 @@ def test_a_coefficient_only_held_rows_inform_has_the_likelihoods_standard_error(
     np.testing.assert_allclose(reported, expected, rtol=1e-9)
 
 
-@pytest.mark.parametrize("response", ["against", "agreeing"])
-def test_information_float64_cannot_hold_is_published_as_none(response):
-    """Pairs at offsets of +-800: the fit returns, and its intercept error says nothing is determined.
+def _pairs(link, low, high, events=(1.0, 0.0), **options):
+    """Five pairs of rows at offsets ``low`` and ``high``, the events on the ``low`` row by default."""
+    return _Case(link, np.tile(events, 5), np.tile([low, high], 5), **options)
 
-    ``p (1 - p)`` at a predictor of 800 is ``1e-348`` and underflows on every
-    row (the control), so the exact error is of order ``1e170``.  Held
-    against their outcome, the unfixed fit published 2,590.54, the bound on
-    its iteration weights; agreeing with it, the fit raised ``working
-    weights must have a positive finite sum``.
+
+#: no row of any case holds information float64 can represent, at any coefficients a fit returns
+_NO_INFORMATION = {
+    # p (1 - p) at a predictor of +-800 is 1e-348
+    "logit_pairs_against_their_outcome": lambda: _pairs("logit", -800.0, 800.0),
+    "logit_pairs_agreeing_with_it": lambda: _pairs("logit", -800.0, 800.0, events=(0.0, 1.0)),
+    # a slope on a column that is level within each pair, so no step separates the two rows
+    "logit_pairs_and_a_slope": lambda: _pairs(
+        "logit", -800.0, 800.0, events=(0.0, 1.0), x=np.repeat(np.linspace(-1.0, 1.0, 5), 2)
+    ),
+    # the solver's first step leaves every row past exp(eta) = 1e308
+    "cloglog_weighted_pairs": lambda: _pairs(
+        "cloglog", -30.0, 5.0, weights=np.tile([1000.0, 1.0], 5)
+    ),
+    "cloglog_pairs": lambda: _pairs("cloglog", -30.0, 4.0),
+}
+
+
+def _log_information_rows(link: str, eta):
+    """The logarithm of each row's Fisher information, which no tail overflows."""
+    if link == "logit":
+        return -np.logaddexp(0.0, eta) - np.logaddexp(0.0, -eta)
+    with np.errstate(over="ignore"):
+        t = np.exp(eta)  # cloglog: t^2 e^-t / (1 - e^-t)
+        return 2.0 * eta - t - np.log1p(-np.exp(-t))
+
+
+@pytest.mark.parametrize("name", sorted(_NO_INFORMATION))
+def test_a_fit_with_no_information_returns_and_shows_no_standard_error(name):
+    """Every row's Fisher information underflows: the fit returns, and no coefficient has an error.
+
+    The control is the information itself, from its logarithm: below
+    ``log(5e-324) = -744.4`` on every row at the returned coefficients, so
+    its sum is zero and the data identify neither the intercept nor a slope.
+    Each estimate is shown with a blank error, statistic, p-value and
+    interval, by ``summary()`` and by ``metrics()`` on the rows or a copy of
+    them, and a cloglog fit the clip stopped still says so.  The unfixed fit
+    read each row's information as ``2.2e-308`` and published errors of
+    ``2.1e153``; before that the logit pairs agreeing with their outcome and
+    both cloglog fits raised.
     """
-    offset = np.tile([-800.0, 800.0], 5)
-    events = np.tile([1.0, 0.0], 5) if response == "against" else np.tile([0.0, 1.0], 5)
-    case = _Case("logit", events, offset)
-    model, coefficients = case.fit()
-    assert case.information(coefficients)[0, 0] == 0.0  # the control
-    assert model.result.converged
-    assert model.summary()._coef_rows[0].se > 1e100
+    case = _NO_INFORMATION[name]()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model, coefficients = case.fit()
+    log_information = _log_information_rows(case.link, case.X @ coefficients + case.offset)
+    assert np.all(log_information < math.log(5e-324))  # the control
+    if case.link == "logit":
+        assert model.result.converged
+    else:
+        assert not model.result.converged
+        assert model._solver_pirls_result().termination_reason == "clip_held"
+        assert any("clip" in str(item.message) for item in caught)
+    frame = (
+        pd.DataFrame(index=range(len(case.y))) if case.x is None else pd.DataFrame({"x": case.x})
+    )
+    readers = [model.summary()] + [
+        model.metrics(rows, case.y, offset=case.offset, sample_weight=case.weights).summary()
+        for rows in (frame, frame.copy())
+    ]
+    for summary in readers:
+        rows = summary._coef_rows
+        np.testing.assert_allclose([row.coef for row in rows], coefficients, rtol=1e-12)
+        blank = [(row.se, row.z, row.p, row.ci_low, row.ci_high) for row in rows]
+        assert np.all(np.isnan(np.array(blank, dtype=float)))
+    metrics = model.metrics(frame.copy(), case.y, offset=case.offset, sample_weight=case.weights)
+    assert math.isnan(metrics.intercept_se_raw) and math.isnan(metrics.intercept_se)
+    assert all(np.all(np.isnan(errors)) for errors in metrics.coefficient_se.values())
 
 
 @pytest.mark.parametrize(

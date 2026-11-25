@@ -47,6 +47,7 @@ from superglm.solvers.clip_rows import (
     ClipRows,
     count_held_against,
     declares_tail_rows,
+    exported_working_rows,
     likelihood_deviance,
     likelihood_working_rows,
     note_held_against,
@@ -356,6 +357,12 @@ class PIRLSResult:
     # Positive-weight rows the returned state holds against their outcome;
     # nonzero only with ``termination_reason == "clip_held"``.
     clip_held_rows: int = 0
+    # Float64 holds none of the likelihood's information on any row of the
+    # returned state (``clip_rows.information_underflowed``): the data identify
+    # no coefficient there, so no reader shows a standard error
+    # (``state_ops.standard_error_mask``), and the returned geometry is the
+    # clipped rows'.
+    information_underflowed: bool = False
     # Rows moved by a direction the factorization truncated, each judged
     # (``mode_score.truncated_direction_ratio``): weakly identified, beyond
     # float64's resolution, rising towards the boundary, or unresolved by the
@@ -2104,20 +2111,11 @@ def _fit_pirls_inner(
     )
     W_final = final_working_rows.weights
     z_final = final_working_rows.response
+    information_underflowed = False
     if declares_tail_rows(family, link):
         # the published rows read the likelihood's information where the clip holds a row
-        W_final, z_final = likelihood_working_rows(
-            family,
-            link,
-            y,
-            weights,
-            eta_new_unclipped,
-            eta_new,
-            mu_new,
-            W_final,
-            z_final,
-            observed=False,
-            exported=True,
+        W_final, z_final, information_underflowed = exported_working_rows(
+            family, link, y, weights, eta_new_unclipped, eta_new, mu_new, W_final, z_final
         )
     centered = build_centered_system(
         dm=selected_dm,
@@ -2276,6 +2274,7 @@ def _fit_pirls_inner(
         mean_space_boundary_rows=boundary_rows,
         clip_rows=clip_rows.state,
         clip_held_rows=clip_held_rows if termination_reason == "clip_held" else 0,
+        information_underflowed=information_underflowed,
         separation_message=separation_message,
         separation_groups=separation_groups,
     )

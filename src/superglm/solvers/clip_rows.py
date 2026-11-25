@@ -66,10 +66,6 @@ CLIP_ROWS_MOVES: dict[tuple[ClipRowsState, str], ClipRowsState] = {
 # information itself.
 _RESPONSE_REACH = 2.0**26
 
-# The information read on a positive-weight held row where float64 holds none
-# on any row (``_keep_some_information``): the smallest positive normal float64.
-_LEAST_INFORMATION = float(np.finfo(np.float64).tiny)
-
 
 class ClipRows:
     """Which rows a fit reads where the working clip holds one: ``working`` or ``likelihood``.
@@ -276,17 +272,17 @@ def tail_working_rows(
     return weight, eta + step
 
 
-def _keep_some_information(information: NDArray, held: NDArray, weights: NDArray) -> None:
-    """Give the rows' ``information`` a positive total where every row's has underflowed, in place.
+def information_underflowed(information: NDArray) -> bool:
+    """Whether a state's rows hold none of the likelihood's information in float64.
 
-    A model's covariance needs some row's information.  A held row's underflows
-    to 0 past a predictor of about ``+-745`` (logit, cloglog) or ``+-38``
-    (probit); where that leaves no row any, each positive-weight held row's is
-    read as the smallest positive normal float64.  The standard errors that
-    follow are of order ``1e153``: not determined, as the exact ones say.
+    A held row's Fisher information underflows to 0 past a predictor of about
+    ``+-745`` (logit, cloglog) or ``+-38`` (probit).  Where that leaves no row
+    any, the data identify no coefficient at that state: a fit returned there
+    shows no standard error (``PIRLSResult.information_underflowed``), and its
+    geometry is formed from the clipped state's rows, since a centred system
+    needs a positive total.
     """
-    if np.sum(information) == 0.0:
-        information[held] = np.where(weights[held] > 0.0, _LEAST_INFORMATION, 0.0)
+    return not np.any(information > 0.0)
 
 
 def likelihood_working_rows(
@@ -321,9 +317,43 @@ def likelihood_working_rows(
     working_weights[held], response[held] = tail_working_rows(
         link, y[held], eta_unclipped[held], weights[held], observed=observed, exported=exported
     )
-    if exported:
-        _keep_some_information(working_weights, held, weights)
     return working_weights, response
+
+
+def exported_working_rows(
+    family: Distribution,
+    link: Link,
+    y: NDArray,
+    weights: NDArray,
+    eta_unclipped: NDArray,
+    eta: NDArray,
+    mu: NDArray,
+    working_weights: NDArray,
+    response: NDArray,
+) -> tuple[NDArray, NDArray, bool]:
+    """The working rows a fit returns, and whether float64 holds none of their information.
+
+    ``likelihood_working_rows`` with every held row's weight its Fisher
+    information alone, which the fit's covariance, rank, EDF and
+    log-determinant read.  Where no row holds any (``information_underflowed``)
+    the two arrays come back as they are, the clipped state's.
+    """
+    patched = likelihood_working_rows(
+        family,
+        link,
+        y,
+        weights,
+        eta_unclipped,
+        eta,
+        mu,
+        working_weights,
+        response,
+        observed=False,
+        exported=True,
+    )
+    if patched[0] is working_weights or not information_underflowed(patched[0]):
+        return patched[0], patched[1], False
+    return working_weights, response, True
 
 
 def count_held_against(
@@ -379,6 +409,39 @@ def likelihood_deviance(
         return float(deviance + np.sum(exact - clipped))
 
 
+def exported_information(
+    family: Distribution,
+    link: Link,
+    eta_unclipped: NDArray,
+    eta: NDArray,
+    mu: NDArray,
+    sample_weight: NDArray,
+    information: NDArray,
+) -> tuple[NDArray, bool]:
+    """``information`` with every held row's entry the likelihood's, and whether float64 holds none.
+
+    The Fisher weights a fitted model's covariance reads, for a declared pair:
+    a held row's clipped weight is the clip's (slope at the band's edge over
+    the variance at the floored mean), not ``p'^2 / (p (1 - p))`` at its
+    predictor.  The same array when no row is held, the pair declares no tail
+    rows, or no row holds any information (``information_underflowed``), which
+    the flag says.
+    """
+    if not declares_tail_rows(family, link):
+        return information, False
+    eta_unclipped = np.asarray(eta_unclipped, dtype=np.float64)
+    low, high = held_rows(family, link, eta_unclipped, eta, mu)
+    held = np.flatnonzero(low | high)
+    if not held.size:
+        return information, False
+    result = np.array(information, dtype=np.float64, copy=True)
+    weights = np.asarray(sample_weight, dtype=np.float64)
+    result[held] = tail_information(link, eta_unclipped[held], weights[held])
+    if information_underflowed(result):
+        return information, True
+    return result, False
+
+
 def likelihood_information(
     family: Distribution,
     link: Link,
@@ -388,25 +451,8 @@ def likelihood_information(
     sample_weight: NDArray,
     information: NDArray,
 ) -> NDArray:
-    """``information`` with every held row's entry read from the likelihood, for a declared pair.
-
-    The Fisher weights a fitted model's covariance reads: a held row's clipped
-    weight is the clip's (slope at the band's edge over the variance at the
-    floored mean), not ``p'^2 / (p (1 - p))`` at its predictor.  Unchanged, and
-    the same array, when no row is held or the pair declares no tail rows.
-    """
-    if not declares_tail_rows(family, link):
-        return information
-    eta_unclipped = np.asarray(eta_unclipped, dtype=np.float64)
-    low, high = held_rows(family, link, eta_unclipped, eta, mu)
-    held = np.flatnonzero(low | high)
-    if not held.size:
-        return information
-    result = np.array(information, dtype=np.float64, copy=True)
-    weights = np.asarray(sample_weight, dtype=np.float64)
-    result[held] = tail_information(link, eta_unclipped[held], weights[held])
-    _keep_some_information(result, held, weights)
-    return result
+    """``exported_information``'s weights alone."""
+    return exported_information(family, link, eta_unclipped, eta, mu, sample_weight, information)[0]
 
 
 def _probit_event_curvature(eta: NDArray) -> tuple[NDArray, NDArray, NDArray]:

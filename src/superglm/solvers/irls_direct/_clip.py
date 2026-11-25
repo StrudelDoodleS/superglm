@@ -12,6 +12,7 @@ from superglm.solvers.clip_rows import (
     ClipRows,
     count_held_against,
     declares_tail_rows,
+    exported_working_rows,
     likelihood_deviance,
     likelihood_working_rows,
     note_held_against,
@@ -41,7 +42,7 @@ class _IRLSDirectClipOverlay:
     (working weight and response); rows inside the guard keep the solver's arithmetic.
     """
 
-    __slots__ = ("rows", "declared", "held_against", "unfinished")
+    __slots__ = ("rows", "declared", "held_against", "unfinished", "information_underflowed")
 
     def __init__(self, family: object, link: object, shared: ClipRows | None) -> None:
         self.rows = ClipRows() if shared is None else shared
@@ -50,6 +51,8 @@ class _IRLSDirectClipOverlay:
         self.held_against = 0
         # the move to the likelihood's rows came with no iteration left to solve them
         self.unfinished = False
+        # float64 holds none of the likelihood's information on the returned rows (``exported``)
+        self.information_underflowed = False
 
     @property
     def likelihood(self) -> bool:
@@ -77,14 +80,12 @@ class _IRLSDirectClipOverlay:
         mu: NDArray,
         *,
         observed: bool,
-        exported: bool = False,
     ) -> CoefficientWorkingRows:
         """``rows`` with every held row's weight and response read from the likelihood.
 
         A held row's response is about its unclipped predictor
         (``clip_rows.tail_working_rows``), which is every other row's own, so
         ``weights * (response - eta_unclipped)`` is the likelihood's score.
-        ``exported`` rows are the fit's returned ones: Fisher information, unbounded.
         """
         weights, response = likelihood_working_rows(
             fit.family,
@@ -97,7 +98,35 @@ class _IRLSDirectClipOverlay:
             rows.weights,
             rows.response,
             observed=observed,
-            exported=exported,
+        )
+        if weights is rows.weights:
+            return rows
+        return replace(rows, weights=weights, response=response)
+
+    def exported(
+        self,
+        fit: _IRLSDirectFit,
+        rows: CoefficientWorkingRows,
+        eta_unclipped: NDArray,
+        eta: NDArray,
+        mu: NDArray,
+    ) -> CoefficientWorkingRows:
+        """``rows`` as the fit returns them: every held row's weight its Fisher information alone.
+
+        Where float64 holds none of that information on any row
+        (``clip_rows.exported_working_rows``), ``rows`` as they are, and
+        ``information_underflowed`` says so.
+        """
+        weights, response, self.information_underflowed = exported_working_rows(
+            fit.family,
+            fit.link,
+            fit.y,
+            fit.weights,
+            eta_unclipped,
+            eta,
+            mu,
+            rows.weights,
+            rows.response,
         )
         if weights is rows.weights:
             return rows

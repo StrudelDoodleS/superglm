@@ -627,8 +627,13 @@ def standard_error_mask(model, penalized, data_mask) -> NDArray:
     penalty then determines what the data alone leave open, and ``sqrt(phi diag V)`` is each
     coefficient's posterior standard deviation.  Otherwise those the data alone determine,
     ``data_mask()``; a record saved before fits recorded this rule keeps that mask whatever its
-    rank (``RankInfo.standard_error_mask``).
+    rank (``RankInfo.standard_error_mask``).  None where float64 holds none of the
+    likelihood's information on the fit's rows (``PIRLSResult.information_underflowed``):
+    the data identify no coefficient there, the intercept included.
     """
+    solver = model._solver_pirls_result()
+    if getattr(solver, "information_underflowed", False):
+        return np.zeros(len(solver.beta), dtype=bool)
     record = _fit_record(model)
     if getattr(record, "standard_error_mask", "data") == "penalized" and penalized_fit_certified(
         model, penalized

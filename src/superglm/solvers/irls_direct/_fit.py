@@ -1914,7 +1914,9 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             # iteration read: a clipped row's weight is the clip's, and the
             # covariance reads these.  An in-loop solve exports the rows it read.
             # Either way a held row's exported weight is its Fisher information
-            # alone: the iteration's bound on it is no information.
+            # alone: the iteration's bound on it is no information.  Where
+            # float64 holds none on any row the clipped rows are returned, and
+            # the result says so (``PIRLSResult.information_underflowed``).
             tail_rows = clip is not None and clip.declared and (clip.likelihood or self._published)
             export_rows = coefficient_working_rows(
                 distribution=self.family,
@@ -1926,14 +1928,8 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                 prefer_observed=False,
             )
             if tail_rows:
-                export_rows = clip.patched(
-                    self,
-                    export_rows,
-                    self.eta_unclipped,
-                    self.eta,
-                    self.mu,
-                    observed=False,
-                    exported=True,
+                export_rows = clip.exported(
+                    self, export_rows, self.eta_unclipped, self.eta, self.mu
                 )
             W = export_rows.weights
             z = export_rows.response
@@ -2046,6 +2042,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             clip_held_rows=(
                 self.clip.held_against if self.termination_reason == "clip_held" else 0
             ),
+            information_underflowed=(self.clip is not None and self.clip.information_underflowed),
             separation_message=self.separation_message,
             separation_groups=self.separation_groups,
         )
