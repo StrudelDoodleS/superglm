@@ -1055,6 +1055,145 @@ class BuildResult:
     compiled: CompiledPredictorDesign
 
 
+def _scan_separation(
+    compiled: CompiledPredictorDesign,
+    X: EagerFrame,
+    y: NDArray,
+    sample_weight: NDArray,
+    offset: NDArray | None,
+    link: Link,
+    boundaries: tuple,
+    selection_penalty: object | None,
+    caps_enforced: bool,
+) -> tuple[Any, list, list] | None:
+    """Scan the terms the build recorded for separated levels, cells and curves.
+
+    Each term's marks from an earlier fit are cleared first. Returns what the
+    caller discloses (``SeparatedLevels``, the held curves, the level curves),
+    or None when the build recorded no term. ``selection_penalty`` and
+    ``caps_enforced`` are as ``build_design_matrix`` documents them;
+    ``boundaries`` is the family and link's response-boundary tuple.
+    """
+    from superglm.features.categorical import Categorical
+    from superglm.model.separated_levels import record_separated_levels
+
+    for spec in compiled.specs.values():
+        if isinstance(spec, Categorical):
+            record_separated_levels(spec)
+    for spec in compiled.interaction_specs.values():
+        if getattr(spec, "_separated_cells_at_fit", ()):
+            spec._separated_cells_at_fit = ()
+            spec._occupied_cells_at_fit = None
+        if hasattr(spec, "_bounded_groups_at_fit"):
+            spec._bounded_groups_at_fit = (False, False, False)
+    if not compiled.separation_records:
+        return None
+    from superglm.diagnostics.separation import (
+        SeparatedLevels,
+        scan_categorical_term,
+        scan_interaction_term,
+    )
+    from superglm.penalties.base import penalty_targets_group
+
+    def _penalised(name: str) -> bool:
+        return selection_penalty is not None and any(
+            penalty_targets_group(selection_penalty, g)
+            for g in compiled.groups
+            if g.feature_name == name
+        )
+
+    findings = []
+    curves = []
+    level_curves = []
+    for record in compiled.separation_records:
+        term_name = record[1]
+        if record[0] == "curve":
+            # Already acted on while the term was built (its separated
+            # directions are held), so a selection penalty exempts
+            # nothing here: it is reported whatever bounds the term.
+            curves.extend(record[2])
+            continue
+        if record[0] != "inter" and _penalised(term_name):
+            # A nonzero lambda1 reaches this block: the penalty grows
+            # without bound along any recession direction, so the
+            # penalised optimum is finite and the term is estimable.
+            if record[0] == "level_curve":
+                compiled.interaction_specs[term_name]._separated_ranges = {}
+            continue
+        if record[0] == "level_curve":
+            level_curves.append(record[1:])
+            continue
+        if record[0] == "cat" and caps_enforced and record[2]._constraint_rules:
+            # A fit-time cap bounds every level's relativity against the base,
+            # so the capped optimum is finite and no level escapes to infinity.
+            compiled.scan_codes.pop(term_name, None)
+            continue
+        if record[0] == "cat":
+            _, name_c, spec_c, x_c = record
+            found = scan_categorical_term(
+                name_c,
+                spec_c,
+                x_c,
+                y,
+                sample_weight,
+                boundaries,
+                compiled.scan_codes.pop(name_c, None),
+            )
+            findings.extend(found)
+            # predict names these levels when it meets them (_predict_eta)
+            record_separated_levels(spec_c, found)
+        else:
+            _, name_i, spec1_i, spec2_i, x1_i, x2_i, p1_i, p2_i = record
+            cross_spec = compiled.interaction_specs[name_i]
+            # An "auto" penalty is calibrated after the build and can come out
+            # zero, so only a set value bounds a cell's parents or the cross.
+            set_value = getattr(selection_penalty, "lambda1", None) != "auto"
+            bounded = (
+                bool(
+                    (caps_enforced and spec1_i._constraint_rules)
+                    or (set_value and _penalised(p1_i))
+                ),
+                bool(
+                    (caps_enforced and spec2_i._constraint_rules)
+                    or (set_value and _penalised(p2_i))
+                ),
+                set_value and _penalised(name_i),
+            )
+            found = scan_interaction_term(
+                name_i,
+                spec1_i,
+                spec2_i,
+                x1_i,
+                x2_i,
+                p1_i,
+                p2_i,
+                y,
+                sample_weight,
+                boundaries,
+                cross_spec=cross_spec,
+                bounded=bounded,
+            )
+            findings.extend(found)
+            # the standard-error rule reads these cells (state_ops._names_an_unpriced_level)
+            cross_spec._separated_cells_at_fit = tuple(
+                label for finding in found for label in finding.labels
+            )
+            cross_spec._occupied_cells_at_fit = found[0].occupied if found else None
+            cross_spec._bounded_groups_at_fit = bounded
+    compiled.scan_codes.clear()
+    from superglm.links import LogLink
+
+    levels = SeparatedLevels(
+        findings=findings,
+        specs={**compiled.specs, **compiled.interaction_specs},
+        sample_weight=sample_weight,
+        offset=offset,
+        exposure=offset is not None and isinstance(link, LogLink),
+        frame=X,
+    )
+    return levels, curves, level_curves
+
+
 def build_design_matrix(
     X: EagerFrame,
     y: NDArray,
@@ -1178,129 +1317,27 @@ def build_design_matrix(
         eigenbasis_turn=eigenbasis_turn,
         term_coordinates=eigenbasis_turn,
     )
-    separation_records = compiled.separation_records
-    from superglm.features.categorical import Categorical
-    from superglm.model.separated_levels import record_separated_levels
-
-    for spec in compiled.specs.values():
-        if isinstance(spec, Categorical):
-            record_separated_levels(spec)
-    for spec in compiled.interaction_specs.values():
-        if getattr(spec, "_separated_cells_at_fit", ()):
-            spec._separated_cells_at_fit = ()
-            spec._occupied_cells_at_fit = None
-        if hasattr(spec, "_bounded_groups_at_fit"):
-            spec._bounded_groups_at_fit = (False, False, False)
-    if separation_records:
+    scanned = _scan_separation(
+        compiled,
+        X,
+        y,
+        sample_weight,
+        offset,
+        link,
+        separation_boundaries,
+        selection_penalty,
+        caps_enforced,
+    )
+    if scanned is not None:
+        # Emitted here: the warnings name this builder's caller by a fixed stack level.
         from superglm.diagnostics.separation import (
-            SeparatedLevels,
             emit_curve_separation,
             emit_level_curve_separation,
             emit_separation_findings,
-            scan_categorical_term,
-            scan_interaction_term,
         )
-        from superglm.penalties.base import penalty_targets_group
 
-        def _penalised(name: str) -> bool:
-            return selection_penalty is not None and any(
-                penalty_targets_group(selection_penalty, g)
-                for g in compiled.groups
-                if g.feature_name == name
-            )
-
-        findings = []
-        curves = []
-        level_curves = []
-        for record in separation_records:
-            term_name = record[1]
-            if record[0] == "curve":
-                # Already acted on while the term was built (its separated
-                # directions are held), so a selection penalty exempts
-                # nothing here: it is reported whatever bounds the term.
-                curves.extend(record[2])
-                continue
-            if record[0] != "inter" and _penalised(term_name):
-                # A nonzero lambda1 reaches this block: the penalty grows
-                # without bound along any recession direction, so the
-                # penalised optimum is finite and the term is estimable.
-                if record[0] == "level_curve":
-                    compiled.interaction_specs[term_name]._separated_ranges = {}
-                continue
-            if record[0] == "level_curve":
-                level_curves.append(record[1:])
-                continue
-            if record[0] == "cat" and caps_enforced and record[2]._constraint_rules:
-                # A fit-time cap bounds every level's relativity against the base,
-                # so the capped optimum is finite and no level escapes to infinity.
-                compiled.scan_codes.pop(term_name, None)
-                continue
-            if record[0] == "cat":
-                _, name_c, spec_c, x_c = record
-                found = scan_categorical_term(
-                    name_c,
-                    spec_c,
-                    x_c,
-                    y,
-                    sample_weight,
-                    separation_boundaries,
-                    compiled.scan_codes.pop(name_c, None),
-                )
-                findings.extend(found)
-                # predict names these levels when it meets them (_predict_eta)
-                record_separated_levels(spec_c, found)
-            else:
-                _, name_i, spec1_i, spec2_i, x1_i, x2_i, p1_i, p2_i = record
-                cross_spec = compiled.interaction_specs[name_i]
-                # An "auto" penalty is calibrated after the build and can come out
-                # zero, so only a set value bounds a cell's parents or the cross.
-                set_value = getattr(selection_penalty, "lambda1", None) != "auto"
-                bounded = (
-                    bool(
-                        (caps_enforced and spec1_i._constraint_rules)
-                        or (set_value and _penalised(p1_i))
-                    ),
-                    bool(
-                        (caps_enforced and spec2_i._constraint_rules)
-                        or (set_value and _penalised(p2_i))
-                    ),
-                    set_value and _penalised(name_i),
-                )
-                found = scan_interaction_term(
-                    name_i,
-                    spec1_i,
-                    spec2_i,
-                    x1_i,
-                    x2_i,
-                    p1_i,
-                    p2_i,
-                    y,
-                    sample_weight,
-                    separation_boundaries,
-                    cross_spec=cross_spec,
-                    bounded=bounded,
-                )
-                findings.extend(found)
-                # the standard-error rule reads these cells (state_ops._names_an_unpriced_level)
-                cross_spec._separated_cells_at_fit = tuple(
-                    label for finding in found for label in finding.labels
-                )
-                cross_spec._occupied_cells_at_fit = found[0].occupied if found else None
-                cross_spec._bounded_groups_at_fit = bounded
-        compiled.scan_codes.clear()
-        from superglm.links import LogLink
-
-        emit_separation_findings(
-            SeparatedLevels(
-                findings=findings,
-                specs={**compiled.specs, **compiled.interaction_specs},
-                sample_weight=sample_weight,
-                offset=offset,
-                exposure=offset is not None and isinstance(link, LogLink),
-                frame=X,
-            ),
-            separation,
-        )
+        levels, curves, level_curves = scanned
+        emit_separation_findings(levels, separation)
         emit_curve_separation(curves, separation)
         emit_level_curve_separation(level_curves)
 
