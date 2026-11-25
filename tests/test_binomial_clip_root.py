@@ -744,6 +744,19 @@ def test_a_fit_returns_where_float64_cannot_hold_the_likelihoods_rows():
     assert math.isfinite(float(np.asarray(model.predict(pd.DataFrame(index=range(1)))).ravel()[0]))
 
 
+def test_a_fit_is_not_reported_converged_where_the_likelihoods_score_does_not_cancel():
+    """Probit pairs at offsets of +-9, every row against its outcome: converged only at the root.
+
+    The solver's first step on the clipped rows leaves the intercept near
+    ``-2.6e8``, where every event's score is ``2.6e8`` and no non-event's
+    offsets it.  The curvature ``l1 (l1 + eta)`` of the Mills ratio ``l1``
+    has no digit there: it came out as ``2e24`` for 1, the Newton step
+    rounded to nothing, the deviance stood still, and the unfixed fit
+    reported converged.  The fit now leaves such a state to the clip's stop.
+    """
+    _returned_and_disclosed(_pairs("probit", -9.0, 9.0))
+
+
 def _likelihood_deviance_of_pair(predictor: float) -> float:
     """``clip_rows.likelihood_deviance`` of a probit event and non-event, both at ``-+predictor``."""
     from superglm.distributions import Binomial, clip_mu
@@ -759,18 +772,20 @@ def _likelihood_deviance_of_pair(predictor: float) -> float:
     return likelihood_deviance(family, link, y, weights, eta_unclipped, eta, mu, clipped)
 
 
-@pytest.mark.parametrize("predictor", [-1.2e22])
+@pytest.mark.parametrize("predictor", [-2.56e8, -1.2e22])
 def test_a_state_whose_working_rows_float64_cannot_hold_has_no_likelihood_deviance(predictor):
     """Such a state's deviance is infinite: a fit neither moves to the likelihood's rows there nor steps there.
 
-    The control is a pair at ``-+9``, held past the mean floor, whose
-    deviance is ``-4 log Phi(-9)`` by SciPy.  At the far predictor ``-2 log
-    L`` is finite too, and was returned, so the move's test let the fit on
-    to rows it could not form.
+    The controls are pairs at ``-+9``, held past the mean floor, and at
+    ``-+1000``, inside the Mills ratio's reach: each deviance is ``-4 log
+    Phi`` by SciPy.  At the far predictors ``-2 log L`` is finite too, and
+    was returned, so the move's test let the fit on to rows it could not
+    form (``-1.2e22``) or whose curvature has no digit (``-2.56e8``).
     """
-    np.testing.assert_allclose(
-        _likelihood_deviance_of_pair(-9.0), -4.0 * log_ndtr(-9.0), rtol=1e-12
-    )
+    for held in (-9.0, -1000.0):
+        np.testing.assert_allclose(
+            _likelihood_deviance_of_pair(held), -4.0 * log_ndtr(held), rtol=1e-12
+        )
     assert math.isfinite(-4.0 * log_ndtr(predictor))  # the control: the likelihood itself is finite
     assert _likelihood_deviance_of_pair(predictor) == math.inf
 

@@ -66,6 +66,14 @@ CLIP_ROWS_MOVES: dict[tuple[ClipRowsState, str], ClipRowsState] = {
 # information itself.
 _RESPONSE_REACH = 2.0**26
 
+# The probit predictor past which a row against its outcome has no working
+# row.  Its score is an inverse Mills ratio, the exponential of a difference
+# of two terms near ``eta^2 / 2``, so its relative error grows as ``u eta^2``
+# and that of the curvature ``l1 (l1 + eta)``, whose second factor is ``1 /
+# |eta|``, as ``u eta^4``: ``7e-4`` here, and no digit by ``2^13``, where a
+# Newton step is as wrong as its curvature (``tail_rows_readable``).
+_MILLS_REACH = 2.0**10
+
 
 class ClipRows:
     """Which rows a fit reads where the working clip holds one: ``working`` or ``likelihood``.
@@ -380,10 +388,17 @@ def tail_information(link: object, eta: NDArray, weights: NDArray) -> NDArray:
 def tail_rows_readable(link: object, y: NDArray, eta: NDArray, weights: NDArray) -> bool:
     """Whether float64 holds the likelihood's working rows at ``eta``, under either curvature.
 
-    ``tail_working_rows`` finite in every weight and response.  A fit reads
-    the likelihood's rows only at such a state: a row whose score or curvature
-    overflows has no working row for the next step to solve.
+    ``tail_working_rows`` finite in every weight and response, and no probit
+    row past ``_MILLS_REACH`` on the side against its outcome, where the row
+    is finite and its curvature has no digit.  A fit reads the likelihood's
+    rows only at such a state: a row whose score or curvature float64 cannot
+    form has no working row for the next step to solve.
     """
+    if type(link) is ProbitLink:
+        # how far each predictor lies on the side against its response
+        against = np.maximum(np.where(y > 0.0, -eta, 0.0), np.where(y < 1.0, eta, 0.0))
+        if np.any(against > _MILLS_REACH):
+            return False
     return all(
         bool(np.all(np.isfinite(part)))
         for observed in (False, True)
