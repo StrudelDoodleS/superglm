@@ -648,6 +648,28 @@ def fit_contrast_estimable(model, inference: dict):
     return None if rank_info is None else rank_info.is_estimable
 
 
+def rank_intercept_centre(model, rank_info) -> NDArray:
+    """The public column mean a dense fit's rank record was centred on, over the fitted coefficients.
+
+    The record centres the solver's columns on ``mean_x``; the public columns sit
+    ``_public_intercept_shift`` below them.
+    """
+    width = len(rank_info.mean_x)
+    return rank_info.mean_x - _public_intercept_shift(model, model._groups, width)
+
+
+def fit_intercept_centre(model, inference: dict) -> NDArray | None:
+    """``build_coef_rows``' ``intercept_centre`` beside ``fit_contrast_estimable``, or ``None``.
+
+    ``None`` for a fit without a rank record and for a structured fit, whose geometry
+    centres shifted moments and decides contrasts of its border columns alone.
+    """
+    if inference.get("structured_covariance"):
+        return None
+    rank_info = model._solver_pirls_result().rank_info
+    return None if rank_info is None else rank_intercept_centre(model, rank_info)
+
+
 def _structured_contrast_estimable(inference: dict, state, contrast: NDArray) -> bool:
     """Whether a structured fit's data determine ``contrast``, by its coefficient mask's rule.
 

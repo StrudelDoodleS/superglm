@@ -247,6 +247,7 @@ def build_coef_rows(
     rules_enforced: bool = True,
     sandwich_covariance: Any | None = None,
     contrast_estimable: Callable[[NDArray], bool] | None = None,
+    intercept_centre: NDArray | None = None,
 ) -> list[_CoefRow]:
     """Build coefficient table rows for summary output.
 
@@ -270,6 +271,11 @@ def build_coef_rows(
         (``RankDecomposition.is_estimable``); the fit's own rank record's when the mask
         is.  A contrast whose coefficients the mask all shows is determined without it;
         without it, any other is not.
+    intercept_centre : the public column mean, over the fitted coefficients, that the
+        decomposition behind ``contrast_estimable`` was centred on.  The reported
+        intercept is the centred one, which the fit always determines, less
+        ``intercept_centre' beta``, so that contrast decides it; without it, only the
+        ordered terms' base-level adjustment does.
     """
     from superglm.features.categorical import Categorical
     from superglm.features.factor_smooth import FactorSmooth
@@ -544,12 +550,15 @@ def build_coef_rows(
         except np.linalg.LinAlgError:
             return float("nan"), float("nan"), ref_df_val
 
-    # Intercept row. The default path shows the fitted intercept as determined; the
-    # ordered terms' base-level effects added to it are decided by the mask's rule.
+    # Intercept row. On the default path the reported intercept, the centred one less the
+    # centre and plus the ordered terms' base-level effects, is decided by the mask's rule.
     z, p, ci_lo, ci_hi = _compute_coef_stats(intercept, icpt_se, alpha)
     blank = moves(-1)
+    intercept_contrast = full_reference_contrast
+    if intercept_centre is not None:
+        intercept_contrast = intercept_contrast - np.asarray(intercept_centre, dtype=np.float64)
     undetermined_intercept = not is_sandwich and not _determined(
-        np.where(selected_columns, full_reference_contrast, 0.0)
+        np.where(selected_columns, intercept_contrast, 0.0)
     )
     withheld = blank or undetermined_intercept
     rows.append(

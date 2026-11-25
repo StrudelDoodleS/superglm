@@ -420,7 +420,7 @@ def summary(
         XtWX_inv_aug = covariance.covariance
         active_groups = list(covariance.active_groups)
         coef_estimable_override = covariance.coefficient_estimable
-        contrast_estimable = None
+        contrast_estimable = intercept_centre = None
         model_info["standard_error_note"] = None
         model_info["covariance_method"] = covariance.method_label
         model_info["covariance_type"] = covariance.cov_type
@@ -436,9 +436,14 @@ def summary(
         XtWX_inv_aug = inf["XtWX_inv_aug"]
         active_groups = inf["active_groups"]
         coef_estimable_override = inf.get("coefficient_estimable")
-        from superglm.model.state_ops import fit_contrast_estimable, saved_standard_error_note
+        from superglm.model.state_ops import (
+            fit_contrast_estimable,
+            fit_intercept_centre,
+            saved_standard_error_note,
+        )
 
         contrast_estimable = fit_contrast_estimable(model, inf)
+        intercept_centre = fit_intercept_centre(model, inf)
 
         model_info["standard_error_note"] = saved_standard_error_note(
             model, inf["coefficient_estimable"]
@@ -477,6 +482,7 @@ def summary(
         ),
         sandwich_covariance=covariance,
         contrast_estimable=contrast_estimable,
+        intercept_centre=intercept_centre,
     )
     _withhold_repaired_term_inference(coef_rows, shape_repaired_feature_names(model))
     from superglm._weight_units import standard_errors

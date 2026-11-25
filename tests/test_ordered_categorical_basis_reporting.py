@@ -737,6 +737,46 @@ def test_term_inference_of_a_single_ordered_term_keeps_its_errors(basis) -> None
     assert np.all(np.isfinite(curve)) and np.all(curve > 0.0)
 
 
+def test_an_intercept_a_design_spanning_the_constant_leaves_open_shows_no_error() -> None:
+    """``x`` and ``5 - x``: the columns span the constant, so the intercept is not determined.
+
+    The reported intercept is the centred one, which every fit determines, less the column
+    means times the slopes; moving ``c`` from the intercept to ``(x + z) c / 5`` leaves the
+    fit.  The default summary and the metrics summaries (fit rows, other weights, other
+    rows) keep the estimate with no error, flagged ``estimable=False``, as the robust one
+    does; at a80058a35 they showed SE 0.1488.  ``x`` alone keeps the OLS error.
+    """
+    rng = np.random.default_rng(0)
+    x = rng.uniform(0.0, 4.0, 200)
+    y = 1.0 + 0.5 * x + rng.normal(size=200)
+    X = pd.DataFrame({"x": x, "z": 5.0 - x})
+    model = SuperGLM(family="gaussian", features={"x": Numeric(), "z": Numeric()}).fit(X, y)
+    _, s, vt = np.linalg.svd(_design(model))
+    null = vt[int(np.sum(s > s[0] * 1e-10)) :]
+    assert np.linalg.norm(null[:, 0]) > 0.1
+    weights = np.linspace(0.5, 1.5, 200)
+    for summary in (
+        model.summary(),
+        model.metrics(X, y).summary(),
+        model.metrics(X, y, sample_weight=weights).summary(),
+        model.metrics(X.iloc[:150].reset_index(drop=True), y[:150]).summary(),
+    ):
+        row = summary._coef_rows[0]
+        assert row.name == "Intercept" and np.isfinite(row.coef)
+        assert row.se is None and row.z is None and row.p is None and row.ci_low is None
+        assert row.estimable is False
+
+    alone = SuperGLM(family="gaussian", features={"x": Numeric()}).fit(X[["x"]], y)
+    design = _design(alone)
+    residual = y - design @ np.linalg.lstsq(design, y, rcond=None)[0]
+    phi = float(residual @ residual) / (len(y) - design.shape[1])
+    expected = np.sqrt(phi * np.linalg.inv(design.T @ design)[0, 0])
+    for summary in (alone.summary(), alone.metrics(X[["x"]], y).summary()):
+        row = summary._coef_rows[0]
+        assert row.estimable is True
+        np.testing.assert_allclose(row.se, expected, rtol=1e-9)
+
+
 def test_editor_stale_summary_keeps_the_basis_vocabulary(segmented_model) -> None:
     from superglm.editor.apply import apply_edits_to_model_copy_with_data
     from superglm.editor.session import EditorSession
