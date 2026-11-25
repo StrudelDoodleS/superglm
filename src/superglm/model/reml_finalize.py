@@ -236,6 +236,33 @@ def restore_qp_group_state(model, qp_saved_state) -> None:
     restore_qp_constraints(model, qp_saved_state)
 
 
+def _penalized_deviance_and_nullity(
+    model, pirls_result, lambdas, reml_penalties, hessian_rank: int | None
+) -> tuple[float, float]:
+    """The penalized deviance at a result and the penalty nullity on its coefficient range.
+
+    ``hessian_rank`` stands for a result that has lost its own certified rank; the
+    coefficient width counts every alias, so it is the last resort.
+    """
+    p_dim = model._dm.p
+    penalized_deviance = float(
+        pirls_result.deviance
+        + total_penalty_quadratic(
+            pirls_result.beta, lambdas, reml_penalties, list(model._dm.group_matrices)
+        )
+    )
+    if hessian_rank is None:
+        hessian_rank = pirls_result.reml_hessian_rank
+    nullity = compute_penalty_nullity(
+        None,
+        hessian_rank=1 + p_dim if hessian_rank is None else hessian_rank,
+        penalties=reml_penalties,
+        lambdas=lambdas,
+        coefficient_width=p_dim,
+    )
+    return penalized_deviance, nullity
+
+
 def compute_profiled_phi(
     model,
     *,
@@ -252,32 +279,11 @@ def compute_profiled_phi(
     raised where the profile has no interior optimum (zero penalized deviance
     or no residual likelihood size). Any other family: the deviance form.
     """
-    scale_known = scale_is_known(model._distribution)
-    if scale_known:
-        return 1.0
-
-    p_dim = model._dm.p
-    pq_final = total_penalty_quadratic(
-        pirls_result.beta,
-        lambdas,
-        reml_penalties,
-        list(model._dm.group_matrices),
-    )
-    penalized_deviance = float(pirls_result.deviance + pq_final)
-
     distribution = model._distribution
-    if hessian_rank is None:
-        # A caller's rank (``profiled_likelihood_scale``) stands for a result that has lost
-        # its own; the coefficient width counts every alias, so it is the last resort.
-        hessian_rank = pirls_result.reml_hessian_rank
-    if hessian_rank is None:
-        hessian_rank = 1 + p_dim
-    M_p = compute_penalty_nullity(
-        None,
-        hessian_rank=hessian_rank,
-        penalties=reml_penalties,
-        lambdas=lambdas,
-        coefficient_width=p_dim,
+    if scale_is_known(distribution):
+        return 1.0
+    penalized_deviance, M_p = _penalized_deviance_and_nullity(
+        model, pirls_result, lambdas, reml_penalties, hessian_rank
     )
     weight_semantics = model_weight_semantics(model)
     if isinstance(distribution, Gaussian | Gamma):
@@ -318,21 +324,8 @@ def profiled_likelihood_scale(
     if scale_is_known(distribution):
         return 1.0, KNOWN
     if isinstance(distribution, Tweedie):
-        p_dim = model._dm.p
-        penalized_deviance = float(
-            pirls_result.deviance
-            + total_penalty_quadratic(
-                pirls_result.beta, lambdas, reml_penalties, list(model._dm.group_matrices)
-            )
-        )
-        if hessian_rank is None:
-            hessian_rank = pirls_result.reml_hessian_rank
-        nullity = compute_penalty_nullity(
-            None,
-            hessian_rank=1 + p_dim if hessian_rank is None else hessian_rank,
-            penalties=reml_penalties,
-            lambdas=lambdas,
-            coefficient_width=p_dim,
+        penalized_deviance, nullity = _penalized_deviance_and_nullity(
+            model, pirls_result, lambdas, reml_penalties, hessian_rank
         )
         phi = profile_likelihood_scale(
             distribution,

@@ -771,22 +771,6 @@ def is_multiplicative(link: object) -> bool:
     return getattr(link, "multiplicative", False)
 
 
-#: The link classes this module ships. Arithmetic is decided by membership of
-#: the exact type, so a subclass never inherits a closed form.
-SHIPPED_LINKS = (
-    IdentityLink,
-    LogLink,
-    LogitLink,
-    ProbitLink,
-    CloglogLink,
-    CauchitLink,
-    InverseLink,
-    InverseSquaredLink,
-    SqrtLink,
-    PowerLink,
-    NegativeBinomialLink,
-)
-
 _LINK_SHORTCUTS: dict[str, type] = {
     "log": LogLink,
     "identity": IdentityLink,
@@ -798,6 +782,11 @@ _LINK_SHORTCUTS: dict[str, type] = {
     "inverse_squared": InverseSquaredLink,
     "sqrt": SqrtLink,
 }
+
+#: The link classes this module ships: every one with a name, and the two with a
+#: parameter. Arithmetic is decided by membership of the exact type, so a subclass
+#: never inherits a closed form.
+SHIPPED_LINKS = (*_LINK_SHORTCUTS.values(), PowerLink, NegativeBinomialLink)
 
 
 def resolve_link(link: str | Link | None, family: Distribution) -> Link:
