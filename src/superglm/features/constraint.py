@@ -108,8 +108,7 @@ class ConstraintSpec:
 
 @dataclass(frozen=True, repr=False)
 class ConstraintRules:
-    """
-    An ordered set of fit-time shape rules, built with ``&``.
+    """An ordered set of fit-time shape rules, built with ``&``.
 
     Examples
     --------
@@ -139,6 +138,7 @@ class ConstraintRules:
         return NotImplemented
 
     def describe(self) -> str:
+        """Format the combined rules as a human-readable ``&``-joined string."""
         return " & ".join(r.describe() for r in self.rules)
 
     def __repr__(self) -> str:

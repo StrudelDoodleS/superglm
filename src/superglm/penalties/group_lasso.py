@@ -15,16 +15,19 @@ from superglm.types import GroupSlice
 
 
 class GroupLasso:
-    """Group lasso penalty: lambda1 * sum_g(w_g * ||beta_g||_2).
+    """Group lasso penalty: ``lambda1 * sum_g(w_g * ||beta_g||_2)``.
 
     Parameters
     ----------
-    lambda1 : float, {"auto"}, or None
+    lambda1 : float, {"auto"}, or None, default None
         Regularisation strength. ``None`` disables selection and ``"auto"``
-        explicitly requests calibration to 10% of lambda_max.
-    flavor : Flavor or None
-        Optional modifier (e.g. Adaptive) that adjusts group weights
-        based on an initial estimate.
+        requests calibration to 10% of ``lambda_max``.
+    flavor : Flavor or None, default None
+        Optional modifier (for example :class:`Adaptive`) that adjusts group
+        weights from an initial estimate.
+    features : str, list of str, or None, default None
+        Optional feature or group name(s) to penalise. ``None`` penalises all
+        penalised groups.
     """
 
     # It reads each group through its norm and can zero a whole group.

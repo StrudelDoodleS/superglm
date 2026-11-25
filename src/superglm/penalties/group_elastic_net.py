@@ -21,20 +21,24 @@ from superglm.types import GroupSlice
 
 
 class GroupElasticNet:
-    """Group elastic net: lambda1 * [alpha * group_L2 + (1-alpha)/2 * L2^2].
+    """Group elastic net: ``lambda1 * [alpha * group_L2 + (1 - alpha) / 2 * L2^2]``.
 
-    alpha=1.0 → pure group lasso, alpha=0.0 → pure ridge.
+    ``alpha=1.0`` reduces to pure group lasso; ``alpha=0.0`` reduces to pure ridge.
 
     Parameters
     ----------
-    lambda1 : float, {"auto"}, or None
+    lambda1 : float, {"auto"}, or None, default None
         Regularisation strength. ``None`` disables selection and ``"auto"``
-        explicitly requests calibration to 10% of lambda_max.
-    alpha : float
-        Mixing parameter in [0, 1]. 1 = pure group lasso, 0 = pure ridge.
-    flavor : Flavor or None
-        Optional modifier (e.g. Adaptive) that adjusts group weights
-        based on an initial estimate.
+        requests calibration to 10% of ``lambda_max``.
+    alpha : float, default 0.5
+        Mixing parameter in ``[0, 1]``. ``1.0`` is pure group lasso and ``0.0``
+        is pure ridge.
+    flavor : Flavor or None, default None
+        Optional modifier (for example :class:`Adaptive`) that adjusts group
+        weights from an initial estimate.
+    features : str, list of str, or None, default None
+        Optional feature or group name(s) to penalise. ``None`` penalises all
+        penalised groups.
     """
 
     # It reads each group through its norm; only its group-L2 part (alpha > 0)

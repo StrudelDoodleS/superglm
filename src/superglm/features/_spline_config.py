@@ -25,7 +25,12 @@ from superglm.types import LambdaPolicy
 
 
 class SplineOptionWarning(UserWarning):
-    """A spline option outside its accepted values, built as it always was."""
+    """A spline option is outside its accepted values and falls back to a default.
+
+    Emitted when ``penalty`` is not ``"ssp"``, ``"none"``, or ``None`` (treated
+    as ``"none"``) or when ``knot_strategy`` is unrecognised and no explicit
+    ``knots`` are given (treated as ``"uniform"``).
+    """
 
 
 # Warnings about a declaration point at the first frame outside the package.
@@ -52,7 +57,11 @@ SHAPE_ENGINES = ("qp", "scop")
 
 
 class SCOPRetiredWarning(UserWarning):
-    """A shape constraint declared or saved on the retired SCOP engine, fitted on the QP."""
+    """A shape constraint declared or saved on the retired SCOP engine.
+
+    Fit-time shape constraints are fitted with the constrained quadratic
+    programming solver instead.
+    """
 
 
 def warn_scop_retired(

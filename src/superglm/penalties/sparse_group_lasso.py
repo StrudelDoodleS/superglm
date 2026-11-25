@@ -16,17 +16,22 @@ from superglm.types import GroupSlice
 
 
 class SparseGroupLasso:
-    """Sparse group lasso: lambda1 * [(1-alpha) * group_L2 + alpha * L1].
+    """Sparse group lasso: ``lambda1 * [(1 - alpha) * group_L2 + alpha * L1]``.
 
     Parameters
     ----------
-    lambda1 : float, {"auto"}, or None
+    lambda1 : float, {"auto"}, or None, default None
         Regularisation strength. ``None`` disables selection and ``"auto"``
-        explicitly requests automatic calibration.
-    alpha : float
-        Mixing parameter in [0, 1]. 0 = pure group lasso, 1 = pure L1.
-    flavor : Flavor or None
-        Optional modifier (e.g. Adaptive).
+        requests automatic calibration.
+    alpha : float, default 0.5
+        Mixing parameter in ``[0, 1]``. ``0.0`` is pure group lasso and ``1.0``
+        is pure L1.
+    flavor : Flavor or None, default None
+        Optional modifier (for example :class:`Adaptive`) that adjusts group
+        weights from an initial estimate.
+    features : str, list of str, or None, default None
+        Optional feature or group name(s) to penalise. ``None`` penalises all
+        penalised groups.
     """
 
     # It can zero a whole group; only without its elementwise L1 part

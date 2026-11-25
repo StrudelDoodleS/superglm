@@ -82,6 +82,7 @@ class PolynomialRange:
 
     @property
     def label(self) -> str:
+        """Short shape name corresponding to ``degree``."""
         return SHAPE_NAMES[int(self.degree)]
 
 

@@ -1003,7 +1003,7 @@ class FactorSmooth:
         response: NDArray | None = None,
         boundaries: tuple[str, ...] = (),
     ) -> tuple[int, ...]:
-        """Record what the fit's data identify of each ``sz`` level (#432); return the separated.
+        """Record what the fit's data identify of each ``sz`` level; return the separated.
 
         A level whose positive-weight rows hold fewer distinct ``x`` values than the penalty's null
         space ``N_P`` is thin (``layout.sz_level_identification``); one whose unpenalized line
@@ -1109,9 +1109,9 @@ class FactorSmooth:
         """How the population curve is fixed (``_population_map``).
 
         ``"main"`` (no level left out), ``"mean"`` (the mean of the levels the data
-        identify) or ``"canonical"`` (every level thin or separated).  A term that
-        selects its lines (#444) is ``"main"`` unless another sz term on its group
-        leaves a level out (``share_group_levels``).
+        identify) or ``"canonical"`` (every level thin or separated). A term that
+        selects its lines is ``"main"`` unless another sz term on its group leaves
+        a level out (``share_group_levels``).
         """
         excluded = self._left_out
         if not excluded:
@@ -1309,7 +1309,7 @@ class FactorSmooth:
         population: bool,
         level_constants: NDArray | None = None,
     ) -> tuple[NDArray[np.float64], tuple]:
-        """Score the term as predicted when some level stays out of the population (#432).
+        """Score the term as predicted when some level stays out of the population.
 
         Returns the contribution and the thin, separated or weightless levels among the rows. Each
         level takes its ``_identified_blocks`` coefficients; an unseen level, and every row under
@@ -1395,11 +1395,11 @@ class FactorSmooth:
     def reconstruct(self, beta: NDArray) -> dict[str, Any]:
         """Return fitted natural-basis coefficients by level.
 
-        With ``sz`` levels left out of the population (#432,
-        ``_population_map``) each level's coefficients are its deviation from
-        the population curve as predicted, ``_identified_blocks`` minus the
-        offset ``c``, which the result carries as ``population_offset`` (the
-        main effect's reported curve adds ``b(x)' c``).
+        When ``sz`` levels are excluded from the population curve (for example
+        because they are thin, separated, or have zero weight), each level's
+        coefficients are returned as its deviation from the identified
+        population curve, and the result includes ``population_offset`` (which
+        the reported main-effect curve adds as ``b(x)' c``).
         """
         blocks = self._level_blocks(beta)
         extra: dict[str, Any] = {}
@@ -1423,7 +1423,7 @@ def population_curve_terms(name: Any, interaction_specs: Any) -> list[tuple[Any,
     """``(interaction name, spec)`` of the ``sz`` terms that move feature ``name``'s population curve.
 
     An ``sz`` term on ``x`` needs the global Spline on ``x`` and, with levels
-    left out of its population (#432, ``FactorSmooth._population_map``), its
+    left out of its population (``FactorSmooth._population_map``), its
     population curve is ``main(x) + b(x)' c``: the reported main-effect curve
     carries ``b(x)' c``.
     """
@@ -1632,7 +1632,7 @@ def population_curve_shift(
 def with_population_curve(
     raw: dict[str, Any], name: Any, interaction_specs: Any, groups: Any, beta: NDArray, spec: Any
 ) -> dict[str, Any]:
-    """A main-effect curve shifted onto its ``sz`` terms' population curve (#432).
+    """A main-effect curve shifted onto its ``sz`` terms' population curve.
 
     With ``sz`` levels left out of the population the curve the model
     predicts for the population is ``main(x) + b(x)' c``

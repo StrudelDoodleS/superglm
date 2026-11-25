@@ -83,14 +83,17 @@ class LambdaPolicy:
 
     @classmethod
     def estimate(cls) -> LambdaPolicy:
+        """Let REML estimate this penalty component's smoothing parameter."""
         return cls(mode="estimate")
 
     @classmethod
     def fixed(cls, value: float) -> LambdaPolicy:
+        """Hold this penalty component's smoothing parameter fixed at ``value``."""
         return cls(mode="fixed", value=float(value))
 
     @classmethod
     def off(cls) -> LambdaPolicy:
+        """Disable this penalty component (equivalent to ``fixed(0.0)``)."""
         return cls.fixed(0.0)
 
 

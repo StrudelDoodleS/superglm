@@ -513,9 +513,11 @@ class _SplineBase:
         return _spline_runtime.score(self, x, beta)
 
     def set_reparametrisation(self, R_inv: NDArray) -> None:
+        """Store the inverse reparametrisation matrix mapping back to raw basis coefficients."""
         self._R_inv = R_inv
 
     def reconstruct(self, beta: NDArray, n_points: int = 200) -> dict[str, Any]:
+        """Evaluate the fitted smooth curve and relativities on an evenly spaced grid."""
         return _spline_runtime.reconstruct(self, beta, n_points=n_points)
 
     def tensor_marginal_ingredients(
@@ -646,16 +648,16 @@ class PSpline(_BSplineBase):
 
     Parameters
     ----------
-    n_knots : int
+    n_knots : int, default 10
         Number of interior knots.
-    degree : int
+    degree : int, default 3
         B-spline polynomial degree.
-    knot_strategy : str
-        "uniform" (default), "quantile", "quantile_rows", or
-        "quantile_tempered".
-    penalty : str
-        "ssp" enables SSP reparametrisation, "none" disables it.
-    select : bool
+    knot_strategy : {"uniform", "quantile", "quantile_rows", "quantile_tempered"}, default "uniform"
+        Interior knot placement rule when ``knots`` is ``None``.
+    penalty : {"ssp", "none"} or None, default "ssp"
+        ``"ssp"`` enables SSP reparametrisation; ``"none"`` or ``None`` leaves
+        the basis un-reparametrised.
+    select : bool, default False
         If True, decompose the spline into null-space (linear) and
         range-space (wiggly) subgroups for three-way selection:
         nonlinear -> linear -> dropped.
@@ -664,35 +666,47 @@ class PSpline(_BSplineBase):
         penalised with a ridge penalty (``penalty_matrix=eye(1)``).
         With ``fit_reml()``, REML estimates separate lambdas for the
         linear and spline subgroups — driving the linear lambda to
-        infinity effectively zeros the linear component (three-way
-        selection: nonlinear -> linear -> dropped). See Wood (2011).
+        infinity effectively zeros the linear component (Wood, 2011).
 
-    knots : array-like or None
-        Explicit interior knot positions.
-    constraint : ConstraintSpec, ConstraintRules or None
+    knots : array-like or None, default None
+        Explicit interior knot positions. Overrides ``n_knots`` and
+        ``knot_strategy`` when given.
+    discrete : bool or None, default None
+        If True, bin the covariate into at most ``n_bins`` bins at fit time.
+        ``None`` defers to the model-level ``discrete`` setting.
+    n_bins : int or None, default None
+        Maximum bin count when discretised. ``None`` defers to the model-level
+        ``n_bins`` setting.
+    extrapolation : {"clip", "extend", "error"}, default "clip"
+        Prediction-time behaviour outside the training range.
+    boundary : tuple of (float, float) or None, default None
+        Explicit ``(lo, hi)`` boundary knots; defaults to the training range.
+    knot_alpha : float, default 0.2
+        Density-weighting exponent for ``knot_strategy="quantile_tempered"``.
+    constraint : ConstraintSpec, ConstraintRules or None, default None
         Public shape-constraint token, or fit-time rules joined with ``&``
-        into a ``ConstraintRules``. Use ``Constraint.fit.increasing``,
+        into a :class:`ConstraintRules`. Use ``Constraint.fit.increasing``,
         ``Constraint.fit.decreasing``, ``Constraint.fit.convex``,
         ``Constraint.fit.concave``, ``Constraint.postfit.increasing``,
         ``Constraint.postfit.decreasing``, ``Constraint.postfit.convex``, or
-        ``Constraint.postfit.concave``. For ``PSpline``, fit-time shape
-        constraints apply on the spline term's linear-predictor contribution
-        and, by default, use the constrained QP solver path that
-        ``BSplineSmooth`` uses: monotone is non-negative (or non-positive)
-        first differences of the B-spline coefficients, which holds the
-        curve monotone everywhere on the knot range, and convex/concave use
-        the exact curvature rows. This works in both exact and
-        ``discrete=True`` fitting paths. With ``fit_reml()``, fixed lambdas
-        work directly; automatic lambda estimation uses the QP passthrough
-        heuristic (unconstrained REML followed by constrained refit).
-        Fit-time convexity/concavity is supported for degrees one through
-        three; higher degrees require a ``Constraint.postfit.*`` token.
-    shape_engine : {"qp", "scop"}
-        The engine for a fit-time shape constraint: ``"qp"``, the path above.
-        ``"scop"`` named the SCOP reparameterization (Pya and Wood, 2015),
-        which 0.41.0 fitted every shape-constrained P-spline on. It is
-        retired: the constraint fits on the QP with a ``UserWarning``, and so
-        does a ``PSpline`` saved on SCOP when it is refitted.
+        ``Constraint.postfit.concave``. Fit-time shape constraints apply on
+        the spline term's linear-predictor contribution via the constrained
+        QP solver: monotone rules constrain adjacent B-spline coefficient
+        differences to one sign, and convex/concave rules enforce exact
+        curvature constraints. Both exact and ``discrete=True`` fits are
+        supported. With ``fit_reml()``, fixed lambdas work directly;
+        automatic lambda estimation runs unconstrained REML followed by a
+        constrained refit. Fit-time convexity/concavity is supported for
+        degrees 1 to 3; higher degrees require ``Constraint.postfit.*``.
+    m : int or tuple of int, default 2
+        Discrete difference order(s) for the penalty.
+    lambda_policy : LambdaPolicy, dict of LambdaPolicy, or None, default None
+        Per-component smoothing parameter policy for ``fit_reml()``.
+    shape_engine : {"qp", "scop"}, default "qp"
+        Engine for fit-time shape constraints. ``"qp"`` uses the constrained
+        QP solver. ``"scop"`` names the retired SCOP reparameterisation
+        (Pya and Wood, 2015); passing it emits :class:`SCOPRetiredWarning` and
+        fits on the QP solver instead, as does refitting a saved SCOP spline.
     """
 
     # A spline pickled before ``shape_engine`` existed reads this: 0.41.0 and
@@ -787,38 +801,50 @@ class BSplineSmooth(_IntegratedPenaltySpline, _BSplineBase):
 
     Parameters
     ----------
-    n_knots : int
+    n_knots : int, default 10
         Number of interior knots.
-    degree : int
+    degree : int, default 3
         B-spline polynomial degree.
-    knot_strategy : str
-        ``"uniform"`` or ``"quantile"``.
-    penalty : str
-        ``"ssp"`` enables SSP reparametrisation, ``"none"`` for raw.
-    select : bool
+    knot_strategy : {"uniform", "quantile", "quantile_rows", "quantile_tempered"}, default "uniform"
+        Interior knot placement rule when ``knots`` is ``None``.
+    penalty : {"ssp", "none"} or None, default "ssp"
+        ``"ssp"`` enables SSP reparametrisation; ``"none"`` or ``None`` leaves
+        the basis un-reparametrised.
+    select : bool, default False
         If True, add double-penalty shrinkage (null + range space).
-    knots : array-like or None
-        Explicit interior knot positions.
-    constraint : ConstraintSpec, ConstraintRules or None
+    knots : array-like or None, default None
+        Explicit interior knot positions. Overrides ``n_knots`` and
+        ``knot_strategy`` when given.
+    discrete : bool or None, default None
+        If True, bin the covariate into at most ``n_bins`` bins at fit time.
+        ``None`` defers to the model-level ``discrete`` setting.
+    n_bins : int or None, default None
+        Maximum bin count when discretised. ``None`` defers to the model-level
+        ``n_bins`` setting.
+    extrapolation : {"clip", "extend", "error"}, default "clip"
+        Prediction-time behaviour outside the training range.
+    boundary : tuple of (float, float) or None, default None
+        Explicit ``(lo, hi)`` boundary knots; defaults to the training range.
+    knot_alpha : float, default 0.2
+        Density-weighting exponent for ``knot_strategy="quantile_tempered"``.
+    constraint : ConstraintSpec, ConstraintRules or None, default None
         Public shape-constraint token, or fit-time rules joined with ``&``
-        into a ``ConstraintRules``. Use ``Constraint.fit.increasing``,
+        into a :class:`ConstraintRules`. Use ``Constraint.fit.increasing``,
         ``Constraint.fit.decreasing``, ``Constraint.fit.convex``,
         ``Constraint.fit.concave``, ``Constraint.postfit.increasing``,
         ``Constraint.postfit.decreasing``, ``Constraint.postfit.convex``, or
-        ``Constraint.postfit.concave``. For ``BSplineSmooth``, fit-time
-        monotone and curvature constraints apply on the spline term's
-        linear-predictor contribution and use the constrained QP solver
-        path. With ``fit_reml()``, fixed lambdas work directly; automatic
-        lambda estimation uses the QP passthrough heuristic
-        (unconstrained REML followed by constrained refit), not exact
-        joint constrained REML. Fit-time convexity/concavity is supported for
-        degrees one through three; higher degrees require a
-        ``Constraint.postfit.*`` token.
-    m : int or tuple of int
+        ``Constraint.postfit.concave``. Fit-time monotone and curvature
+        constraints apply on the spline term's linear-predictor contribution
+        via the constrained QP solver. With ``fit_reml()``, fixed lambdas work
+        directly; automatic lambda estimation runs unconstrained REML followed
+        by a constrained refit rather than joint constrained REML. Fit-time
+        convexity/concavity is supported for degrees 1 to 3; higher degrees
+        require ``Constraint.postfit.*``.
+    m : int or tuple of int, default 2
         Integrated derivative order(s) for the penalty.
-    lambda_policy : LambdaPolicy or dict or None
-        Per-component lambda control.
-    polynomial_ranges : sequence of PolynomialRange or None
+    lambda_policy : LambdaPolicy, dict of LambdaPolicy, or None, default None
+        Per-component smoothing parameter policy for ``fit_reml()``.
+    polynomial_ranges : sequence of PolynomialRange or None, default None
         Ranges of the axis on which the curve is pinned to a polynomial of
         the range's degree; the rest stays the penalised smooth, and the
         penalty skips the pinned intervals.
@@ -876,21 +902,54 @@ class BSplineSmooth(_IntegratedPenaltySpline, _BSplineBase):
 
 
 class NaturalSpline(_SplineBase):
-    """Natural P-spline: f''=0 at boundaries, linear tails.
+    """Natural P-spline: ``f'' = 0`` at boundaries, linear tails.
 
-    Applies natural boundary constraints: f''(boundary) = 0 at both
-    ends. The underlying basis therefore has linear tails beyond the
-    boundary knots, preventing the tail explosions common with
-    unconstrained B-splines. Prediction behavior outside the training
-    range is then controlled by ``extrapolation``: ``"clip"``
-    (default) freezes at the boundary, while ``"extend"`` exposes the
-    linear tails.
+    Applies natural boundary constraints ``f''(boundary) = 0`` at both ends.
+    The underlying basis therefore has linear tails beyond the boundary knots,
+    preventing tail explosions common with unconstrained B-splines.
+    Prediction behaviour outside the training range is controlled by
+    ``extrapolation``: ``"clip"`` (default) freezes at the boundary, while
+    ``"extend"`` exposes the linear tails.
 
-    Uses a second-difference penalty (like BS) rather than the
-    integrated-f'' penalty of ``CubicRegressionSpline``.  The
-    boundary constraints reduce the penalty null space to 1 dimension
-    (constant only), so ``select=True`` is not supported — use
-    ``kind="cr"`` or ``kind="ps"`` for double-penalty selection.
+    Uses a discrete difference penalty (like :class:`PSpline`) rather than the
+    integrated-``f''`` penalty of :class:`CubicRegressionSpline`. The boundary
+    constraints reduce the penalty null space to 1 dimension (constant only),
+    so ``select=True`` is not supported — use ``kind="cr"`` or ``kind="ps"``
+    for double-penalty selection.
+
+    Parameters
+    ----------
+    n_knots : int, default 10
+        Number of interior knots.
+    degree : int, default 3
+        B-spline polynomial degree (natural boundary constraints apply when
+        ``degree >= 3``).
+    knot_strategy : {"uniform", "quantile", "quantile_rows", "quantile_tempered"}, default "uniform"
+        Interior knot placement rule when ``knots`` is ``None``.
+    penalty : {"ssp", "none"} or None, default "ssp"
+        ``"ssp"`` enables SSP reparametrisation; ``"none"`` or ``None`` leaves
+        the basis un-reparametrised.
+    select : bool, default False
+        Not supported for ``NaturalSpline`` (must remain ``False``).
+    knots : array-like or None, default None
+        Explicit interior knot positions. Overrides ``n_knots`` and
+        ``knot_strategy`` when given.
+    discrete : bool or None, default None
+        If True, bin the covariate into at most ``n_bins`` bins at fit time.
+        ``None`` defers to the model-level ``discrete`` setting.
+    n_bins : int or None, default None
+        Maximum bin count when discretised. ``None`` defers to the model-level
+        ``n_bins`` setting.
+    extrapolation : {"clip", "extend", "error"}, default "clip"
+        Prediction-time behaviour outside the training range.
+    boundary : tuple of (float, float) or None, default None
+        Explicit ``(lo, hi)`` boundary knots; defaults to the training range.
+    knot_alpha : float, default 0.2
+        Density-weighting exponent for ``knot_strategy="quantile_tempered"``.
+    m : int or tuple of int, default 2
+        Discrete difference order(s) for the penalty.
+    lambda_policy : LambdaPolicy, dict of LambdaPolicy, or None, default None
+        Per-component smoothing parameter policy for ``fit_reml()``.
     """
 
     _select_supported = False
@@ -971,28 +1030,54 @@ class CubicRegressionSpline(_IntegratedPenaltySpline):
 
     Parameters
     ----------
-    constraint : ConstraintSpec, ConstraintRules or None
+    n_knots : int, default 10
+        Number of interior knots.
+    knot_strategy : {"uniform", "quantile", "quantile_rows", "quantile_tempered"}, default "uniform"
+        Interior knot placement rule when ``knots`` is ``None``.
+    penalty : {"ssp", "none"} or None, default "ssp"
+        ``"ssp"`` enables SSP reparametrisation; ``"none"`` or ``None`` leaves
+        the basis un-reparametrised.
+    select : bool, default False
+        If True, decompose into linear (null-space) and wiggly (range-space)
+        subgroups for double-penalty selection.
+    knots : array-like or None, default None
+        Explicit interior knot positions. Overrides ``n_knots`` and
+        ``knot_strategy`` when given.
+    discrete : bool or None, default None
+        If True, bin the covariate into at most ``n_bins`` bins at fit time.
+        ``None`` defers to the model-level ``discrete`` setting.
+    n_bins : int or None, default None
+        Maximum bin count when discretised. ``None`` defers to the model-level
+        ``n_bins`` setting.
+    extrapolation : {"clip", "extend", "error"}, default "clip"
+        Prediction-time behaviour outside the training range.
+    boundary : tuple of (float, float) or None, default None
+        Explicit ``(lo, hi)`` boundary knots; defaults to the training range.
+    knot_alpha : float, default 0.2
+        Density-weighting exponent for ``knot_strategy="quantile_tempered"``.
+    constraint : ConstraintSpec, ConstraintRules or None, default None
         Public shape-constraint token, or fit-time rules joined with ``&``
-        into a ``ConstraintRules``. Use ``Constraint.fit.increasing``,
+        into a :class:`ConstraintRules`. Use ``Constraint.fit.increasing``,
         ``Constraint.fit.decreasing``, ``Constraint.fit.convex``,
         ``Constraint.fit.concave``, or any of the corresponding
         ``Constraint.postfit.*`` kinds. Fit-time constraints apply on the
-        spline term's linear-predictor contribution and use the constrained
-        QP solver path. An increasing or decreasing rule holds the adjacent
-        B-spline coefficient differences of the natural cubic to one sign.
-        That is sufficient for a monotone curve but not necessary, like the
-        linear conditions of Wood (1994) behind mgcv's ``mono.con``, so the
-        fit is the best curve in a smaller set than all monotone curves;
-        more knots narrow the gap. Convex and concave rules are exact.
-        With ``fit_reml()``, fixed lambdas work directly;
-        automatic lambda estimation uses the QP passthrough heuristic
-        (unconstrained REML followed by constrained refit), not exact joint
-        constrained REML.
-    polynomial_ranges : sequence of PolynomialRange or None
+        spline term's linear-predictor contribution via the constrained QP
+        solver. An increasing or decreasing rule holds adjacent B-spline
+        coefficient differences of the natural cubic to one sign; this is
+        sufficient for monotonicity (like Wood 1994 behind mgcv's
+        ``mono.con``) and more knots narrow the gap to all monotone curves.
+        Convex and concave rules are exact. With ``fit_reml()``, fixed lambdas
+        work directly; automatic lambda estimation runs unconstrained REML
+        followed by a constrained refit rather than joint constrained REML.
+    m : int or tuple of int, default 2
+        Integrated derivative order(s) for the penalty (at most 3).
+    lambda_policy : LambdaPolicy, dict of LambdaPolicy, or None, default None
+        Per-component smoothing parameter policy for ``fit_reml()``.
+    polynomial_ranges : sequence of PolynomialRange or None, default None
         Ranges of the axis on which the curve is pinned to a polynomial of
         the range's degree; the rest stays the penalised smooth, and the
-        penalty skips the pinned intervals.
-        A range reaching an end replaces that end's natural condition.
+        penalty skips the pinned intervals. A range reaching an end replaces
+        that end's natural boundary condition.
     """
 
     _max_penalty_order = 3
@@ -1245,7 +1330,24 @@ _BUILT_IN_SPLINES = frozenset(
 
 
 def n_knots_from_k(kind: str, k: int, degree: int = 3) -> int:
-    """Convert basis dimension ``k`` to interior knot count."""
+    """Convert basis dimension ``k`` to the interior knot count for a spline ``kind``.
+
+    Parameters
+    ----------
+    kind : {"bs", "ps", "ns", "cr", "cr_cardinal"}
+        Spline family identifier.
+    k : int
+        Requested basis dimension. Must satisfy the minimum for ``kind`` and
+        ``degree`` (``degree + 2`` for ``"bs"``/``"ps"``, ``3`` for
+        ``"cr_cardinal"``, ``degree`` for ``"cr"``/``"ns"``).
+    degree : int, default 3
+        B-spline polynomial degree.
+
+    Returns
+    -------
+    int
+        Number of interior knots corresponding to ``k``.
+    """
     return cast(int, _spline_factory.n_knots_from_k(kind, k, degree))
 
 
@@ -1270,25 +1372,68 @@ def Spline(
     polynomial_ranges: Sequence[PolynomialRange] | None = None,
     shape_engine: Literal["qp", "scop"] = "qp",
 ) -> _SplineBase:
-    """Create a spline feature spec.
+    """Create a spline feature specification.
 
-    With no ``kind`` the spline is a cubic regression spline, ``"cr"`` (a
-    P-spline, ``"ps"``, before 0.40). ``"cr"`` and ``"cr_cardinal"`` are always
-    cubic and refuse a ``degree`` other than 3; ``cr`` takes penalty orders ``m`` up
-    to 3 and ``cr_cardinal`` only 2. Pass ``kind="ps"`` (or ``"bs"`` for another degree) beyond
-    those. A spline with no kind that ``cr`` cannot serve (a ``degree`` other
-    than 3 or a penalty order above 3) builds as ``"ps"``, as before 0.40,
-    with a ``UserWarning``;
-    pass ``kind=`` to choose and silence it.
+    Parameters
+    ----------
+    kind : {"cr", "ps", "bs", "ns", "cr_cardinal"} or None, default None
+        Spline family. When omitted, defaults to ``"cr"``
+        (:class:`CubicRegressionSpline`), except when ``degree != 3`` or
+        ``max(m) > 3`` (which ``"cr"`` cannot serve), in which case it falls
+        back to ``"ps"`` (:class:`PSpline`) with a ``UserWarning``; pass
+        ``kind`` explicitly to choose and silence the warning.
+    k : int or None, default None
+        Basis dimension, converted to ``n_knots`` via :func:`n_knots_from_k`.
+        Mutually exclusive with ``n_knots``.
+    n_knots : int or None, default None
+        Number of interior knots (defaults to 10 when both ``k`` and
+        ``n_knots`` are omitted). Mutually exclusive with ``k``.
+    degree : int, default 3
+        B-spline polynomial degree. ``"cr"`` and ``"cr_cardinal"`` require
+        ``degree=3``; use ``kind="ps"`` or ``kind="bs"`` for other degrees.
+    knot_strategy : {"uniform", "quantile", "quantile_rows", "quantile_tempered"}, default "uniform"
+        Interior knot placement rule when ``knots`` is ``None``.
+    penalty : {"ssp", "none"} or None, default "ssp"
+        ``"ssp"`` enables SSP reparametrisation; ``"none"`` or ``None`` leaves
+        the basis un-reparametrised.
+    select : bool, default False
+        If True, add a second penalty on the null space for double-penalty
+        selection (not supported for ``kind="ns"``).
+    knots : array-like or None, default None
+        Explicit interior knot positions.
+    discrete : bool or None, default None
+        Whether to bin this covariate into at most ``n_bins`` bins at fit time.
+        ``None`` defers to the model-level ``discrete`` setting.
+    n_bins : int or None, default None
+        Maximum bin count when discretised. ``None`` defers to the model-level
+        ``n_bins`` setting.
+    extrapolation : {"clip", "extend", "error"}, default "clip"
+        Prediction-time behaviour outside the training range.
+    boundary : tuple of (float, float) or None, default None
+        Explicit ``(lo, hi)`` boundary knots; defaults to the training range.
+    knot_alpha : float, default 0.2
+        Density-weighting exponent for ``knot_strategy="quantile_tempered"``.
+    constraint : ConstraintSpec, ConstraintRules, or None, default None
+        Shape constraint(s) for the curve (not supported for ``kind="ns"``).
+    m : int or tuple of int, default 2
+        Penalty order(s) (difference order for ``"ps"``/``"ns"``, integrated
+        derivative order for ``"bs"``/``"cr"``; ``"cr"`` accepts up to 3 and
+        ``"cr_cardinal"`` only 2).
+    lambda_policy : LambdaPolicy, dict of LambdaPolicy, or None, default None
+        Per-component smoothing parameter policy for ``fit_reml()``.
+    polynomial_ranges : sequence of PolynomialRange or None, default None
+        Ranges on which the curve is pinned to a polynomial while the rest
+        remains a penalised smooth (``kind="bs"`` or ``kind="cr"`` only).
+    shape_engine : {"qp", "scop"}, default "qp"
+        Engine for fit-time shape constraints. Every kind fits on the
+        constrained QP solver; ``"scop"`` names the retired SCOP engine and is
+        accepted with :class:`SCOPRetiredWarning` while fitting on the QP
+        solver instead.
 
-    ``polynomial_ranges`` (``kind="bs"`` or ``"cr"`` only) pins the curve to a
-    polynomial on each :class:`PolynomialRange` and leaves the rest the
-    penalised smooth.
-
-    A fit-time shape constraint fits on the QP for every kind.
-    ``shape_engine="scop"`` names the retired SCOP engine: it is accepted
-    with a ``UserWarning`` and the constraint fits on the QP; see
-    :class:`PSpline`.
+    Returns
+    -------
+    _SplineBase
+        Configured spline specification instance matching ``kind``.
     """
     return cast(
         _SplineBase,
