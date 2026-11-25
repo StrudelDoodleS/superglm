@@ -522,6 +522,35 @@ def likelihood_deviance(
         return float(deviance + np.sum(exact - clipped))
 
 
+def score_cancellation(score: NDArray, size: NDArray) -> float:
+    """How far a penalised score is from cancelling: the largest ``|g_j| / E_j``, in ``[0, 1]``.
+
+    ``g_j = sum_i s_i x_ij - (S beta)_j`` is coefficient ``j``'s score, ``s``
+    the rows' scores (``tail_rows``), and ``E_j = sum_i |s_i x_ij| + (|S|
+    |beta|)_j`` the size of the terms it sums: at a root every ``g_j`` is 0,
+    and a coefficient whose terms all pull one way has ``|g_j| = E_j``
+    wherever it is.  The ratio needs no curvature and no scale but the
+    scores' own, so it reads the same in a tail, where the deviance is flat.
+
+    It bounds the cosine of the angle between the standardised residual ``r
+    = W^-1/2 s`` and each column ``a_j = W^1/2 x_j`` of the model space: by
+    Cauchy-Schwarz ``E_j <= |r| |a_j|``.  That cosine is the orthogonality
+    nonlinear least squares stops on (MINPACK's ``gtol``, More 1980; the
+    relative offset of Bates and Watts 1981, Technometrics 23(2)).  A Newton
+    step gains ``g' H^-1 g`` in deviance (Boyd and Vandenberghe 2004,
+    section 9.5.1), the squared length of ``r``'s projection on the model
+    space, so the deviance criterion ``gain < tol * size`` with Pearson's
+    ``|r|^2`` as the size is ``cosine < sqrt(tol)``: a fit stopped on a
+    ratio within ``sqrt(tol)`` meets it for every coefficient.  ``inf``
+    where float64 cannot form a score or a size.
+    """
+    if not (np.all(np.isfinite(score)) and np.all(np.isfinite(size))):
+        return math.inf
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.where(score == 0.0, 0.0, np.abs(score) / size)
+    return float(np.max(ratio, initial=0.0))
+
+
 def exported_information(
     family: Distribution,
     link: Link,

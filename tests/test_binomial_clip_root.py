@@ -116,6 +116,35 @@ _FIVE = np.zeros(5)
 _SLOPE_X = np.linspace(-1.0, 1.0, 40)
 _SLOPE_Y = (np.arange(40) % 3 == 0).astype(float)
 
+
+def _two_balanced_groups() -> _Case:
+    """Two groups at ``x = -c`` and 1, ``c`` the ratio of the sizes of their scores at the root.
+
+    An intercept and a slope give each group its own level, so each group's
+    scores sum to zero at the root whatever ``c`` is, and their sizes ``sum
+    |s|`` do not depend on it.  With that ``c`` the sizes balance on the
+    column, ``x' |s| = 0``, while the sum of its terms' sizes is twice the
+    second group's: the stop on the likelihood's rows has to sum the column
+    entry by entry to see that its scores cancel.
+    """
+    low = np.r_[1.0, 1.0, 0.0, 0.0, 0.0], np.linspace(-0.3, 0.3, 5)
+    high = np.r_[_FIVE, 1.0], np.r_[np.linspace(-0.2, 0.2, 5), -35.0]
+
+    def size(y, offset):
+        def scores(level):
+            return _score_information_rows("logit", y, level + offset)[0]
+
+        return np.abs(scores(brentq(lambda b: scores(b).sum(), -30.0, 30.0, xtol=1e-14))).sum()
+
+    c = size(*high) / size(*low)
+    return _Case(
+        "logit",
+        np.r_[low[0], high[0]],
+        np.r_[low[1], high[1]],
+        x=np.r_[np.full(5, -c), np.ones(6)],
+    )
+
+
 #: every case holds one row against its outcome at the likelihood's root
 _HELD_AGAINST = {
     # below the logit band of -20
@@ -135,6 +164,7 @@ _HELD_AGAINST = {
         x=np.r_[_SLOPE_X, 0.5],
         weights=np.r_[np.ones(40), 3.0],
     ),
+    "logit_event_in_one_of_two_groups_whose_sizes_balance": lambda: _two_balanced_groups(),
     # probit: the band of +-20 is far, the mean floor acts from 5.2 standard deviations
     "probit_event_at_minus_9": lambda: _Case("probit", np.r_[_FIVE, 1.0], np.r_[_FIVE, -9.0]),
     "probit_non_event_at_plus_9": lambda: _Case(
@@ -320,6 +350,32 @@ def test_a_penalised_fit_balances_the_likelihoods_score(discrete):
     score, _ = _score_information_rows("logit", response, np.asarray(eta, dtype=float))
     assert model.result.converged
     assert abs(score.sum()) <= 1e-6 * np.abs(score).sum()
+
+
+def test_a_fit_at_a_fixed_penalty_stops_where_its_penalised_scores_cancel():
+    """``fit`` at a fixed smoothing parameter reports converged at the penalised mode.
+
+    The fixture above under a spline penalty of 100.  At the mode the data's
+    score on a spline coefficient is not 0: it is the penalty's, ``X' s = S
+    beta``, so a stop that read the data's score alone would run out the
+    budget.  The intercept is unpenalised and its scores cancel, to the
+    ``sqrt(tol) = 1e-3`` the stop asks of every coefficient.
+    """
+    from superglm.solvers.mode_score import linear_predictor
+
+    x = np.linspace(0.0, 1.0, 300)
+    y = ((np.arange(300) * 7) % 10 < 3.0 + 4.0 * x).astype(float)
+    frame = pd.DataFrame({"x": np.r_[x, 0.5]})
+    response, offset = np.r_[y, 1.0], np.r_[np.zeros(300), -30.0]
+    model = SuperGLM(
+        family="binomial", link="logit", features={"x": Spline(n_knots=5)}, spline_penalty=100.0
+    )
+    model.fit(frame, response, offset=offset)
+    result = model._solver_pirls_result()
+    eta = linear_predictor(model._dm, result, model._fit_offset)
+    score, _ = _score_information_rows("logit", response, np.asarray(eta, dtype=float))
+    assert model.result.converged and result.clip_rows == "likelihood"
+    assert abs(score.sum()) <= 1e-3 * (1.0 + 1e-6) * np.abs(score).sum()
 
 
 @pytest.mark.parametrize("discrete", [False, True])
@@ -840,14 +896,15 @@ def test_the_same_rows_give_the_same_inference_in_any_frame(slope, retain_fit_st
 
 
 @pytest.mark.pins_behaviour
-def test_rows_held_on_the_side_of_their_outcome_leave_the_fit_at_the_root():
-    """Pins: a fit whose held rows all agree with their outcome is already at the root.
+def test_a_fit_whose_held_rows_all_agree_with_their_outcome_is_left_where_it_was():
+    """Pins: the fix for #734 does not move a fit that holds no row against its outcome.
 
     Every row of this fixture is past the 1e-7 mean floor and half are past
     the +-20 band, each on the side its response agrees with (non-events
-    low, events high).  The held rows' scores are below ``1e-7`` each, the
-    intercept is 0 by symmetry, and the fit reports converged.  The fix for
-    #734 must leave this fit where it is.
+    low, events high).  The fit stays on the clipped rows and reports
+    converged at an intercept of ``1e-7``.  That is the likelihood's root, 0,
+    only because the offsets are symmetric: the test shows that the fit is
+    left alone, not that such a fit is at the root (the next test).
     """
     offset = np.tile([-19.0, 19.0, -35.0, 35.0], 10)
     case = _Case("logit", (offset > 0.0).astype(float), offset)
@@ -855,6 +912,81 @@ def test_rows_held_on_the_side_of_their_outcome_leave_the_fit_at_the_root():
     assert model.result.converged
     assert abs(case.score(coefficients)[0]) <= 1e-12
     assert abs(coefficients[0]) <= 1e-6
+
+
+@pytest.mark.pins_behaviour
+def test_a_fit_whose_held_rows_all_agree_with_their_outcome_can_stop_away_from_the_root():
+    """Pins the scope of #734's fix: such a fit stops where the clipped rows balance, as before.
+
+    Three events at an offset of 40 and seven non-events at -30, every row
+    held on the side of its outcome.  The likelihood's root is ``-5 + log(3 /
+    7) / 2 = -5.42``; the fit returns -18.41, converged, where each clipped
+    row pulls its predictor back to the band's edge.  No fitted probability
+    is more than ``1e-9`` from the root's, so nothing a user reads moves.
+    The fix covers fits that stop on a row held *against* its outcome; with
+    no such row, and without offsets past the band, the rows are separated
+    and no root exists (Albert and Anderson 1984, Biometrika 71(1)).
+    """
+    case = _Case(
+        "logit", np.r_[np.ones(3), np.zeros(7)], np.r_[np.full(3, 40.0), np.full(7, -30.0)]
+    )
+    root = brentq(lambda b: case.score(np.array([b]))[0], -30.0, 30.0, xtol=1e-14)
+    np.testing.assert_allclose(root, -5.0 + 0.5 * math.log(3.0 / 7.0), rtol=1e-12)
+    model, coefficients = case.fit()
+    assert model.result.converged
+    np.testing.assert_allclose(coefficients[0], -18.41, atol=1e-2)
+    assert np.max(np.abs(expit(coefficients[0] + case.offset) - expit(root + case.offset))) <= 1e-9
+
+
+def test_a_fit_on_the_likelihoods_rows_does_not_stop_while_its_scores_fail_to_cancel():
+    """A flat deviance does not end a fit that moved to the likelihood's rows away from the root.
+
+    Cloglog pairs at offsets of ``log 30`` and -30, each on the side of its
+    outcome, and one event of weight ``1e-12`` at -1000, against it.  The
+    root is where that event's pull, ``1e-12``, offsets the five non-events'
+    ``5 exp(b - 30)``: ``b = 30 + log(2e-13) = 0.76``.  The unfixed fit
+    reported converged at -0.54 after two iterations: the deviance there is
+    ``2e-7`` and its change passed the criterion, while the paired events'
+    scores, ``4e-7`` each, pulled one way with nothing to offset them.  The
+    fit now stops where each coefficient's scores cancel to ``sqrt(tol) =
+    1e-3`` of their size, which near the root is ``tanh(|b - root| / 2)``.
+    """
+    pair = np.tile([1.0, 0.0], 5)
+    case = _Case(
+        "cloglog",
+        np.r_[pair, 1.0],
+        np.r_[np.tile([math.log(30.0), -30.0], 5), -1000.0],
+        weights=np.r_[np.ones(10), 1e-12],
+    )
+    root = brentq(lambda b: case.score(np.array([b]))[0], -30.0, 30.0, xtol=1e-14)
+    np.testing.assert_allclose(root, 30.0 + math.log(2e-13), atol=1e-9)  # the control
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # a fractional frequency weight, and rows in the tails
+        model, coefficients = case.fit()
+    assert model.result.converged
+    assert model._solver_pirls_result().clip_rows == "likelihood"
+    assert abs(coefficients[0] - root) <= 2.0 * math.atanh(1e-3) * (1.0 + 1e-6)
+
+
+def test_a_fit_on_the_likelihoods_rows_with_no_root_is_not_reported_converged():
+    """A coefficient whose scores all pull one way has no root: the fit runs out its budget and says so.
+
+    Five non-events and an event at an offset of -35, which the clip holds
+    against its outcome, so the fit moves to the likelihood's rows; and four
+    more non-events that alone carry a second column.  That column's
+    coefficient falls by one a step and its scores never cancel.  The unfixed
+    fit reported converged after 15 iterations, once the falling deviance
+    stood still, with that coefficient at -15.1.
+    """
+    y = np.r_[np.zeros(5), 1.0, np.zeros(4)]
+    case = _Case(
+        "logit", y, np.r_[np.zeros(5), -35.0, np.zeros(4)], x=np.r_[np.zeros(6), 1, 1, 1, 1]
+    )
+    model, coefficients = _returned_and_disclosed(case)
+    assert model._solver_pirls_result().clip_rows == "likelihood"  # the control: the fit moved
+    assert not model.result.converged
+    # the rows that have a root are at it: the first column's score is the six rows' alone
+    assert abs(case.score(coefficients)[0] - case.score(coefficients)[1]) <= 1e-9
 
 
 # ── the rows themselves, and the value that says which a fit reads ──
