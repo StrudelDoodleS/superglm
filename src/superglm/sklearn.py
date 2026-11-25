@@ -30,6 +30,8 @@ from typing import Any, Literal, cast
 
 import numpy as np
 import pandas as pd
+import scipy.linalg
+import scipy.spatial
 from numpy.typing import NDArray
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 from sklearn.utils.validation import check_is_fitted

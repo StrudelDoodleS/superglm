@@ -6,6 +6,7 @@ from collections.abc import Callable, Hashable
 from typing import Any
 
 import numpy as np
+import scipy.spatial
 from numpy.typing import NDArray
 
 from superglm._weight_units import coefficient_covariance, standard_errors
@@ -90,8 +91,9 @@ def _ordered_piecewise_structural_rows(
     chi-square family row for more): ordinary linear-model tests of a
     fixed-knot design (Smith 1979, Am. Statist. 33(2):57-62). Under C0 seams
     the segments share their joint values, so per-segment per-power z-tests
-    do not exist. ``determines`` (a robust covariance's, over the block's
-    coefficients) leaves a row it does not determine its estimate alone.
+    do not exist. ``determines`` (over the block's coefficients: a robust
+    covariance's, or the fit's ``RankDecomposition.is_estimable``) leaves a row
+    it does not determine its estimate alone.
     """
     from scipy.stats import chi2 as chi2_dist
 
@@ -181,6 +183,8 @@ def _ordered_piecewise_structural_rows(
                 )
                 if stat is None:
                     ref_df = None
+        elif undetermined(np.eye(len(b_main))[indices]):
+            stat = p_val = ref_df = None
         else:
             try:
                 stat = covariance_wald_statistic(b_family, V_family)
@@ -237,6 +241,7 @@ def build_coef_rows(
     selection_shrunk_group_names: set[str] | None = None,
     rules_enforced: bool = True,
     sandwich_covariance: Any | None = None,
+    contrast_estimable: Callable[[NDArray], bool] | None = None,
 ) -> list[_CoefRow]:
     """Build coefficient table rows for summary output.
 
@@ -255,6 +260,11 @@ def build_coef_rows(
     rules_enforced : False for a model last fitted by ``fit_path``, which fits every
         term without its constraint rows; the rule line of a term the build
         constrained then says its rules were not enforced.
+    contrast_estimable : whether the decomposition that decided the coefficient mask
+        determines a contrast over the fitted coefficients
+        (``RankDecomposition.is_estimable``); the fit's own rank record's when the mask
+        is.  A contrast whose coefficients the mask all shows is determined without it;
+        without it, any other is not.
     """
     from superglm.features.categorical import Categorical
     from superglm.features.factor_smooth import FactorSmooth
@@ -301,6 +311,9 @@ def build_coef_rows(
             else np.ones(len(beta), dtype=bool)
         )
     )
+    if contrast_estimable is None and coefficient_estimable_override is None:
+        rank_info = getattr(result, "rank_info", None)
+        contrast_estimable = None if rank_info is None else rank_info.is_estimable
 
     # ── Per-level diagnostics for categorical features ────────────
     # Compute observation count, exposure share and thinness per non-base level.
@@ -444,6 +457,26 @@ def build_coef_rows(
 
     def moves(column: int) -> bool:
         return separated is not None and bool(separated[column])
+
+    def _mask_determines(g_slice: slice) -> Callable[[NDArray], NDArray[np.bool_]]:
+        """Which contrasts of the coefficients at ``g_slice`` the default covariance determines.
+
+        The rule of the coefficient mask, read on each contrast: one whose coefficients the
+        mask all shows is determined, as the determined functions form a subspace; any
+        other is decided by ``contrast_estimable``, and is not without it.
+        """
+        shown = coefficient_estimable[g_slice]
+
+        def determined(contrast: NDArray) -> bool:
+            if np.all(shown[contrast != 0.0]):
+                return True
+            if contrast_estimable is None:
+                return False
+            full = np.zeros(len(beta))
+            full[g_slice] = contrast
+            return bool(contrast_estimable(full))
+
+        return lambda contrasts: np.array([determined(c) for c in contrasts], dtype=bool)
 
     def _block_determines(start: int) -> Callable[[NDArray], NDArray[np.bool_]] | None:
         """``determines`` of a robust covariance for contrasts of the block at ``start``, or none."""
@@ -813,7 +846,11 @@ def build_coef_rows(
                     )
                     if ag is not None:
                         V_b_main = _augmented_group_block(ag)
-                        main_determines = _block_determines(1 + ag.start)
+                        main_determines = (
+                            _block_determines(1 + ag.start)
+                            if is_sandwich
+                            else _mask_determines(main_group.sl)
+                        )
                         stat, p_val, ref_df = _block_wald_for(
                             b_main, V_b_main, main_group.sl, main_group.name
                         )

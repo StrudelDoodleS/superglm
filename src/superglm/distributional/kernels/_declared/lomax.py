@@ -10,6 +10,7 @@ the exact-zero limit and admission of tail derivatives; positive responses here.
 from math import exp, expm1, lgamma, log, log1p, sqrt
 
 import numpy as np
+import numpy.random
 from numba import njit
 
 from superglm.distributional.kernels._severity_primitives import expit, log1mexp_exp_01234, logratio, logsoftplus_01234, softplus
@@ -19,7 +20,7 @@ DATA = ()
 COORDINATES = 'natural'
 LAWS = ('density', 'logsf', 'logcdf')
 MAX_ORDER = 4
-PRIMITIVES_DIGEST = "f4e1e71de6e62a35536be2de7f21d2069fdb5a4bc9a56659cf0340ec0c54ae37"
+PRIMITIVES_DIGEST = "1552c0bc633fbef0125de686969af008e7e5a9adc32e1446b8ed23cccbb36d2f"
 ENGINES_DIGEST = ""
 
 @njit(cache=True, nogil=True, error_model='numpy')

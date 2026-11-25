@@ -42,6 +42,7 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 
 import numpy as np
+import numpy.random
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 

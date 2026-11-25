@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
+import scipy.linalg
 from scipy.special import gammaln
 
 from superglm.solvers.dispersion import (
@@ -382,6 +383,7 @@ def score_test_zi(
         Where the model gives a row no predicted mean: the statistic would be
         read from a mean that does not exist.
     """
+    import scipy.spatial
     from scipy import stats
 
     _check_family(model, {"Poisson"}, "score_test_zi")
@@ -461,6 +463,7 @@ def dispersion_test(
         Where the model gives a row no predicted mean: the statistic would be
         read from a mean that does not exist.
     """
+    import scipy.spatial
     from scipy import stats
 
     _check_family(model, {"Poisson"}, "dispersion_test")
@@ -555,6 +558,7 @@ def vuong_test(
         Where either model gives a row of positive weight no predicted mean:
         its log-likelihood, and so the comparison, does not exist.
     """
+    import scipy.spatial
     from scipy import stats
 
     if correction not in {"none", "aic", "bic"}:

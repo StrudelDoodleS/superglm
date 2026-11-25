@@ -68,7 +68,7 @@ from superglm.distributional.solver.derivatives import (
     transform_natural_derivatives,
     transform_natural_information,
 )
-from superglm.distributional.telemetry import CurvatureTelemetry
+from superglm.distributional.telemetry import AcceptedCurvatureKind, CurvatureTelemetry
 from superglm.distributional.timing import FitPhaseRecorder, measure_phase
 from superglm.distributional.walls import PRESSED_STEP, outward_step, wall_rows
 from superglm.distributional.weights import (
@@ -1774,6 +1774,85 @@ def _representative_state(
     return _evaluate_state(context, coefficients, phase_recorder=phase_recorder)
 
 
+def _discarded_newton_direction(
+    context: _SolverContext,
+    state: _AcceptedState,
+    discarded: NDArray,
+    slopes: NDArray,
+    source: AcceptedCurvatureKind,
+    phase_recorder: FitPhaseRecorder | None,
+) -> NDArray[np.float64]:
+    """The Newton direction of the discarded subspace, in its basis ``N``.
+
+    A gain is coordinate-free only in the curvature's metric (the Newton
+    decrement, Boyd & Vandenberghe §9.5), so the subspace needs its own
+    ``N'HN``. The factored ``H`` cannot supply it: ``X'WX`` cancels a column
+    far from zero at the square of its level over its spread (Higham 2002,
+    ch. 20), which is what dropped the contrast. Summed over the rows of
+    ``X N`` it cancels once, as the predictors do.
+
+    Each direction is read in units of its own curvature (unit diagonal: van der Sluis 1969).
+    Below ``k eps`` of the largest it is flat and gets no step, as do rows that cannot be read.
+    """
+    if source not in ("observed", "fisher", "nearest_semidefinite"):
+        return np.zeros_like(slopes)
+    try:
+        with measure_phase(phase_recorder, "curvature_gradient_assembly"):
+            if context.chunk_size is not None:
+                data = chunking.chunked_subspace_curvature(
+                    context.family,
+                    context.layout,
+                    context.response,
+                    context.likelihood_plan,
+                    state.coefficients,
+                    discarded,
+                    chunk_size=context.chunk_size,
+                    curvature_source=source,
+                    likelihood_cache=context.likelihood_cache,
+                )
+            else:
+                if context.dense_matrices is None:
+                    raise RuntimeError("dense solver context is missing predictor matrices")
+                # A reused endpoint carries no row derivatives.
+                rows = (
+                    _evaluate_state(context, state.coefficients, phase_recorder=phase_recorder)
+                    if state.derivatives is None
+                    else state
+                )
+                if rows is None or rows.derivatives is None:
+                    return np.zeros_like(slopes)
+                moves = np.stack(
+                    [
+                        matrix @ discarded[predictor.coefficient_slice]
+                        for predictor, matrix in zip(
+                            context.layout.predictors, context.dense_matrices, strict=True
+                        )
+                    ],
+                    axis=1,
+                )
+                data = chunking.subspace_row_curvature(
+                    moves, _dense_curvature_channels(context, rows, source)
+                )
+        penalty = discarded.T @ context.penalty @ discarded
+        curvature = data + 0.5 * (penalty + penalty.T)
+        # A direction with no curvature of its own is flat: an infinite unit zeroes it.
+        own = np.diag(curvature)
+        unit = np.sqrt(np.where(own > 0.0, own, np.inf))
+        values, vectors = np.linalg.eigh(curvature / unit[:, None] / unit)
+    except (
+        _NumericalEvaluationError,
+        FloatingPointError,
+        OverflowError,
+        MemoryError,
+        ValueError,
+        np.linalg.LinAlgError,
+    ):
+        # The trial is optional: a row pass that fails or runs out of memory leaves the fit as is.
+        return np.zeros_like(slopes)
+    keep = values > len(values) * np.finfo(np.float64).eps * values[-1]
+    return vectors[:, keep] @ ((vectors[:, keep].T @ (slopes / unit)) / values[keep]) / unit
+
+
 def _terminal_step_improves_objective(
     context: _SolverContext,
     state: _AcceptedState,
@@ -1818,6 +1897,20 @@ def _terminal_step_improves_objective(
                 direction = discarded @ (slopes / slope)
                 if improves(state.coefficients + (2.0 * limit / slope) * direction):
                     return True
+                if discarded.shape[1] > 1:
+                    # The score's direction is steepest only in the basis's units, so a
+                    # stiff contrast can hide a soft one's gain. Several directions also
+                    # take their Newton direction, scaled the same way: on a quadratic
+                    # it gains the limit exactly when the subspace's optimum does. One
+                    # direction has no other.
+                    ascent = _discarded_newton_direction(
+                        context, state, discarded, slopes, telemetry.actual_source, phase_recorder
+                    )
+                    gain = float(slopes @ ascent)
+                    if limit < 0.5 * gain < np.inf and improves(
+                        state.coefficients + (2.0 * limit / gain) * (discarded @ ascent)
+                    ):
+                        return True
     if not telemetry.certified:
         return False
     if rank.cholesky_factor is not None and telemetry.actual_source == "observed":

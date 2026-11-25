@@ -6,6 +6,8 @@ import math
 from dataclasses import dataclass
 
 import numpy as np
+import numpy.random
+import scipy.linalg
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 from scipy import special

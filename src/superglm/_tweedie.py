@@ -15,6 +15,7 @@ from dataclasses import dataclass, field, replace
 from functools import cached_property
 
 import numpy as np
+import scipy.linalg
 from numpy.typing import NDArray
 from scipy.special import digamma, gammaln, lambertw, polygamma
 

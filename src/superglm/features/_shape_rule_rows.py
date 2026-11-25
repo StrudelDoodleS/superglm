@@ -17,6 +17,7 @@ those builders' rows, which exist at every degree.
 from __future__ import annotations
 
 import numpy as np
+import scipy.linalg
 from numpy.lib.stride_tricks import sliding_window_view
 from numpy.typing import NDArray
 from scipy.interpolate import BSpline

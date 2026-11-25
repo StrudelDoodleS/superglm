@@ -50,6 +50,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import numpy.random
 from numba import njit, types  # type: ignore[import-untyped]
 from numpy.typing import ArrayLike, NDArray
 

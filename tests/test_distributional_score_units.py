@@ -19,7 +19,7 @@ from superglm.distributional.results.solver import (
     _assessment_retained_kkt_ratio,
 )
 from superglm.distributional.smoothing.penalty_face import build_penalty_face
-from superglm.distributional.solver import solver
+from superglm.distributional.solver import chunks, solver
 from superglm.distributional.solver.shape import _face_of
 from superglm.features import Categorical, Numeric, RandomEffect, Spline
 from superglm.features.interaction import SplineCategorical
@@ -85,6 +85,86 @@ def test_a_joint_gain_in_discarded_directions_must_be_fitted_or_disclosed(discre
         assert optimum - fitted <= 1e-7 * (1 + abs(fitted))
     else:
         assert any(issubclass(item.category, ConvergenceWarning) for item in caught)
+
+
+def _discard_both_contrasts(monkeypatch):
+    """Force the terminal check to discard a two-slope fit's contrasts, whatever the rank decides."""
+    check = solver._terminal_step_improves_objective
+
+    def with_both_contrasts_discarded(context, state, score, rank, discarded, *rest):
+        units = context.score_units
+        slopes = np.flatnonzero(units.centre)
+        if len(slopes) == 2:
+            # Each centred column in units of its level, as an equilibrated rank decision has it.
+            discarded = np.zeros((len(score), 2))
+            discarded[slopes, [0, 1]] = 1.0 / units.centre[slopes]
+            discarded[units.intercept[slopes], [0, 1]] = -1.0
+        return check(context, state, score, rank, discarded, *rest)
+
+    monkeypatch.setattr(solver, "_terminal_step_improves_objective", with_both_contrasts_discarded)
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
+@pytest.mark.parametrize(
+    ("unit", "x_level", "v_level", "scale", "x_effect", "v_effect"),
+    [
+        (1e10, 3e7, 1e12, 1e7, 0.0001, 0.7),
+        (2.0**33, 2.0**25, 2.0**51, 2.0**23, 2.0**-13, 0.5),
+    ],
+    ids=["score_follows_x", "curvatures_eps_apart"],
+)
+def test_a_stiff_discarded_contrast_cannot_hide_the_gain_along_a_soft_one(
+    monkeypatch, unit, x_level, v_level, scale, x_effect, v_effect, discrete
+):
+    """Force two discarded contrasts of unequal curvature (#728): fit both or disclose.
+
+    ``x`` varies in an earlier digit than ``v`` and barely matters; ``v`` carries the
+    response. A step along their joint score follows ``x`` and loses. In the second case
+    ``v``'s curvature is ``eps`` of ``x``'s: a cut relative to the stiffer calls it flat.
+    """
+    z = np.tile([-1.0, -1.0, 1.0, 1.0], 16)
+    v = np.repeat([-1.0, 1.0], 32)
+    X = pd.DataFrame({"x": unit * (x_level + z), "v": unit * (v_level + v)})
+    mu = scale * (1 + x_effect * z + v_effect * v)
+    y = mu + scale * np.tile([-1.0, 1.0], 32)
+    _discard_both_contrasts(monkeypatch)
+    family = GaussianLS(scale_floor=0)
+    model = SuperLSS(family, family.location("x", "v"), family.scale(), discrete=discrete)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ConvergenceWarning)
+        model.fit(X, y)
+    if model.result_.converged:
+        np.testing.assert_allclose(model.predict(X), mu, rtol=1e-7, atol=0)
+    else:
+        assert any(issubclass(item.category, ConvergenceWarning) for item in caught)
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["dense", "chunked"])
+def test_a_discarded_subspace_check_out_of_memory_keeps_the_fit(monkeypatch, discrete):
+    """The optional trial's row pass cannot allocate: the fit returns what it had accepted."""
+    z = np.tile([-1.0, -1.0, 1.0, 1.0], 16)
+    v = np.repeat([-1.0, 1.0], 32)
+    X = pd.DataFrame({"x": 1e10 * (3e7 + z), "v": 1e10 * (1e12 + v)})
+    y = 1e7 * (1 + 0.0001 * z + 0.7 * v + np.tile([-1.0, 1.0], 32))
+    _discard_both_contrasts(monkeypatch)
+    family = GaussianLS(scale_floor=0)
+
+    def fitted():
+        model = SuperLSS(family, family.location("x", "v"), family.scale(), discrete=discrete)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ConvergenceWarning)
+            return model.fit(X, y).predict(X)
+
+    accepted = fitted()
+    refused = []
+
+    def out_of_memory(moves, curvature_packed):
+        refused.append(moves.shape)
+        raise MemoryError
+
+    monkeypatch.setattr(chunks, "subspace_row_curvature", out_of_memory)
+    np.testing.assert_array_equal(fitted(), accepted)
+    assert refused
 
 
 @pytest.mark.parametrize("force_fallback", [False, True], ids=["observed", "fisher"])

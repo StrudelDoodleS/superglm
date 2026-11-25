@@ -31,6 +31,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import numpy.random
 from numba import njit  # type: ignore[import-untyped]
 
 _SPLITTER = float(2**27 + 1)

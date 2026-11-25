@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import cast
 
 import numpy as np
+import numpy.random
 from numba import njit, types
 
 from superglm._group_matrix._group_matrix_core import (

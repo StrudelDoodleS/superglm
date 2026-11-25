@@ -246,6 +246,7 @@ def _fractional_tail(
 def _fallback_tail(stat: float, stat_alt: float, ref_df: float, res_df: float) -> float:
     """Fallback when the mixture evaluation is unavailable or unstable."""
     if res_df <= 0:
+        import scipy.spatial
         from scipy.stats import chi2 as chi2_dist
 
         return 0.5 * (chi2_dist.sf(stat, ref_df) + chi2_dist.sf(stat_alt, ref_df))

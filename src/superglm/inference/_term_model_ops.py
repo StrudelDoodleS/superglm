@@ -284,6 +284,7 @@ def drop1(
     unchanged reduced deviance is reported as statistic 0 and p-value 1; a
     nonzero deviance change is undefined and raises an explicit error.
     """
+    import scipy.spatial
     from scipy.stats import chi2
     from scipy.stats import f as f_dist
 
