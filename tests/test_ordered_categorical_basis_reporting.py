@@ -22,6 +22,7 @@ import pytest
 
 from superglm import (
     FactorSmooth,
+    GroupLasso,
     Numeric,
     OrderedCategorical,
     Piecewise,
@@ -175,12 +176,17 @@ def _twin_frame(names, extra=None):
     return frame, np.tile(np.arange(8.0) ** 2, 20) + np.sin(np.arange(160.0))
 
 
-def _twin_fit(names, degrees, extra_features=None, extra=None):
-    """Ordered piecewise terms on one column (issue #737), with any ``extra_features``."""
+def _twin_fit(names, degrees, extra_features=None, extra=None, *, basis=None, bases=None):
+    """Ordered piecewise terms on one column (issue #737), with any ``extra_features``.
+
+    ``basis`` makes each term's basis instead, and ``bases`` maps a term to its base level.
+    """
     settings = {} if degrees is None else {"degrees": degrees}
     features = {
         name: OrderedCategorical(
-            order=_TWIN_LABELS, base="a", basis=Piecewise(breaks=["d"], **settings)
+            order=_TWIN_LABELS,
+            base=(bases or {}).get(name, "a"),
+            basis=Piecewise(breaks=["d"], **settings) if basis is None else basis(),
         )
         for name in names
     }
@@ -393,6 +399,214 @@ def test_a_summary_saved_beside_an_ordered_piecewise_term_is_formed_again() -> N
     row = next(r for r in restored.summary()._coef_rows if r.name == "a[slope-change @ d]")
     assert row.se is None and row.z is None and row.p is None
     assert np.isfinite(row.coef)
+
+
+_TWIN_BASES = {"piecewise": None, "spline": lambda: Spline(n_knots=4)}
+
+
+def _level_contrasts(model, name):
+    """Each non-base level of ``name`` as a row over the fitted slopes, with its label."""
+    spec = model._specs[name]
+    start = next(g for g in model._groups if g.feature_name == name).start
+    rows = np.asarray(spec.transform(np.asarray(_TWIN_LABELS, dtype=object)), dtype=float)
+    base = np.asarray(spec.transform([spec._base_level]), dtype=float).ravel()
+    out = []
+    for label, row in zip(_TWIN_LABELS, rows):
+        if label != spec._base_level:
+            full = np.zeros((1, len(model.result.beta)))
+            full[0, start : start + row.size] = row - base
+            out.append((f"{name}[{label}]", full))
+    return out
+
+
+@pytest.mark.parametrize("basis", list(_TWIN_BASES))
+def test_levels_of_twin_ordered_terms_carry_no_error_on_any_summary(basis) -> None:
+    """Two ordered terms on one column: no level relativity is determined (issue #740).
+
+    Moving the effect from one term to the other leaves the fit, so each level's contrast
+    raises the design's rank when appended.  The default summary, both metrics summaries
+    and the robust one keep each level's estimate with no error or interval, and flag it
+    ``estimable=False``, as they do each structural row; the default summary's dictionary
+    gives no error for a coefficient the fit does not determine.  At 71f10edce the default
+    ones showed ``a[b]`` SE 0.1406 (piecewise) and 1.319 (spline), and every flag was True.
+    """
+    model, X, y = _twin_fit(["a", "b"], None, basis=_TWIN_BASES[basis])
+    for name in ("a", "b"):
+        for _, contrast in _level_contrasts(model, name):
+            assert _rank_gain(model, contrast) > 0
+    other = X.iloc[:120].reset_index(drop=True), y[:120] + 0.5
+    summaries = {
+        "default": model.summary(),
+        "metrics": model.metrics(X, y).summary(),
+        "other rows": model.metrics(*other).summary(),
+        "robust": model.summary(covariance=model.sandwich_covariance()),
+    }
+    for kind, summary in summaries.items():
+        rows = {r.name: r for r in summary._coef_rows}
+        for name in ("a", "b"):
+            for label, _ in _level_contrasts(model, name):
+                row = rows[label]
+                assert np.isfinite(row.coef), (kind, label)
+                assert row.se is None and row.ci_low is None and row.ci_high is None, (kind, label)
+                assert row.estimable is False, (kind, label)
+        for row in summary._coef_rows:
+            if "slope-change" in row.name or "curvature" in row.name:
+                assert row.estimable is False, (kind, row.name)
+    assert model.result.rank_info.coefficient_estimable().sum() == 0
+    for se in summaries["default"]["standard_errors"].values():
+        if isinstance(se, dict):
+            assert all(np.all(np.isnan(v)) for v in se.values()), se
+
+
+@pytest.mark.parametrize("basis", list(_TWIN_BASES))
+def test_an_intercept_at_two_bases_the_fit_does_not_determine_shows_no_error(basis) -> None:
+    """Twin ordered terms on different base levels: the reported intercept is not determined.
+
+    The intercept is reported at each ordered term's base level, so with ``a`` based at
+    ``a`` and ``b`` at ``h`` it moves when the effect moves between the terms: its
+    functional is not orthogonal to the design's null space.  The default summary keeps
+    its estimate and gives no error, test or interval, flagged ``estimable=False``; with
+    one base both summaries keep the error, and the null-space check agrees.
+    """
+    from superglm.inference._ordered_reference import ordered_reference_beta_contrast
+
+    def intercept_determined(model):
+        design = _design(model)
+        _, s, vt = np.linalg.svd(design)
+        null = vt[int(np.sum(s > s[0] * 1e-10)) :].T
+        width = len(model.result.beta)
+        reference = ordered_reference_beta_contrast(
+            width, list(model._specs), model._specs, model._groups
+        )
+        return np.linalg.norm(np.concatenate([[1.0], reference]) @ null) < 1e-8
+
+    split, X, y = _twin_fit(["a", "b"], None, basis=_TWIN_BASES[basis], bases={"b": "h"})
+    assert not intercept_determined(split)
+    for summary in (split.summary(), split.metrics(X, y).summary()):
+        row = summary._coef_rows[0]
+        assert row.name == "Intercept" and np.isfinite(row.coef)
+        assert row.se is None and row.z is None and row.p is None and row.ci_low is None
+        assert row.estimable is False
+    same, X, y = _twin_fit(["a", "b"], None, basis=_TWIN_BASES[basis])
+    assert intercept_determined(same)
+    for summary in (same.summary(), same.metrics(X, y).summary()):
+        row = summary._coef_rows[0]
+        assert row.se is not None and np.isfinite(row.se) and row.estimable is True
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("basis", list(_TWIN_BASES))
+def test_a_single_ordered_term_keeps_its_level_errors(basis) -> None:
+    """Control (pins): one unaliased ordered term keeps every level's error and flag.
+
+    Piecewise is unpenalized, so each level's error is ``sqrt(phi c'(X'X)^-1 c)`` of the
+    Gaussian fit; the penalized spline's are those ``term_inference`` reads from the same
+    covariance.  The intercept keeps its error and every row stays ``estimable``.
+    """
+    model, X, y = _twin_fit(["a"], None, basis=_TWIN_BASES[basis])
+    if basis == "piecewise":
+        design = _design(model)
+        gram_inverse = np.linalg.inv(design.T @ design)
+        residual = y - design @ np.linalg.lstsq(design, y, rcond=None)[0]
+        phi = float(residual @ residual) / (len(y) - design.shape[1])
+        expected = {
+            label: np.sqrt(phi * np.r_[0.0, c[0]] @ gram_inverse @ np.r_[0.0, c[0]])
+            for label, c in _level_contrasts(model, "a")
+        }
+    else:
+        inference = model.term_inference("a")
+        expected = {
+            f"a[{level}]": se
+            for level, se in zip(inference.levels, inference.se_log_relativity)
+            if level != "a"
+        }
+    for summary in (model.summary(), model.metrics(X, y).summary()):
+        rows = {r.name: r for r in summary._coef_rows}
+        for label, se in expected.items():
+            np.testing.assert_allclose(rows[label].se, se, rtol=1e-9)
+        assert all(r.estimable for r in summary._coef_rows)
+        assert summary._coef_rows[0].se is not None
+
+
+@pytest.mark.pins_behaviour
+def test_a_dropped_ordered_spline_leaves_its_free_level_and_the_intercept_their_errors() -> None:
+    """Control (pins): an ordered spline the selection drops adds nothing undetermined.
+
+    Its coefficients are held at zero, although the mask blanks them, so neither its
+    base-level effect in the reported intercept nor its share of the free level ``h``'s
+    contrast leaves those rows undetermined: both keep their errors.
+    """
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame({"a": np.tile(_TWIN_LABELS, 20), "x": rng.normal(size=160)})
+    y = 3.0 * X["x"].to_numpy() + 2.0 * (X["a"] == "h").to_numpy() + rng.normal(size=160)
+    spline = Spline(n_knots=4)
+    features = {
+        "a": OrderedCategorical(order=_TWIN_LABELS, base="a", basis=spline, specials=["h"]),
+        "x": Numeric(),
+    }
+    model = SuperGLM(family="gaussian", features=features, penalty=GroupLasso(lambda1=20.0))
+    model.fit(X, y)
+    group = next(g for g in model._groups if g.name == "a")
+    assert np.all(model.result.beta[group.sl] == 0.0)
+    assert not np.any(model._fit_inference_info["coefficient_estimable"][group.sl])
+    for summary in (model.summary(), model.metrics(X, y).summary()):
+        rows = {r.name: r for r in summary._coef_rows}
+        for row in (rows["Intercept"], rows["a[h]"]):
+            assert row.se is not None and np.isfinite(row.se) and row.se > 0.0, row.name
+            assert row.estimable is True
+
+
+def test_a_summary_saved_before_levels_were_decided_is_formed_again() -> None:
+    """A summary cached before undetermined levels and dictionary errors were blanked is dropped.
+
+    Twin ordered splines (no piecewise term, which #744's hook covered) and twin numerics,
+    whose aliased coefficients the dictionary gave errors for: a summary holding what
+    71f10edce cached is served again unless the restore drops it.
+    """
+    spline, _, _ = _twin_fit(["a", "b"], None, basis=_TWIN_BASES["spline"])
+    stale = next(r for r in spline.summary()._coef_rows if r.name == "a[b]")
+    stale.se, stale.estimable = 1.3189453074629316, True  # what 71f10edce cached
+    restored = pickle.loads(pickle.dumps(spline))
+    row = next(r for r in restored.summary()._coef_rows if r.name == "a[b]")
+    assert row.se is None and row.estimable is False
+
+    x = np.linspace(0.0, 1.0, 160)
+    frame = pd.DataFrame({"x": x, "x2": x})
+    numeric = SuperGLM(family="gaussian", features={"x": Numeric(), "x2": Numeric()}).fit(
+        frame, 2.0 * x + np.sin(np.arange(160.0))
+    )
+    assert not np.all(numeric.result.rank_info.coefficient_estimable())
+    numeric.summary()["standard_errors"]["coefficient_se"]["x2"][:] = 0.1  # a stale figure
+    restored = pickle.loads(pickle.dumps(numeric))
+    se = restored.summary()["standard_errors"]["coefficient_se"]
+    assert np.all(np.isnan(se["x"])) and np.all(np.isnan(se["x2"]))
+
+
+@pytest.mark.parametrize("term", ["random effect", "fs", "sz"])
+def test_structured_fits_decide_each_level_on_their_own_data(term) -> None:
+    """A structured fit blanks the levels its data do not determine, and keeps the rest.
+
+    Twin ordered terms beside a random effect, an ``fs`` or an ``sz`` factor smooth: no
+    level of either term is determined, and both summaries give none an error, flagged
+    ``estimable=False``.  One term keeps the dense fit's level errors.
+    """
+    twin, X, y = _structured_fit(["a", "b"], term)
+    assert twin._fit_inference_info.get("structured_covariance")
+    for summary in (twin.summary(), twin.metrics(X, y).summary()):
+        rows = {r.name: r for r in summary._coef_rows}
+        for name in ("a", "b"):
+            for label, contrast in _level_contrasts(twin, name):
+                assert rows[label].se is None and rows[label].estimable is False, label
+    assert _rank_gain(twin, _level_contrasts(twin, "a")[0][1]) > 0
+
+    single, X, y = _structured_fit(["a"], term)
+    dense, _, _ = _structured_fit(["a"], term, direct_solve="gram")
+    expected = {r.name: r.se for r in dense.summary()._coef_rows if r.name.startswith("a[")}
+    for summary in (single.summary(), single.metrics(X, y).summary()):
+        rows = {r.name: r for r in summary._coef_rows}
+        for label, _ in _level_contrasts(single, "a"):
+            assert rows[label].estimable is True
+            np.testing.assert_allclose(rows[label].se, expected[label], rtol=1e-9)
 
 
 def test_editor_stale_summary_keeps_the_basis_vocabulary(segmented_model) -> None:

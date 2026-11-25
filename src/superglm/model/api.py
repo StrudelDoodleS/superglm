@@ -363,8 +363,9 @@ class SuperGLM:
         (``mark_kindless_saved_on_scop``).  A capped level an older build recorded
         separated is cleared where the fit enforced the cap, and a summary cached beside
         a separated level is dropped (``release_capped_separation_records``,
-        ``release_separated_level_summaries``), as is one cached beside an ordered piecewise
-        term (``release_ordered_piecewise_summaries``).
+        ``release_separated_level_summaries``), as is one cached beside a blank in the
+        saved mask, from before it blanked what a fit does not determine
+        (``release_undetermined_row_summaries``).
         """
         self.__dict__.update(state)
         restore_legacy_edited_statistics(self)
@@ -373,10 +374,10 @@ class SuperGLM:
         from superglm.model.retired_state import (
             mark_retired_linear_state,
             release_capped_separation_records,
-            release_ordered_piecewise_summaries,
             release_retired_tweedie_state,
             release_saved_mask_summaries,
             release_separated_level_summaries,
+            release_undetermined_row_summaries,
             release_v0_35_nb_summaries,
         )
 
@@ -386,7 +387,7 @@ class SuperGLM:
         release_saved_mask_summaries(self)
         release_capped_separation_records(self)
         release_separated_level_summaries(self)
-        release_ordered_piecewise_summaries(self)
+        release_undetermined_row_summaries(self)
         from superglm.features._spline_build import mark_kindless_saved_on_scop
 
         mark_kindless_saved_on_scop(self)

@@ -508,8 +508,13 @@ def summary(
                     se_raw_dict[g.name] = se_vals
                     se_dict[g.name] = se_vals
                 else:
-                    se_raw_dict[g.name] = standard_errors(var_diag, res, raw=True)
-                    se_dict[g.name] = standard_errors(var_diag, res)
+                    # blank where the fit does not determine the coefficient, as the table
+                    # and ``metrics().summary()`` are
+                    shown = np.asarray(inf["coefficient_estimable"], dtype=bool)[g.sl]
+                    se_raw_dict[g.name] = np.where(
+                        shown, standard_errors(var_diag, res, raw=True), np.nan
+                    )
+                    se_dict[g.name] = np.where(shown, standard_errors(var_diag, res), np.nan)
 
     if covariance is not None:
         data["standard_errors"] = {

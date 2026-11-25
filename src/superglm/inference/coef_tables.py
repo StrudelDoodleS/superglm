@@ -114,7 +114,9 @@ def _ordered_piecewise_structural_rows(
             estimate = float(contrast @ b_main)
             name = f"{feature_name}[slope-change @ {_level_at(structural.index)}]"
             if undetermined(contrast):
-                rows.append(_CoefRow(name=name, group=feature_label, coef=estimate))
+                rows.append(
+                    _CoefRow(name=name, group=feature_label, coef=estimate, estimable=False)
+                )
                 continue
             se_val = covariance_contrast_se(V_b_main, contrast)
             z, p, ci_lo, ci_hi = _compute_coef_stats(estimate, se_val, alpha)
@@ -144,6 +146,7 @@ def _ordered_piecewise_structural_rows(
                         name=f"{feature_name}[curvature {segment_label}]",
                         group=feature_label,
                         coef=coef_val,
+                        estimable=False,
                     )
                 )
                 continue
@@ -172,8 +175,9 @@ def _ordered_piecewise_structural_rows(
         stat: float | None = float("nan")
         p_val: float | None = float("nan")
         ref_df: float | None = float(indices.size)
+        family_undetermined = undetermined(np.eye(len(b_main))[indices])
         if is_sandwich:
-            if sandwich_penalized or undetermined(np.eye(len(b_main))[indices]):
+            if sandwich_penalized or family_undetermined:
                 stat = p_val = ref_df = None
             else:
                 from superglm.inference._sandwich_core import wald_block_statistic
@@ -183,7 +187,7 @@ def _ordered_piecewise_structural_rows(
                 )
                 if stat is None:
                     ref_df = None
-        elif undetermined(np.eye(len(b_main))[indices]):
+        elif family_undetermined:
             stat = p_val = ref_df = None
         else:
             try:
@@ -203,6 +207,7 @@ def _ordered_piecewise_structural_rows(
                 wald_p=p_val,
                 ref_df=ref_df,
                 subgroup_type="curvature",
+                estimable=not family_undetermined,
             )
         )
     return rows
@@ -288,7 +293,7 @@ def build_coef_rows(
         ordered_reference_beta_contrast,
         ordered_reference_intercept,
     )
-    from superglm.inference._term_covariance import feature_se_from_cov
+    from superglm.inference._term_covariance import feature_se_from_cov, ordered_level_contrasts
     from superglm.inference._term_helpers import (
         _resolve_group_lambda,
         ordered_level_fit,
@@ -314,6 +319,10 @@ def build_coef_rows(
     if contrast_estimable is None and coefficient_estimable_override is None:
         rank_info = getattr(result, "rank_info", None)
         contrast_estimable = None if rank_info is None else rank_info.is_estimable
+    # A dropped group's coefficients are held at zero by the selected model.
+    selected_columns = np.zeros(len(beta), dtype=bool)
+    for group in groups:
+        selected_columns[group.sl] = group.name in selected_names
 
     # ── Per-level diagnostics for categorical features ────────────
     # Compute observation count, exposure share and thinness per non-base level.
@@ -458,23 +467,24 @@ def build_coef_rows(
     def moves(column: int) -> bool:
         return separated is not None and bool(separated[column])
 
-    def _mask_determines(g_slice: slice) -> Callable[[NDArray], NDArray[np.bool_]]:
-        """Which contrasts of the coefficients at ``g_slice`` the default covariance determines.
+    def _determined(contrast: NDArray) -> bool:
+        """Whether the default covariance determines ``contrast @ beta``.
 
-        The rule of the coefficient mask, read on each contrast: one whose coefficients the
+        The rule of the coefficient mask, read on the contrast: one whose coefficients the
         mask all shows is determined, as the determined functions form a subspace; any
         other is decided by ``contrast_estimable``, and is not without it.
         """
-        shown = coefficient_estimable[g_slice]
+        if np.all(coefficient_estimable[contrast != 0.0]):
+            return True
+        return contrast_estimable is not None and bool(contrast_estimable(contrast))
+
+    def _mask_determines(g_slice: slice) -> Callable[[NDArray], NDArray[np.bool_]]:
+        """Which contrasts of the coefficients at ``g_slice`` the default covariance determines."""
 
         def determined(contrast: NDArray) -> bool:
-            if np.all(shown[contrast != 0.0]):
-                return True
-            if contrast_estimable is None:
-                return False
             full = np.zeros(len(beta))
             full[g_slice] = contrast
-            return bool(contrast_estimable(full))
+            return _determined(full)
 
         return lambda contrasts: np.array([determined(c) for c in contrasts], dtype=bool)
 
@@ -521,18 +531,24 @@ def build_coef_rows(
         except np.linalg.LinAlgError:
             return float("nan"), float("nan"), ref_df_val
 
-    # Intercept row
+    # Intercept row. The default path shows the fitted intercept as determined; the
+    # ordered terms' base-level effects added to it are decided by the mask's rule.
     z, p, ci_lo, ci_hi = _compute_coef_stats(intercept, icpt_se, alpha)
     blank = moves(-1)
+    undetermined_intercept = not is_sandwich and not _determined(
+        np.where(selected_columns, full_reference_contrast, 0.0)
+    )
+    withheld = blank or undetermined_intercept
     rows.append(
         _CoefRow(
             name="Intercept",
             coef=intercept,
-            se=None if blank else icpt_se,
-            z=None if blank else z,
-            p=None if blank else p,
-            ci_low=None if blank else ci_lo,
-            ci_high=None if blank else ci_hi,
+            se=None if withheld else icpt_se,
+            z=None if withheld else z,
+            p=None if withheld else p,
+            ci_low=None if withheld else ci_lo,
+            ci_high=None if withheld else ci_hi,
+            estimable=not undetermined_intercept,
             separated=blank,
         )
     )
@@ -617,10 +633,30 @@ def build_coef_rows(
             )
 
         se = read(_cov_from_aug(covariance_slope_view(XtWX_inv_aug)))
+        if not is_sandwich and isinstance(specs.get(feature_name), OrderedCategorical):
+            return np.where(_ordered_levels_determined(feature_name), se, np.nan)
         if undetermined is None or undetermined_metrics is None:
             return se
         norms = [read(metric) for metric in undetermined_metrics]
         return np.where(undetermined.determined(*norms), se, np.nan)
+
+    ordered_levels_determined: dict[Hashable, NDArray[np.bool_]] = {}
+
+    def _ordered_levels_determined(feature_name) -> NDArray[np.bool_]:
+        """Which levels of an ordered term the default covariance determines (``_determined``)."""
+        if feature_name not in ordered_levels_determined:
+            contrasts = ordered_level_contrasts(
+                specs[feature_name],
+                feature_name,
+                [g for g in groups if g.feature_name == feature_name],
+                interaction_specs,
+                len(beta),
+                selected_names,
+            )
+            ordered_levels_determined[feature_name] = np.array(
+                [_determined(c) for c in contrasts], dtype=bool
+            )
+        return ordered_levels_determined[feature_name]
 
     def _curve_se_range(feature_name):
         """Compute curve SE min/max for a spline feature."""
@@ -933,6 +969,7 @@ def build_coef_rows(
                 se_val: float | None = (
                     float(se_levels[i]) if feature_active and i < len(se_levels) else None
                 )
+                level_estimable = se_val is None or not np.isnan(se_val)
                 level_ci_lo: float | None
                 level_ci_hi: float | None
                 if se_val is not None and np.isfinite(se_val) and se_val > 0.0:
@@ -950,6 +987,7 @@ def build_coef_rows(
                         se=se_val,
                         ci_low=level_ci_lo,
                         ci_high=level_ci_hi,
+                        estimable=level_estimable,
                         level_fit=ordered_level_fit(
                             level,
                             special_labels=special_labels,
