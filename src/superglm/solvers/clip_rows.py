@@ -377,6 +377,20 @@ def tail_information(link: object, eta: NDArray, weights: NDArray) -> NDArray:
     return weights * tail_rows(link, np.zeros_like(eta, dtype=np.float64), eta)[2]
 
 
+def tail_rows_readable(link: object, y: NDArray, eta: NDArray, weights: NDArray) -> bool:
+    """Whether float64 holds the likelihood's working rows at ``eta``, under either curvature.
+
+    ``tail_working_rows`` finite in every weight and response.  A fit reads
+    the likelihood's rows only at such a state: a row whose score or curvature
+    overflows has no working row for the next step to solve.
+    """
+    return all(
+        bool(np.all(np.isfinite(part)))
+        for observed in (False, True)
+        for part in tail_working_rows(link, y, eta, weights, observed=observed)
+    )
+
+
 def tail_deviance(link: object, y: NDArray, eta: NDArray, weights: NDArray) -> NDArray:
     """``-2 w l`` per row at the unclipped ``eta``: the binomial unit deviance, unclipped."""
     with np.errstate(invalid="ignore"):
@@ -397,12 +411,17 @@ def likelihood_deviance(
 
     ``deviance`` is the clipped state's, ``sum w d(y, mu)``; the positive-weight
     rows the clip holds trade their clipped term for ``-2 w l`` at the
-    unclipped predictor, and every other row keeps its own.
+    unclipped predictor, and every other row keeps its own.  ``inf`` where
+    float64 cannot hold a held row's working rows (``tail_rows_readable``):
+    no fit moves to the likelihood's rows at such a state, and no step of a
+    fit on them is accepted there.
     """
     low, high = held_rows(family, link, eta_unclipped, eta, mu)
     held = np.flatnonzero((low | high) & (weights > 0.0))
     if not held.size:
         return deviance
+    if not tail_rows_readable(link, y[held], eta_unclipped[held], weights[held]):
+        return math.inf
     clipped = weights[held] * family.deviance_unit(y[held], mu[held])
     exact = tail_deviance(link, y[held], eta_unclipped[held], weights[held])
     with np.errstate(invalid="ignore"):

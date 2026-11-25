@@ -136,7 +136,8 @@ class _IRLSDirectClipOverlay:
         """Whether the working rows' loop ended on a row held against its outcome and carries on.
 
         One pass over the retained state's rows.  With such a row and tail
-        rows float64 can hold there, the fit's ``ClipRows`` moves to
+        rows float64 can hold there (a finite ``deviance``, which no state
+        with a non-finite working row has), the fit's ``ClipRows`` moves to
         ``likelihood``, the retained state is evaluated again on those rows
         and becomes the base of the iterations left.  ``True`` when one is
         left.

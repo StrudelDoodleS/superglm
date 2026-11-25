@@ -702,6 +702,79 @@ def test_a_fit_with_no_information_returns_and_shows_no_standard_error(name):
     assert all(np.all(np.isnan(errors)) for errors in metrics.coefficient_se.values())
 
 
+def _score_cancels(case, coefficients) -> bool:
+    """Whether the likelihood's row scores cancel to a thousandth of their size at ``coefficients``.
+
+    At a root they sum to zero.  Where every row is held against its outcome
+    far from it, each coefficient's terms have one sign and their sum is all
+    of them; a score float64 cannot form does not cancel either.
+    """
+    rows, _ = _score_information_rows(case.link, case.y, case.X @ coefficients + case.offset)
+    terms = case.X * (case.weights * rows)[:, None]
+    with np.errstate(invalid="ignore"):
+        return bool(np.all(np.abs(terms.sum(axis=0)) <= 1e-3 * np.abs(terms).sum(axis=0)))
+
+
+def _returned_and_disclosed(case):
+    """Fit ``case``: it returns, and reports converged only where the likelihood's score cancels."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model, coefficients = case.fit()
+    assert np.all(np.isfinite(coefficients)) and math.isfinite(model.result.deviance)
+    if model.result.converged:
+        assert _score_cancels(case, coefficients)
+    else:
+        assert model._solver_pirls_result().termination_reason != "converged"
+        assert any("converge" in str(item.message) for item in caught)
+    return model, coefficients
+
+
+def test_a_fit_returns_where_float64_cannot_hold_the_likelihoods_rows():
+    """Probit pairs at offsets of +-12, every row against its outcome: the fit returns, not converged.
+
+    The solver's first step on the clipped rows is a difference of working
+    responses of ``5e31`` and leaves the intercept near ``-1e22``.  The
+    likelihood's deviance there is finite, ``eta^2`` per row, but the inverse
+    Mills ratio of its score is the exponential of a difference of two terms
+    of ``7e43``: no float64.  The unfixed fit moved to the likelihood's rows
+    on the finite deviance and raised ``working weights must be finite and
+    non-negative`` in the next iteration.
+    """
+    model, _ = _returned_and_disclosed(_pairs("probit", -12.0, 12.0))
+    assert math.isfinite(float(np.asarray(model.predict(pd.DataFrame(index=range(1)))).ravel()[0]))
+
+
+def _likelihood_deviance_of_pair(predictor: float) -> float:
+    """``clip_rows.likelihood_deviance`` of a probit event and non-event, both at ``-+predictor``."""
+    from superglm.distributions import Binomial, clip_mu
+    from superglm.links import stabilize_eta
+    from superglm.solvers.clip_rows import likelihood_deviance
+
+    family, link = Binomial(), ProbitLink()
+    y, weights = np.array([1.0, 0.0]), np.ones(2)
+    eta_unclipped = np.array([predictor, -predictor])
+    eta = stabilize_eta(eta_unclipped, link)
+    mu = clip_mu(link.inverse(eta), family)
+    clipped = float(np.sum(weights * family.deviance_unit(y, mu)))
+    return likelihood_deviance(family, link, y, weights, eta_unclipped, eta, mu, clipped)
+
+
+@pytest.mark.parametrize("predictor", [-1.2e22])
+def test_a_state_whose_working_rows_float64_cannot_hold_has_no_likelihood_deviance(predictor):
+    """Such a state's deviance is infinite: a fit neither moves to the likelihood's rows there nor steps there.
+
+    The control is a pair at ``-+9``, held past the mean floor, whose
+    deviance is ``-4 log Phi(-9)`` by SciPy.  At the far predictor ``-2 log
+    L`` is finite too, and was returned, so the move's test let the fit on
+    to rows it could not form.
+    """
+    np.testing.assert_allclose(
+        _likelihood_deviance_of_pair(-9.0), -4.0 * log_ndtr(-9.0), rtol=1e-12
+    )
+    assert math.isfinite(-4.0 * log_ndtr(predictor))  # the control: the likelihood itself is finite
+    assert _likelihood_deviance_of_pair(predictor) == math.inf
+
+
 @pytest.mark.parametrize(
     ("retain_fit_state", "copied"),
     [(True, True), (False, False), (False, True)],
