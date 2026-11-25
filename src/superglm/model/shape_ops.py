@@ -864,6 +864,18 @@ def _derivative_free_intercept(eta, evaluate) -> tuple[float, _InterceptState] |
 
     unit = _intercept_scale(eta, 0.0)
     values: dict[float, float] = {}
+    roundings: dict[float, float] = {}
+
+    def record(t: float, state: _InterceptState | None) -> None:
+        # The deviance at ``t`` and its rounding, as ``higher`` reads it in
+        # ``_searched_intercept``: of the sum (Higham, section 3.1) and what it keeps from its
+        # mean. A deviance not formed is infinitely high, and carries none.
+        deviance = np.inf if state is None else state.deviance
+        values[t] = deviance if np.isfinite(deviance) else np.inf
+        carried = np.inf
+        if np.isfinite(deviance):
+            carried = shape_sum_tolerance(abs(deviance), eta.size) + state.mean_rounding
+        roundings[t] = carried if np.isfinite(carried) else 0.0
 
     def objective(t: float) -> float:
         if t not in values:
@@ -871,18 +883,19 @@ def _derivative_free_intercept(eta, evaluate) -> tuple[float, _InterceptState] |
                 state = evaluate(unit * t, True)
             except RuntimeError:
                 state = None
-            deviance = np.inf if state is None else state.deviance
-            values[t] = deviance if np.isfinite(deviance) else np.inf
+            record(t, state)
         return values[t]
 
-    # The deviance's rounding at the start, as ``higher`` reads it in ``_searched_intercept``:
-    # of the sum (Higham, section 3.1) and what it keeps from its mean.
+    def rounding(t: float) -> float:
+        objective(t)
+        return roundings[t]
+
+    # Where the start's deviance or its rounding is not formed, the values' own order.
     start = evaluate(0.0, True)
-    rounding = None
-    if start is not None and np.isfinite(start.deviance) and np.isfinite(start.mean_rounding):
-        values[0.0] = start.deviance
-        rounding = shape_sum_tolerance(abs(start.deviance), eta.size) + start.mean_rounding
-    best = _derivative_free_minimum(objective, 0.0, unit, rounding=rounding)
+    formed = start is not None and np.isfinite(start.deviance) and np.isfinite(start.mean_rounding)
+    if formed:
+        record(0.0, start)
+    best = _derivative_free_minimum(objective, 0.0, unit, rounding=rounding if formed else None)
     if best is None or not np.isfinite(objective(best)):
         return None
     state = evaluate(unit * best, True)
