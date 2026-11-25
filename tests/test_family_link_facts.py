@@ -42,6 +42,7 @@ from superglm.distributions import (
     Tweedie,
     clip_mu,
     initial_mean,
+    scale_is_known,
     validate_response,
 )
 from superglm.inference.metrics import ModelMetrics
@@ -58,6 +59,7 @@ from superglm.links import (
     ProbitLink,
     SqrtLink,
     declared_eta_domain,
+    is_multiplicative,
     stabilize_eta,
 )
 from superglm.model.fit_ops import _log_power_null_intercept, _null_curvature_kind
@@ -283,13 +285,13 @@ FAMILY_PROBES = {
         is not None
     ),
     "legacy_weight_semantics": family_default_weight_semantics,
-    "scale_known": lambda f: getattr(f, "scale_known", True),
+    "scale_known": scale_is_known,
     "scale_known_in_metrics": lambda f: ModelMetrics._known_scale.fget(SimpleNamespace(_family=f)),
     "scale_profile": _scale_profile,
 }
 LINK_PROBES = {
     "eta_clip": lambda k: tuple(float(v) for v in stabilize_eta(np.array([-1e300, 0.0, 1e300]), k)),
-    "multiplicative": lambda k: isinstance(k, LogLink),
+    "multiplicative": is_multiplicative,
     "eta_domain": declared_eta_domain,
 }
 PAIR_PROBES = {

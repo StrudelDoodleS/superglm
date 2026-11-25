@@ -1256,7 +1256,7 @@ def discretization_impact(
     from superglm._utils import weighted_row_sum
     from superglm._warn import warn_caller
     from superglm.distributions import clip_mu
-    from superglm.links import LogLink, stabilize_eta
+    from superglm.links import is_multiplicative, stabilize_eta
     from superglm.model import base
     from superglm.solvers.irls_state import link_domain_rows
 
@@ -1646,7 +1646,7 @@ def discretization_impact(
     # or the mean, so neither is clipped here: clipping would hide the error
     # where binning removes cancellation between terms.
     link, dist = model._link, model._distribution
-    if isinstance(link, LogLink):
+    if is_multiplicative(link):
         with np.errstate(over="ignore", under="ignore"):
             predictions = np.exp(eta_orig + total_delta)
         unusable = ~np.isfinite(predictions) | (predictions == 0.0)

@@ -30,7 +30,7 @@ from superglm.diagnostics.separation import (
     disclose_solver_separation,
     validate_solver_separation_mode,
 )
-from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu
+from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu, scale_is_known
 from superglm.dm_builder import rebuild_design_matrix_with_lambdas
 from superglm.group_matrix import (
     DesignMatrix,
@@ -584,7 +584,7 @@ def optimize_discrete_reml_cached_w(
         group_matrices=dm.group_matrices,
         penalty_caches=penalty_caches,
     )
-    scale_known = getattr(distribution, "scale_known", True)
+    scale_known = scale_is_known(distribution)
     (
         likelihood_size,
         saturated_log_weight,

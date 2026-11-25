@@ -49,7 +49,7 @@ import pandas as pd
 import scipy.sparse as sp
 
 from superglm._frame import as_eager_frame
-from superglm.distributions import Tweedie, validate_response
+from superglm.distributions import prior_weights_in_normalizer, validate_response
 from superglm.dm_builder import interaction_parent_has_ranges, knot_geometry_weight
 from superglm.features._spline_knots import row_quantile_knots
 from superglm.features.categorical import (
@@ -502,7 +502,7 @@ def screen_interactions(
     if not np.all(np.isfinite(y)):
         raise ValueError("screen_interactions requires finite y")
     if (
-        isinstance(model._distribution, Tweedie)
+        prior_weights_in_normalizer(model._distribution)
         and model_weight_semantics(model) == "prior"
         and (not np.all(np.isfinite(weights)) or np.any(weights <= 0.0))
     ):

@@ -22,6 +22,7 @@ from superglm.distributions import (
     Poisson,
     Tweedie,
     clip_mu,
+    mean_domain,
 )
 from superglm.group_matrix import DesignMatrix
 from superglm.inference._sandwich_core import (
@@ -969,7 +970,7 @@ def compute_superglm_sandwich_covariance(
         eta = stabilize_eta(eta_raw, model._link)
         mu = np.asarray(model._link.inverse(eta), dtype=np.float64)
         clipped = clip_mu(mu, model._distribution)
-        binomial = isinstance(model._distribution, Binomial)
+        binomial = mean_domain(model._distribution).bounded_above
         clip_held = binomial and bool(np.any(((clipped != mu) | (eta != eta_raw)) & pos))
         if not binomial:
             mu = clipped

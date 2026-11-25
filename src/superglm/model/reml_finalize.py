@@ -17,7 +17,7 @@ from superglm._reporting_state import (
 )
 from superglm._weight_units import likelihood_scale
 from superglm.diagnostics.separation import refuse_published_separation
-from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu
+from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu, scale_is_known
 from superglm.links import stabilize_eta
 from superglm.model.base import rebuild_dm_with_lambdas
 from superglm.model.reml_setup import restore_qp_constraints
@@ -263,7 +263,7 @@ def compute_profiled_phi(
     deviance or no residual likelihood size, ``boundary_phi`` is returned
     when given; otherwise the profiler's ``ValueError`` is raised.
     """
-    scale_known = getattr(model._distribution, "scale_known", True)
+    scale_known = scale_is_known(model._distribution)
     if scale_known:
         return 1.0
 
@@ -367,7 +367,7 @@ def profiled_likelihood_scale(
     from superglm.solvers.dispersion import KNOWN, profile_likelihood_scale
 
     distribution = model._distribution
-    if getattr(distribution, "scale_known", True):
+    if scale_is_known(distribution):
         return 1.0, KNOWN
     if isinstance(distribution, Tweedie):
         p_dim = model._dm.p
@@ -1066,7 +1066,7 @@ def finalize_reml_fit(
     elif (
         terminal_evaluation is not None
         and not isinstance(model._distribution, Tweedie)
-        and not getattr(model._distribution, "scale_known", True)
+        and not scale_is_known(model._distribution)
     ):
         penalty_nullity = float(terminal_evaluation.penalty_nullity or 0.0)
         likelihood_phi = max(

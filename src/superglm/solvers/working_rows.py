@@ -21,6 +21,7 @@ from superglm.distributions import (
     _weighted_residual_square,
     clip_mu,
     initial_mean,
+    mean_domain,
 )
 from superglm.links import (
     CloglogLink,
@@ -152,7 +153,8 @@ def null_fit_eta(
             np.isfinite(rescaled_weights[carried])
         ):
             rows = (rescaled_y, rescaled_weights)
-    if isinstance(distribution, Binomial):
+    unit_interval = mean_domain(distribution).bounded_above
+    if unit_interval:
         # ``initial_mean`` returns the weighted mean unclamped for an
         # unbounded mean space.  A mean of 0 or 1 has no finite intercept
         # under any offset, whatever a binary link's own clamp at 1e-15 would
@@ -160,7 +162,7 @@ def null_fit_eta(
         mean = initial_mean(y, weights, Gaussian())
         if not 0.0 < mean < 1.0:
             return None
-    if rows is not None and isinstance(distribution, Binomial):
+    if rows is not None and unit_interval:
         intercept = float(link.link(np.atleast_1d(mean))[0])
     elif rows is not None:
         intercept = coefficient_initial_intercept(

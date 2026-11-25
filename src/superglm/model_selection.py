@@ -23,7 +23,7 @@ from superglm._utils import weighted_row_sum
 from superglm._weight_units import unit_log_likelihood
 from superglm.distributional.api import SuperLSS
 from superglm.distributional.cross_validation import LSSFolds, parts_ratio
-from superglm.distributions import Tweedie
+from superglm.distributions import prior_weights_in_normalizer
 from superglm.model.base import NoPredictedMeanError, unpriced_rows
 
 # The full-frame binding pass lives in a neutral module so the public
@@ -663,7 +663,7 @@ class _GLMFolds:
         self.model = model
 
     def weights_must_be_positive(self) -> bool:
-        return isinstance(self.model._distribution, Tweedie) and (
+        return prior_weights_in_normalizer(self.model._distribution) and (
             model_weight_semantics(self.model) == "prior"
         )
 

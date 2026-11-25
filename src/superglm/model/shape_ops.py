@@ -11,7 +11,14 @@ from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
 from superglm._utils import weighted_row_sum
-from superglm.distributions import Binomial, Gamma, NegativeBinomial, Poisson, Tweedie
+from superglm.distributions import (
+    Binomial,
+    Gamma,
+    NegativeBinomial,
+    Poisson,
+    Tweedie,
+    scale_is_known,
+)
 from superglm.features.constraint import rules_of
 from superglm.group_matrix import DesignMatrix, GroupMatrix
 from superglm.links import CloglogLink, IdentityLink, InverseLink, LogitLink, LogLink, ProbitLink
@@ -1671,7 +1678,7 @@ def _refresh_repaired_scale_and_statistics(
     solver_phi = None
     mu = np.asarray(model._fit_mu, dtype=np.float64)
     distribution = model._distribution
-    if getattr(distribution, "scale_known", True):
+    if scale_is_known(distribution):
         phi = 1.0
     else:
         # Standard errors read Pearson's estimate at the repaired mean on every route.
@@ -1715,7 +1722,7 @@ def _refresh_repaired_scale_and_statistics(
 
     likelihood_phi = solver_likelihood_phi = None
     likelihood_method = ML_AT_MEAN
-    if getattr(distribution, "scale_known", True):
+    if scale_is_known(distribution):
         pass
     elif getattr(model, "_last_fit_meta", {}).get("method") == "fit_reml":
         from superglm.model.reml_finalize import profiled_likelihood_scale

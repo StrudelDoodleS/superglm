@@ -30,7 +30,7 @@ from collections.abc import Callable
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributions import Distribution, Tweedie
+from superglm.distributions import Distribution, Tweedie, scale_is_known
 
 PRIOR_WEIGHTS = "prior"
 FREQUENCY_WEIGHTS = "frequency"
@@ -271,7 +271,7 @@ def scale_fields(
     underflows. The Pearson pair stands in, and the method says so, where neither is a
     normal positive float.
     """
-    if getattr(distribution, "scale_known", True):
+    if scale_is_known(distribution):
         # Standard errors of a known-scale family read 1 whatever ``phi`` holds.
         return {
             "phi_likelihood": 1.0,

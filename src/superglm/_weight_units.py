@@ -83,7 +83,7 @@ def _fisher_weight_power_bound(family, link):
         clip_mu,
     )
     from superglm.links import (
-        _STABILIZE_ETA_BY_LINK_TYPE,
+        SHIPPED_LINKS,
         IdentityLink,
         LogLink,
         SqrtLink,
@@ -97,7 +97,7 @@ def _fisher_weight_power_bound(family, link):
         return 0
     if type(family) is Poisson and type(link) is SqrtLink:
         return 2
-    if type(link) not in _STABILIZE_ETA_BY_LINK_TYPE:
+    if type(link) not in SHIPPED_LINKS:
         return None
     limit = np.finfo(np.float64).max
     eta = stabilize_eta(np.array([-limit, 0.0, limit]), link)

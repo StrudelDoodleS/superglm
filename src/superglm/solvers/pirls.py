@@ -19,7 +19,7 @@ from numpy.typing import NDArray
 from superglm._fit_trace import TraceRun
 from superglm._roundoff import EPS, gamma
 from superglm.diagnostics.convergence import inspect_initial_precision
-from superglm.distributions import Distribution
+from superglm.distributions import Distribution, scale_is_known
 from superglm.group_matrix import (
     DenseGroupMatrix,
     DesignMatrix,
@@ -2243,7 +2243,7 @@ def _fit_pirls_inner(
     # binomial), as the direct solver publishes it. The Pearson numerator has the same
     # form under either weight contract -- both scale a row's squared residual by its
     # weight -- so only the denominator's likelihood size distinguishes them.
-    if getattr(family, "scale_known", True):
+    if scale_is_known(family):
         phi = 1.0
     else:
         pearson_sum = pearson_chi2(distribution=family, y=y, mu=mu_new, sample_weight=weights)

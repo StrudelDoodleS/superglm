@@ -16,7 +16,7 @@ from numpy.typing import NDArray
 
 from superglm._roundoff import gamma
 from superglm._tweedie import TweedieRows
-from superglm.distributions import Gamma, Gaussian, Poisson, Tweedie, clip_mu
+from superglm.distributions import Gamma, Gaussian, Poisson, Tweedie, clip_mu, scale_is_known
 from superglm.group_matrix import DesignMatrix
 from superglm.links import stabilize_eta
 from superglm.reml.penalty_algebra import (
@@ -309,7 +309,7 @@ def reml_laml_objective(
     )
 
     # phi-profiled REML for estimated-scale families
-    scale_known = getattr(distribution, "scale_known", True)
+    scale_known = scale_is_known(distribution)
     if not scale_known:
         # The declared contract's likelihood size, not the row count.  The
         # shipped estimated-scale families reach it through

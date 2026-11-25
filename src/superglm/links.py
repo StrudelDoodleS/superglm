@@ -42,6 +42,12 @@ class Link(Protocol):
         outside it NaN, and the fit keeps its rows inside. It counts only
         where it is declared at least as far down the class hierarchy as
         ``inverse`` (:func:`declared_eta_domain`).
+
+    Optional declarations, each with the default a link that omits it takes:
+        clip_eta — ``eta -> eta``, the predictors held where the inverse needs
+        protection (``stabilize_eta``; a band of plus or minus 20).
+        multiplicative — the mean is ``exp(eta)``, so an effect on the predictor
+        multiplies it (False).
     """
 
     def link(self, mu: NDArray) -> NDArray:
@@ -151,6 +157,10 @@ def eta_domain_text(link: object) -> str:
 class LogLink:
     """Log link: eta = log(mu), mu = exp(eta)."""
 
+    #: The mean is ``exp(eta)``, so an effect on the predictor multiplies it:
+    #: relativities are factors.
+    multiplicative = True
+
     def link(self, mu: NDArray) -> NDArray:
         return np.log(mu)
 
@@ -173,6 +183,12 @@ class LogLink:
     def deriv4_inverse(self, eta: NDArray) -> NDArray:
         """d⁴μ/dη⁴ = exp(η)."""
         return np.exp(eta)
+
+    def clip_eta(self, eta: NDArray) -> NDArray:
+        # Wide enough for IRLS to reach the MLE of a near-separated category:
+        # exp(-80) ≈ 2e-35 is above the float64 subnormal range and well beyond
+        # the -37 / -43 regime seen in real actuarial data.
+        return np.clip(eta, _LOG_LINK_ETA_MIN, _LOG_LINK_ETA_MAX)
 
 
 class IdentityLink:
@@ -200,6 +216,9 @@ class IdentityLink:
     def deriv4_inverse(self, eta: NDArray) -> NDArray:
         """d⁴μ/dη⁴ = 0."""
         return np.zeros_like(eta)
+
+    def clip_eta(self, eta: NDArray) -> NDArray:
+        return eta
 
 
 class LogitLink:
@@ -249,6 +268,10 @@ class LogitLink:
         product = p * q
         return product * (q - p) * (1 - 12 * product)
 
+    def clip_eta(self, eta: NDArray) -> NDArray:
+        # Keeps inverse-link derivatives away from numerical zero in IRLS.
+        return np.clip(eta, -20.0, 20.0)
+
 
 class ProbitLink:
     """Probit link: eta = Phi^{-1}(mu), mu = Phi(eta).
@@ -295,6 +318,10 @@ class ProbitLink:
         """d⁴μ/dη⁴ = (3η - η³)·φ(η)."""
         eta = _as_float64(eta)
         return (3 * eta - eta**3) * _normal_pdf(eta)
+
+    def clip_eta(self, eta: NDArray) -> NDArray:
+        # Keeps inverse-link derivatives away from numerical zero in IRLS.
+        return np.clip(eta, -20.0, 20.0)
 
 
 #: ``sqrt(2 pi)`` as ``scipy.stats`` forms it, so the density below is the same float64.
@@ -361,6 +388,15 @@ class CloglogLink:
         """d⁴μ/dη⁴ = exp(η-eη)·(1 - 7eη + 6e²η - e³η)."""
         ee = np.exp(eta)
         return ee * np.exp(-ee) * (1 - 7 * ee + 6 * ee**2 - ee**3)
+
+    def clip_eta(self, eta: NDArray) -> NDArray:
+        # The positive tail saturates much earlier than logit (dμ/dη = exp(η-e^η) is
+        # 0.0 at η = 20), so the band needs its own cap, set by ``clip_mu`` rather than
+        # CloglogLink.link()'s 1e-15 endpoint: the eta returned must invert to a mean the
+        # family will keep.  A cap at or past clip_mu's boundary lets clip_mu rewrite mu
+        # behind this method's back; a cap tighter than the family's floor pins fits
+        # whose MLE tail mass lies between the cap and clip_mu.
+        return np.clip(np.asarray(eta, dtype=np.float64), -20.0, _CLOGLOG_LINK_ETA_MAX)
 
 
 class CauchitLink:
@@ -444,6 +480,14 @@ class CauchitLink:
         result[~large] = 24.0 * small * (1.0 - small**2) / (np.pi * (1.0 + small**2) ** 4)
         return result
 
+    def clip_eta(self, eta: NDArray) -> NDArray:
+        # Unlike the exponential-tail links, cauchit's inverse approaches the
+        # endpoints polynomially.  Its useful eta range is therefore set by the
+        # same probability resolution used by link(), not logit's band.
+        return np.clip(
+            np.asarray(eta, dtype=np.float64), -_CAUCHIT_LINK_ETA_MAX, _CAUCHIT_LINK_ETA_MAX
+        )
+
 
 class InverseLink:
     """Inverse (reciprocal) link: eta = 1/mu, mu = 1/eta.
@@ -476,6 +520,9 @@ class InverseLink:
     def deriv4_inverse(self, eta: NDArray) -> NDArray:
         """d⁴μ/dη⁴ = 24/η⁵."""
         return 24.0 / eta**5
+
+    def clip_eta(self, eta: NDArray) -> NDArray:
+        return np.clip(eta, 1e-12, 1e12)
 
 
 class InverseSquaredLink:
@@ -510,6 +557,9 @@ class InverseSquaredLink:
         """d⁴μ/dη⁴ = 105/16 · η^{-9/2}."""
         return 6.5625 * eta ** (-4.5)
 
+    def clip_eta(self, eta: NDArray) -> NDArray:
+        return np.clip(eta, 1e-12, 1e12)
+
 
 class SqrtLink:
     """Square-root link: eta = sqrt(mu), mu = eta^2.
@@ -540,6 +590,12 @@ class SqrtLink:
     def deriv4_inverse(self, eta: NDArray) -> NDArray:
         """d⁴μ/dη⁴ = 0."""
         return np.zeros_like(eta)
+
+    def clip_eta(self, eta: NDArray) -> NDArray:
+        # The inverse μ = η² has two fitted branches even though the forward link
+        # returns the principal square root.  Preserve both and bound only where
+        # squaring would overflow, rather than inheriting a binary-link band.
+        return np.clip(np.asarray(eta, dtype=np.float64), -_SQRT_LINK_ETA_MAX, _SQRT_LINK_ETA_MAX)
 
 
 class PowerLink:
@@ -605,6 +661,11 @@ class PowerLink:
         q = 1.0 / p
         return q * (q - 1) * (q - 2) * (q - 3) * np.power(np.maximum(eta, 1e-15), q - 4)
 
+    def clip_eta(self, eta: NDArray) -> NDArray:
+        if self.power == 1.0:
+            return eta
+        return np.clip(eta, 1e-12, 1e12)
+
 
 class NegativeBinomialLink:
     """Negative binomial link: ``eta = log(mu / (mu + theta))``.
@@ -652,6 +713,9 @@ class NegativeBinomialLink:
         e = np.exp(np.clip(eta, -30, 0 - 1e-10))
         return self.theta * e * (1 + 11 * e + 11 * e**2 + e**3) / (1 - e) ** 5
 
+    def clip_eta(self, eta: NDArray) -> NDArray:
+        return np.clip(eta, -30.0, -1e-10)
+
 
 _LOG_LINK_ETA_MIN = -80.0
 _LOG_LINK_ETA_MAX = 80.0
@@ -659,106 +723,42 @@ _SQRT_LINK_ETA_MAX = 0.5 * float(np.sqrt(np.finfo(np.float64).max))
 _CAUCHIT_PROBABILITY_EPS = 1e-15
 _CAUCHIT_LINK_ETA_MAX = float(abs(CauchitLink().link(np.array([_CAUCHIT_PROBABILITY_EPS]))[0]))
 # ``clip_mu`` clamps binomial means to [_BINOMIAL_CLIP_MU_EPS, 1 - _BINOMIAL_CLIP_MU_EPS].
-# Cloglog's cap must sit strictly inside that band (see _cloglog_eta), so use
+# Cloglog's cap must sit strictly inside that band (``CloglogLink.clip_eta``), so use
 # twice the family's floor.
 _BINOMIAL_CLIP_MU_EPS = 1e-7
 _CLOGLOG_PROBABILITY_EPS = 2.0 * _BINOMIAL_CLIP_MU_EPS
 _CLOGLOG_LINK_ETA_MAX = float(CloglogLink().link(np.array([1.0 - _CLOGLOG_PROBABILITY_EPS]))[0])
 
 
-def _identity_eta(eta: NDArray, _link: Link) -> NDArray:
-    return eta
-
-
-def _log_eta(eta: NDArray, _link: Link) -> NDArray:
-    return np.clip(eta, _LOG_LINK_ETA_MIN, _LOG_LINK_ETA_MAX)
-
-
-def _binary_eta(eta: NDArray, _link: Link) -> NDArray:
-    # Keeps inverse-link derivatives away from numerical zero in IRLS.
-    return np.clip(eta, -20.0, 20.0)
-
-
-def _cloglog_eta(eta: NDArray, _link: Link) -> NDArray:
-    # The positive tail saturates much earlier than logit (dμ/dη = exp(η-e^η) is
-    # 0.0 at η = 20), so the band needs its own cap, set by ``clip_mu`` rather than
-    # CloglogLink.link()'s 1e-15 endpoint: the eta returned must invert to a mean the
-    # family will keep.  A cap at or past clip_mu's boundary lets clip_mu rewrite mu
-    # behind this function's back; a cap tighter than the family's floor pins fits
-    # whose MLE tail mass lies between the cap and clip_mu.
-    return np.clip(
-        np.asarray(eta, dtype=np.float64),
-        -20.0,
-        _CLOGLOG_LINK_ETA_MAX,
-    )
-
-
-def _cauchit_eta(eta: NDArray, _link: Link) -> NDArray:
-    # Unlike the exponential-tail links, cauchit's inverse approaches the
-    # endpoints polynomially.  Its useful eta range is therefore set by the
-    # same probability resolution used by CauchitLink.link(), not logit's band.
-    return np.clip(
-        np.asarray(eta, dtype=np.float64),
-        -_CAUCHIT_LINK_ETA_MAX,
-        _CAUCHIT_LINK_ETA_MAX,
-    )
-
-
-def _positive_eta(eta: NDArray, _link: Link) -> NDArray:
-    return np.clip(eta, 1e-12, 1e12)
-
-
-def _sqrt_eta(eta: NDArray, _link: Link) -> NDArray:
-    # The inverse μ = η² has two fitted branches even though the forward link
-    # returns the principal square root.  Preserve both and bound only where
-    # squaring would overflow, rather than inheriting a binary-link band.
-    return np.clip(
-        np.asarray(eta, dtype=np.float64),
-        -_SQRT_LINK_ETA_MAX,
-        _SQRT_LINK_ETA_MAX,
-    )
-
-
-def _power_eta(eta: NDArray, link: Link) -> NDArray:
-    assert isinstance(link, PowerLink)
-    if link.power == 1.0:
-        return eta
-    return np.clip(eta, 1e-12, 1e12)
-
-
-def _negative_binomial_eta(eta: NDArray, _link: Link) -> NDArray:
-    return np.clip(eta, -30.0, -1e-10)
-
-
-_STABILIZE_ETA_BY_LINK_TYPE: dict[type, Callable[[NDArray, Link], NDArray]] = {
-    IdentityLink: _identity_eta,
-    LogLink: _log_eta,
-    LogitLink: _binary_eta,
-    ProbitLink: _binary_eta,
-    CloglogLink: _cloglog_eta,
-    CauchitLink: _cauchit_eta,
-    InverseLink: _positive_eta,
-    InverseSquaredLink: _positive_eta,
-    SqrtLink: _sqrt_eta,
-    PowerLink: _power_eta,
-    NegativeBinomialLink: _negative_binomial_eta,
-}
-
-
 def stabilize_eta(eta: NDArray, link: Link) -> NDArray:
-    """Clip eta only where the inverse link needs protection.
+    """Clip eta only where the inverse link needs protection: the link's own ``clip_eta``.
 
-    For the log link, the bounds must be wide enough that the IRLS can reach
-    the true MLE for near-separated categories.  exp(-80) ≈ 2e-35 is safely
-    above float64 subnormal range for all practical distributions, and well
-    beyond the -37 / -43 regime seen in real actuarial data.
+    A link that declares none keeps a conservative band.
     """
-    for link_type, stabilizer in _STABILIZE_ETA_BY_LINK_TYPE.items():
-        if isinstance(link, link_type):
-            return stabilizer(eta, link)
-    # Unregistered custom links retain a conservative fallback.
-    return np.clip(eta, -20.0, 20.0)
+    clip = getattr(link, "clip_eta", None)
+    return np.clip(eta, -20.0, 20.0) if clip is None else clip(eta)
 
+
+def is_multiplicative(link: object) -> bool:
+    """Whether the link declares a mean of ``exp(eta)``, where an effect multiplies the mean."""
+    return getattr(link, "multiplicative", False)
+
+
+#: The link classes this module ships. Arithmetic is decided by membership of
+#: the exact type, so a subclass never inherits a closed form.
+SHIPPED_LINKS = (
+    IdentityLink,
+    LogLink,
+    LogitLink,
+    ProbitLink,
+    CloglogLink,
+    CauchitLink,
+    InverseLink,
+    InverseSquaredLink,
+    SqrtLink,
+    PowerLink,
+    NegativeBinomialLink,
+)
 
 _LINK_SHORTCUTS: dict[str, type] = {
     "log": LogLink,

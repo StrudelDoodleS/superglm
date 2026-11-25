@@ -34,6 +34,7 @@ from superglm.distributions import (
     Poisson,
     Tweedie,
     clip_mu,
+    scale_is_known,
 )
 from superglm.group_matrix import (
     CategoricalGroupMatrix,
@@ -1951,7 +1952,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         # Pearson-based phi for estimated-scale families.  The numerator is the
         # same under either weight contract; only the denominator's likelihood
         # size distinguishes them.
-        if _compute_fit_statistics and not getattr(family, "scale_known", True):
+        if _compute_fit_statistics and not scale_is_known(family):
             pearson_sum = pearson_chi2(distribution=family, y=y, mu=self.mu, sample_weight=weights)
             df_resid = pearson_residual_degrees_of_freedom(
                 self._physical_weights,
@@ -1971,7 +1972,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             phi = float("nan")
 
         exponent = self.weight_exponent
-        solver_phi = phi if exponent and not getattr(family, "scale_known", True) else None
+        solver_phi = phi if exponent and not scale_is_known(family) else None
         deviance, log_det_H = self.dev, final.log_det_H
         iteration_log = self.recorder.iteration_log if self.record_diagnostics else None
         if exponent:

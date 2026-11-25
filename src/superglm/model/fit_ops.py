@@ -26,6 +26,7 @@ from superglm.distributions import (
     Tweedie,
     clip_mu,
     resolve_distribution,
+    scale_is_known,
     weighted_log_likelihood,
 )
 from superglm.links import Link, stabilize_eta
@@ -450,7 +451,7 @@ def _compute_null_mu(
     Where the link has no predictor for the mean response (Gaussian log link, mean at or
     below 0) the null means are NaN, with a warning. ``weight_semantics`` is unused.
     """
-    from superglm.distributions import Binomial, Gaussian, clip_mu
+    from superglm.distributions import clip_mu, mean_domain
     from superglm.links import SqrtLink
     from superglm.solvers.mode_score import compensated_weighted_mean
 
@@ -470,7 +471,8 @@ def _compute_null_mu(
     # its own value (np.average alone sat 1.5 ulp off on two adjacent-float
     # levels, inflating the null deviance 5x); with one it only starts the search.
     y_bar = np.average(y, weights=weights) if has_offset else compensated_weighted_mean(y, weights)
-    if y_bar == 0.0 and not isinstance(distribution, (Binomial, Gaussian)):
+    domain = mean_domain(distribution)
+    if y_bar == 0.0 and domain.positive and not domain.bounded_above:
         # An all-zero response of a positive family has no positive mean in
         # any units; it keeps the stand-in it always had.
         y_bar = 1e-10
@@ -1246,7 +1248,7 @@ def _publish_fit_statistics(
         likelihood_phi = solver_likelihood_phi = None
         y_arr = np.asarray(y, dtype=np.float64)
         w_arr = np.asarray(sample_weight, dtype=np.float64)
-        if getattr(distribution, "scale_known", True):
+        if scale_is_known(distribution):
             pass
         elif getattr(model._result, "solver_phi", None) is not None:
             # A lifted weight unit profiles in that unit, where its deviance is normal.
@@ -1585,7 +1587,7 @@ def _validate_rule_fit_conflicts(model) -> None:
     from superglm.features._spline_subclass_ops import refuse_max_step
     from superglm.features.constraint import rules_of
     from superglm.features.spline import _SplineBase
-    from superglm.links import LogLink, resolve_link
+    from superglm.links import is_multiplicative, resolve_link
 
     link = None
     for name, spec in itertools.chain(model._specs.items(), model._interaction_specs.items()):
@@ -1602,7 +1604,7 @@ def _validate_rule_fit_conflicts(model) -> None:
             if link is None:
                 family = resolve_distribution(configured_family(model))
                 link = resolve_link(configured_link(model), family)
-            if not isinstance(link, LogLink):
+            if not is_multiplicative(link):
                 raise ValueError(
                     f"{held.describe()} bounds printed relativities, which need a log link; "
                     f"this model uses {type(link).__name__}. Fit with link='log' or drop the "
@@ -1863,7 +1865,7 @@ def _fit_in_workspace(
     )
 
     # Fix phi for known-scale families (Poisson): phi is always 1.0.
-    scale_known = getattr(model._distribution, "scale_known", True)
+    scale_known = scale_is_known(model._distribution)
     if scale_known and model._result.phi != 1.0:
         model._result = replace(model._result, phi=1.0)
 

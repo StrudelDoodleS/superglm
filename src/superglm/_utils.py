@@ -51,13 +51,13 @@ def contract_weights(
     other weight is finite and nonnegative, with at least one positive.
     ``finite_sum`` also requires the total to be finite.
     """
-    from superglm.distributions import Tweedie
+    from superglm.distributions import prior_weights_in_normalizer
     from superglm.model.input_validation import _finite_vector
     from superglm.solvers.dispersion import PRIOR_WEIGHTS
 
     if sample_weight is None:
         weights = np.ones(n, dtype=np.float64)
-    elif isinstance(family, Tweedie) and weight_semantics == PRIOR_WEIGHTS:
+    elif prior_weights_in_normalizer(family) and weight_semantics == PRIOR_WEIGHTS:
         weights = _validate_strict_prior_weights(sample_weight, n)
     else:
         weights = _finite_vector(name, sample_weight, n)

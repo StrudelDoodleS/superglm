@@ -27,7 +27,15 @@ from superglm.diagnostics.separation import (
     disclose_solver_separation,
     validate_solver_separation_mode,
 )
-from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
+from superglm.distributions import (
+    Binomial,
+    Gamma,
+    Gaussian,
+    NegativeBinomial,
+    Poisson,
+    Tweedie,
+    scale_is_known,
+)
 from superglm.group_matrix import DesignMatrix
 from superglm.links import CloglogLink, LogitLink, LogLink, ProbitLink
 from superglm.reml._leverage_rows import reads_row_supports
@@ -391,7 +399,7 @@ def optimize_direct_reml(
             separation=separation,
         )
 
-    scale_known = getattr(distribution, "scale_known", True)
+    scale_known = scale_is_known(distribution)
     (
         likelihood_size,
         saturated_log_weight,
