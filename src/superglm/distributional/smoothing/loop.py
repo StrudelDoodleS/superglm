@@ -112,9 +112,10 @@ def _within_ceiling(
 
     A rise inside the rounding of the two objectives is none the objective
     resolves (``no_higher_within_rounding``), and beside a penalty held at its
-    bound that rounding is several times the tolerance. The tie goes to the
-    proposal: halving a step answers a rise the objective shows (Wood and Fasiolo,
-    Biometrics 73(4), 2017, sec. 2), so no step length is chosen inside it.
+    bound in the data's coordinates that rounding is several times the
+    tolerance. The tie goes to the proposal: halving a step answers a rise the
+    objective shows (Wood and Fasiolo, Biometrics 73(4), 2017, sec. 2), so no
+    step length is chosen inside it.
     """
     reference, candidate = rank_matched_objectives(
         current, current_objective, trial, trial_objective

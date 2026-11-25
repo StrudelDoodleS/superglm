@@ -242,10 +242,11 @@ def laplace_objective_rounding(result: DenseSolverResult) -> float:
 
     The penalty ``P = sum_j lambda_j S_j`` is stored to about ``gamma_k |P|``
     entrywise, ``k`` the most nonzeros in a row plus two (the roundings
-    ``_score_within_rounding_floor`` counts in a row of ``P b``). A null
-    direction of ``S_j`` is therefore null in ``P`` only to that, and at a large
-    ``lambda_j`` the stored penalty charges it. The criterion reads ``P`` in
-    ``b'Pb / 2`` and in ``log|H + P| / 2``. A change ``dP`` moves those by
+    ``_score_within_rounding_floor`` counts in a row of ``P b``). In the data's
+    coordinates a null direction of ``S_j`` is therefore null in ``P`` only to
+    that, and at a large ``lambda_j`` the stored penalty charges it; a block in
+    its penalty's null coordinates stores exact zeros there. The criterion reads
+    ``P`` in ``b'Pb / 2`` and in ``log|H + P| / 2``. A change ``dP`` moves those by
     ``b'dPb / 2`` and, to first order, ``tr((H + P)^-1 dP) / 2``, so by at most
     ``gamma_k (|b|'|P||b| + sum_ij |(H + P)^-1|_ij |P|_ij) / 2``. On an exact
     face the component's range is eliminated and its penalty is zero, which
@@ -278,11 +279,12 @@ def no_higher_within_rounding(
     """Whether one fit's Laplace objective is no higher than another's.
 
     Each value carries its stored penalty's rounding
-    (``laplace_objective_rounding``), which beside a penalty at its bound
-    exceeds the tolerance. A difference inside the rounding of the two values is
-    not an order: a comparison of values known to ``e_a`` and ``e_b`` is relaxed
-    by ``e_a + e_b`` (Shi, Xie, Byrd and Nocedal, arXiv 2010.04352, sec. 4.2).
-    What decides there is the caller's: evidence it resolves, or its tie rule.
+    (``laplace_objective_rounding``), which beside a penalty at its bound in
+    the data's coordinates exceeds the tolerance. A difference inside the
+    rounding of the two values is not an order: a comparison of values known to
+    ``e_a`` and ``e_b`` is relaxed by ``e_a + e_b`` (Shi, Xie, Byrd and Nocedal,
+    arXiv 2010.04352, sec. 4.2). What decides there is the caller's: evidence
+    it resolves, or its tie rule.
     """
     ceiling = reference + objective_tolerance * (1.0 + abs(reference))
     if candidate <= ceiling:

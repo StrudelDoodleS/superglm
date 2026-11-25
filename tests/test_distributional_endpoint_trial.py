@@ -18,7 +18,7 @@ from superglm.distributional.smoothing.proposals import (
     endpoint_trial_names,
     flat_tail_names,
 )
-from superglm.features import Spline
+from superglm.features import CubicRegressionSpline, Spline
 from superglm.reml.convergence import flat_tail_certified
 from superglm.reml.efs_update import EFSComponentState, wood_fasiolo_update
 from superglm.types import LambdaPolicy
@@ -31,18 +31,35 @@ _X, _Z, _W = "location:x#wiggle", "location:z#wiggle", "location:w#wiggle"
 _PLATEAU = {"practical_reml": True, "reml_tol": 1.0e-13, "max_log_step": 0.5}
 
 
-def _fit(outer: _Outer, *, terms=("x", "z"), policies=None, **options):
+class _DataCoordinateSpline(CubicRegressionSpline):
+    """A subclass states no penalty null coordinates, so its block keeps the data's coordinates.
+
+    There the stored penalty is singular only to rounding, which a smoothing
+    parameter on its bound multiplies into the objective. Held in its penalty's
+    null coordinates, superglm's own spline has an exactly singular penalty and
+    an objective as exact on the bound as on the face.
+    """
+
+
+def _fit(outer: _Outer, *, terms=("x", "z"), policies=None, data_coordinates=False, **options):
     """A strong smooth in ``x`` beside smooths of ``z`` and ``w``, which act linearly.
 
-    ``policies`` fixes the named covariates' smoothing parameters.
+    ``policies`` fixes the named covariates' smoothing parameters, and
+    ``data_coordinates`` fits every smooth as a ``_DataCoordinateSpline``.
     """
+
+    def spline(**spec):
+        if data_coordinates:
+            return _DataCoordinateSpline(n_knots=6, **spec)  # the knots of ``k=8``
+        return Spline(kind="cr", k=8, **spec)
+
     rng = np.random.default_rng(21)
     frame = pd.DataFrame({name: rng.uniform(-1.0, 1.0, 600) for name in ("x", "z", "w")})
     y = 0.4 + 0.9 * np.sin(2.0 * np.pi * frame["x"]) + 0.3 * frame["z"] + 0.2 * frame["w"]
     y = y + rng.normal(scale=0.35, size=600)
-    splines = {name: Spline(kind="cr", k=8) for name in terms}
+    splines = {name: spline() for name in terms}
     for name, policy in (policies or {}).items():
-        splines[name] = Spline(kind="cr", k=8, lambda_policy=policy)
+        splines[name] = spline(lambda_policy=policy)
     model = model_from_templates(
         family=GaussianLS(),
         predictors=(Predictor("location", splines), Predictor("scale", {})),
@@ -778,21 +795,22 @@ def _read_finite_objectives_shifted(monkeypatch, shift: float) -> None:
 def test_the_rounding_of_a_caps_objective_does_not_decide_its_face(monkeypatch, outer) -> None:
     """A cap's objective that reads a rounding above or below its face's changes nothing.
 
-    At a bound of 2e10 the stored penalty is singular only to rounding, and it
-    leaves the objective there undetermined by 3e-6, ten times the comparison
-    tolerance, where the face's is exact to 1e-14. The cap's objective is read
-    three tolerances higher and then three lower. Either way the endpoint
-    derivative promotes ``z``'s face and the fit is the unshifted one. Mutation
-    check: compared at the tolerance alone, the lower reading refuses the face,
-    and the fit ends ``lambda_cap_unresolved`` or converged without it.
+    In the data's coordinates the stored penalty is singular only to rounding,
+    and at a bound of 2e10 it leaves the objective there undetermined by 3e-6,
+    ten times the comparison tolerance, where the face's is exact to 1e-14. The
+    cap's objective is read three tolerances higher and then three lower. Either
+    way the endpoint derivative promotes ``z``'s face and the fit is the
+    unshifted one. Mutation check: compared at the tolerance alone, the lower
+    reading refuses the face, and the fit ends ``lambda_cap_unresolved`` or
+    converged without it.
     """
-    _, reference = _fit(outer)
+    _, reference = _fit(outer, data_coordinates=True)
     shift = 3.0 * reference.config.objective_tolerance * (1.0 + abs(reference.objective))
 
     for reading in (shift, -shift):
         with monkeypatch.context() as patch:
             _read_finite_objectives_shifted(patch, reading)
-            model, smoothing = _fit(outer)
+            model, smoothing = _fit(outer, data_coordinates=True)
         assert model.exact_face_components_ == (_Z,)
         assert smoothing.convergence_reason == reference.convergence_reason
         assert smoothing.converged is True
@@ -801,17 +819,23 @@ def test_the_rounding_of_a_caps_objective_does_not_decide_its_face(monkeypatch, 
 
 
 @pytest.mark.pins_behaviour
-def test_a_face_above_its_cap_by_more_than_rounding_is_refused(monkeypatch) -> None:
+@pytest.mark.parametrize(("data_coordinates", "tolerances"), [(True, 1.0e3), (False, 3.0)])
+def test_a_face_above_its_cap_by_more_than_rounding_is_refused(
+    monkeypatch, data_coordinates: bool, tolerances: float
+) -> None:
     """Pins the refusal of a face whose objective is materially above its cap's.
 
-    The cap's objective is read a part in a million lower, a hundred times the
-    penalty's rounding there, so the face is higher by more than rounding
-    explains and the endpoint derivative does not decide alone.
+    In the data's coordinates the cap's objective is read a part in a million
+    lower, a hundred times the penalty's rounding there. In its penalty's null
+    coordinates superglm's own spline leaves the cap's objective a rounding of
+    1e-14, so three tolerances lower is material there. Either way the face is
+    higher by more than rounding explains and the endpoint derivative does not
+    decide alone.
     """
-    _, reference = _fit("efs")
-    shift = 1.0e3 * reference.config.objective_tolerance * (1.0 + abs(reference.objective))
+    _, reference = _fit("efs", data_coordinates=data_coordinates)
+    shift = tolerances * reference.config.objective_tolerance * (1.0 + abs(reference.objective))
     _read_finite_objectives_shifted(monkeypatch, -shift)
-    model, smoothing = _fit("efs")
+    model, smoothing = _fit("efs", data_coordinates=data_coordinates)
 
     assert model.exact_face_components_ == ()
     assert (smoothing.converged, smoothing.convergence_reason) == (False, "lambda_cap_unresolved")
@@ -823,18 +847,19 @@ def test_the_rounding_of_a_held_caps_objective_does_not_shorten_the_steps_beside
 ) -> None:
     """A step beside a held cap is taken whole whichever way the cap's objective rounds.
 
-    While ``z`` is held at its bound of 2e10 the objective is undetermined by
-    3e-6, ten times the comparison tolerance, and ``x``'s last step changes it by
-    far less than that tolerance. Every trial is read three tolerances above the
-    objective it is compared with, and then three below. Either way each round
-    takes the step proposed and the fit is the unshifted one. Mutation check:
-    compared at the tolerance alone, the higher reading refuses ``x``'s last step
-    at every length, nine fits. Plain ``"efs"`` then ends ``objective_rejected``
-    and ``"efs+finish"`` at another smoothing parameter.
+    While ``z`` is held at its bound of 2e10 in the data's coordinates the
+    objective is undetermined by 3e-6, ten times the comparison tolerance, and
+    ``x``'s last step changes it by far less than that tolerance. Every trial is
+    read three tolerances above the objective it is compared with, and then
+    three below. Either way each round takes the step proposed and the fit is
+    the unshifted one. Mutation check: compared at the tolerance alone, the
+    higher reading refuses ``x``'s last step at every length, nine fits. Plain
+    ``"efs"`` then ends ``objective_rejected`` and ``"efs+finish"`` at another
+    smoothing parameter.
     """
     from superglm.distributional.smoothing import loop
 
-    _, reference = _fit(outer)
+    _, reference = _fit(outer, data_coordinates=True)
     tolerance = reference.config.objective_tolerance * (1.0 + abs(reference.objective))
     matched = loop.rank_matched_objectives
 
@@ -848,7 +873,7 @@ def test_the_rounding_of_a_held_caps_objective_does_not_shorten_the_steps_beside
 
         with monkeypatch.context() as patch:
             patch.setattr(loop, "rank_matched_objectives", read)
-            _, smoothing = _fit(outer)
+            _, smoothing = _fit(outer, data_coordinates=True)
         assert any(risen) is (reading > 0.0)
         assert [row.coefficient_fit_indices for row in smoothing.history] == [
             row.coefficient_fit_indices for row in reference.history
