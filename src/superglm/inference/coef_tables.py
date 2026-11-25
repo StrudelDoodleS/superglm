@@ -293,7 +293,11 @@ def build_coef_rows(
         ordered_reference_beta_contrast,
         ordered_reference_intercept,
     )
-    from superglm.inference._term_covariance import feature_se_from_cov, ordered_level_contrasts
+    from superglm.inference._term_covariance import (
+        contrast_determined,
+        feature_se_from_cov,
+        ordered_level_contrasts,
+    )
     from superglm.inference._term_helpers import (
         _resolve_group_lambda,
         ordered_level_fit,
@@ -468,15 +472,8 @@ def build_coef_rows(
         return separated is not None and bool(separated[column])
 
     def _determined(contrast: NDArray) -> bool:
-        """Whether the default covariance determines ``contrast @ beta``.
-
-        The rule of the coefficient mask, read on the contrast: one whose coefficients the
-        mask all shows is determined, as the determined functions form a subspace; any
-        other is decided by ``contrast_estimable``, and is not without it.
-        """
-        if np.all(coefficient_estimable[contrast != 0.0]):
-            return True
-        return contrast_estimable is not None and bool(contrast_estimable(contrast))
+        """Whether the default covariance determines ``contrast @ beta`` (``contrast_determined``)."""
+        return contrast_determined(contrast, coefficient_estimable, contrast_estimable)
 
     def _mask_determines(g_slice: slice) -> Callable[[NDArray], NDArray[np.bool_]]:
         """Which contrasts of the coefficients at ``g_slice`` the default covariance determines."""

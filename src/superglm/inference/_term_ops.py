@@ -11,8 +11,10 @@ from numpy.typing import NDArray
 from superglm.features.constraint import rules_of
 from superglm.inference._term_covariance import (
     feature_se_from_cov,
+    ordered_level_contrasts,
     piecewise_knot_covariance,
     simultaneous_band_and_critical_value,
+    term_contrasts,
 )
 from superglm.inference._term_helpers import (
     _VALID_CENTERING,
@@ -43,6 +45,14 @@ def _maybe_array(value: NDArray | float | None) -> NDArray | None:
     if value is None:
         return None
     return cast(NDArray, np.asarray(value))
+
+
+def _withhold_undetermined(se: NDArray, determines, contrasts) -> NDArray:
+    """``se`` with NaN at each row of ``contrasts()`` that ``determines`` does not determine."""
+    if determines is None:
+        return se
+    determined = np.array([determines(contrast) for contrast in contrasts()], dtype=bool)
+    return np.where(determined, se, np.nan)
 
 
 def _centered_se(
@@ -102,6 +112,7 @@ def term_inference(
     n_sim: int = 10_000,
     seed: int = 42,
     centering: str = "native",
+    determines=None,
 ) -> TermInference | InteractionInference:
     """Build a per-term inference object.
 
@@ -143,6 +154,10 @@ def term_inference(
         same fitted coefficients, so the errors and intervals are propagated
         through the centering contrast rather than translated with the
         values -- see ``_recenter_term``.
+    determines : callable or None
+        Whether the covariance determines a contrast over the fitted coefficients
+        (``contrast_determined``); an ordered term's level and curve errors it does not
+        determine are NaN.  ``None`` reports every one.
 
     Returns
     -------
@@ -319,6 +334,13 @@ def term_inference(
                     specs,
                     interaction_specs,
                 )
+                se = _withhold_undetermined(
+                    se,
+                    determines,
+                    lambda: ordered_level_contrasts(
+                        spec, name, feature_groups, interaction_specs, len(beta), selected_names
+                    ),
+                )
                 ci_lo = _safe_exp(level_log_rels - z_alpha * se)
                 ci_hi = _safe_exp(level_log_rels + z_alpha * se)
 
@@ -339,6 +361,9 @@ def term_inference(
                         for ag in active_groups_cov
                         if not (ag.feature_name == name and ag.subgroup_type == "special")
                     ]
+                    reference_x = np.array(
+                        [raw["level_values"][spec._base_level]], dtype=np.float64
+                    )
                     curve_se = _spline_se(
                         inner,
                         name,
@@ -346,9 +371,17 @@ def term_inference(
                         smooth_active_cov,
                         Cov_active,
                         x_eval=raw["x"],
-                        reference_x=np.array(
-                            [raw["level_values"][spec._base_level]],
-                            dtype=np.float64,
+                        reference_x=reference_x,
+                    )
+                    curve_se = _withhold_undetermined(
+                        curve_se,
+                        determines,
+                        lambda: term_contrasts(
+                            np.asarray(inner.transform(raw["x"]), dtype=np.float64)
+                            - np.asarray(inner.transform(reference_x), dtype=np.float64),
+                            smooth_feature_groups,
+                            len(beta),
+                            selected_names,
                         ),
                     )
                     curve = SmoothCurve(
@@ -434,6 +467,13 @@ def term_inference(
                     groups,
                     specs,
                     interaction_specs,
+                )
+                se = _withhold_undetermined(
+                    se,
+                    determines,
+                    lambda: ordered_level_contrasts(
+                        spec, name, feature_groups, interaction_specs, len(beta), selected_names
+                    ),
                 )
                 ci_lo = _safe_exp(log_rels - z_alpha * se)
                 ci_hi = _safe_exp(log_rels + z_alpha * se)

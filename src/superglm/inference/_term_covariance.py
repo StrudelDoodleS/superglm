@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Hashable, Mapping
+from collections.abc import Callable, Hashable, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -250,13 +250,38 @@ def ordered_level_contrasts(
     levels = list(spec._ordered_levels)
     record = _held_levels(spec, name, interaction_specs)
     L = _level_rows(spec, levels, None if record is None else record[1:], slice(None))
-    contrasts = np.zeros((len(levels), width))
+    return term_contrasts(L, feature_groups, width, selected)
+
+
+def term_contrasts(rows: NDArray, feature_groups, width: int, selected) -> NDArray:
+    """``rows`` over a term's ``feature_groups`` (columns in their order) as contrasts over
+    ``width`` coefficients, zero on the groups ``selected`` does not name: the selected
+    model holds those at zero.
+    """
+    contrasts = np.zeros((len(rows), width))
     start = 0
     for group in feature_groups:
         if group.name in selected:
-            contrasts[:, group.sl] = L[:, start : start + group.size]
+            contrasts[:, group.sl] = rows[:, start : start + group.size]
         start += group.size
     return contrasts
+
+
+def contrast_determined(
+    contrast: NDArray,
+    coefficient_estimable: NDArray,
+    contrast_estimable: Callable[[NDArray], bool] | None,
+) -> bool:
+    """Whether a covariance determines ``contrast @ beta``, by its coefficient mask's rule.
+
+    A contrast whose coefficients the mask ``coefficient_estimable`` all shows is
+    determined, as the determined functions form a subspace; any other is decided by
+    ``contrast_estimable`` (``RankDecomposition.is_estimable`` of the decomposition the
+    mask came from), and is not without it.
+    """
+    if np.all(coefficient_estimable[contrast != 0.0]):
+        return True
+    return contrast_estimable is not None and bool(contrast_estimable(contrast))
 
 
 def feature_se_from_cov(

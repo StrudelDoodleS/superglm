@@ -4601,11 +4601,15 @@ def test_a_held_level_of_the_group_term_reports_the_error_of_the_identified_mean
     of the identified levels' values (all but g000 and the separated g001)
     against the base, ``c' gamma`` with ``c`` the mean of their rows less the
     base row, so its error is ``sqrt(c' V
-    c)``, in ``relativities(with_se=True)`` and ``term_inference()``, within
-    ``4 gamma_(2p)`` of ``|c|' |V| |c|``.  Fails on 4a2ed996, which reported
-    the error of g000's own value.  With ``integers`` the group column holds
-    ``0 .. 11`` beside ``order=["0", ..., "11"]`` and the held level is
-    ``"0"`` in the term's table (PR 508 round 7); fails on 8f4d0d7c.
+    c)``, in ``relativities(with_se=True)`` and in ``feature_se_from_cov``, which
+    ``term_inference()`` reads, within ``4 gamma_(2p)`` of ``|c|' |V| |c|``.
+    Fails on 4a2ed996, which reported the error of g000's own value.  With
+    ``integers`` the group column holds ``0 .. 11`` beside ``order=["0", ...,
+    "11"]`` and the held level is ``"0"`` in the term's table (PR 508 round 7);
+    fails on 8f4d0d7c.  The group term is redundant
+    beside the sz constants and the fit's mask blanks its coefficients, so
+    ``c' gamma`` is not determined: ``term_inference()`` withholds it, as
+    ``summary()`` does (#740); a80058a35 showed it.
     """
     order = [str(i) for i in range(12)] if integers else [f"g{i:03d}" for i in range(12)]
     model, _, _ = _folded_group_term_model(
@@ -4628,8 +4632,17 @@ def test_a_held_level_of_the_group_term_reports_the_error_of_the_identified_mean
         inference = model.term_inference("g")
     inferred = dict(zip(inference.levels, inference.se_log_relativity, strict=True))
     held = order[0]
-    for se in (frame_se[held], inferred[held]):
-        assert abs(float(se) ** 2 - expected) <= bound
+    from superglm.inference._term_covariance import feature_se_from_cov
+
+    se = feature_se_from_cov(
+        "g", covariance, active, model.result, model._groups, model._specs, model._interaction_specs
+    )
+    for value in (frame_se[held], se[inference.levels.index(held)]):
+        assert abs(float(value) ** 2 - expected) <= bound
+    mask = model._fit_inference_info["coefficient_estimable"]
+    assert not mask[next(g for g in model._groups if g.feature_name == "g").sl].any()
+    assert np.isnan(inferred[held])
+    assert next(r for r in model.summary()._coef_rows if r.name == f"g[{held}]").se is None
 
 
 def test_reports_fold_a_held_level_beside_a_declared_level_the_group_term_lacks() -> None:

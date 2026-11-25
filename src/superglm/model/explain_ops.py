@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import warnings
+from functools import partial
 
 import numpy as np
 
@@ -90,6 +91,26 @@ def _aliased_features(model, covariance) -> set[str]:
         for group in model._groups
         if group.name in active and not estimable[group.sl].all()
     }
+
+
+def _default_determines(model, name):
+    """``contrast_determined`` on the default covariance for ordered term ``name``, or ``None``.
+
+    The summary's rule, on the mask and decomposition it reads (``fit_contrast_estimable``):
+    an ordered term's levels and curve are contrasts of several coefficients.
+    """
+    from superglm.features.ordered_categorical import OrderedCategorical
+    from superglm.inference._term_covariance import contrast_determined
+    from superglm.model.state_ops import fit_contrast_estimable
+
+    if not isinstance(model._specs.get(name), OrderedCategorical):
+        return None
+    inference = model._fit_inference_info
+    return partial(
+        contrast_determined,
+        coefficient_estimable=inference["coefficient_estimable"],
+        contrast_estimable=fit_contrast_estimable(model, inference),
+    )
 
 
 _ALIASED_INFERENCE_MESSAGE = (
@@ -357,6 +378,7 @@ def term_inference(
         n_sim=n_sim,
         seed=seed,
         centering=centering,
+        determines=(_default_determines(model, name) if robust_cov is None and with_se else None),
     )
     if covariance is not None and hasattr(inference, "covariance_method"):
         inference = dataclasses.replace(

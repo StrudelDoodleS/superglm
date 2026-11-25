@@ -676,6 +676,67 @@ def test_a_single_ordered_term_keeps_its_whole_term_test(basis) -> None:
             )
 
 
+def _term_inference_errors(model, name):
+    """``term_inference(name)``'s level and curve errors, the curve's at the base removed."""
+    inference = model.term_inference(name)
+    base = inference.levels.index(model._specs[name]._base_level)
+    levels = np.delete(np.asarray(inference.se_log_relativity), base)
+    curve = inference.smooth_curve
+    base_x = curve.level_x[base]
+    return levels, np.asarray(curve.se_log_relativity)[curve.x != base_x], inference
+
+
+@pytest.mark.parametrize("fit", ["piecewise", "spline", "random effect"])
+def test_term_inference_gives_no_error_the_fit_does_not_determine(fit) -> None:
+    """Twin ordered terms: ``term_inference`` gives no level or curve error (#740).
+
+    Each non-base level and each curve point away from the base is a contrast
+    ``f(x) - f(base)`` the twins can trade (their levels raise the design's rank); the
+    summary blanks the levels, and the same rule leaves NaN errors and intervals here,
+    on a dense fit and beside a random effect.  At a80058a35 ``term_inference("a")`` gave
+    ``a[b]`` 0.1406 (piecewise) and 1.319 (spline).
+    """
+    if fit == "random effect":
+        model, _, _ = _structured_fit(["a", "b"], fit)
+    else:
+        model, _, _ = _twin_fit(["a", "b"], None, basis=_TWIN_BASES[fit])
+    assert _rank_gain(model, _level_contrasts(model, "a")[0][1]) > 0
+    for name in ("a", "b"):
+        levels, curve, inference = _term_inference_errors(model, name)
+        assert np.all(np.isnan(levels)), (name, levels)
+        assert np.all(np.isnan(curve)), (name, curve)
+        base = inference.levels.index("a")
+        assert np.all(np.isnan(np.delete(inference.ci_lower, base))), name
+        assert np.isfinite(inference.log_relativity).all()
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("basis", list(_TWIN_BASES))
+def test_term_inference_of_a_single_ordered_term_keeps_its_errors(basis) -> None:
+    """Control (pins): one unaliased ordered term keeps every ``term_inference`` error.
+
+    The piecewise levels' are ``sqrt(phi c'(X'X)^-1 c)`` of the Gaussian fit, each curve
+    vertex is a level, and the spline's are the summary's level errors; every curve error
+    is finite and positive away from the base.
+    """
+    model, X, y = _twin_fit(["a"], None, basis=_TWIN_BASES[basis])
+    levels, curve, _ = _term_inference_errors(model, "a")
+    if basis == "piecewise":
+        design = _design(model)
+        gram_inverse = np.linalg.inv(design.T @ design)
+        residual = y - design @ np.linalg.lstsq(design, y, rcond=None)[0]
+        phi = float(residual @ residual) / (len(y) - design.shape[1])
+        expected = [
+            np.sqrt(phi * np.r_[0.0, c[0]] @ gram_inverse @ np.r_[0.0, c[0]])
+            for _, c in _level_contrasts(model, "a")
+        ]
+    else:
+        rows = {r.name: r.se for r in model.summary()._coef_rows}
+        expected = [rows[label] for label, _ in _level_contrasts(model, "a")]
+    np.testing.assert_allclose(levels, expected, rtol=1e-9)
+    assert np.all(np.isfinite(curve)) and np.all(curve > 0.0)
+
+
 def test_editor_stale_summary_keeps_the_basis_vocabulary(segmented_model) -> None:
     from superglm.editor.apply import apply_edits_to_model_copy_with_data
     from superglm.editor.session import EditorSession
