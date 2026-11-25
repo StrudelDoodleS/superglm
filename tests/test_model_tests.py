@@ -597,3 +597,142 @@ class TestVuongTestUnits:
         # The zero-weight row adds exact zeros to each sum: a reordering's gamma_n at most.
         assert padded.statistic == pytest.approx(reference.statistic, rel=4 * gamma(n + 1))
         assert padded.preferred == reference.preferred
+
+
+# ── Statistics against independent references ─────────────────
+
+
+def _cancellation(terms):
+    """sum |t| / |sum t|: how much a sum's relative rounding error is magnified."""
+    terms = np.asarray(terms, dtype=np.float64)
+    return float(np.sum(np.abs(terms)) / abs(np.sum(terms)))
+
+
+class TestStatisticsMatchReferences:
+    """The statistics a user reads before switching to a zero-inflated or negative
+    binomial model, each against a reference the test computes itself.
+
+    Sums of n terms carry relative error about n u times their cancellation factor
+    (Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed., section 4.2),
+    so each tolerance is built from those factors. A p-value is compared absolutely:
+    1 - F(t) in float64 is accurate to about u, not relative to a tiny p.
+    """
+
+    @pytest.fixture
+    def poisson_case(self):
+        rng = np.random.default_rng(20261125)
+        n = 400
+        x = rng.uniform(0.0, 2.0, n)
+        y = rng.poisson(np.exp(-0.3 + 0.6 * x)).astype(float)
+        X = pd.DataFrame({"x": x})
+        return _fit_poisson_numeric(X, y), X, y
+
+    def test_dispersion_statistic_is_the_cameron_trivedi_regression_t(self, poisson_case):
+        """The t statistic of Cameron and Trivedi's auxiliary regression of
+        ((y - mu)^2 - y) / mu on mu without intercept (Regression Analysis of Count Data,
+        2nd ed., 2013, section 3.4), from statsmodels OLS; a t half its size would hide
+        overdispersion."""
+        sm = pytest.importorskip("statsmodels.api")
+        from scipy import stats
+
+        model, X, y = poisson_case
+        n = len(y)
+        mu = np.asarray(model.predict(X), dtype=np.float64)
+        dep = ((y - mu) ** 2 - y) / mu
+        ols = sm.OLS(dep, mu).fit()
+        alpha_hat, t = float(ols.params[0]), float(ols.tvalues[0])
+        rtol = 8.0 * n * UNIT_ROUNDOFF * (_cancellation(mu * dep) + 1.0)
+        p_atol = 64.0 * UNIT_ROUNDOFF + stats.t.pdf(t, n - 1) * abs(t) * rtol
+
+        expected_p = {
+            "greater": stats.t.sf(t, n - 1),
+            "less": stats.t.cdf(t, n - 1),
+            "two-sided": 2.0 * stats.t.sf(abs(t), n - 1),
+        }
+        for alternative, p in expected_p.items():
+            result = dispersion_test(model, X, y, alternative=alternative)
+            assert result.alpha_hat == pytest.approx(alpha_hat, rel=rtol, abs=0)
+            assert result.statistic == pytest.approx(t, rel=rtol, abs=0)
+            assert result.p_value == pytest.approx(p, rel=0, abs=p_atol)
+
+    def test_zero_inflation_statistic_is_van_den_broeks_score_at_a_constant_mean(self):
+        """Van den Broek's score statistic [sum (1{y=0} - p0) / p0]^2 /
+        [sum (1 - p0) / p0 - sum mu] (Biometrics 51, 1995, 738-743) for a model whose
+        fitted mean is constant; a statistic missing the variance correction for the
+        estimated mean would be 40% too small."""
+        from scipy import stats
+
+        rng = np.random.default_rng(20261126)
+        n = 600
+        # Zeros added to a Poisson(1.2) sample, so the statistic is far from zero.
+        y = np.where(rng.uniform(size=n) < 0.08, 0.0, rng.poisson(1.2, n)).astype(float)
+        X = pd.DataFrame({"x": rng.normal(size=n)})
+        # A group-lasso penalty far above the gradient's norm sets the feature to
+        # exactly zero, so the fitted mean is the same on every row.
+        model = SuperGLM(
+            family="poisson",
+            penalty="group_lasso",
+            selection_penalty=1e3,
+            features={"x": Numeric()},
+        )
+        model.fit(X, y)
+        mu = np.asarray(model.predict(X), dtype=np.float64)
+        assert np.ptp(mu) == 0.0
+
+        p0 = np.exp(-mu)
+        score_terms = ((y == 0) - p0) / p0
+        variance = np.sum((1.0 - p0) / p0) - np.sum(mu)
+        expected = np.sum(score_terms) ** 2 / variance
+        variance_cancellation = (np.sum((1.0 - p0) / p0) + np.sum(mu)) / variance
+        rtol = 8.0 * n * UNIT_ROUNDOFF * (2.0 * _cancellation(score_terms) + variance_cancellation)
+
+        result = score_test_zi(model, X, y)
+        assert result.statistic == pytest.approx(expected, rel=rtol, abs=0)
+        p_atol = 64.0 * UNIT_ROUNDOFF + stats.chi2.pdf(expected, 1) * expected * rtol
+        assert result.p_value == pytest.approx(stats.chi2.sf(expected, 1), rel=0, abs=p_atol)
+        assert result.direction == "inflated"
+
+    @pytest.mark.parametrize("correction", ["none", "aic", "bic"])
+    def test_vuong_statistic_matches_its_definition_on_poisson_against_nb2(self, correction):
+        """Vuong's sqrt(n) mean(m) / sd(m) with m_i the per-row log-likelihood ratio
+        (Econometrica 57, 1989, section 5; sd with n - 1 as in pscl's vuong), and the
+        Akaike or Schwarz shift of the mean by (k_a - k_b) / n or (k_a - k_b) log(n) / (2n),
+        with densities from scipy; a halved statistic would flip the preferred model."""
+        from scipy import stats
+
+        rng = np.random.default_rng(20261127)
+        n = 500
+        x = rng.uniform(0.0, 2.0, n)
+        mu_true = np.exp(0.2 + 0.5 * x)
+        theta = 1.5
+        y = rng.negative_binomial(theta, theta / (theta + mu_true)).astype(float)
+        X = pd.DataFrame({"x": x, "x2": x**2})
+        model_a = _fit_poisson_numeric(X, y)
+        model_b = SuperGLM(
+            family=NegativeBinomial(theta=theta),
+            features={"x": Numeric()},
+            selection_penalty=0.0,
+        )
+        model_b.fit(X[["x"]], y)
+
+        mu_a = np.asarray(model_a.predict(X), dtype=np.float64)
+        mu_b = np.asarray(model_b.predict(X[["x"]]), dtype=np.float64)
+        m = stats.poisson.logpmf(y, mu_a) - stats.nbinom.logpmf(y, theta, theta / (theta + mu_b))
+        k_a, k_b = 3, 2  # unpenalised coefficients, intercepts included
+        shift = {
+            "none": 0.0,
+            "aic": (k_a - k_b) / n,
+            "bic": (k_a - k_b) * np.log(n) / (2.0 * n),
+        }[correction]
+        mean = np.mean(m) - shift
+        expected = np.sqrt(n) * mean / np.std(m, ddof=1)
+        mean_cancellation = (np.mean(np.abs(m)) + shift) / abs(mean)
+        rtol = 8.0 * n * UNIT_ROUNDOFF * (mean_cancellation + 2.0)
+        expected_p = 2.0 * stats.norm.sf(abs(expected))
+
+        result = vuong_test(model_a, model_b, X, y, correction=correction)
+        assert result.statistic == pytest.approx(expected, rel=rtol, abs=0)
+        p_atol = 64.0 * UNIT_ROUNDOFF + 2.0 * stats.norm.pdf(expected) * abs(expected) * rtol
+        assert result.p_value == pytest.approx(expected_p, rel=0, abs=p_atol)
+        assert expected < 0 and expected_p < 0.05, "fixture needs NB2 clearly preferred"
+        assert result.preferred == "model_b"
