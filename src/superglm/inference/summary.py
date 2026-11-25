@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import textwrap
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from html import escape as html_escape
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import numpy as np
 
@@ -449,7 +449,8 @@ def _row_kind(row: _CoefRow) -> str:
 
 def _structured_text(row: _CoefRow, markup: _Markup) -> str:
     """A structured term's one-line description; its levels have a dedicated report."""
-    kind = _STRUCTURED_KIND_LABELS.get(row.structured_kind, row.structured_kind.replace("_", " "))
+    structured_kind = cast(str, row.structured_kind)
+    kind = _STRUCTURED_KIND_LABELS.get(structured_kind, structured_kind.replace("_", " "))
     detail = [f"{row.n_params} params"]
     if row.n_levels is not None:
         detail.insert(0, f"{row.n_levels} levels")
@@ -731,7 +732,8 @@ class ModelSummary:
         lines.extend(box.header_row(*cells) for cells in header)
         lines.append(box.mid())
         columns = box.prefix("Term", "Level group", "Fit")
-        lines.append(box.row(columns + box.fields(*self._column_names(), _LOW_CREDIBILITY_TAG)))
+        names = self._column_names()
+        lines.append(box.row(columns + box.fields(names[:6], names[6], _LOW_CREDIBILITY_TAG)))
         lines.append(box.thin())
         lines.extend(self._text_body(box))
         lines.append(box.bot())
@@ -765,13 +767,13 @@ class ModelSummary:
         if kind == "group":
             return self._text_group_row(box, row, prefix)
         if kind == "reference":
-            return [box.row(prefix + box.fields("0.0000", "ref", "---", "---", "---", "---"))]
+            return [box.row(prefix + box.fields(("0.0000", "ref", "---", "---", "---", "---")))]
         if kind == "estimated":
             advisory = "?" if row.quasi_separated else ""
-            return [box.row(prefix + box.fields(*_ascii_numbers(row), _sig_stars(row.p), advisory))]
+            return [box.row(prefix + box.fields(_ascii_numbers(row), _sig_stars(row.p), advisory))]
         coef = _format_ascii_number(row.coef, decimals=4, width=_COEF_FIELD_WIDTHS[0])
         advisory = _SEPARATED_TAG if row.separated else ""
-        return [box.row(prefix + box.fields(coef, *("---",) * 5, advisory=advisory))]
+        return [box.row(prefix + box.fields((coef, *("---",) * 5), advisory=advisory))]
 
     def _text_group_row(self, box: _TextBox, row: _CoefRow, prefix: str) -> list[str]:
         group = _group_text(row, _TEXT)
@@ -784,7 +786,7 @@ class ModelSummary:
         if self._detail == "full":
             for br in self._basis_detail.get(row.name, ()):
                 label = box.prefix(f"  Coef {br.basis_index + 1}")
-                lines.append(box.row(label + box.fields(*_ascii_numbers(br), _sig_stars(br.p))))
+                lines.append(box.row(label + box.fields(_ascii_numbers(br), _sig_stars(br.p))))
         return lines
 
     def _text_footer(self, width: int) -> list[str]:
@@ -969,22 +971,11 @@ class _TextBox:
             text += f"{fit:>{self.level_fit_w}s}"
         return text
 
-    def fields(
-        self,
-        coef: str,
-        se: str,
-        z: str,
-        p: str,
-        ci_low: str,
-        ci_high: str,
-        sig: str = "",
-        advisory: str = "",
-    ) -> str:
+    def fields(self, numbers: Sequence[str], sig: str = "", advisory: str = "") -> str:
         """The six numeric fields, Sig and the advisory tag, each after its own space."""
-        numeric = (coef, se, z, p, ci_low, ci_high)
         rendered = "".join(
             f" {value:>{width}s}"
-            for value, width in zip(numeric, _COEF_FIELD_WIDTHS[:6], strict=True)
+            for value, width in zip(numbers, _COEF_FIELD_WIDTHS[:6], strict=True)
         )
         return f"{rendered} {sig or '---':<3s} {advisory or '---':<3s}"
 

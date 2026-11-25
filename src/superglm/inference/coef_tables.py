@@ -814,16 +814,21 @@ class _CoefTable:
 
     def group_row(self, g: GroupSlice, test: _GroupTest | None, **fields: Any) -> _CoefRow:
         """Group ``g``'s whole-term test row: active with ``test``, or inactive (``None``)."""
-        common = {
-            "name": g.name,
-            "group": str(g.feature_name),
-            "is_spline": True,
-            "n_params": g.size,
-        }
         if test is None:
-            return _CoefRow(**common, active=False, group_norm=0.0, **fields)
+            return _CoefRow(
+                name=g.name,
+                group=str(g.feature_name),
+                is_spline=True,
+                n_params=g.size,
+                active=False,
+                group_norm=0.0,
+                **fields,
+            )
         return _CoefRow(
-            **common,
+            name=g.name,
+            group=str(g.feature_name),
+            is_spline=True,
+            n_params=g.size,
             active=True,
             group_norm=float(np.linalg.norm(self.beta[g.sl])),
             wald_chi2=test.stat,
@@ -868,7 +873,8 @@ class _CoefTable:
         )
         # Blank where the fit does not determine the base-level contrast, not only the
         # unadjusted intercept.
-        if self.is_sandwich and not self.sandwich_covariance.determines(augmented_contrast)[0]:
+        sandwich = self.sandwich_covariance
+        if sandwich is not None and not sandwich.determines(augmented_contrast)[0]:
             icpt_se = float("nan")
         if self.information_underflowed:
             icpt_se = float("nan")

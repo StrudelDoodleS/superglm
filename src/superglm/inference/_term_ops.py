@@ -168,6 +168,7 @@ class _TermReport:
         """The term's standard errors (``feature_se_from_cov``), or ``None`` without them."""
         if not (self.with_se and self.active and self.Cov_active is not None):
             return None
+        assert self.active_groups_cov is not None
         return feature_se_from_cov(
             self.name,
             self.Cov_active,
@@ -323,6 +324,7 @@ class _TermReport:
                 relativity=raw["relativity"],
                 level_x=level_x,
             )
+        assert self.active_groups_cov is not None
         smooth_groups = spline_groups(self.feature_groups)
         smooth_active_cov = [
             ag
@@ -545,6 +547,7 @@ class _TermReport:
             Cov_active, exponent = Cov_active.base, Cov_active.exponent
         se = knot_cov = None
         if self.with_se and self.active and Cov_active is not None:
+            assert self.active_groups_cov is not None
             knot_cov = piecewise_knot_covariance(
                 self.name, Cov_active, self.active_groups_cov, self.specs
             )
