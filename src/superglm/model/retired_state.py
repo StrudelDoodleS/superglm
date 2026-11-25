@@ -118,21 +118,19 @@ def release_separated_level_summaries(model) -> None:
             model.__dict__["_summary_cache"] = None
 
 
-def release_ordered_piecewise_summaries(model) -> None:
-    """``SuperGLM.__setstate__``'s part for a summary cached beside an ordered piecewise term.
+def release_undetermined_row_summaries(model) -> None:
+    """``SuperGLM.__setstate__``'s part for a summary cached before it blanked undetermined rows.
 
-    A summary cached before its readers asked whether the fit determines each slope change
-    and curvature (#737) can hold an error and a test for one it does not; it is dropped, and
-    the next ``summary()`` is formed from the same fit.
+    Such a summary can hold an error and a test the fit does not determine: on an ordered
+    term's slope change or curvature (#737), level or base-level intercept (#740), or in its
+    dictionary for a coefficient the mask blanks (#740).  Every such row reads a coefficient
+    its mask blanks, so it is dropped beside a blank in the saved mask, and the next
+    ``summary()`` is formed from the same fit.
     """
-    from superglm.features.ordered_categorical import OrderedCategorical
-    from superglm.features.piecewise import Piecewise
-
-    # the spline attribute itself: a removed step-mode spec has none, and raises on read
-    if model.__dict__.get("_summary_cache") and any(
-        isinstance(spec, OrderedCategorical) and isinstance(spec.__dict__.get("_spline"), Piecewise)
-        for spec in (model.__dict__.get("_specs") or {}).values()
-    ):
+    if not model.__dict__.get("_summary_cache"):
+        return
+    mask = (model.__dict__.get("_fit_inference_info") or {}).get("coefficient_estimable")
+    if mask is not None and not np.all(mask):
         model.__dict__["_summary_cache"] = None
 
 

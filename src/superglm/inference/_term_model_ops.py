@@ -9,7 +9,11 @@ import pandas as pd  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 from superglm._frame import FrameLike
-from superglm.inference._term_covariance import feature_se_from_cov
+from superglm.inference._term_covariance import (
+    feature_se_from_cov,
+    ordered_level_contrasts,
+    withhold_undetermined,
+)
 from superglm.inference._term_helpers import _VALID_CENTERING
 from superglm.inference._term_types import _safe_exp
 
@@ -29,8 +33,14 @@ def relativities(
     with_se: bool = False,
     covariance_fn=None,
     centering: str = "native",
+    determines=None,
 ) -> dict[str, pd.DataFrame]:
-    """Extract plot-ready relativity DataFrames for all features."""
+    """Extract plot-ready relativity DataFrames for all features.
+
+    ``determines(name)`` gives ``term_inference``'s decider of a contrast over the fitted
+    coefficients for term ``name``, or ``None``; an ordered term's level errors it does not
+    determine are NaN.  ``None`` reports every one.
+    """
     if centering not in _VALID_CENTERING:
         raise ValueError(f"centering must be one of {_VALID_CENTERING}, got {centering!r}")
     if with_se:
@@ -74,6 +84,26 @@ def relativities(
         df["relativity"] = _safe_exp(df["log_relativity"].values)
         return df
 
+    def _ordered_level_se(name: str, spec, se: NDArray) -> NDArray:
+        """``se`` of ordered term ``name``'s levels, NaN where ``determines`` leaves one open."""
+        from superglm.solvers.rank import selected_group_name_set
+
+        def contrasts() -> NDArray:
+            rows = ordered_level_contrasts(
+                spec,
+                name,
+                _feature_groups(name),
+                interaction_specs,
+                len(result.beta),
+                selected_group_name_set(result, groups),
+            )
+            # a centred frame reports each level less the levels' mean (``C b``)
+            return rows - rows.mean(axis=0) if center_se else rows
+
+        return withhold_undetermined(
+            se, None if determines is None else determines(name), contrasts
+        )
+
     out: dict[str, pd.DataFrame] = {}
     for name in feature_order:
         raw = _reconstruct(name)
@@ -89,15 +119,19 @@ def relativities(
                 }
             )
             if with_se:
-                df["se_log_relativity"] = feature_se_from_cov(
+                df["se_log_relativity"] = _ordered_level_se(
                     name,
-                    Cov_active,
-                    active_groups,
-                    result,
-                    groups,
-                    specs,
-                    interaction_specs,
-                    center=center_se,
+                    spec_cur,
+                    feature_se_from_cov(
+                        name,
+                        Cov_active,
+                        active_groups,
+                        result,
+                        groups,
+                        specs,
+                        interaction_specs,
+                        center=center_se,
+                    ),
                 )
             out[name] = _center_df(df)
             continue
