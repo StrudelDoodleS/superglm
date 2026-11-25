@@ -241,6 +241,9 @@ def relativities(model, with_se=False, centering="native", *, covariance=None):
         with_se=with_se,
         covariance_fn=cov_fn,
         centering=centering,
+        determines=(
+            partial(_default_determines, model) if with_se and robust_cov is None else None
+        ),
     )
     # Per FEATURE, not for the whole call: this returns every term at once, and
     # dropping the band on unrepaired terms because one term was projected

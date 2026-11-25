@@ -15,6 +15,7 @@ inner basis, exact against the fitted model.
 from __future__ import annotations
 
 import pickle
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -735,6 +736,62 @@ def test_term_inference_of_a_single_ordered_term_keeps_its_errors(basis) -> None
         expected = [rows[label] for label, _ in _level_contrasts(model, "a")]
     np.testing.assert_allclose(levels, expected, rtol=1e-9)
     assert np.all(np.isfinite(curve)) and np.all(curve > 0.0)
+
+
+def _relativity_errors(model, name, centering):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        frame = model.relativities(with_se=True, centering=centering)[name]
+    return frame.set_index("level")["se_log_relativity"]
+
+
+@pytest.mark.parametrize("fit", ["piecewise", "spline", "random effect"])
+def test_relativities_give_no_level_error_the_fit_does_not_determine(fit) -> None:
+    """Twin ordered terms: ``relativities(with_se=True)`` gives no non-base level error (#740).
+
+    It decides each level ``L_l - L_base`` (centred: less the levels' mean) by the rule
+    ``summary()`` and ``term_inference()`` use, so the three agree.  At b7e5b3d98 it gave
+    ``a[b]`` 0.1406 (piecewise) and 1.319 (spline), and every centred error.
+    """
+    if fit == "random effect":
+        model, _, _ = _structured_fit(["a", "b"], fit)
+    else:
+        model, _, _ = _twin_fit(["a", "b"], None, basis=_TWIN_BASES[fit])
+    for name in ("a", "b"):
+        native = _relativity_errors(model, name, "native")
+        assert native["a"] == 0.0, name
+        assert native.drop("a").isna().all(), (name, native)
+        assert _relativity_errors(model, name, "mean").isna().all(), name
+        inference = model.term_inference(name)
+        np.testing.assert_array_equal(native.to_numpy(), inference.se_log_relativity)
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("basis", list(_TWIN_BASES))
+def test_relativities_of_a_single_ordered_term_keep_their_errors(basis) -> None:
+    """Control (pins): one unaliased ordered term keeps every ``relativities`` level error.
+
+    The native errors are ``term_inference``'s, bit for bit, and the centred ones are
+    ``feature_se_from_cov(center=True)``'s; all are finite.
+    """
+    from superglm.inference._term_covariance import feature_se_from_cov
+
+    model, _, _ = _twin_fit(["a"], None, basis=_TWIN_BASES[basis])
+    native = _relativity_errors(model, "a", "native")
+    np.testing.assert_array_equal(native.to_numpy(), model.term_inference("a").se_log_relativity)
+    covariance, active = model._coef_covariance
+    centred = feature_se_from_cov(
+        "a",
+        covariance,
+        active,
+        model.result,
+        model._groups,
+        model._specs,
+        model._interaction_specs,
+        center=True,
+    )
+    np.testing.assert_array_equal(_relativity_errors(model, "a", "mean").to_numpy(), centred)
+    assert np.isfinite(centred).all() and native.drop("a").gt(0.0).all()
 
 
 def test_an_intercept_a_design_spanning_the_constant_leaves_open_shows_no_error() -> None:

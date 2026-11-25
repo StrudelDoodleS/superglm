@@ -15,6 +15,7 @@ from superglm.inference._term_covariance import (
     piecewise_knot_covariance,
     simultaneous_band_and_critical_value,
     term_contrasts,
+    withhold_undetermined,
 )
 from superglm.inference._term_helpers import (
     _VALID_CENTERING,
@@ -45,14 +46,6 @@ def _maybe_array(value: NDArray | float | None) -> NDArray | None:
     if value is None:
         return None
     return cast(NDArray, np.asarray(value))
-
-
-def _withhold_undetermined(se: NDArray, determines, contrasts) -> NDArray:
-    """``se`` with NaN at each row of ``contrasts()`` that ``determines`` does not determine."""
-    if determines is None:
-        return se
-    determined = np.array([determines(contrast) for contrast in contrasts()], dtype=bool)
-    return np.where(determined, se, np.nan)
 
 
 def _centered_se(
@@ -334,7 +327,7 @@ def term_inference(
                     specs,
                     interaction_specs,
                 )
-                se = _withhold_undetermined(
+                se = withhold_undetermined(
                     se,
                     determines,
                     lambda: ordered_level_contrasts(
@@ -373,7 +366,7 @@ def term_inference(
                         x_eval=raw["x"],
                         reference_x=reference_x,
                     )
-                    curve_se = _withhold_undetermined(
+                    curve_se = withhold_undetermined(
                         curve_se,
                         determines,
                         lambda: term_contrasts(
@@ -468,7 +461,7 @@ def term_inference(
                     specs,
                     interaction_specs,
                 )
-                se = _withhold_undetermined(
+                se = withhold_undetermined(
                     se,
                     determines,
                     lambda: ordered_level_contrasts(

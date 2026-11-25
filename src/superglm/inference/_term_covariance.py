@@ -284,6 +284,14 @@ def contrast_determined(
     return contrast_estimable is not None and bool(contrast_estimable(contrast))
 
 
+def withhold_undetermined(se: NDArray, determines, contrasts) -> NDArray:
+    """``se`` with NaN at each row of ``contrasts()`` that ``determines`` does not determine."""
+    if determines is None:
+        return se
+    determined = np.array([determines(contrast) for contrast in contrasts()], dtype=bool)
+    return np.where(determined, se, np.nan)
+
+
 def feature_se_from_cov(
     name: Hashable,
     Cov_active: NDArray,
