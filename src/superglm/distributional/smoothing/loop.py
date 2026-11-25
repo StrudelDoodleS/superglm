@@ -80,6 +80,7 @@ from superglm.distributional.smoothing.objective import (
     _complete_mapping,
     _laplace_objective,
     _maximum_step,
+    no_higher_within_rounding,
     rank_matched_objectives,
     remaining_fall,
 )
@@ -107,11 +108,20 @@ def _within_ceiling(
     trial_objective: float,
     config: DistributionalEFSConfig,
 ) -> bool:
-    """Accept a trial no worse than the current objective, on a common subspace."""
+    """Accept a trial no worse than the current objective, on a common subspace.
+
+    A rise inside the rounding of the two objectives is none the objective
+    resolves (``no_higher_within_rounding``), and beside a penalty held at its
+    bound that rounding is several times the tolerance. The tie goes to the
+    proposal: halving a step answers a rise the objective shows (Wood and Fasiolo,
+    Biometrics 73(4), 2017, sec. 2), so no step length is chosen inside it.
+    """
     reference, candidate = rank_matched_objectives(
         current, current_objective, trial, trial_objective
     )
-    return candidate <= reference + config.objective_tolerance * (1.0 + abs(reference))
+    return no_higher_within_rounding(
+        candidate, trial, reference, current, config.objective_tolerance
+    )
 
 
 def _trial_laplace_objective(

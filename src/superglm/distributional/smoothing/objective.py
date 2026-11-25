@@ -268,6 +268,29 @@ def laplace_objective_rounding(result: DenseSolverResult) -> float:
     return 0.5 * float(gamma(roundings)) * (quadratic + log_determinant)
 
 
+def no_higher_within_rounding(
+    candidate: float,
+    candidate_fit: DenseSolverResult,
+    reference: float,
+    reference_fit: DenseSolverResult,
+    objective_tolerance: float,
+) -> bool:
+    """Whether one fit's Laplace objective is no higher than another's.
+
+    Each value carries its stored penalty's rounding
+    (``laplace_objective_rounding``), which beside a penalty at its bound
+    exceeds the tolerance. A difference inside the rounding of the two values is
+    not an order: a comparison of values known to ``e_a`` and ``e_b`` is relaxed
+    by ``e_a + e_b`` (Shi, Xie, Byrd and Nocedal, arXiv 2010.04352, sec. 4.2).
+    What decides there is the caller's: evidence it resolves, or its tie rule.
+    """
+    ceiling = reference + objective_tolerance * (1.0 + abs(reference))
+    if candidate <= ceiling:
+        return True
+    rounding = laplace_objective_rounding(candidate_fit) + laplace_objective_rounding(reference_fit)
+    return candidate <= ceiling + rounding
+
+
 def _penalty_lambdas(
     lambdas: Mapping[str, float],
     face: PenaltyFace | None,

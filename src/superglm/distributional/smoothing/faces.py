@@ -48,7 +48,7 @@ from superglm.distributional.smoothing.evidence import _FreshRawEvidence
 from superglm.distributional.smoothing.objective import (
     _complete_mapping,
     _laplace_objective,
-    laplace_objective_rounding,
+    no_higher_within_rounding,
 )
 from superglm.distributional.smoothing.penalty_face import (
     PenaltyFace,
@@ -90,9 +90,13 @@ class _FaceDirectionCheck:
         return (self.cap_fit, self.endpoint_fit)
 
     def no_higher_than(self, objective: float, fit: DenseSolverResult, tolerance: float) -> bool:
-        """Whether the face's objective is no higher than the finite state ``fit``'s."""
+        """Whether the face's objective is no higher than the finite state ``fit``'s.
 
-        return _face_no_higher(
+        Inside the rounding of the two the endpoint derivative, which the face
+        resolves, decides alone.
+        """
+
+        return no_higher_within_rounding(
             self.endpoint_objective, self.endpoint_fit, objective, fit, tolerance
         )
 
@@ -168,30 +172,6 @@ class _EndpointDerivativeMemo:
                 *args, component_name=component_name, endpoint_fit=endpoint_fit, **kwargs
             )
         return self._taken[component_name]
-
-
-def _face_no_higher(
-    endpoint_objective: float,
-    endpoint_fit: DenseSolverResult,
-    objective: float,
-    fit: DenseSolverResult,
-    objective_tolerance: float,
-) -> bool:
-    """Whether a face's objective is no higher than that of the finite state ``fit``.
-
-    The two evaluate one criterion at a penalty and at its limit, and the finite
-    one carries the stored penalty's rounding (``laplace_objective_rounding``),
-    which at a cap exceeds the tolerance. A difference inside the rounding of the
-    two values is not an order: a comparison of values known to ``e_a`` and
-    ``e_b`` is relaxed by ``e_a + e_b`` (Shi, Xie, Byrd and Nocedal, arXiv
-    2010.04352, sec. 4.2). There the endpoint derivative, which the face
-    resolves, decides alone.
-    """
-    ceiling = objective + objective_tolerance * (1.0 + abs(objective))
-    if endpoint_objective <= ceiling:
-        return True
-    rounding = laplace_objective_rounding(fit) + laplace_objective_rounding(endpoint_fit)
-    return endpoint_objective <= ceiling + rounding
 
 
 def _check_face_direction(
@@ -444,7 +424,7 @@ def _assess_joint_face_directions(
             )
         except (ValueError, FloatingPointError, np.linalg.LinAlgError):
             return refused("joint_analytic_unavailable", endpoint_fit)
-    if not _face_no_higher(
+    if not no_higher_within_rounding(
         endpoint_objective,
         endpoint_fit,
         source_objective,

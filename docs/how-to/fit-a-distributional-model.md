@@ -1314,6 +1314,13 @@ stalls, the fit is the one the failed step left and reports
 `objective_rejected` with `converged=False`; under plain `outer="efs"` a failed
 step reports that at once.
 
+While a penalty is held at its cap, the stored penalty leaves the LAML
+undetermined by more than the tolerance a step is tested against: about 1e-8
+of the LAML at a cap of 1e10, against 1e-9. A Fellner--Schall step whose LAML
+rises by less than that rounding is taken at its full length: the LAML cannot
+say that it rose, and a shorter step chosen inside rounding would differ between
+machines. A larger rise shortens or refuses the step as before.
+
 A search can also push a penalty to its cap long before any plateau. If the
 exact-face check does not settle that penalty, `efs+finish` and `efs+newton` ask
 the exact gradient next, so the fit reports `lambda_cap_unresolved` only if the

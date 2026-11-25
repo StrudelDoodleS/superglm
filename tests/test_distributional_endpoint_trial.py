@@ -817,6 +817,47 @@ def test_a_face_above_its_cap_by_more_than_rounding_is_refused(monkeypatch) -> N
     assert (smoothing.converged, smoothing.convergence_reason) == (False, "lambda_cap_unresolved")
 
 
+@pytest.mark.parametrize("outer", ["efs", "efs+finish"])
+def test_the_rounding_of_a_held_caps_objective_does_not_shorten_the_steps_beside_it(
+    monkeypatch, outer
+) -> None:
+    """A step beside a held cap is taken whole whichever way the cap's objective rounds.
+
+    While ``z`` is held at its bound of 2e10 the objective is undetermined by
+    3e-6, ten times the comparison tolerance, and ``x``'s last step changes it by
+    far less than that tolerance. Every trial is read three tolerances above the
+    objective it is compared with, and then three below. Either way each round
+    takes the step proposed and the fit is the unshifted one. Mutation check:
+    compared at the tolerance alone, the higher reading refuses ``x``'s last step
+    at every length, nine fits. Plain ``"efs"`` then ends ``objective_rejected``
+    and ``"efs+finish"`` at another smoothing parameter.
+    """
+    from superglm.distributional.smoothing import loop
+
+    _, reference = _fit(outer)
+    tolerance = reference.config.objective_tolerance * (1.0 + abs(reference.objective))
+    matched = loop.rank_matched_objectives
+
+    for reading in (3.0 * tolerance, -3.0 * tolerance):
+        risen = []
+
+        def read(current, current_objective, trial, trial_objective, reading=reading, risen=risen):
+            floor, candidate = matched(current, current_objective, trial, trial_objective)
+            risen.append(candidate + reading > floor + tolerance)
+            return floor, candidate + reading
+
+        with monkeypatch.context() as patch:
+            patch.setattr(loop, "rank_matched_objectives", read)
+            _, smoothing = _fit(outer)
+        assert any(risen) is (reading > 0.0)
+        assert [row.coefficient_fit_indices for row in smoothing.history] == [
+            row.coefficient_fit_indices for row in reference.history
+        ]
+        assert smoothing.convergence_reason == reference.convergence_reason
+        assert smoothing.objective == reference.objective
+        assert dict(smoothing.lambdas) == dict(reference.lambdas)
+
+
 @pytest.mark.parametrize(
     ("outer", "options"),
     [("efs+newton", _PLATEAU), ("efs+stationary", {"terms": ("x", "z", "w")})],
