@@ -375,10 +375,28 @@ class _SplineBase:
 
         A split that fails on a column with one value is refused by naming it.
         """
-        structural = self._structural_penalty_for_order(max(self._m_orders))
+        max_order = max(self._m_orders)
+        structural = self._structural_penalty_for_order(max_order)
         if structural is not None and Z is not None:
             structural = Z.T @ structural @ Z
+        self._select_from_root = False
         try:
+            if type(self) in _BUILT_IN_SPLINES:
+                null_raw = self._penalty_null_basis(max_order)
+                root_raw = self._penalty_root_for_order(max_order)
+                if null_raw is not None and root_raw is not None:
+                    split = _spline_select.root_select_split(
+                        omega_c,
+                        Z,
+                        null_raw=null_raw,
+                        root_raw=root_raw,
+                        n_basis=self._n_basis,
+                        structural=structural,
+                    )
+                    if split is not None:
+                        self._U_null, self._U_range, self._omega_range = split
+                        self._select_from_root = True
+                        return
             self._U_null, self._U_range, self._omega_range = _spline_select.eigendecompose_select(
                 omega_c,
                 Z,
@@ -908,6 +926,14 @@ class NaturalSpline(_SplineBase):
 
     def _build_penalty_for_order(self, order: int) -> NDArray:
         return _spline_penalties.build_difference_penalty(self._n_basis, order)
+
+    def _penalty_null_basis(self, order: int) -> NDArray:
+        """Polynomial sequences of degree below ``order`` on the B-spline coefficients."""
+        return np.vander(np.arange(self._n_basis, dtype=np.float64), order, increasing=True)
+
+    def _penalty_root_for_order(self, order: int) -> NDArray:
+        """The ``order``-th difference operator ``D`` whose Gram ``D' D`` is the penalty."""
+        return np.diff(np.eye(self._n_basis), n=order, axis=0)
 
     def _build_penalty(self) -> NDArray:
         return self._build_penalty_for_order(self._m_orders[0])

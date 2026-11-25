@@ -660,12 +660,37 @@ def fit_contrast_estimable(model, inference: dict):
     return None if rank_info is None else rank_info.is_estimable
 
 
-def _structured_contrast_estimable(inference: dict, state, contrast: NDArray) -> bool:
+def rank_intercept_centre(model, rank_info) -> NDArray:
+    """The public column mean a dense fit's rank record was centred on, over the fitted coefficients.
+
+    The record centres the solver's columns on ``mean_x``; the public columns sit
+    ``_public_intercept_shift`` below them.
+    """
+    width = len(rank_info.mean_x)
+    return rank_info.mean_x - _public_intercept_shift(model, model._groups, width)
+
+
+def fit_intercept_centre(model, inference: dict) -> NDArray | None:
+    """``build_coef_rows``' ``intercept_centre`` beside ``fit_contrast_estimable``, or ``None``.
+
+    ``None`` for a fit without a rank record and for a structured fit, whose geometry
+    centres shifted moments and decides contrasts of its border columns alone.
+    """
+    if inference.get("structured_covariance"):
+        return None
+    rank_info = model._solver_pirls_result().rank_info
+    return None if rank_info is None else rank_intercept_centre(model, rank_info)
+
+
+def _structured_contrast_estimable(
+    inference: dict, state, contrast: NDArray, design_rows: bool = False
+) -> bool:
     """Whether a structured fit's data determine ``contrast``, by its coefficient mask's rule.
 
     The mask's geometry (``fit_inference_info``) is formed again on the first contrast a
     reader asks about, and kept in ``inference``, the fit's inference record: it lives and
-    is dropped with that record.
+    is dropped with that record.  With ``design_rows``, ``contrast`` marks a term's
+    coefficients and the answer is of its fitted function (``function_estimable``).
     """
     decision = inference.get("contrast_estimability")
     if decision is None:
@@ -676,6 +701,8 @@ def _structured_contrast_estimable(inference: dict, state, contrast: NDArray) ->
             else centered_operator_contrast_estimability(state.centered_data_operator)
         )
         inference["contrast_estimability"] = decision
+    if design_rows:
+        return decision.function_estimable(np.asarray(contrast, dtype=bool))
     return decision.is_estimable(contrast)
 
 

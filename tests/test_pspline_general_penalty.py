@@ -482,26 +482,16 @@ def test_select_splits_a_long_tail_binary64_still_resolves(
         assert null @ penalty @ null <= 2 * bound
 
 
-def test_select_names_the_knot_spread_binary64_cannot_hold():
-    """On lognormal(0, 3) quantile knots the cr penalty's tail curvature is below 1e-15 of
-    its largest, under the eigensolver's resolution: no split can recover it. The refusal
-    blamed the kind ("may not support select=True"); it names the spread and what to do.
-    The kind it names, ps, fits these knots and REML ranks its penalty at n_basis - 2.
-    """
+def test_select_recovers_the_tail_curvature_from_the_derivative_factor():
+    """The weakest curvature falls below round-off on the formed Gram on these knots."""
     x, rng = _skewed(3.0, 10_000, 0)
     y = rng.poisson(np.exp(-1.0 + 0.3 * np.sin(np.log(x))))
     spline = Spline(n_knots=10, knot_strategy="quantile_rows", select=True)
     model = SuperGLM(family="poisson", features={"x": spline})
-    with pytest.raises(ValueError, match="differ so much in width") as raised:
-        model.fit(pd.DataFrame({"x": x}), y)
-    assert "may not support" not in str(raised.value)
-    assert 'kind="ps"' in str(raised.value)
-    assert "whose penalty double precision can hold on any knots" in str(raised.value)
-    ps = SuperGLM(
-        family="poisson",
-        features={"x": Spline(kind="ps", n_knots=10, knot_strategy="quantile_rows", select=True)},
-    ).fit_reml(pd.DataFrame({"x": x}), y)
-    assert _reml_ranks(ps)["x:wiggle"] == ps._specs["x"]._n_basis - 2
+    frame = pd.DataFrame({"x": x})
+    model.fit_reml(frame, y)
+    assert np.isfinite(model.predict(frame)).all()
+    assert _reml_ranks(model)["x:wiggle"] == model._specs["x"]._n_basis - 4
 
 
 @pytest.mark.parametrize("fit", ["fit", "fit_reml"])
@@ -534,21 +524,6 @@ def test_a_decomposed_tensor_with_a_skewed_quantile_margin_splits_off_the_biline
         x1, x2, {"a": margin_1, "b": margin_2}
     )
     assert [info.subgroup_name for info in infos] == ["bilinear", "wiggly"]
-
-
-def _assert_names_the_tensor_and_its_spread_margin(message, tensor, margin):
-    """The refusal names the term and margin, offers decompose=False first, and states its number.
-
-    It named neither, left out decompose=False, and printed the tensor's spectrum
-    on its structural range as the widest interval over the narrowest.
-    """
-    from superglm.features.interaction import _range_spread
-
-    assert message.startswith("TensorInteraction('a', 'b', decompose=True) cannot split")
-    assert f"On the {margin!r} margin" in message
-    assert message.index("decompose=False") < message.index('kind="ps"')
-    marginal = tensor._marginal1 if margin == "a" else tensor._marginal2
-    assert f"is {_range_spread(marginal):.1e} of the penalty" in message
 
 
 def _skewed_tensor_margins(kind, sigma):
@@ -606,18 +581,18 @@ def test_a_decomposed_discrete_tensor_reads_its_null_space_from_the_structural_m
     assert bilinear @ omega @ bilinear <= bound
 
 
-def test_a_decomposed_tensor_it_cannot_split_is_refused_by_name():
-    """A bs margin on lognormal(0, 2.5) puts its tail at a fraction of its largest
-    curvature that Rump's test cannot certify positive (the certificate's radius is
-    nine times its least eigenvalue), so the split is refused, naming the tensor and
-    the margin."""
+def test_decomposed_tensor_keeps_the_weak_range_on_lognormal_knots():
+    """The formed Gram refused this bilinear split. The derivative factor resolves the tail."""
     from superglm.features.interaction import TensorInteraction
 
     x1, x2, margins = _skewed_tensor_margins("bs", 2.5)
     tensor = TensorInteraction("a", "b", decompose=True)
-    with pytest.raises(ValueError) as refusal:
-        tensor.build_discrete(x1, x2, margins, n_bins=(256, 256))
-    _assert_names_the_tensor_and_its_spread_margin(str(refusal.value), tensor, "a")
+    bilinear, wiggly = tensor.build_discrete(x1, x2, margins, n_bins=(256, 256)).infos
+    assert bilinear.n_cols == 1
+    for margin in (tensor._marginal1, tensor._marginal2):
+        assert margin.penalty_nullity == 1
+        assert np.all(np.diag(margin.penalty)[1:] > 0.0)
+    assert np.all(np.diag(wiggly.penalty_matrix) > 0.0)
 
 
 def test_the_structural_cardinal_penalty_has_the_real_penalty_null_space():
@@ -709,7 +684,10 @@ def test_a_kindless_decomposed_tensor_fits_by_reml_at_its_structural_ranks():
     omega = components["margin_z"]
     values, vectors = np.linalg.eigh(omega)
     null = vectors[:, : omega.shape[0] - p1 * (p2 - 1)]
-    direction = null @ np.linalg.svd(gm.R_inv.T @ null)[2][0]
+    from superglm._group_matrix._group_matrix_core import penalty_coordinate_map
+
+    assert np.count_nonzero(np.diag(omega) == 0) == null.shape[1]
+    direction = null @ np.linalg.svd(penalty_coordinate_map(gm).T @ null)[2][0]
     n = omega.shape[0]
     components["margin_z"] = omega + 4 * n * u * values[-1] * np.outer(direction, direction)
     gm.omega_components = list(components.items())

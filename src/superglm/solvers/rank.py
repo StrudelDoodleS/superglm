@@ -955,6 +955,26 @@ def _exact_orthogonal_columns(coordinates: NDArray) -> tuple[NDArray, float]:
     return basis, math.fsum(log_norms)
 
 
+def null_directions_keep_to(inside: NDArray, outside: NDArray | None = None) -> bool:
+    """Whether each direction of a null space lies in a set of coordinates or leaves them alone.
+
+    ``inside`` holds those coordinates' rows of an orthonormal basis of the space and
+    ``outside`` its other rows.  Their singular values are the cosines ``c`` and sines
+    ``s`` of the space's principal angles to the coordinates (Bjorck & Golub, "Numerical
+    methods for computing angles between linear subspaces", Math. Comp. 27, 1973), and
+    ``inside @ outside.T`` has the products ``c s``: each is within ``factor_rcond`` of
+    zero when every direction has ``c`` or ``s`` there, the rule ``coefficient_estimable``
+    reads of one coordinate.  Without ``outside`` (a reader that keeps only some rows)
+    ``s**2`` is known only as ``1 - c**2``, to the rounding of the basis, and is held to
+    ``factor_rcond`` itself.
+    """
+    rcond = SHARED_RANK_POLICY.factor_rcond
+    if outside is not None:
+        return bool(np.linalg.norm(inside @ outside.T) <= rcond)
+    cosines = np.linalg.svd(inside, compute_uv=False)
+    return bool(np.all((cosines <= rcond) | (1.0 - cosines**2 <= rcond)))
+
+
 @dataclass(frozen=True)
 class RankDecomposition:
     """The rank-revealing decomposition chosen for one design matrix."""
@@ -1134,7 +1154,14 @@ class RankDecomposition:
             return np.zeros((self.width, 0))
         return self.parameter_null_basis.copy()
 
-    def is_estimable(self, contrast: NDArray) -> bool:
+    def is_estimable(self, contrast: NDArray, determined: float = 0.0) -> bool:
+        """Whether ``contrast``'s part in the null space is at most ``factor_rcond`` of its size.
+
+        Both are measured in the equilibrated coordinates, where ``contrast`` is divided by
+        the column scale.  ``determined`` is the size there of a part of the same estimate
+        that lies outside these coefficients and is always determined: it adds to the size
+        the null-space part is compared with, and to nothing else.
+        """
         contrast = np.asarray(contrast, dtype=float)
         if contrast.shape != (self.width,):
             raise ValueError("contrast width does not match decomposition")
@@ -1150,14 +1177,14 @@ class RankDecomposition:
             tolerance = SHARED_RANK_POLICY.factor_rcond * np.linalg.norm(normalized_contrast)
             if np.linalg.norm(normalized_contrast[~scaled_columns]) > tolerance:
                 return False
-            scaled_contrast, _ = _scaled_coordinate_columns(
+            scaled_contrast, exponent = _scaled_coordinate_columns(
                 contrast[scaled_columns, None], self.column_scale[scaled_columns]
             )
             scaled_contrast = scaled_contrast[:, 0]
             projection = scaled_contrast @ self.equilibrated_null_basis[scaled_columns]
-            tolerance = SHARED_RANK_POLICY.factor_rcond * max(
-                float(np.linalg.norm(scaled_contrast)), np.finfo(float).tiny
-            )
+            with np.errstate(over="ignore"):
+                size = np.hypot(np.linalg.norm(scaled_contrast), np.ldexp(determined, -exponent[0]))
+            tolerance = SHARED_RANK_POLICY.factor_rcond * max(float(size), np.finfo(float).tiny)
             return bool(np.linalg.norm(projection) <= tolerance)
         contrast_norm = float(np.linalg.norm(contrast))
         structural_tolerance = SHARED_RANK_POLICY.factor_rcond * max(
@@ -1183,10 +1210,33 @@ class RankDecomposition:
         normalized_null = equilibrated_null[:, retained_null] / null_norms[retained_null]
         projection = scaled_contrast @ normalized_null
         tolerance = SHARED_RANK_POLICY.factor_rcond * max(
-            float(np.linalg.norm(scaled_contrast)),
+            float(np.hypot(np.linalg.norm(scaled_contrast), determined)),
             np.finfo(float).tiny,
         )
         return bool(np.linalg.norm(projection) <= tolerance)
+
+    def function_estimable(self, columns: NDArray) -> bool:
+        """Whether each design row's part on the coefficients ``columns`` marks is estimable.
+
+        Those parts, zero on the other coefficients, are the fitted function of a term
+        whose coefficients are the marked ones.  A term's function is estimable when its
+        columns share no direction with the others' (Rao, *Linear Statistical Inference
+        and Its Applications*, 2nd ed., 1973, p. 282; Seely & Birkes, "Estimability in
+        partitioned linear models", Ann. Statist. 8(2), 1980): every null direction is
+        then one of the term's columns alone or of the others alone
+        (``null_directions_keep_to``).  This reads the null space the coefficient mask
+        reads, and no row of a design factor.
+        """
+        scaled = self.column_scale > 0.0
+        if self.equilibrated_null_basis is not None:
+            null = self.equilibrated_null_basis[scaled]
+        else:
+            null = self.null_basis()[scaled] * self.column_scale[scaled, None]
+            norms = np.linalg.norm(null, axis=0)
+            retained = norms > np.finfo(float).eps
+            null = null[:, retained] / norms[retained]
+        marked = np.asarray(columns, dtype=bool)[scaled]
+        return null_directions_keep_to(null[marked], null[~marked])
 
     def estimability_only(self) -> RankDecomposition:
         """This decomposition without its factor and solution bases.
@@ -1357,7 +1407,22 @@ class RankInfo:
             return self.coefficient.pseudo_inverse()
         return face_pseudo_inverse(self.face_coefficient, self.face)
 
-    def is_estimable(self, contrast: NDArray) -> bool:
+    def is_estimable(
+        self, contrast: NDArray, intercept: float = 0.0, design_rows: bool = False
+    ) -> bool:
+        """Whether the data determine ``intercept * a + contrast @ beta``.
+
+        ``a`` is the intercept beside the centred columns, which every fit determines, so
+        its weight only adds to the size the contrast's undetermined part is compared with
+        (``RankDecomposition.is_estimable``): the centred constant column has scale
+        ``sqrt(sum_w)``.  With ``design_rows``, ``contrast`` marks coefficients, and the
+        answer is ``RankDecomposition.function_estimable`` of the marked ones the fit
+        selected.
+        """
+        if design_rows:
+            return self.data.function_estimable(
+                np.asarray(contrast, dtype=bool)[self.selected_columns]
+            )
         contrast = np.asarray(contrast, dtype=float)
         if contrast.shape != self.mean_x.shape:
             raise ValueError("contrast width does not match fitted coefficient space")
@@ -1366,7 +1431,9 @@ class RankInfo:
         tolerance = SHARED_RANK_POLICY.factor_rcond * max(1.0, float(np.linalg.norm(contrast)))
         if np.linalg.norm(contrast[unselected]) > tolerance:
             return False
-        return self.data.is_estimable(contrast[self.selected_columns])
+        return self.data.is_estimable(
+            contrast[self.selected_columns], abs(intercept) / math.sqrt(self.sum_w)
+        )
 
     def coefficient_estimable(self) -> NDArray:
         result = np.zeros(len(self.mean_x), dtype=bool)

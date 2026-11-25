@@ -844,9 +844,11 @@ def _process_info(
         # Only a sparse block carries a penalty, so dense penalised columns (a
         # build() override's) are held sparse, keeping the penalty they came with.
         info.columns = sp.csr_matrix(info.columns)
-    in_term = term_coordinates and info.null_coordinates is not None
+    in_term = term_coordinates and (
+        info.null_coordinates is not None or info.penalty_in_term_coordinates
+    )
     term_roots = None
-    if in_term:
+    if in_term and info.null_coordinates is not None:
         info = _in_term_coordinates(info)
         term_roots = dict(
             zip(
@@ -892,12 +894,17 @@ def _process_info(
             P = info.projection
             if info.uses_ssp:
                 lam, omega = _applied_penalty(info, group_name, lambda2)
-                R_inv_local = compute_projected_R_inv(B_for, P, omega, level_weight, lam)
+                penalty = _whitening_penalty(omega, term_roots, group_name, lambda2)
+                R_inv_local = compute_projected_R_inv(B_for, P, penalty, level_weight, lam)
                 R_inv = P @ R_inv_local
             else:
                 R_inv = P
                 R_inv_local = None
-            omega_full = P @ info.penalty_matrix @ P.T if info.penalty_matrix is not None else None
+            omega_full = (
+                info.penalty_matrix
+                if in_term
+                else (P @ info.penalty_matrix @ P.T if info.penalty_matrix is not None else None)
+            )
         elif info.uses_ssp:
             lam, omega = _applied_penalty(info, group_name, lambda2)
             R_inv = compute_R_inv(B_for, omega, level_weight, lam)
@@ -941,6 +948,9 @@ def _process_info(
             gm.omega = omega_full
         if info.projection is not None:
             gm.projection = info.projection
+            if in_term:
+                gm.R_inv_local = np.eye(n_cols) if R_inv_local is None else R_inv_local
+                gm.term_roots = term_roots
 
     elif info.projection is not None:
         P = info.projection
@@ -975,7 +985,9 @@ def _process_info(
                     exposure_agg if binned else sample_weight,
                     group_name,
                     lambda2,
-                    term_coordinates=in_term,
+                    # Declared roots turn the range in place. A tensor's fixed
+                    # coordinates declare none and take the eigenbasis.
+                    term_coordinates=term_roots is not None,
                 )
                 if eigenbasis_turn
                 else None
@@ -1138,6 +1150,12 @@ def _process_info(
         else:
             gm = DenseGroupMatrix(info.columns)
 
+    if info.penalty_in_term_coordinates and isinstance(
+        gm, (SparseSSPGroupMatrix, DiscretizedSSPGroupMatrix)
+    ):
+        # A tensor already has fixed marginal coordinates. A later Cholesky
+        # rotation would mix the two components' different null axes.
+        gm.reparametrize = info.reparametrize
     if info.structural_ranks is not None and hasattr(gm, "structural_ranks"):
         gm.structural_ranks = info.structural_ranks
 
@@ -1536,10 +1554,14 @@ def rebuild_design_matrix_with_lambdas(
                 continue
             lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
             level_weight = sample_weight[gm.row_idx]
+            R_inv_local = None
             if gm.projection is not None:
                 P = gm.projection
                 omega_proj = _projected_penalty(gm, omega_eff)
-                R_inv_local = compute_projected_R_inv(gm.B_level, P, omega_proj, level_weight, lam)
+                penalty = _whitening_penalty(
+                    omega_proj, getattr(gm, "term_roots", None), g.name, lambdas
+                )
+                R_inv_local = compute_projected_R_inv(gm.B_level, P, penalty, level_weight, lam)
                 R_inv_new = P @ R_inv_local
             else:
                 R_inv_new = compute_R_inv(gm.B_level, omega_eff, level_weight, lam)
@@ -1551,6 +1573,8 @@ def rebuild_design_matrix_with_lambdas(
                 new_gm = SplineCategoricalGroupMatrix(gm.B, R_inv_new, gm.row_idx)
             new_gm.omega = gm.omega
             new_gm.projection = gm.projection
+            new_gm.R_inv_local = None if getattr(gm, "R_inv_local", None) is None else R_inv_local
+            new_gm.term_roots = getattr(gm, "term_roots", None)
             new_gm.omega_components = gm.omega_components
             new_gm.component_types = gm.component_types
             new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
@@ -1572,13 +1596,17 @@ def rebuild_design_matrix_with_lambdas(
                 weights=sample_weight[gm.row_idx],
                 minlength=gm.n_bins,
             )
+            R_inv_local = None
             if gm.projection is not None:
                 P = gm.projection
                 omega_proj = _projected_penalty(gm, omega_eff)
+                penalty = _whitening_penalty(
+                    omega_proj, getattr(gm, "term_roots", None), g.name, lambdas
+                )
                 R_inv_local = compute_projected_R_inv(
                     gm.B_unique,
                     P,
-                    omega_proj,
+                    penalty,
                     level_weight,
                     lam,
                 )
@@ -1597,6 +1625,8 @@ def rebuild_design_matrix_with_lambdas(
             )
             new_gm.omega = gm.omega
             new_gm.projection = gm.projection
+            new_gm.R_inv_local = None if getattr(gm, "R_inv_local", None) is None else R_inv_local
+            new_gm.term_roots = getattr(gm, "term_roots", None)
             new_gm.omega_components = gm.omega_components
             new_gm.component_types = gm.component_types
             new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
@@ -1639,6 +1669,8 @@ def rebuild_design_matrix_with_lambdas(
             carry_binned_codes(gm, new_gm)
             new_gm.omega = gm.omega
             new_gm.projection = gm.projection
+            if getattr(gm, "R_inv_local", None) is not None:
+                new_gm.R_inv_local = R_inv_local
             new_gm.omega_components = gm.omega_components
             new_gm.component_types = gm.component_types
             new_gm.structural_ranks = getattr(gm, "structural_ranks", None)

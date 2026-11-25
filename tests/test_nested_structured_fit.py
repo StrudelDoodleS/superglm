@@ -949,17 +949,22 @@ def _lone_level_data(extra: str | None = None, seed: int = 3):
     return frame, y, weight
 
 
-def _lone_level_fit(extra, direct_solve, lam, weight_scale=1.0, *, data=None, link=None):
+def _lone_level_fit(
+    extra, direct_solve, lam, weight_scale=1.0, *, data=None, link=None, effects=()
+):
     """A fit of ``_lone_level_data(extra)``, or of ``data``, a binary response
-    under ``link``."""
+    under ``link``.  ``effects`` names more columns of ``data`` to fit as random
+    effects at the same fixed lambda."""
     frame, y, weight = _lone_level_data(extra) if data is None else data
-    numerics = [name for name in frame.columns if name not in ("cat", "g")]
+    numerics = [name for name in frame.columns if name not in ("cat", "g", *effects)]
+    grouping = dict.fromkeys(effects, RandomEffect(lambda_policy=LambdaPolicy.fixed(lam)))
     model = SuperGLM(
         family="gaussian" if link is None else "binomial",
         link=link,
         features={
             **{name: Numeric() for name in numerics},
             "cat": Categorical(),
+            **grouping,
             "g": RandomEffect(
                 levels=[f"g{c:02d}" for c in range(LONE_LEVELS)],
                 lambda_policy=LambdaPolicy.fixed(lam),
@@ -1200,6 +1205,46 @@ def test_a_chain_of_one_is_exact_at_a_tiny_lambda_under_large_weights() -> None:
     chain = _lone_level_fit(None, "auto", 1e-8, weight_scale=1e4)
     assert isinstance(chain._linear_system_state.profiled_factor, ProfiledNestedSchurFactor)
     frame, _, weight = _lone_level_data(None)
+    logdet, edf, kappa = _exact_logdet_and_edf(chain, weight * 1e4)
+    n, size = len(frame), chain._dm.shape[1] + 1
+    q = size - LONE_LEVELS
+    rows = int(np.max(np.bincount(pd.factorize(frame["g"])[0])))
+    gamma_tree = (rows + 4) * EPS
+    gamma_border = q * kappa * (n + LONE_LEVELS + q + 10) * EPS
+    assert abs(chain.result.log_det_H - logdet) <= LONE_LEVELS * gamma_tree + q * gamma_border
+    assert abs(chain.result.effective_df - edf) <= size * (gamma_tree + gamma_border)
+
+
+@pytest.mark.pins_behaviour
+def test_a_border_effect_one_row_from_nested_is_exact_at_a_tiny_lambda() -> None:
+    """The fit above with two more random effects at lambda = 1e-8, one of them in the border.
+
+    ``ga`` is a parent of the 30 levels and joins the chain.  ``gb`` is a
+    parent too but for one row, which carries 1e-13 of a row's weight and
+    takes another of its levels: so it is crossed, a border block that every
+    leaf but one meets on a single level.  Its within-leaf scatter is exactly
+    zero in those leaves and 1e-13 of the leaf's weight in that one, the
+    scale of its other Schur entries (sums of ``w_l lambda / (w_l +
+    lambda)``, like the intercept's).  A pair form that subtracts raw masses
+    (``diag(c) - c m' - m c' + A m m'``) leaves ``eps`` times the leaf's
+    weight there, a relative 1e-3.  Bounds as above, with ``kappa_s`` of the
+    centred Schur complement after the 30 levels alone.
+    """
+    frame, y, weight = _lone_level_data(None)
+    code = frame["g"].str[1:].astype(int).to_numpy()
+    row = int(np.flatnonzero(weight)[5])
+    assert np.count_nonzero(weight[code == code[row]]) > 10
+    parent = code // 6
+    parent[row] = (parent[row] + 1) % 5
+    weight = weight.copy()
+    weight[row] = 1e-13
+    frame = frame.assign(ga=(code % 5).astype(str), gb=parent.astype(str))
+    chain = _lone_level_fit(
+        None, "auto", 1e-8, weight_scale=1e4, data=(frame, y, weight), effects=("ga", "gb")
+    )
+    factor = chain._linear_system_state.profiled_factor
+    assert isinstance(factor, ProfiledNestedSchurFactor)
+    assert factor.chain_group_names == ("ga", "g")
     logdet, edf, kappa = _exact_logdet_and_edf(chain, weight * 1e4)
     n, size = len(frame), chain._dm.shape[1] + 1
     q = size - LONE_LEVELS

@@ -17,6 +17,7 @@ from superglm.features._spline_config import (
 from superglm.features._spline_identifiability import (
     apply_identifiability_for_spec,
     build_identifiability_projection_for_spec,
+    null_explicit_coordinates,
     term_null_basis,
 )
 from superglm.features._spline_multi_penalty import build_multi_m_components
@@ -423,10 +424,26 @@ def declared_null_coordinates(
     null_basis = _nested_null_basis(thetas)
     if null_basis is None:
         return None
-    nullity = null_basis.shape[1]
+    members = null_basis if info.projection is None else info.projection @ null_basis
+    if not _rows_identify(basis, weights, members):
+        return None
+    return NullCoordinates(null_basis, tuple(t.shape[1] for t in thetas), tuple(roots))
+
+
+def _rows_identify(basis, weights: NDArray | None, members: NDArray) -> bool:
+    """Whether the weighted raw design rows identify the unpenalised raw directions ``members``.
+
+    The three conditions ``declared_null_coordinates`` states, on the rows the
+    fit reads: more rows of positive weight than directions, every basis
+    function reached by one, and no direction's centred column within
+    ``sqrt(u)`` of the basis's rounding. ``weights`` are the solver's
+    precision weights, summed over the observations each row of ``basis``
+    stands for.
+    """
+    nullity = members.shape[1]
     occupied = basis.shape[0] if weights is None else np.count_nonzero(weights > 0)
     if occupied <= nullity:
-        return None
+        return False
     rows = basis
     if weights is not None:
         scale = (np.sqrt(weights) / np.sqrt(np.max(weights)))[:, None]
@@ -436,9 +453,8 @@ def declared_null_coordinates(
     else:
         column_squares = np.einsum("ij,ij->j", rows, rows)
     if not np.all(column_squares > 0.0):
-        return None
+        return False
     if nullity:
-        members = null_basis if info.projection is None else info.projection @ null_basis
         smallest = np.linalg.svd(rows @ members, compute_uv=False)[-1]
         # The Frobenius norm bounds the spectral norm from above, so most
         # terms pass without a Gram. Only its largest eigenvalue is needed
@@ -449,8 +465,37 @@ def declared_null_coordinates(
             if sparse.issparse(gram):
                 gram = gram.toarray()
             if smallest < resolution * np.sqrt(np.linalg.eigvalsh(gram)[-1]):
-                return None
-    return NullCoordinates(null_basis, tuple(t.shape[1] for t in thetas), tuple(roots))
+                return False
+    return True
+
+
+def _rows_identify_null_products(
+    rows1: NDArray,
+    rows2: NDArray,
+    nullities: tuple[int, int],
+    weights: NDArray | None,
+) -> bool:
+    """Whether the weighted rows identify a tensor's null coordinates beside the intercept.
+
+    ``rows1``/``rows2`` are the margins' bases on the rows (or occupied cells) the fit reads,
+    null coordinates first, with the solver's precision ``weights``. The tensor's null
+    coordinates are the margins' row-wise products; each margin's own are identified
+    (``_rows_identify``), but a product is not centred, and on rows where it is constant
+    (``x z = 1``) its weighted centring leaves only rounding, of order ``u`` times the design's
+    weighted Frobenius norm. Below ``sqrt(u)`` of that norm in the centred products' smallest
+    weighted singular value, more than half the digits are lost, as for a margin.
+    """
+    if weights is None:
+        scale = np.ones(rows1.shape[0])
+    else:
+        scale = np.sqrt(weights) / np.sqrt(np.max(weights))
+    products = np.einsum(
+        "i,ij,ik->ijk", scale, rows1[:, : nullities[0]], rows2[:, : nullities[1]]
+    ).reshape(scale.size, -1)
+    products -= np.outer(scale, (scale @ products) / (scale @ scale))
+    row_squares = np.einsum("ij,ij->i", rows1, rows1) * np.einsum("ij,ij->i", rows2, rows2)
+    smallest = np.linalg.svd(products, compute_uv=False)[-1]
+    return bool(smallest >= np.sqrt(2.0**-53) * np.sqrt((scale * scale) @ row_squares))
 
 
 def _nested_null_basis(thetas: list[NDArray]) -> NDArray | None:
@@ -560,8 +605,17 @@ def tensor_marginal_info(
     *,
     support: NDArray | None = None,
     counts: NDArray | None = None,
+    precision: NDArray | None = None,
+    root_coordinates: bool = True,
 ) -> TensorMarginalInfo:
-    """Compute tensor-product marginal ingredients for an already-built spline spec."""
+    """Compute tensor-product marginal ingredients for an already-built spline spec.
+
+    ``precision`` is the fit's precision weight on each evaluation point
+    (``counts`` without one): the rows it weights decide whether the margin
+    states its penalty's null coordinates (``_rows_identify``).
+    ``root_coordinates=False`` keeps the centred basis and its formed penalty
+    ``P' Omega P`` as they are, without the penalty's root or null coordinates.
+    """
     if not spec._tensor_supported:
         raise NotImplementedError(
             f"{type(spec).__name__} does not support tensor marginal ingredients. "
@@ -601,11 +655,11 @@ def tensor_marginal_info(
         return spec._raw_basis_matrix(points)
 
     distinct = row_supports.distinct_values(evaluation_points)
-    basis_raw = (
-        raw_rows(evaluation_points)
-        if distinct is None
-        else np.asarray(raw_rows(distinct[0]))[distinct[1]]
-    )
+    if distinct is None:
+        value_rows = basis_raw = raw_rows(evaluation_points)
+    else:
+        value_rows = np.asarray(raw_rows(distinct[0]))
+        basis_raw = value_rows[distinct[1]]
     omega = spec._build_penalty()
     _, omega_constrained, _, projection_constraints = spec._apply_constraints(
         None, omega, main_effect=False
@@ -635,7 +689,48 @@ def tensor_marginal_info(
         projection = projection_constraints @ projection_ident
     else:
         projection = projection_ident
-    structural = spec._structural_penalty_for_order(spec._m_orders[0])
+    order = spec._m_orders[0]
+    structural = spec._structural_penalty_for_order(order)
+    structural_proj = None if structural is None else projection.T @ structural @ projection
+    penalty_root = None
+    penalty_nullity = None
+    raw_root = spec._penalty_root_for_order(order) if follows_policy and root_coordinates else None
+    # A zero penalty (a column with one value) has no root to state.
+    if raw_root is not None and np.any(raw_root):
+        width = projection.shape[1]
+        rank_reference = structural_proj if structural_proj is not None else penalty
+        rank = _gapped_rank(np.linalg.eigvalsh(rank_reference))
+        null_raw = spec._penalty_null_basis(order)
+        theta = None
+        if rank is not None and null_raw is not None:
+            theta = term_null_basis(null_raw, projection, width - rank)
+        # An unpenalised coordinate the rows do not identify would be fitted to
+        # rounding (``declared_null_coordinates``): such a margin keeps the data's
+        # coordinates and its formed penalty.
+        visible = support_counts if precision is None else np.asarray(precision, np.float64)
+        if distinct is not None:
+            visible = np.bincount(distinct[1], weights=visible, minlength=len(distinct[0]))
+        if theta is None or _rows_identify(value_rows, visible, projection @ theta):
+            penalty_root = raw_root @ projection
+            if theta is not None:
+                penalty_nullity = width - rank
+                turn = null_explicit_coordinates(theta)
+                # Diagonalise only the range, directly on the rectangular
+                # factor. Both Kronecker components then keep their small
+                # positive curvatures and all their coordinate zeros.
+                span = turn[:, penalty_nullity:]
+                _, singular, vh = np.linalg.svd(penalty_root @ span, full_matrices=False)
+                if singular.size == rank:
+                    turn[:, penalty_nullity:] = span @ vh.T
+                    projection = projection @ turn
+                    basis = basis @ turn
+                    penalty_root = np.zeros((rank, width))
+                    penalty_root[:, penalty_nullity:] = np.diag(singular)
+                    if structural is not None:
+                        structural_proj = projection.T @ structural @ projection
+                else:
+                    penalty_nullity = None
+            penalty = penalty_root.T @ penalty_root
 
     info = TensorMarginalInfo(
         basis=basis,
@@ -648,7 +743,9 @@ def tensor_marginal_info(
         degree=spec.degree,
         raw_basis_eval=spec._raw_basis_matrix,
         normalize_penalty=False,
-        structural_penalty=None if structural is None else projection.T @ structural @ projection,
+        structural_penalty=structural_proj,
+        penalty_root=penalty_root,
+        penalty_nullity=penalty_nullity,
         follows_policy=follows_policy,
     )
     if distinct is not None:

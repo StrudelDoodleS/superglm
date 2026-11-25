@@ -54,10 +54,13 @@ from superglm.model.retired_state import retained_linear_state
 from superglm.model.state_ops import (
     _grouped_active_state,
     _public_augmented_covariance,
+    _public_intercept_shift,
     _rank_active_state,
     _rank_augmented_covariance,
     _solver_space_working_weights,
     fit_contrast_estimable,
+    fit_intercept_centre,
+    rank_intercept_centre,
     rank_standard_error_mask,
     refit_shows_every_standard_error,
     saved_standard_error_note,
@@ -365,28 +368,66 @@ def _contrast_estimability(
     groups: list[GroupSlice],
     active_groups: list[GroupSlice],
     width: int,
+    sum_w: float,
 ):
     """``data_rank.is_estimable`` read on a contrast over the full fitted coordinates.
 
     A contrast that weighs an inactive coefficient is not determined, as
     ``_coefficient_estimability`` leaves those coefficients blank.  The reader lives as
     long as the metrics object and is pickled with it: a ``partial`` of a module
-    function, over only the null-space part of ``data_rank``.
+    function, over only the null-space part of ``data_rank`` and the weight total
+    ``sum_w`` it was centred with.
     """
     original_by_name = {group.name: group for group in groups}
     columns = np.empty(sum(group.size for group in active_groups), dtype=np.intp)
     for active_group in active_groups:
         columns[active_group.sl] = np.arange(width)[original_by_name[active_group.name].sl]
-    return partial(_active_contrast_estimable, data_rank.estimability_only(), columns)
+    return partial(_active_contrast_estimable, data_rank.estimability_only(), columns, sum_w=sum_w)
 
 
-def _active_contrast_estimable(data_rank, columns: NDArray, contrast: NDArray) -> bool:
-    """Whether ``data_rank`` determines ``contrast``, whose active coordinates sit at ``columns``."""
+def _active_centre(
+    XtW1: NDArray,
+    W: NDArray,
+    groups: list[GroupSlice],
+    active_groups: list[GroupSlice],
+    width: int,
+    shift: NDArray | None = None,
+) -> NDArray:
+    """The weighted mean ``X'W1 / sum(W)`` of the active columns less ``shift``, over the
+    full fitted coordinates, zero on the inactive ones: ``build_coef_rows``' ``intercept_centre``.
+    """
+    total = float(np.sum(W))
+    mean = np.asarray(XtW1, dtype=np.float64) / total if total > 0.0 else np.zeros(len(XtW1))
+    if shift is not None:
+        mean = mean - shift
+    original_by_name = {group.name: group for group in groups}
+    centre = np.zeros(width)
+    for active_group in active_groups:
+        centre[original_by_name[active_group.name].sl] = mean[active_group.sl]
+    return centre
+
+
+def _active_contrast_estimable(
+    data_rank,
+    columns: NDArray,
+    contrast: NDArray,
+    intercept: float = 0.0,
+    design_rows: bool = False,
+    sum_w=None,
+) -> bool:
+    """Whether ``data_rank`` determines ``contrast``, whose active coordinates sit at ``columns``.
+
+    ``intercept`` and ``design_rows`` are ``RankInfo.is_estimable``'s; a reader saved
+    without ``sum_w`` decides the contrast alone.
+    """
+    if design_rows:
+        return bool(data_rank.function_estimable(np.asarray(contrast, dtype=bool)[columns]))
     outside = np.ones(len(contrast), dtype=bool)
     outside[columns] = False
     if np.any(contrast[outside] != 0.0):
         return False
-    return bool(data_rank.is_estimable(contrast[columns]))
+    determined = 0.0 if sum_w is None else abs(intercept) / math.sqrt(sum_w)
+    return bool(data_rank.is_estimable(contrast[columns], determined))
 
 
 def _requires_wood_inference(model, active_groups: list[GroupSlice]) -> bool:
@@ -1233,6 +1274,13 @@ class ModelMetrics:
                 if compact_estimable is not None
                 else getattr(rank_info, "is_estimable", None)
             )
+            self.__dict__["_intercept_centre"] = (
+                fit_intercept_centre(self._model, fit_inference)
+                if compact_estimable is not None
+                else None
+                if rank_info is None
+                else rank_intercept_centre(self._model, rank_info)
+            )
             if compact_estimable is not None:
                 self.__dict__["_coefficient_estimable"] = compact_estimable
             elif "_coefficient_estimable" not in self.__dict__:
@@ -1282,7 +1330,11 @@ class ModelMetrics:
                 ),
             )
             self.__dict__["_contrast_estimable"] = _contrast_estimability(
-                data_rank, self._groups, active_groups, len(beta)
+                data_rank, self._groups, active_groups, len(beta), float(np.sum(W))
+            )
+            # public rows: the decomposition's centre is theirs
+            self.__dict__["_intercept_centre"] = _active_centre(
+                XtW1, W, self._groups, active_groups, len(beta)
             )
             augmented = _profiled_augmented_covariance(
                 centered_data_gram,
@@ -1303,6 +1355,7 @@ class ModelMetrics:
                 self._model, rank_info
             )
             self.__dict__["_contrast_estimable"] = rank_info.is_estimable
+            self.__dict__["_intercept_centre"] = rank_intercept_centre(self._model, rank_info)
             return X_a, W, inverse, augmented, active_groups
 
         _, active_groups = _selected_group_state(
@@ -1338,7 +1391,16 @@ class ModelMetrics:
             partial(_coefficient_estimability, data_rank, self._groups, active_groups, len(beta)),
         )
         self.__dict__["_contrast_estimable"] = _contrast_estimability(
-            data_rank, self._groups, active_groups, len(beta)
+            data_rank, self._groups, active_groups, len(beta), float(np.sum(W))
+        )
+        # solver rows, whose public columns sit ``_public_intercept_shift`` below them
+        self.__dict__["_intercept_centre"] = _active_centre(
+            XtW1,
+            W,
+            self._groups,
+            active_groups,
+            len(beta),
+            _public_intercept_shift(self._model, active_groups, X_a.p),
         )
         augmented = _profiled_augmented_covariance(
             centered_data_gram,
@@ -1652,6 +1714,12 @@ class ModelMetrics:
         """
         _ = self._active_info
         return bool(self.__dict__.get("_information_underflowed", False))
+
+    @property
+    def _current_intercept_centre(self) -> NDArray | None:
+        """The public column mean that decomposition was centred on (``build_coef_rows``)."""
+        _ = self._active_info
+        return self.__dict__.get("_intercept_centre")
 
     @cached_property
     def _current_coefficient_estimable(self) -> NDArray:
@@ -2048,6 +2116,7 @@ class ModelMetrics:
             coefficient_estimable_override=self._current_coefficient_estimable,
             contrast_estimable=self._current_contrast_estimable,
             information_underflowed=self._current_information_underflowed,
+            intercept_centre=self._current_intercept_centre,
             selected_group_names=selected_names,
             group_matrices=(
                 self._dm.group_matrices if self._uses_fit_design and self._dm is not None else None
