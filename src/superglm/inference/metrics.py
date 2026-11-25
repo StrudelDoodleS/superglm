@@ -44,6 +44,7 @@ from superglm.inference.covariance import (  # noqa: F401
     _active_penalty_matrix,
     _active_penalty_root,
     _second_diff_penalty,
+    augmented_group_diagonal,
     covariance_selected_block,
     covariance_selected_diagonal,
     covariance_slope_view,
@@ -1301,49 +1302,9 @@ class ModelMetrics:
                 penalty=fitted_penalty(self._model),
             )
             X_a = EvaluationDesign(self._model, self._X, selected_columns)
-            lam2 = scale_penalties(fitted_lambda2(self._model), self._geometry_weight_exponent)
-            penalty_terms = (self._model._dm.group_matrices, self._groups, active_groups, lam2)
-            reml_penalties = getattr(self._model, "_reml_penalties", None)
-            S_active = _active_penalty_matrix(*penalty_terms, reml_penalties=reml_penalties)
-            XtWX, XtW1, centered_data_gram = weighted_moments(X_a, W)
-            self.__dict__["_active_centered_data_gram"] = centered_data_gram
-            data_rank = _certified_data_rank(X_a, W, centered_data_gram, XtW1, S_active)
-            # one stacked root for the face's decompositions and the covariance's
-            root = cache(
-                partial(_active_penalty_root, *penalty_terms, reml_penalties=reml_penalties)
-            )
-            inverse, profile_rank = self._reformed_ranks(
-                X_a,
-                W,
-                XtWX,
-                XtW1,
-                centered_data_gram,
-                S_active,
-                data_rank,
-                face,
-                root,
-            )
-            self._decide_standard_errors(
-                profile_rank,
-                partial(
-                    _coefficient_estimability, data_rank, self._groups, active_groups, len(beta)
-                ),
-            )
-            self.__dict__["_contrast_estimable"] = _contrast_estimability(
-                data_rank, self._groups, active_groups, len(beta), float(np.sum(W))
-            )
             # public rows: the decomposition's centre is theirs
-            self.__dict__["_intercept_centre"] = _active_centre(
-                XtW1, W, self._groups, active_groups, len(beta)
-            )
-            augmented = _profiled_augmented_covariance(
-                centered_data_gram,
-                S_active,
-                XtW1,
-                float(np.sum(W)),
-                profiled_inverse=self._covariance_profiled_inverse(
-                    X_a, W, centered_data_gram, XtW1, S_active, data_rank, profile_rank, face, root
-                ),
+            inverse, augmented = self._reformed_covariance(
+                X_a, W, active_groups, self._model._dm.group_matrices, face, centre_shift=None
             )
             return X_a, W, inverse, augmented, active_groups
 
@@ -1366,8 +1327,28 @@ class ModelMetrics:
         X_a, active_groups, _ = _grouped_active_state(
             self._model, {group.name for group in active_groups}
         )
+        # solver rows, whose public columns sit ``_public_intercept_shift`` below them
+        inverse, augmented = self._reformed_covariance(
+            X_a,
+            W,
+            active_groups,
+            self._dm.group_matrices,
+            face,
+            centre_shift=_public_intercept_shift(self._model, active_groups, X_a.p),
+        )
+        augmented = _public_augmented_covariance(self._model, augmented, active_groups)
+        return X_a, W, inverse, augmented, active_groups
+
+    def _reformed_covariance(self, X_a, W, active_groups, group_matrices, face, *, centre_shift):
+        """The coefficient inverse and augmented covariance re-formed on these rows and weights.
+
+        Forming them decides, and records on this reader, the coefficient mask
+        (``_decide_standard_errors``), the contrast rule, the intercept centre (the
+        rows' weighted column mean less ``centre_shift``) and the centred data Gram.
+        """
+        beta = self._result.beta
         lam2 = scale_penalties(fitted_lambda2(self._model), self._geometry_weight_exponent)
-        penalty_terms = (self._dm.group_matrices, self._groups, active_groups, lam2)
+        penalty_terms = (group_matrices, self._groups, active_groups, lam2)
         reml_penalties = getattr(self._model, "_reml_penalties", None)
         S_active = _active_penalty_matrix(*penalty_terms, reml_penalties=reml_penalties)
         XtWX, XtW1, centered_data_gram = weighted_moments(X_a, W)
@@ -1376,15 +1357,7 @@ class ModelMetrics:
         # one stacked root for the face's decompositions and the covariance's
         root = cache(partial(_active_penalty_root, *penalty_terms, reml_penalties=reml_penalties))
         inverse, profile_rank = self._reformed_ranks(
-            X_a,
-            W,
-            XtWX,
-            XtW1,
-            centered_data_gram,
-            S_active,
-            data_rank,
-            face,
-            root,
+            X_a, W, XtWX, XtW1, centered_data_gram, S_active, data_rank, face, root
         )
         self._decide_standard_errors(
             profile_rank,
@@ -1393,14 +1366,8 @@ class ModelMetrics:
         self.__dict__["_contrast_estimable"] = _contrast_estimability(
             data_rank, self._groups, active_groups, len(beta), float(np.sum(W))
         )
-        # solver rows, whose public columns sit ``_public_intercept_shift`` below them
         self.__dict__["_intercept_centre"] = _active_centre(
-            XtW1,
-            W,
-            self._groups,
-            active_groups,
-            len(beta),
-            _public_intercept_shift(self._model, active_groups, X_a.p),
+            XtW1, W, self._groups, active_groups, len(beta), centre_shift
         )
         augmented = _profiled_augmented_covariance(
             centered_data_gram,
@@ -1411,8 +1378,7 @@ class ModelMetrics:
                 X_a, W, centered_data_gram, XtW1, S_active, data_rank, profile_rank, face, root
             ),
         )
-        augmented = _public_augmented_covariance(self._model, augmented, active_groups)
-        return X_a, W, inverse, augmented, active_groups
+        return inverse, augmented
 
     def _covariance_profiled_inverse(
         self,
@@ -1835,15 +1801,7 @@ class ModelMetrics:
             else:
                 _, _, _, XtWX_inv_aug, active_groups = self._active_info
                 ag = next(ag for ag in active_groups if ag.name == g.name)
-                augmented_indices = np.arange(
-                    1 + ag.start,
-                    1 + ag.end,
-                    dtype=np.intp,
-                )
-                var_diag = covariance_selected_diagonal(
-                    XtWX_inv_aug,
-                    augmented_indices,
-                )
+                var_diag = augmented_group_diagonal(XtWX_inv_aug, ag)
                 values = self._variance_standard_errors(var_diag, scaled=scaled)
                 values[~self._current_coefficient_estimable[g.sl]] = np.nan
             if separated is not None:
