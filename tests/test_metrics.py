@@ -3521,11 +3521,13 @@ class TestSummaryInferenceCache:
         assert total_edf < 1.5, f"Aliased columns should share ~1 EDF, got {total_edf}"
 
     def test_summary_rank_deficient_smooth_term(self):
-        """Pseudo-R fallback must produce valid Wood test results for smooth terms.
+        """The pseudo-R fallback forms the summary, and twin smooths carry no Wood test.
 
         Regression test for the path: singular XtWX → eigendecomposition pseudo-R
-        (state_ops.py) → wood_test_smooth (metrics.py). Two identical splines on
-        the same data force XtWX to be rank-deficient in the active system.
+        (state_ops.py), which builds each smooth's test design. Two identical splines on
+        the same data force XtWX to be rank-deficient in the active system, and moving
+        the curve between them leaves the fit, so neither fitted function is determined:
+        its Wood test is withheld, ``estimable=False`` (#740; b7e5b3d98 showed one).
         """
         rng = np.random.default_rng(99)
         n = 400
@@ -3545,11 +3547,10 @@ class TestSummaryInferenceCache:
         smooth_rows = [r for r in s._coef_rows if r.is_spline and r.active]
         assert len(smooth_rows) >= 1
 
-        # Wood test p-values should be finite (not NaN/Inf)
+        assert {r.name for r in smooth_rows} == {"x", "x_dup"}
         for r in smooth_rows:
-            assert r.wald_p is not None, f"{r.name}: p-value is None"
-            assert np.isfinite(r.wald_p), f"{r.name}: p-value is {r.wald_p}"
-            assert 0.0 <= r.wald_p <= 1.0, f"{r.name}: p-value out of range: {r.wald_p}"
+            assert r.wald_chi2 is None and r.wald_p is None and r.ref_df is None, r.name
+            assert r.estimable is False, r.name
 
     def test_summary_near_aliased_edf_matches_metrics(self):
         """Near-aliased EDF from model.summary() should match model.metrics()."""

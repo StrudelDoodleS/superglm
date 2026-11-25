@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Hashable, Mapping
+from collections.abc import Callable, Hashable, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -163,6 +163,55 @@ def _population_curve_se(
     return cast(NDArray, np.sqrt(np.maximum(np.diag(mapped[1]), 0.0)))
 
 
+def _held_levels(spec, name, interaction_specs):
+    """``(levels, keys, identified)`` where an ``sz`` term folds main term ``spec``, or ``None``.
+
+    ``keys`` are the reported levels it holds, which report the mean over the identified
+    levels (``factor_smooth.with_held_group_levels``).
+    """
+    from superglm.features.categorical import Categorical
+    from superglm.features.factor_smooth import group_term_report_levels, held_group_levels
+    from superglm.features.ordered_categorical import OrderedCategorical
+
+    record = held_group_levels(name, interaction_specs)
+    if (
+        record is None
+        or not isinstance(spec, Categorical | OrderedCategorical)
+        or spec._grouping is not None
+    ):
+        return None
+    levels = list(spec._ordered_levels if isinstance(spec, OrderedCategorical) else spec._levels)
+    held, identified = record
+    keys = [key for key in group_term_report_levels(spec, held) if key in levels]
+    return (levels, keys, identified) if keys else None
+
+
+def _level_rows(spec, levels, held, columns) -> NDArray:
+    """``L_l - L_base`` over the term's ``columns`` for each of ``levels``.
+
+    ``L`` is the term's rows at its levels; the levels ``held`` names, a pair ``(keys,
+    identified)``, each have the identified rows' mean in place of their own.
+    """
+    from superglm.features.factor_smooth import at_each_level
+
+    def rows(labels):
+        return np.asarray(spec.transform(labels), dtype=np.float64)[:, columns]
+
+    L = rows(np.asarray(levels, dtype=object))
+    base = L[levels.index(spec._base_level)]
+    L = L - base
+    if held is not None:
+        keys, identified = held
+        # the identified levels' rows as ``predict`` scores them: a level the term
+        # does not know has the zero row an unseen level gets
+        found = at_each_level(rows, identified)
+        mean = (
+            np.mean([np.zeros(L.shape[1]) if row is None else row for row in found], axis=0) - base
+        )
+        L[[levels.index(key) for key in keys]] = mean
+    return L
+
+
 def _held_level_se(
     spec, name, feature_groups, active_groups, Cov_active, interaction_specs, *, center: bool
 ) -> NDArray | None:
@@ -174,47 +223,96 @@ def _held_level_se(
     held level's row the identified rows' mean: the errors are those of that
     map, and centring maps it through ``I - 11'/n``.
     """
-    from superglm.features.categorical import Categorical
-    from superglm.features.factor_smooth import (
-        at_each_level,
-        group_term_report_levels,
-        held_group_levels,
-    )
-    from superglm.features.ordered_categorical import OrderedCategorical
-
-    record = held_group_levels(name, interaction_specs)
     active_subs = [ag for ag in active_groups if ag.feature_name == name]
-    if (
-        record is None
-        or not active_subs
-        or not isinstance(spec, Categorical | OrderedCategorical)
-        or spec._grouping is not None
-    ):
+    record = _held_levels(spec, name, interaction_specs) if active_subs else None
+    if record is None:
         return None
-    levels = list(spec._ordered_levels if isinstance(spec, OrderedCategorical) else spec._levels)
-    held, identified = record
-    keys = [key for key in group_term_report_levels(spec, held) if key in levels]
-    if not keys:
-        return None
+    levels, keys, identified = record
     columns = _active_subgroup_columns(name, feature_groups, active_subs)
-
-    def rows(labels):
-        return np.asarray(spec.transform(labels), dtype=np.float64)[:, columns]
-
-    L = rows(np.asarray(levels, dtype=object))
-    base = L[levels.index(spec._base_level)]
-    L = L - base
-    # the identified levels' rows as ``predict`` scores them: a level the term
-    # does not know has the zero row an unseen level gets
-    found = at_each_level(rows, identified)
-    mean = np.mean([np.zeros(L.shape[1]) if row is None else row for row in found], axis=0) - base
-    L[[levels.index(key) for key in keys]] = mean
+    L = _level_rows(spec, levels, (keys, identified), columns)
     indices = np.concatenate([np.arange(ag.start, ag.end) for ag in active_subs])
     Cov_g = np.asarray(Cov_active[np.ix_(indices, indices)], dtype=np.float64)
     if center:
         L = L - L.mean(axis=0)
     variance = np.einsum("ij,jk,ik->i", L, Cov_g, L, optimize=True)
     return cast(NDArray, np.sqrt(np.maximum(variance, 0.0)))
+
+
+def ordered_level_contrasts(
+    spec, name, feature_groups, interaction_specs, width: int, selected
+) -> NDArray:
+    """Each level ``feature_se_from_cov`` reports for ordered ``spec``, over ``width`` coefficients.
+
+    Row ``l`` is ``L_l - L_base`` (``_level_rows``, a held level's the identified levels'
+    mean) on the term's groups ``selected`` names, and zero on the others, whose
+    coefficients the selected model holds at zero.
+    """
+    levels = list(spec._ordered_levels)
+    record = _held_levels(spec, name, interaction_specs)
+    L = _level_rows(spec, levels, None if record is None else record[1:], slice(None))
+    return term_contrasts(L, feature_groups, width, selected)
+
+
+def term_contrasts(rows: NDArray, feature_groups, width: int, selected) -> NDArray:
+    """``rows`` over a term's ``feature_groups`` (columns in their order) as contrasts over
+    ``width`` coefficients, zero on the groups ``selected`` does not name: the selected
+    model holds those at zero.
+    """
+    contrasts = np.zeros((len(rows), width))
+    start = 0
+    for group in feature_groups:
+        if group.name in selected:
+            contrasts[:, group.sl] = rows[:, start : start + group.size]
+        start += group.size
+    return contrasts
+
+
+def contrast_determined(
+    contrast: NDArray,
+    coefficient_estimable: NDArray,
+    contrast_estimable: Callable[..., bool] | None,
+    intercept: float = 0.0,
+) -> bool:
+    """Whether a covariance determines ``contrast @ beta``, by its coefficient mask's rule.
+
+    A contrast whose coefficients the mask ``coefficient_estimable`` all shows is
+    determined, as the determined functions form a subspace; any other is decided by
+    ``contrast_estimable`` (``RankDecomposition.is_estimable`` of the decomposition the
+    mask came from), and is not without it.  ``intercept`` is the weight the same
+    estimate puts on the intercept beside the centred columns (``RankInfo.is_estimable``).
+    """
+    if np.all(coefficient_estimable[contrast != 0.0]):
+        return True
+    if contrast_estimable is None:
+        return False
+    if intercept:
+        return bool(contrast_estimable(contrast, intercept=intercept))
+    return bool(contrast_estimable(contrast))
+
+
+def function_determined(
+    columns: NDArray,
+    coefficient_estimable: NDArray,
+    contrast_estimable: Callable[..., bool] | None,
+) -> bool:
+    """Whether a covariance determines each design row's part on the coefficients ``columns`` marks.
+
+    That is the fitted function of a term whose coefficients are the marked ones.  It is
+    determined when the mask shows them all; otherwise
+    ``contrast_estimable(columns, design_rows=True)`` decides
+    (``RankDecomposition.function_estimable``), and it is not without it.
+    """
+    if np.all(coefficient_estimable[columns]):
+        return True
+    return contrast_estimable is not None and bool(contrast_estimable(columns, design_rows=True))
+
+
+def withhold_undetermined(se: NDArray, determines, contrasts) -> NDArray:
+    """``se`` with NaN at each row of ``contrasts()`` that ``determines`` does not determine."""
+    if determines is None:
+        return se
+    determined = np.array([determines(contrast) for contrast in contrasts()], dtype=bool)
+    return np.where(determined, se, np.nan)
 
 
 def feature_se_from_cov(
