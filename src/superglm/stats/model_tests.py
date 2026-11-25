@@ -355,10 +355,55 @@ def score_test_zi(
     sample_weight=None,
     offset=None,
 ) -> ScoreTestZIResult:
-    """Van den Broek (1995) score test for zero-inflation.
+    """Score test for zero inflation in a fitted Poisson model.
 
-    Tests H0: no zero-inflation vs H1: zero-inflation, assuming
-    a Poisson baseline model.
+    Tests H0, that every count is Poisson with its fitted mean, against a
+    zero-inflated Poisson in which a constant share ``p`` of the rows is zero
+    whatever its mean.  The statistic is the squared score for ``p`` at
+    ``p = 0`` over the score's variance::
+
+        S = sum((1{y = 0} - p0) / p0 + (y - mu)),    p0 = exp(-mu)
+        V = sum((1 - p0) / p0 - mu)
+        statistic = S**2 / V
+
+    ``p_value`` is its upper tail under chi-square with one degree of freedom.
+    The test is two-sided: too few zeros reject as well as too many, and
+    ``direction`` is the sign of ``S``.  ``p`` may be negative under this
+    alternative, so zero is not on its boundary.
+
+    With a log link this is van den Broek's (1995) score test in its regression
+    form (Jansakul and Hinde, 2002, with a constant inflation probability; Deng
+    and Paul, 2005).  Their variance is ``sum((1 - p0) / p0) - mu' D (D' diag(mu)
+    D)^-1 D' mu`` for the design ``D`` of the mean; with an intercept in ``D``
+    the subtracted term is ``sum(mu)``, and at a maximum-likelihood fit
+    ``sum(y - mu)`` is zero, which leaves ``S`` and ``V``.
+
+    The fit enters through ``mu`` alone, so the same statistic holds:
+
+    - for a penalised fit (smooth terms, ``fit_reml``, a selection penalty).
+      The penalty leaves the intercept free, and the intercept is the one
+      direction the variance correction removes.
+    - for rows the model was not fitted to, provided it was fitted to at least
+      as many.  ``y - mu`` removes the first-order effect of the error in
+      ``mu`` from the score, as Neyman's C(alpha) construction does for any
+      consistent estimate; what remains grows with the ratio of rows tested to
+      rows fitted and makes the test reject too often.
+    - for another link, where ``p`` is the inflation probability with ``mu``
+      held as each row's mean.  That is the usual zero-inflated Poisson
+      whenever rescaling every mean by one factor stays inside the model: a log
+      link with an intercept, or a power link without an offset.
+
+    What the test relies on:
+
+    - The mean must be right.  A missing term, or one smoothed or shrunk
+      further than the data support, leaves the counts more spread than their
+      fitted means, and the test rejects for that as it does for any other
+      overdispersion.  A rejection says the fitted Poisson model does not
+      account for the zeros, not that a zero-inflated model should replace it.
+    - The chi-square reference is a large-sample one.  A row weighs in
+      proportion to ``exp(mu)``, so the reference is accurate when the rows
+      with the largest means still expect zeros between them, and the test is
+      conservative when a few rows with large means carry the variance.
 
     Parameters
     ----------
@@ -371,7 +416,7 @@ def score_test_zi(
     sample_weight : array-like or None
         Observation weights. Currently unsupported.
     offset : array-like or None
-        Optional offset.
+        Optional offset.  It enters through ``mu`` only.
 
     Returns
     -------
@@ -382,6 +427,26 @@ def score_test_zi(
     NoPredictedMeanError
         Where the model gives a row no predicted mean: the statistic would be
         read from a mean that does not exist.
+    ValueError
+        Where the score has no finite positive variance: every predicted mean
+        is zero to rounding, or one is too large for ``exp(mu)`` in float64.
+
+    References
+    ----------
+    Deng, D. and Paul, S. R. (2005). Score tests for zero-inflation and
+    over-dispersion in generalized linear models. Statistica Sinica 15, 257-276.
+
+    Hsu, W.-W., Todem, D., Mawella, N. R., Kim, K. and Rosenkranz, R. R. (2020).
+    A robust score test of homogeneity for zero-inflated count data.
+    Statistical Methods in Medical Research 29(12), 3653-3665.
+
+    Baillo, A., Berrendero, J. R. and Carcamo, J. (2008). Tests for
+    zero-inflation and overdispersion. arXiv:0809.4205.
+
+    van den Broek, J. (1995), Biometrics 51, 738-743, and Jansakul, N. and
+    Hinde, J. P. (2002), Computational Statistics and Data Analysis 40, 75-96,
+    are the original papers; the statement here follows the three above and the
+    documentation of statsmodels' ``test_poisson_zeroinflation_jh``.
     """
     import scipy.spatial
     from scipy import stats
@@ -397,30 +462,30 @@ def score_test_zi(
     y = np.asarray(y, dtype=float)
     mu = _get_mu(model, X, y, offset, what="the zero-inflation score test")
 
-    p0 = np.exp(-mu)  # P(Y=0|mu) under Poisson
-    indicator = (y == 0).astype(float)
+    # (1 - p0)/p0 - mu is each row's variance and the score of a row with y = 0;
+    # a row with y > 0 scores -1 + (y - mu).
+    with np.errstate(over="ignore"):
+        information = np.expm1(mu) - mu
+    score = float(np.sum(np.where(y == 0, information, y - 1.0 - mu)))
+    variance = float(np.sum(information))
+    if not np.isfinite(variance):
+        raise ValueError(
+            "score_test_zi cannot weigh a row whose predicted mean is above about 709: "
+            "exp(mean), the weight the test gives the row, overflows float64. A Poisson "
+            "count that large has no zeros to test; pass the rows with smaller means."
+        )
+    if variance <= 0.0:
+        raise ValueError(
+            "score_test_zi has nothing to test: every predicted mean is 0 to rounding, "
+            "so the Poisson model already expects every response to be 0. Check the "
+            "rows and the offset passed."
+        )
 
-    # Score statistic: van den Broek (1995), eq. (3)
-    # Numerator: [sum(I(y=0) - p0)]^2
-    numer = (np.sum(indicator - p0)) ** 2
-
-    # Denominator: Var under H0 from van den Broek (1995)
-    # Full formula: Var = sum(q_i(1-q_i)) - (sum(mu_i*q_i))^2 / sum(mu_i)
-    # where q_i = exp(-mu_i)
-    correction = (np.sum(mu * p0)) ** 2 / np.sum(mu)
-    denom = np.sum(p0 * (1 - p0)) - correction
-
-    if denom <= 0:
-        denom = 1e-10  # safety
-
-    statistic = float(numer / denom)
-    p_value = float(1.0 - stats.chi2.cdf(statistic, df=1))
-    direction = "inflated" if np.sum(indicator) > np.sum(p0) else "deflated"
-
+    statistic = score * score / variance
     return ScoreTestZIResult(
         statistic=statistic,
-        p_value=p_value,
-        direction=direction,
+        p_value=float(stats.chi2.sf(statistic, df=1)),
+        direction="inflated" if score > 0.0 else "deflated",
     )
 
 

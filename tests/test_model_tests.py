@@ -736,3 +736,212 @@ class TestStatisticsMatchReferences:
         assert result.p_value == pytest.approx(expected_p, rel=0, abs=p_atol)
         assert expected < 0 and expected_p < 0.05, "fixture needs NB2 clearly preferred"
         assert result.preferred == "model_b"
+
+
+# ── score_test_zi — the statistic, its null distribution and its refusals ──
+
+
+def _poisson_frame(rng, n, low, high):
+    """A numeric and a three-level factor whose Poisson mean spans ``low`` to ``high``."""
+    x = rng.uniform(0.0, 1.0, n)
+    g = rng.choice(["a", "b", "c"], n)
+    shift = np.where(g == "b", 0.25, np.where(g == "c", -0.25, 0.0))
+    return pd.DataFrame({"x": x, "g": g}), low * (high / low) ** x * np.exp(shift)
+
+
+def _fit_poisson_frame(X, y):
+    from superglm import Categorical
+
+    features = {"x": Numeric(), "g": Categorical(base="first")}
+    return SuperGLM(family="poisson", features=features, selection_penalty=0.0).fit(X, y)
+
+
+def _zi_score_statistic(y, mu):
+    """[sum (1{y=0} - p0)/p0 + (y - mu)]^2 / sum((1 - p0)/p0 - mu) at means ``mu``."""
+    p0 = np.exp(-mu)
+    return np.sum(((y == 0) - p0) / p0 + (y - mu)) ** 2 / np.sum((1.0 - p0) / p0 - mu)
+
+
+def _null_statistics(rng, replicates, mu, fit, X):
+    """``score_test_zi`` on ``replicates`` Poisson samples at ``mu``, each refitted."""
+    results = []
+    for _ in range(replicates):
+        y = rng.poisson(mu).astype(float)
+        results.append(score_test_zi(fit(X, y), X, y))
+    return np.array([r.statistic for r in results]), np.array([r.p_value for r in results])
+
+
+def _assert_chi_square_one(statistics, p_values):
+    """A 5% rejection rate and a mean of 1, each within three standard errors."""
+    replicates = len(statistics)
+    assert abs(np.mean(p_values < 0.05) - 0.05) <= 3.0 * np.sqrt(0.05 * 0.95 / replicates)
+    assert abs(np.mean(statistics) - 1.0) <= 3.0 * np.sqrt(2.0 / replicates)
+
+
+@pytest.fixture(scope="module")
+def covariate_fit():
+    """An unpenalised fit on a numeric and a three-level factor, with its dense design."""
+    rng = np.random.default_rng(7)
+    n = 400
+    x = rng.uniform(0, 2, n)
+    g = rng.choice(["a", "b", "c"], n)
+    eta = -0.3 + 0.6 * x + np.where(g == "b", 0.4, np.where(g == "c", -0.5, 0.0))
+    y = rng.poisson(np.exp(eta)).astype(float)
+    X = pd.DataFrame({"x": x, "g": g})
+    design = np.column_stack([np.ones(n), x, g == "b", g == "c"]).astype(float)
+    return _fit_poisson_frame(X, y), X, y, design
+
+
+class TestScoreTestZIStatistic:
+    """The score statistic for a constant inflation probability, on any fitted mean."""
+
+    def test_statistic_with_covariates_is_the_score_statistic_of_the_fitted_design(
+        self, covariate_fit
+    ):
+        """With covariates in a log-link mean the statistic is [sum (1{y=0} - p0)/p0]^2
+        / [sum (1 - p0)/p0 - mu' D (D' diag(mu) D)^-1 D' mu], D the design of the mean
+        (Deng and Paul, Statistica Sinica 15, 2005, Theorem 3.3's V11 at a log link); a
+        variance that allows for an intercept only gives 0.657 for this 0.874."""
+        from scipy import stats
+
+        model, X, y, design = covariate_fit
+        mu = np.asarray(model.predict(X), dtype=np.float64)
+        p0 = np.exp(-mu)
+        projected = design.T @ mu
+        variance = np.sum((1.0 - p0) / p0) - projected @ np.linalg.solve(
+            design.T @ (mu[:, None] * design), projected
+        )
+        expected = np.sum(((y == 0) - p0) / p0) ** 2 / variance
+
+        result = score_test_zi(model, X, y)
+        # The fit stops at its tolerance, and the statistic moves with the fitted mean.
+        assert result.statistic == pytest.approx(expected, rel=1e-6)
+        assert result.p_value == pytest.approx(stats.chi2.sf(expected, 1), rel=1e-6)
+        assert result.direction == "deflated"
+
+    def test_statistic_with_covariates_matches_statsmodels(self, covariate_fit):
+        """statsmodels' Jansakul-Hinde test with a constant inflation probability, on
+        its own maximum-likelihood fit of the same design."""
+        sm = pytest.importorskip("statsmodels.api")
+        model, X, y, design = covariate_fit
+        reference = (
+            sm.Poisson(y, design)
+            .fit(disp=0, tol=1e-12)
+            .get_diagnostic()
+            .test_poisson_zeroinflation(method="broek", exog_infl=np.ones(len(y)))
+        )
+
+        result = score_test_zi(model, X, y)
+        assert result.statistic == pytest.approx(reference.statistic, rel=1e-6)
+        assert result.p_value == pytest.approx(reference.pvalue, rel=1e-6)
+
+    @pytest.mark.pins_behaviour
+    def test_constant_mean_statistic_is_van_den_broeks(self):
+        """Pins the statistic at a fitted mean that is the same on every row, where it
+        is van den Broek's (n0 - n p0)^2 / (n p0 (1 - p0) - n ybar p0^2) with
+        p0 = exp(-ybar), as it was before the variance allowed for covariates."""
+        rng = np.random.default_rng(11)
+        n = 500
+        y = np.where(rng.uniform(size=n) < 0.1, 0.0, rng.poisson(1.4, n)).astype(float)
+        X = pd.DataFrame({"x": rng.normal(size=n)})
+        # A group-lasso penalty far above the gradient's norm zeroes the feature.
+        model = SuperGLM(
+            family="poisson",
+            penalty="group_lasso",
+            selection_penalty=1e3,
+            features={"x": Numeric()},
+        ).fit(X, y)
+        assert np.ptp(model.predict(X)) == 0.0
+        p0 = np.exp(-np.mean(y))
+        expected = (np.sum(y == 0) - n * p0) ** 2 / (n * p0 * (1 - p0) - np.sum(y) * p0**2)
+
+        result = score_test_zi(model, X, y)
+        assert result.statistic == pytest.approx(expected, rel=1e-6)  # fit tolerance
+        assert result.direction == "inflated"
+
+    def test_reml_smooth_fit_keeps_the_statistic(self):
+        """A penalty that leaves the intercept free keeps sum(y - mu) at zero, so the
+        score and its variance are the unpenalised fit's functions of the fitted mean."""
+        rng = np.random.default_rng(5)
+        n = 400
+        X = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        y = rng.poisson(np.exp(-0.8 + 1.5 * np.sin(2 * np.pi * X["x"]))).astype(float)
+        model = SuperGLM(family="poisson", features={"x": Spline(n_knots=8)}, selection_penalty=0.0)
+        model.fit_reml(X, y)
+        mu = np.asarray(model.predict(X), dtype=np.float64)
+        p0 = np.exp(-mu)
+        classical = np.sum(((y == 0) - p0) / p0) ** 2 / (np.sum((1.0 - p0) / p0) - np.sum(mu))
+
+        assert model.result.effective_df < len(model.result.beta)  # the penalty acted
+        assert abs(np.sum(y - mu)) <= 1e-6 * np.sum(y)
+        assert score_test_zi(model, X, y).statistic == pytest.approx(classical, rel=1e-6)
+
+    def test_rows_the_model_was_not_fitted_to_carry_their_mean_error(self):
+        """On held-out rows sum(y - mu) is not zero, and the score includes it: the
+        term that removes the first-order effect of the error in the fitted mean."""
+        rng = np.random.default_rng(3)
+        X, mu_true = _poisson_frame(rng, 800, 0.05, 2.5)
+        y = rng.poisson(mu_true).astype(float)
+        fitted, held_out = slice(0, 400), slice(400, 800)
+        model = _fit_poisson_frame(X[fitted], y[fitted])
+        mu = np.asarray(model.predict(X[held_out]), dtype=np.float64)
+
+        assert abs(np.sum(y[held_out] - mu)) > 1.0
+        result = score_test_zi(model, X[held_out], y[held_out])
+        assert result.statistic == pytest.approx(_zi_score_statistic(y[held_out], mu), rel=1e-12)
+
+    @pytest.mark.slow
+    def test_null_rejection_rate_with_covariates_is_five_percent(self):
+        """Over 500 seeded Poisson samples whose mean runs from 0.02 to 3 across the
+        covariates, the test rejects at its 5% level in 5% of them and the statistic
+        averages chi-square's 1; a variance that allows for an intercept only rejects
+        in under 1% and averages 0.5."""
+        rng = np.random.default_rng(20261126)
+        X, mu = _poisson_frame(rng, 600, 0.02, 3.0)
+        _assert_chi_square_one(*_null_statistics(rng, 500, mu, _fit_poisson_frame, X))
+
+    @pytest.mark.slow
+    def test_null_rejection_rate_of_reml_smooth_fits_is_five_percent(self):
+        """The same over 300 seeded samples from a smooth mean between 0.06 and 2.2,
+        each fitted by REML with a penalised spline."""
+
+        def fit(X, y):
+            model = SuperGLM(
+                family="poisson", features={"x": Spline(n_knots=8)}, selection_penalty=0.0
+            )
+            model.fit_reml(X, y)
+            return model
+
+        rng = np.random.default_rng(20261127)
+        X = pd.DataFrame({"x": rng.uniform(0.0, 1.0, 400)})
+        mu = np.exp(-1.0 + 1.8 * np.sin(2 * np.pi * X["x"].to_numpy()))
+        _assert_chi_square_one(*_null_statistics(rng, 300, mu, fit, X))
+
+    @pytest.mark.parametrize(
+        ("offset", "message"),
+        [(-60.0, "every predicted mean is 0 to rounding"), (9.0, "overflows float64")],
+    )
+    def test_a_score_without_a_finite_positive_variance_is_refused(
+        self, covariate_fit, offset, message
+    ):
+        """Forced through the offset: at -60 exp(mu) - 1 - mu rounds to 0 on every row,
+        and at 9 the means pass 709, where exp(mu) leaves float64."""
+        model, X, y, _ = covariate_fit
+        with pytest.raises(ValueError, match=message):
+            score_test_zi(model, X, y, offset=np.full(len(y), offset))
+
+
+class TestUpperTailPValues:
+    """A statistic far into the tail reports its tail probability, not zero."""
+
+    def test_zero_inflation(self):
+        from scipy import stats
+
+        rng = np.random.default_rng(42)
+        n = 2000
+        X = pd.DataFrame({"x": rng.uniform(0, 1, n)})
+        y = rng.poisson(np.exp(0.2 + 0.5 * X["x"])).astype(float)
+        y[rng.random(n) < 0.3] = 0.0
+        result = score_test_zi(_fit_poisson(X, y), X, y)
+        assert result.statistic > 100.0
+        assert 0.0 < result.p_value == stats.chi2.sf(result.statistic, 1)
