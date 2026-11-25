@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import scipy.spatial
 from numpy.typing import NDArray
 from scipy.stats import norm
 

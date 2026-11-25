@@ -15,6 +15,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import numpy.random
 from numba import njit
 
 from superglm.distributional.kernels._response_tails import Jet, _checked_core_order

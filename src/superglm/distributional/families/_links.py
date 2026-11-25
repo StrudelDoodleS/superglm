@@ -13,6 +13,7 @@ import math
 from dataclasses import dataclass
 
 import numpy as np
+import scipy.linalg
 from numpy.typing import NDArray
 from scipy.special import expit
 

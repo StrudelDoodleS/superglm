@@ -14,11 +14,22 @@ inner basis, exact against the fitted model.
 
 from __future__ import annotations
 
+import pickle
+
 import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import OrderedCategorical, Piecewise, Polynomial, Spline, SuperGLM
+from superglm import (
+    FactorSmooth,
+    Numeric,
+    OrderedCategorical,
+    Piecewise,
+    Polynomial,
+    RandomEffect,
+    Spline,
+    SuperGLM,
+)
 
 LEVELS = [f"Mi{i:03d}" for i in range(10)]
 
@@ -151,6 +162,237 @@ def test_curvature_family_of_two_freedoms_reports_a_joint_test() -> None:
             assert "[curvature, 2 params, chi2(2.0)=" in line
             return
     raise AssertionError("curvature family row missing")
+
+
+_TWIN_LABELS = list("abcdefgh")
+
+
+def _twin_frame(names, extra=None):
+    codes = np.tile(_TWIN_LABELS, 20)
+    frame = pd.DataFrame({name: codes for name in names})
+    for name, values in (extra or {}).items():
+        frame[name] = values
+    return frame, np.tile(np.arange(8.0) ** 2, 20) + np.sin(np.arange(160.0))
+
+
+def _twin_fit(names, degrees, extra_features=None, extra=None):
+    """Ordered piecewise terms on one column (issue #737), with any ``extra_features``."""
+    settings = {} if degrees is None else {"degrees": degrees}
+    features = {
+        name: OrderedCategorical(
+            order=_TWIN_LABELS, base="a", basis=Piecewise(breaks=["d"], **settings)
+        )
+        for name in names
+    }
+    features.update(extra_features or {})
+    X, y = _twin_frame(names, extra)
+    return SuperGLM(family="gaussian", features=features).fit(X, y), X, y
+
+
+def _structural_contrasts(model, name):
+    """Each structural row of ``name`` as rows over the fitted slopes, with its label."""
+    group = next(g for g in model._groups if g.feature_name == name)
+    width = len(model.result.beta)
+    out = []
+    for row in model._specs[name]._basis_spline.ordered_structural_rows():
+        if row.kind == "slope_change":
+            block = row.contrast[None, :]
+        else:
+            block = np.eye(group.size)[np.asarray(row.column_indices, dtype=np.intp)]
+        full = np.zeros((len(block), width))
+        full[:, group.sl] = block
+        out.append((row.kind, full))
+    return out
+
+
+def _design(model):
+    return np.column_stack([np.ones(model._dm.n), *[g.toarray() for g in model._dm.group_matrices]])
+
+
+def _rank_gain(model, contrasts):
+    """How much the slope contrasts raise the rank of ``[1, X]`` when appended."""
+    design = _design(model)
+    stacked = np.vstack([design, np.column_stack([np.zeros(len(contrasts)), contrasts])])
+    return int(np.linalg.matrix_rank(stacked) - np.linalg.matrix_rank(design))
+
+
+@pytest.mark.parametrize("degrees", [None, [2, 2], [3, 2]])
+def test_structural_rows_of_twin_ordered_piecewise_terms_carry_no_default_error(degrees) -> None:
+    """Two piecewise ordered terms on one column: no slope change or curvature is determined.
+
+    Moving the curve from one term to the other leaves the fit, so every structural
+    contrast raises the design's rank when appended. The default summary and the
+    metrics summary keep each row's estimate and give no error, interval or test:
+    the slope-change row, a one-freedom curvature row (degree 2) and the curvature
+    family (degree 3), on both terms.
+    """
+    model, X, y = _twin_fit(["a", "b"], degrees)
+    for name in ("a", "b"):
+        for _, contrasts in _structural_contrasts(model, name):
+            assert _rank_gain(model, contrasts) > 0
+    for summary in (model.summary(), model.metrics(X, y).summary()):
+        rows = [r for r in summary._coef_rows if "slope-change" in r.name or "curvature" in r.name]
+        assert {r.name.split("[")[0] for r in rows} == {"a", "b"}
+        for row in rows:
+            assert row.se is None and row.z is None and row.p is None, row.name
+            assert row.ci_low is None and row.ci_high is None, row.name
+            assert row.wald_chi2 is None and row.wald_p is None, row.name
+            assert row.ref_df is None or row.n_params == 1, row.name
+        slope_change = next(r for r in rows if r.name == "a[slope-change @ d]")
+        assert np.isfinite(slope_change.coef)
+        text = str(summary)
+        assert not any("curvature" in line and "chi2(" in line for line in text.splitlines())
+
+
+@pytest.mark.pins_behaviour
+def test_determined_structural_rows_keep_their_default_errors() -> None:
+    """Control (pins): a structural contrast the fit determines keeps its least-squares error.
+
+    One unaliased piecewise term: each row's error is ``sqrt(phi c'(X'X)^-1 c)`` of the
+    Gaussian fit, with ``phi`` the residual mean square. A linear term on the level
+    positions aliases the term's slopes, so no slope coefficient is determined, but the
+    slope change is: appending it leaves the design's rank, and its row keeps the
+    single term's error.
+    """
+    single, _, y = _twin_fit(["a"], [2, 2])
+    design = _design(single)
+    gram_inverse = np.linalg.inv(design.T @ design)
+    residual = y - design @ np.linalg.lstsq(design, y, rcond=None)[0]
+    phi = float(residual @ residual) / (len(y) - design.shape[1])
+    rows = {r.name: r for r in single.summary()._coef_rows}
+    expected = {}
+    for (_, contrasts), name in zip(
+        _structural_contrasts(single, "a"),
+        ["a[slope-change @ d]", "a[curvature a..d]", "a[curvature d..h]"],
+    ):
+        augmented = np.column_stack([np.zeros(len(contrasts)), contrasts])[0]
+        expected[name] = np.sqrt(phi * augmented @ gram_inverse @ augmented)
+        np.testing.assert_allclose(rows[name].se, expected[name], rtol=1e-9)
+        assert rows[name].p is not None
+
+    positions = np.tile(np.arange(8.0), 20)
+    aliased, X, y = _twin_fit(
+        ["a"], [2, 2], extra_features={"x": Numeric()}, extra={"x": positions}
+    )
+    slope_change = _structural_contrasts(aliased, "a")[0][1]
+    shown = aliased.result.rank_info.coefficient_estimable()
+    assert not np.all(shown[slope_change[0] != 0.0])
+    assert _rank_gain(aliased, slope_change) == 0
+    for summary in (aliased.summary(), aliased.metrics(X, y).summary()):
+        row = next(r for r in summary._coef_rows if r.name == "a[slope-change @ d]")
+        np.testing.assert_allclose(row.se, expected["a[slope-change @ d]"], rtol=1e-9)
+    # other rows re-form the covariance, and its own data rank decides the contrast
+    other = aliased.metrics(X.iloc[:120].reset_index(drop=True), y[:120] + 0.5).summary()
+    row = next(r for r in other._coef_rows if r.name == "a[slope-change @ d]")
+    assert row.se is not None and np.isfinite(row.se) and row.p is not None
+
+
+def test_metrics_on_other_rows_pickle_with_their_structural_decisions() -> None:
+    """Metrics re-formed on other rows pickle once read, and keep their structural decisions.
+
+    A metrics object on other rows keeps its re-formed data rank's contrast decision for
+    its summary; at dceef692b that was a local closure, and ``pickle.dumps`` raised.
+    Restored, the twin terms' slope change stays blank, and the aliased term's determined
+    one keeps the error a fresh object gives.
+    """
+    twin, X, y = _twin_fit(["a", "b"], None)
+    positions = np.tile(np.arange(8.0), 20)
+    aliased, X_aliased, _ = _twin_fit(
+        ["a"], [2, 2], extra_features={"x": Numeric()}, extra={"x": positions}
+    )
+    for model, frame, shown in ((twin, X, False), (aliased, X_aliased, True)):
+        other = frame.iloc[:120].reset_index(drop=True), y[:120] + 0.5
+        metrics = model.metrics(*other)
+        _ = metrics.coefficient_se
+        restored = pickle.loads(pickle.dumps(metrics))
+        row, fresh = (
+            next(r for r in m.summary()._coef_rows if r.name == "a[slope-change @ d]")
+            for m in (restored, model.metrics(*other))
+        )
+        assert (row.se is not None) is shown
+        assert row.se == fresh.se and row.p == fresh.p
+
+
+def _structured_fit(names, term, *, linear=False, direct_solve="auto"):
+    """Ordered piecewise ``names`` on eight bands crossed with 40 levels, twice per cell,
+    beside a structured ``term`` on the levels: a random effect, declared first so its
+    levels sit before the border columns, or an ``fs`` or ``sz`` factor smooth; with a
+    linear term on the band positions if ``linear``.
+    """
+    band = np.repeat(np.arange(8), 80)
+    level = np.tile(np.repeat(np.arange(40), 2), 8)
+    row = np.arange(len(band), dtype=float)
+    z = 0.5 + 0.5 * np.sin(0.7 * row)
+    X = pd.DataFrame({name: np.asarray(_TWIN_LABELS)[band] for name in names})
+    X["g"], X["x"], X["z"] = level.astype(str), band.astype(float), z
+    y = band**2.0 + 2.0 * np.cos(level) + np.sin(row) + z
+    features = {"g": RandomEffect()} if term == "random effect" else {}
+    for name in names:
+        features[name] = OrderedCategorical(
+            order=_TWIN_LABELS, base="a", basis=Piecewise(breaks=["d"])
+        )
+    if linear:
+        features["x"] = Numeric()
+    interactions = []
+    if term != "random effect":
+        features["z"] = Spline(n_knots=5)
+        interactions.append(FactorSmooth("z", group="g", basis=term, k=5))
+    model = SuperGLM(
+        family="gaussian",
+        features=features,
+        interactions=interactions,
+        direct_solve=direct_solve,
+    )
+    return model.fit_reml(X, y), X, y
+
+
+@pytest.mark.parametrize("term", ["random effect", "fs", "sz"])
+def test_structured_fits_decide_each_slope_change_on_their_own_data(term) -> None:
+    """A structured fit decides whether its data determine a slope change, as a dense fit does.
+
+    The terms cover the three compact geometries: a random effect's nested chain, an ``fs``
+    factor smooth's independent blocks and an ``sz`` one's balance tree.  With a linear term
+    on the band positions no slope coefficient is determined, but the slope change is:
+    it keeps the dense fit's error in both summaries, where dceef692b blanked it.  Twin
+    terms determine neither slope change, and both stay blank, where fe8a6eb9b showed them.
+    """
+    model, X, y = _structured_fit(["a"], term, linear=True)
+    assert model._fit_inference_info.get("structured_covariance")
+    slope_change = _structural_contrasts(model, "a")[0][1]
+    shown = model._fit_inference_info["coefficient_estimable"]
+    assert not np.all(shown[slope_change[0] != 0.0])
+    assert _rank_gain(model, slope_change) == 0
+    dense, _, _ = _structured_fit(["a"], term, linear=True, direct_solve="gram")
+    expected = next(r for r in dense.summary()._coef_rows if r.name == "a[slope-change @ d]").se
+    for summary in (model.summary(), model.metrics(X, y).summary()):
+        row = next(r for r in summary._coef_rows if r.name == "a[slope-change @ d]")
+        assert row.se is not None and row.p is not None
+        np.testing.assert_allclose(row.se, expected, rtol=1e-9)
+
+    twin, X, y = _structured_fit(["a", "b"], term)
+    assert twin._fit_inference_info.get("structured_covariance")
+    for name in ("a", "b"):
+        assert _rank_gain(twin, _structural_contrasts(twin, name)[0][1]) > 0
+    for summary in (twin.summary(), twin.metrics(X, y).summary()):
+        rows = [r for r in summary._coef_rows if "slope-change" in r.name]
+        assert len(rows) == 2
+        assert all(r.se is None and r.p is None for r in rows), [r.name for r in rows]
+
+
+def test_a_summary_saved_beside_an_ordered_piecewise_term_is_formed_again() -> None:
+    """A summary cached before the structural rows were checked is dropped on restore.
+
+    Pickled after ``summary()`` at fe8a6eb9b, the twin terms' model served that summary at
+    dceef692b: ``a[slope-change @ d]`` kept SE 0.2179 and p = 0, which ``summary(alpha=0.1)``
+    of the same restored model left blank.
+    """
+    model, _, _ = _twin_fit(["a", "b"], None)
+    stale = next(r for r in model.summary()._coef_rows if r.name == "a[slope-change @ d]")
+    stale.se, stale.z, stale.p = 0.21788071784804042, 35.3, 0.0  # what fe8a6eb9b cached
+    restored = pickle.loads(pickle.dumps(model))
+    row = next(r for r in restored.summary()._coef_rows if r.name == "a[slope-change @ d]")
+    assert row.se is None and row.z is None and row.p is None
+    assert np.isfinite(row.coef)
 
 
 def test_editor_stale_summary_keeps_the_basis_vocabulary(segmented_model) -> None:

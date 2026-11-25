@@ -11,20 +11,35 @@ these kernels offer ``screening_ops`` and the tests. The supported entry point i
 is internal.
 """
 
-from superglm.screening._pair_factor import (
-    PairFactor,
-    numeric_cat_factor,
-    numeric_numeric_factor,
-    pair_design_factor,
-)
-from superglm.screening._pair_moments import (
-    pair_cell_moments,
-    working_score,
-)
-from superglm.screening._score_stat import (
-    ScreenedPair,
-    penalized_score_statistic_ladder,
-)
+import typing as _typing
+
+from superglm._lazy import attach
+
+if _typing.TYPE_CHECKING:
+    from superglm.screening._pair_factor import (
+        PairFactor,
+        numeric_cat_factor,
+        numeric_numeric_factor,
+        pair_design_factor,
+    )
+    from superglm.screening._pair_moments import pair_cell_moments, working_score
+    from superglm.screening._score_stat import ScreenedPair, penalized_score_statistic_ladder
+
+# Each name is read from its module on first access (``superglm._lazy``): the package's body
+# imports none of its modules, so a thread that imports one of them by path while another thread
+# runs this body never waits on a sibling that thread holds.
+_LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
+    "superglm.screening._pair_factor": (
+        "PairFactor",
+        "numeric_cat_factor",
+        "numeric_numeric_factor",
+        "pair_design_factor",
+    ),
+    "superglm.screening._pair_moments": ("pair_cell_moments", "working_score"),
+    "superglm.screening._score_stat": ("ScreenedPair", "penalized_score_statistic_ladder"),
+}
+
+__getattr__, __dir__ = attach(__name__, __path__, _LAZY_EXPORTS)
 
 __all__ = [
     "PairFactor",

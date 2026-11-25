@@ -16,6 +16,7 @@ Kernels in ``(log mean, log cv)``: ``GammaLS``'s predictor jets.
 from math import exp, expm1, lgamma, log, log1p, sqrt
 
 import numpy as np
+import numpy.random
 from numba import njit
 
 from superglm.distributional.kernels._severity_primitives import gdev, gnorm, logratio, sres_0123
@@ -27,7 +28,7 @@ DATA = ('weight',)
 COORDINATES = 'log'
 LAWS = ('density', 'logsf', 'logcdf', 'logsf_uniform', 'logcdf_uniform')
 MAX_ORDER = 4
-PRIMITIVES_DIGEST = "f4e1e71de6e62a35536be2de7f21d2069fdb5a4bc9a56659cf0340ec0c54ae37"
+PRIMITIVES_DIGEST = "1552c0bc633fbef0125de686969af008e7e5a9adc32e1446b8ed23cccbb36d2f"
 ENGINES_DIGEST = "7c18b487b3adc9e8c37a2f9883388117ead12cd1188f5beedf8140e8b6a7313a"
 
 @njit(cache=True, nogil=True, error_model='numpy')

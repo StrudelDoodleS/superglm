@@ -22,6 +22,7 @@ from dataclasses import replace
 from typing import Any
 
 import numpy as np
+import numpy.random
 import scipy.sparse as sp
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray

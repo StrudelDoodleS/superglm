@@ -87,6 +87,7 @@ from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
+import scipy.spatial
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame

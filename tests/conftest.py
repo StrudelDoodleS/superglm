@@ -58,7 +58,8 @@ def pytest_configure(config):
             for name in names:
                 getattr(superglm, name)
         # The editor is a subpackage the root does not export, and it defines warnings too.
-        importlib.import_module("superglm.editor")
+        # Its body is lazy as well, and every name it exports comes from ``editor.session``.
+        importlib.import_module("superglm.editor.session")
     _register_numba_numpy_overloads()
 
 

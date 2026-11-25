@@ -15,6 +15,7 @@ of silently forking the look.
 
 from __future__ import annotations
 
+import html
 import re
 from contextlib import AbstractContextManager
 from importlib.resources import files

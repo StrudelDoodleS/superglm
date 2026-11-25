@@ -51,7 +51,9 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import scipy.linalg
 import scipy.linalg.lapack
+import scipy.spatial
 
 from superglm._frame import as_eager_frame
 from superglm._roundoff import UNIT_ROUNDOFF

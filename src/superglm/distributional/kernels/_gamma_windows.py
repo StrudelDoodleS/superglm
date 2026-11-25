@@ -22,6 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
+import numpy.random
 from numba import njit
 
 from superglm.distributional.kernels._incomplete_gamma import (
