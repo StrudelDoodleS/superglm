@@ -27,6 +27,9 @@ class Numeric:
     The column is passed through without any transformation.
     """
 
+    # What the term is.
+    _term_kind = "numeric"
+
     def __repr__(self) -> str:
         return "Numeric()"
 

@@ -49,7 +49,6 @@ from typing import Any
 import numpy as np
 
 from superglm.features._spline_ranges import SHAPE_NAMES, PolynomialRange, RangeError
-from superglm.features.categorical import Categorical
 from superglm.features.grouping import native_by_text
 from superglm.features.ordered_categorical import OrderedCategorical, _spline_kind_name
 from superglm.features.rebuild import (
@@ -72,7 +71,6 @@ from superglm.features.rebuild import (
     source_spline,
     states_positional_breaks,
 )
-from superglm.features.spline import _SplineBase
 from superglm.model import SuperGLM
 from superglm.model.fit_state import configured_family, configured_lambda2, configured_penalty
 
@@ -557,15 +555,13 @@ def _require_superglm(model, method: str) -> None:
         raise StructureError(_NOT_A_SUPERGLM.format(method=method, kind=type(model).__name__))
 
 
+# The structure kind of each term kind it records.
+_STRUCTURE_KINDS = {"ordered": "ordered", "categorical": "categorical", "spline": "spline"}
+
+
 def _kind(spec) -> str | None:
     """The structure kind of a feature spec, or None for a kind it does not record."""
-    if isinstance(spec, OrderedCategorical):
-        return "ordered"
-    if isinstance(spec, Categorical):
-        return "categorical"
-    if isinstance(spec, _SplineBase):
-        return "spline"
-    return None
+    return _STRUCTURE_KINDS.get(getattr(spec, "_term_kind", None))
 
 
 def _level_structure(name: str, spec, kind: str, frame) -> FeatureStructure:

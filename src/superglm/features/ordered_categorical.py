@@ -365,6 +365,9 @@ class OrderedCategorical:
         Categorical(base="most_exposed")
     """
 
+    # What the term is.
+    _term_kind = "ordered"
+
     @property
     def _build_weight(self) -> str:
         """The weights its build learns from (``_predictor_compiler._Build.weight``).

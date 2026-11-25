@@ -57,27 +57,19 @@ def term_from_inference(ti) -> EditableTerm:
     )
 
 
-def term_type_from_spec(spec) -> str:
-    from superglm.features.categorical import Categorical
-    from superglm.features.numeric import Numeric
-    from superglm.features.ordered_categorical import OrderedCategorical
-    from superglm.features.piecewise import Piecewise
-    from superglm.features.polynomial import Polynomial
-    from superglm.features.spline import _SplineBase
+# The editor's label for each term kind.
+_TERM_TYPES = {
+    "spline": "spline",
+    "ordered": "ordered categorical",
+    "categorical": "categorical",
+    "piecewise": "piecewise",
+    "polynomial": "polynomial",
+    "numeric": "numeric",
+}
 
-    if isinstance(spec, _SplineBase):
-        return "spline"
-    if isinstance(spec, OrderedCategorical):
-        return "ordered categorical"
-    if isinstance(spec, Categorical):
-        return "categorical"
-    if isinstance(spec, Piecewise):
-        return "piecewise"
-    if isinstance(spec, Polynomial):
-        return "polynomial"
-    if isinstance(spec, Numeric):
-        return "numeric"
-    return type(spec).__name__
+
+def term_type_from_spec(spec) -> str:
+    return _TERM_TYPES.get(getattr(spec, "_term_kind", None), type(spec).__name__)
 
 
 def term_weights_from_fit(model, name: str, term: EditableTerm) -> NDArray:

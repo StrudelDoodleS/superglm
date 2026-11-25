@@ -337,8 +337,9 @@ class Categorical:
         shape rule needs ordered levels; use ``OrderedCategorical`` for one.
     """
 
-    # The weights its build learns from (``_predictor_compiler._Build.weight``).
-    # The base and level reporting follow the reporting weights.
+    # What the term is, and the weights its build learns from
+    # (``_predictor_compiler._Build.weight``). The base and level reporting follow the reporting weights.
+    _term_kind = "categorical"
     _build_weight = "reporting"
 
     # Class-level defaults for the level-universe state.  Unpickling bypasses

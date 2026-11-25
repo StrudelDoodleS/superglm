@@ -560,17 +560,16 @@ class TermResults(dict):
         return dict.get(self, resolve_label(key, dict.keys(self)), default)
 
 
+# The helper that declares each term kind in a terms list.
+_DECLARATIONS = {"random_effect": "re", "categorical": "cat", "spline": "s"}
+
+
 def declaration_text(column: Hashable, spec: object) -> str:
     """How a main term on ``column`` reads in a terms list, for messages."""
-    from superglm.features.categorical import Categorical as _Categorical
-
-    if isinstance(spec, RandomEffect):
-        return f"re({column!r})"
-    if isinstance(spec, _Categorical) and not isinstance(spec, OrderedCategorical):
-        return f"cat({column!r})"
-    if isinstance(spec, _SplineBase):
-        return f"s({column!r})"
-    return f"term({column!r}, {type(spec).__name__}(...))"
+    helper = _DECLARATIONS.get(getattr(spec, "_term_kind", None))
+    if helper is None:
+        return f"term({column!r}, {type(spec).__name__}(...))"
+    return f"{helper}({column!r})"
 
 
 def _ti_parent_message(parent: str, spec: FeatureSpec, parents: tuple[str, str]) -> str:

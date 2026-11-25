@@ -448,92 +448,34 @@ def auto_detect_features(
     logger.info("\n".join(lines))
 
 
-def _spec_kind(spec: FeatureSpec) -> str:
-    """Classify a feature spec into one of the four canonical kinds."""
-    from superglm.features.categorical import Categorical
-    from superglm.features.numeric import Numeric
-    from superglm.features.ordered_categorical import OrderedCategorical
-    from superglm.features.polynomial import Polynomial
-    from superglm.features.spline import _SplineBase
-
-    if isinstance(spec, _SplineBase):
-        return "spline"
-    if isinstance(spec, Polynomial):
-        return "polynomial"
-    if isinstance(spec, Numeric):
-        return "numeric"
-    if isinstance(spec, Categorical):
-        return "categorical"
-    if isinstance(spec, OrderedCategorical):
-        # Always the smooth: ``add_interaction`` refuses an OrderedCategorical
-        # without an inner spline before it reaches here.
-        return "spline"
-    return type(spec).__name__
-
-
-# ── Interaction factories ─────────────────────────────────────────
-# Each returns (iname, ispec) given (feat1, feat2, name, **kwargs).
-# For asymmetric pairs the factory receives the canonical orientation
-# (e.g. spline first, categorical second).
-
-
-def _make_spline_categorical(f1: str, f2: str, *, name: str | None, **kw: Any) -> tuple[str, Any]:
-    from superglm.features.interaction import SplineCategorical
-
-    return name or f"{f1}:{f2}", SplineCategorical(f1, f2)
-
-
-def _make_polynomial_categorical(
-    f1: str, f2: str, *, name: str | None, **kw: Any
-) -> tuple[str, Any]:
-    from superglm.features.interaction import PolynomialCategorical
-
-    return name or f"{f1}:{f2}", PolynomialCategorical(f1, f2)
-
-
-def _make_numeric_categorical(f1: str, f2: str, *, name: str | None, **kw: Any) -> tuple[str, Any]:
-    from superglm.features.interaction import NumericCategorical
-
-    return name or f"{f1}:{f2}", NumericCategorical(f1, f2)
-
-
-def _make_categorical_interaction(
-    f1: str, f2: str, *, name: str | None, **kw: Any
-) -> tuple[str, Any]:
-    from superglm.features.interaction import CategoricalInteraction
-
-    return name or f"{f1}:{f2}", CategoricalInteraction(f1, f2)
-
-
-def _make_numeric_interaction(f1: str, f2: str, *, name: str | None, **kw: Any) -> tuple[str, Any]:
-    from superglm.features.interaction import NumericInteraction
-
-    return name or f"{f1}:{f2}", NumericInteraction(f1, f2)
-
-
-def _make_polynomial_interaction(
-    f1: str, f2: str, *, name: str | None, **kw: Any
-) -> tuple[str, Any]:
-    from superglm.features.interaction import PolynomialInteraction
-
-    return name or f"{f1}:{f2}", PolynomialInteraction(f1, f2)
-
-
-def _make_tensor_interaction(f1: str, f2: str, *, name: str | None, **kw: Any) -> tuple[str, Any]:
-    from superglm.features.interaction import TensorInteraction
-
-    return name or f"{f1}:{f2}", TensorInteraction(f1, f2, **kw)
-
-
-_INTERACTION_FACTORIES: dict[tuple[str, str], Any] = {
-    ("spline", "categorical"): _make_spline_categorical,
-    ("polynomial", "categorical"): _make_polynomial_categorical,
-    ("numeric", "categorical"): _make_numeric_categorical,
-    ("categorical", "categorical"): _make_categorical_interaction,
-    ("numeric", "numeric"): _make_numeric_interaction,
-    ("polynomial", "polynomial"): _make_polynomial_interaction,
-    ("spline", "spline"): _make_tensor_interaction,
+# How each term kind pairs in an interaction. A smoothed ordinal pairs as its
+# spline: ``add_interaction`` refuses an OrderedCategorical without one first.
+_INTERACTION_KINDS = {
+    "spline": "spline",
+    "ordered": "spline",
+    "polynomial": "polynomial",
+    "numeric": "numeric",
+    "categorical": "categorical",
 }
+
+# The interaction class each pair of parent kinds builds. An asymmetric pair is
+# listed in one orientation (spline first, categorical second) and matched
+# either way round; ``add_interaction`` passes the parents in this orientation.
+_INTERACTION_CLASSES: dict[tuple[str, str], str] = {
+    ("spline", "categorical"): "SplineCategorical",
+    ("polynomial", "categorical"): "PolynomialCategorical",
+    ("numeric", "categorical"): "NumericCategorical",
+    ("categorical", "categorical"): "CategoricalInteraction",
+    ("numeric", "numeric"): "NumericInteraction",
+    ("polynomial", "polynomial"): "PolynomialInteraction",
+    ("spline", "spline"): "TensorInteraction",
+}
+
+
+def _spec_kind(spec: FeatureSpec) -> str:
+    """Classify a feature spec into one of the four canonical kinds, else its class name."""
+    kind = _INTERACTION_KINDS.get(getattr(spec, "_term_kind", None))
+    return type(spec).__name__ if kind is None else kind
 
 
 def _shared_row_support(B_csr, supports: dict | None):
@@ -697,22 +639,22 @@ def add_interaction(
         raise ValueError(f"Parent feature not found: {feat2}")
     refuse_unsupported_interaction_parents(feat1, feat2, specs)
 
+    from superglm.features import interaction
+
     kind1 = _spec_kind(specs[feat1])
     kind2 = _spec_kind(specs[feat2])
-
-    factory = _INTERACTION_FACTORIES.get((kind1, kind2))
-    if factory is not None:
-        iname, ispec = factory(feat1, feat2, name=name, **kwargs)
+    if (kind1, kind2) in _INTERACTION_CLASSES:
+        parents, cls = (feat1, feat2), getattr(interaction, _INTERACTION_CLASSES[kind1, kind2])
+    elif (kind2, kind1) in _INTERACTION_CLASSES:
+        parents, cls = (feat2, feat1), getattr(interaction, _INTERACTION_CLASSES[kind2, kind1])
     else:
-        # Try swapped orientation (asymmetric pairs like categorical+spline)
-        factory = _INTERACTION_FACTORIES.get((kind2, kind1))
-        if factory is not None:
-            iname, ispec = factory(feat2, feat1, name=name, **kwargs)
-        else:
-            raise TypeError(
-                f"Cannot create interaction between {kind1} "
-                f"and {kind2}. Supported: {', '.join('+'.join(k) for k in _INTERACTION_FACTORIES)}."
-            )
+        raise TypeError(
+            f"Cannot create interaction between {kind1} "
+            f"and {kind2}. Supported: {', '.join('+'.join(k) for k in _INTERACTION_CLASSES)}."
+        )
+    # Only a tensor takes keyword arguments; every other pair drops them.
+    ispec = cls(*parents, **kwargs) if cls is interaction.TensorInteraction else cls(*parents)
+    iname = name or f"{parents[0]}:{parents[1]}"
 
     if iname in interaction_specs:
         raise ValueError(f"Interaction already added: {iname}")

@@ -254,8 +254,9 @@ class Piecewise:
     with more knots displays a subsample and the rest cannot be dragged.
     """
 
-    # The weights its build learns from (``_predictor_compiler._Build.weight``).
-    # Breaks and centring follow the model geometry.
+    # What the term is, and the weights its build learns from
+    # (``_predictor_compiler._Build.weight``). Breaks and centring follow the model geometry.
+    _term_kind = "piecewise"
     _build_weight = "geometry"
 
     # Opt out of the editor's 12-handle default (see `editor/controls.py`): every

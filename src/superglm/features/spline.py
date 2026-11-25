@@ -110,8 +110,9 @@ class _SplineBase:
         native continuation. ``"error"`` raises on out-of-range values.
     """
 
-    # The weights its build learns from (``_predictor_compiler._Build.weight``).
-    # Knots and centring follow the model geometry.
+    # What the term is, and the weights its build learns from
+    # (``_predictor_compiler._Build.weight``). Knots and centring follow the model geometry.
+    _term_kind = "spline"
     _build_weight = "geometry"
 
     # ── Basis capability metadata (override in subclasses) ────────
