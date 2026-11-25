@@ -806,17 +806,19 @@ class SuperGLM:
             ``["n_presolve_iter"]`` the pre-solve.
         reml_tol : float, optional
             Stopping tolerance for smoothing-parameter selection. Defaults to
-            ``1e-9`` (``1e-6`` for ``interaction_mode="fast_candidate"`` and
-            ``estimate_p`` search candidates; explicit values on the discrete
-            path are floored at ``1e-12``). The optimizer stops when both the
-            log-lambda gradient and objective change drop below
-            ``reml_tol * (1 + |objective|)`` on active terms, or when the
-            Newton step and estimated remaining distance drop below
-            ``min(1e-3, 1e6 * reml_tol)`` in log-lambda
+            ``1e-9`` (``1e-6`` for ``interaction_mode="fast_candidate"`` on
+            models with interactions, and for ``estimate_p`` search candidates;
+            explicit values on the discrete path are floored at ``1e-12``). The
+            optimizer stops when both the log-lambda gradient and objective
+            change drop below ``reml_tol * (1 + |objective|)`` on active terms
+            (with the score test also capped at ``1e-4`` nats per log-lambda at
+            default fidelity, scaling proportionally with ``reml_tol``), or when
+            the Newton step and estimated remaining distance drop below
+            ``min(1e-3, 1e6 * reml_tol)`` in log-lambda on an unmodified
+            positive-definite Hessian
             (``termination_reason="newton_step_tolerance"``). Near-flat
-            directions with gradient below ``1e-4`` nats per log-lambda (scaled
-            proportionally for tighter tolerances) and negligible curvature are
-            frozen in place and recorded under
+            directions with gradient below that score limit and negligible
+            relative row curvature are frozen in place and recorded under
             ``reml_diagnostics()["profile"]["reml_freeze_decision"]``. Stopping
             at line-search precision reports
             ``termination_reason="converged_at_precision"`` with
@@ -842,8 +844,11 @@ class SuperGLM:
             a different point. A float or ``None`` uses the default start.
         interaction_mode : {"full", "fast_candidate"}, default "full"
             ``"full"`` runs standard REML. ``"fast_candidate"`` caps outer
-            updates at 5 with looser tolerance for screening candidate
-            interactions before running the normal final refit.
+            updates at 5 (and defaults ``reml_tol`` to ``1e-6`` when
+            ``reml_tol`` is not passed) for models with interactions before
+            running the normal final refit; models without interactions run
+            unchanged. Intended for screening candidate interactions before a
+            full final fit.
         runtime_validation : optional
             Deprecated and ignored. Emits a ``FutureWarning`` when passed.
         verbose : bool, default False

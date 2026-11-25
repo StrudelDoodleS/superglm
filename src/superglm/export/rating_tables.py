@@ -74,13 +74,14 @@ class InteractionTableBlock:
 
     ``kind`` records how the block represents the interaction: ``"cells"`` is an
     exact cell table (categorical-by-categorical, or spline-by-categorical on an
-    ordinal parent), ``"grid"`` is a continuous surface sampled at ``n_bins``
-    nodes per axis, and ``"spline_cells"`` is a spline-by-categorical deviation
+    ordinal parent), ``"grid"`` is an approximate continuous surface sampled at
+    ``n_bins`` nodes per axis (not exact between grid nodes), and
+    ``"spline_cells"`` is an approximate spline-by-categorical deviation
     tabulated per covariate bin and categorical level (evaluated at each bin's
     representative, or as the band's weighted mean under
-    ``bin_strategy="exact"``). Recording ``kind`` here lets
-    ``_gridded_interaction_names`` read the approximation set directly from the
-    built blocks.
+    ``bin_strategy="exact"``; not exact between representatives or at unobserved
+    values). Recording ``kind`` here lets ``_gridded_interaction_names`` read
+    the approximation set directly from the built blocks.
     """
 
     name: str
@@ -679,7 +680,8 @@ def _piecewise_block(model: SuperGLM, name: str, centering: str) -> RatingTableB
     Emits three columns (knot value, ``Relativity``, and ``Log relativity``)
     with no binning. The model is linear in ``Log relativity`` between knots, so
     linear interpolation on ``Log relativity`` followed by ``exp`` reproduces
-    the model exactly. Records ``centering_shift`` on the block so
+    the model exactly (linearly interpolating ``Relativity`` is only
+    approximate). Records ``centering_shift`` on the block so
     ``base_relativity`` absorbs the shift under ``centering="mean"``.
     """
     ti = _main_effect_inference(model, name, centering)
@@ -965,13 +967,13 @@ def _require_usable_relativities_export(
 ) -> None:
     """Refuse any main-effect or interaction block carrying an unusable factor.
 
-    Rejects every block value that is non-finite or outside the open interval
-    ``(exp(-_MAX_LOG_REL), exp(_MAX_LOG_REL))``. This catches both values
-    clipped at ``exp(+/-500)`` by ``_safe_exp`` and values from plain ``np.exp``
-    that overflowed to ``inf``, underflowed to subnormals or ``0.0``, or are
-    negative (including extrapolated corner cells of a continuous interaction
-    grid). Checked per block rather than on the product so cancelling extreme
-    terms cannot slip through.
+    Raises ``ValueError`` if any block value is non-finite or outside the open
+    interval ``(exp(-_MAX_LOG_REL), exp(_MAX_LOG_REL))``. This catches both
+    values clipped at ``exp(+/-500)`` by ``_safe_exp`` and values from plain
+    ``np.exp`` that overflowed to ``inf``, underflowed to subnormals or ``0.0``,
+    or are negative (including extrapolated corner cells of a continuous
+    interaction grid). Checked per block rather than on the product so
+    cancelling extreme terms cannot slip through.
     """
     from superglm.inference._term_types import _MAX_LOG_REL
 
@@ -1017,9 +1019,9 @@ def _require_usable_offset_multipliers(multiplier: NDArray) -> None:
     because large offset and term contributions can cancel in the sum while the
     offset factor itself overflows or underflows.
 
-    Every row is checked unweighted against the shared ``(exp(-500), exp(500))``
-    band (endpoints excluded to match ``_require_usable_relativities_export``),
-    so a single unusable row raises even if its weight is zero.
+    Every row is checked unweighted: raises ``ValueError`` if any multiplier is
+    non-finite or outside ``(exp(-500), exp(500))`` (endpoints excluded to match
+    ``_require_usable_relativities_export``), even if its weight is zero.
     """
     from superglm.inference._term_types import _MAX_LOG_REL
 
@@ -1905,22 +1907,27 @@ def build_rating_table_payload(
     ``base_relativity`` times one relativity per main-effect block, times one
     per interaction block, reproduces ``model.predict`` on every row whose
     linear predictor stays inside the log-link stability range ``[-80, 80]``.
-    Non-log links, ``Binomial`` models, saturated predictors on ``X``, and
-    unusable per-block factors are refused at the boundary.
+    Non-log links, ``Binomial`` models, frames ``X`` that already saturate
+    ``[-80, 80]``, and unusable per-block factors are refused at the boundary;
+    because the payload is frame-independent, a table that exports cleanly on
+    ``X`` still diverges from ``model.predict`` on any later risk whose linear
+    predictor leaves ``[-80, 80]`` (returning ``exp(eta)`` where the model
+    clips).
 
-    Exact blocks
-    ------------
+    .. rubric:: Exact blocks
+
     ``Categorical``, ``OrderedCategorical``, ``Numeric``, ``Piecewise``, and
     categorical-by-categorical (or ordinal-parent spline-by-categorical)
     interactions are tabulated without binning and reproduce ``model.predict``
     to float64 round-off. Two interaction limitations apply: interactions whose
     categorical parent uses ``grouping=`` are keyed on grouped level labels while
-    the main-effect block expands to raw labels, and continuous grids with a
-    spline-mode ``OrderedCategorical`` parent print mapped-score axes rather
-    than level labels.
+    the main-effect block expands to raw labels with no map between them (so the
+    multiplicative product contract holds for ungrouped interaction parents), and
+    continuous grids with a spline-mode ``OrderedCategorical`` parent print
+    mapped-score axes rather than level labels.
 
-    Offsets
-    -------
+    .. rubric:: Offsets
+
     ``offset_max_exact_levels`` governs BOTH paths — the declared path via
     ``offset_source=`` and the undeclared path using the offset vector alone —
     selecting a per-level lookup up to that cap and a single exact ``"per_unit"``
@@ -1928,7 +1935,9 @@ def build_rating_table_payload(
     path counts distinct values of the SOURCE column, whereas the undeclared
     path counts distinct MULTIPLIERS (``exp(offset)`` rounded to 12 significant
     digits). On the undeclared path the per-unit row is keyed on the MULTIPLIER
-    itself (with ``Relativity = 1.0``) because no column was declared.
+    itself (with ``Relativity = 1.0``) because no column was declared. A per-unit
+    offset block has no bounds or extrapolation rule (the relation holds at any
+    magnitude).
 
     ``offset_kind`` controls the emitted shape:
 
@@ -1936,74 +1945,128 @@ def build_rating_table_payload(
       otherwise ``"per_unit"``.
     - ``"discrete"``: exact lookup; a declared source raises above the cap,
       while the undeclared path falls through to ``"per_unit"``.
-    - ``"per_unit"``: always emits the exact per-unit relation (verified
-      against ``offset_mapping_rtol`` relative to block scale).
+    - ``"per_unit"``: always emits the exact per-unit relation (verified on
+      every row against ``offset_mapping_rtol`` relative to block scale, with no
+      absolute floor; non-numeric, non-positive, or non-proportional declared
+      sources raise ``OffsetRelationError``).
     - ``"binned"``: exposure-banded summary on the undeclared path only
-      (refused when ``offset_source`` is declared). Empty bins report their
-      interval midpoint with weight 0, and the block is included in the
+      (refused when ``offset_source`` is declared, and refused with
+      ``bin_strategy="exact"`` on an offset-fitted model). Empty bins report
+      their interval midpoint with weight 0, and the block is included in the
       discretization-impact sweep.
 
-    Continuous terms and ``continuous_kind``
-    ----------------------------------------
+    For an offset-fitted model, exporting on a frame other than the original fit
+    frame requires ``offset=``; passing ``offset=`` or ``offset_source=`` for a
+    model fitted without an offset raises ``ValueError``.
+
+    .. rubric:: Continuous terms and ``continuous_kind``
+
     ``continuous_kind : {"binned", "ppform"}, default "binned"`` selects how
     continuous main-effect terms are represented:
 
     - ``"binned"`` approximates each spline or polynomial curve by interval
-      averages (geometry-weighted under ``"frequency"``, physical-row-weighted
-      under ``"prior"``). Measured on a motor book with 81 distinct ages at
-      ``n_bins=150``, the worst row was mis-rated by 60% in sparse tail bins.
-      ``n_bins`` is a BUDGET, not a target: a covariate with fewer distinct
-      values than that budget is still binned. Under ``bin_strategy="exact"``,
-      bands are placed to keep every value within
-      ``min(band_se * SE, log(1 + band_max_error))`` of the curve (jointly with
-      any spline-by-categorical interactions on the same covariate), widening
-      with a warning if ``n_bins`` is too small.
+      averages (geometry-weighted under ``"frequency"``, unweighted per
+      positive-weight physical row under ``"prior"``). Measured on a motor book
+      with 81 distinct ages at ``n_bins=150``, the worst row was mis-rated by
+      60% in sparse tail bins. ``n_bins`` is a BUDGET, not a target: a covariate
+      with fewer distinct values than that budget is still binned. Under
+      ``bin_strategy="exact"``, the fewest bands up to ``n_bins`` are placed to
+      keep the band average within
+      ``min(band_se * SE, log(1 + band_max_error))`` of the curve at every
+      positive-weight observed value in ``X`` (not at unobserved values between
+      them, where the curve can bend). When ``SplineCategorical`` interactions
+      share the covariate, one shared set of bands holds the main effect and
+      each level's total relativity (main effect plus that level's deviation,
+      each with its own standard error; or the deviations alone when
+      ``continuous_kind="ppform"`` makes the main effect exact) within that
+      limit at every positive-weight observed value, with each cell equal to the
+      band's weighted mean of the level's deviation; with multiple such
+      interactions on one covariate, every combination of levels observed among
+      the positive-weight rows of ``X`` is certified too (unobserved level
+      combinations are not certified). If ``n_bins`` is too small, every limit
+      is widened by one common factor with a warning per covariate and recorded
+      in the impact sheet's ``band_*`` columns on its main and interaction rows.
+      A term with a ``Constraint.postfit`` repair or a model with editor
+      coefficient edits is refused under ``bin_strategy="exact"``.
     - ``"ppform"`` exports each spline's exact piecewise-polynomial form: one
       row per knot interval with SEVEN columns rather than three (``<feature>``,
-      ``Relativity``, ``Weight``, followed by ``a``, ``b``, ``c``, ``d``). A
-      consumer reads both bounds back out of the interval key and evaluates
-      ``exp(a + b*u + c*u**2 + d*u**3)`` with
-      ``u = (x - lower) / (upper - lower)`` on bounded rows, and reads
-      ``Relativity`` directly on unbounded tail rows. An un-upgraded loader
+      ``Relativity``, ``Weight``, followed by ``a``, ``b``, ``c``, ``d``).
+      ``Relativity`` is the curve value at the interval's lower bound
+      (``u = 0``), not an interval average. A consumer reads both bounds back
+      out of the interval key and evaluates ``exp(a + b*u + c*u**2 + d*u**3)``
+      with ``u = (x - lower) / (upper - lower)`` on bounded rows, and reads
+      ``Relativity`` directly on unbounded tail rows (do not evaluate the cubic
+      formula on unbounded rows, where ``u`` is ``nan``). An un-upgraded loader
       still reads it as a step function from the first three columns; a
       consumer that stores coefficients must include them in any content digest
       so models differing only in polynomial coefficients do not fingerprint
       identically.
     - Under ``"ppform"``, ``extrapolation="clip"`` emits constant unbounded
-      tail rows, ``extrapolation="error"`` emits no unbounded rows, and
-      ``extrapolation="extend"`` raises unless
-      ``allow_unbounded_extrapolation=True`` (which clips tails to the boundary).
-      Terms with ``Constraint.postfit`` repairs are refused under ``"ppform"``;
+      tail rows, ``extrapolation="error"`` emits no unbounded rows (with the
+      last knot interval right-closed so the upper boundary knot still matches),
+      and ``extrapolation="extend"`` raises unless
+      ``allow_unbounded_extrapolation=True`` (which clips tails to the boundary,
+      so exactness holds over the knot range alone). Terms with
+      ``Constraint.postfit`` repairs are refused under ``"ppform"``;
       ``Constraint.fit`` constraints convert unchanged. ``Polynomial`` terms
-      stay binned, as do continuous-by-continuous interaction grids.
+      stay binned, as do continuous-by-continuous interaction grids; converted
+      splines are omitted from the discretization-impact sweep.
 
-    Interactions and discretization impact
-    --------------------------------------
+    .. rubric:: Interactions and discretization impact
+
     Continuous-by-continuous interactions export as ``"grid"`` blocks sampled at
-    ``n_bins`` nodes per axis; ``SplineCategorical`` interactions on numeric
-    parents export as ``"spline_cells"`` blocks keyed on covariate bins and
-    categorical levels. All approximated blocks (binned main effects, sampled
-    grids, binned spline-categorical deviations, and ``offset_kind="binned"``)
-    are swept across ``impact_bins`` plus the exported ``n_bins`` with joint
-    unclipped prediction-change metrics, and boundaries are printed at
-    round-trip precision.
+    ``n_bins`` nodes per axis (nearest-node lookup, not interval binning); a
+    custom grid-shaped interaction over a ``Categorical`` or unspec'd parent is
+    refused with ``NotImplementedError``. ``SplineCategorical`` interactions on
+    numeric parents export as ``"spline_cells"`` blocks keyed on covariate bins
+    and categorical level text (base level ``1.0``; unseen levels have no column
+    and are rated as the base level; distinct levels sharing one text raise
+    ``ValueError``). Under non-``"exact"`` strategies, cells are evaluated at
+    bin representatives (exact at representatives, approximate between them).
+    When the spline parent is an ``OrderedCategorical``, the interaction exports
+    as an exact ``"cells"`` block and is excluded from the impact sheet.
 
-    Centering
-    ---------
+    All approximated blocks (binned main effects, sampled grids, binned
+    spline-categorical deviations, and ``offset_kind="binned"``) are swept
+    across ``impact_bins`` plus the exported ``n_bins`` with joint unclipped
+    prediction-change metrics (within one ``n_bins`` group only ``feature`` and
+    ``actual_bins`` vary), and boundaries are printed at round-trip precision.
+    Each swept resolution is an independent measurement because nearest-node
+    grids are not nested; read the ``exported=True`` row rather than the
+    smallest error on the sheet. Passing ``impact_bins=()`` skips the comparison
+    sweep and returns an empty impact table (the workbook still writes the sheet
+    headers with no rows), while still evaluating and validating the exported
+    ``n_bins`` resolution (raising ``OverflowError`` if an approximated
+    prediction is non-finite or zero; comparison rungs that overflow record
+    infinite change and a ``note`` instead).
+
+    .. rubric:: Centering
+
     ``centering="native"`` keeps each term under its fit identifiability
     constraint. ``centering="mean"`` shifts ``Categorical``, ``Piecewise``, and
-    binned continuous blocks by their ``term_inference`` centering shift and
-    folds the sum into ``base_relativity`` so the workbook product is unchanged
-    (Anderson et al., CAS Study Note, 3rd ed. 2007, s1.127–1.129; Goldburd et
-    al., CAS Monograph 5, 2nd ed., s2.4.3; Werner & Modlin, *Basic Ratemaking*,
-    4th ed. 2010, ch. 10 & 14). ``OrderedCategorical``, ``Numeric``, and offset
-    blocks are not re-centred.
+    continuous (binned and ``ppform``) blocks by their ``term_inference``
+    centering shift and folds the sum into ``base_relativity`` so the workbook
+    product is unchanged (Anderson et al., CAS Study Note, 3rd ed. 2007,
+    s1.127–1.129; Goldburd et al., CAS Monograph 5, 2nd ed., s2.4.3; Werner &
+    Modlin, *Basic Ratemaking*, 4th ed. 2010, ch. 10 & 14). For binned
+    continuous blocks, using the ``term_inference`` grid shift preserves one
+    shared origin across the workbook rather than setting
+    ``exp(mean(log(Relativity)))`` over the bin rows to ``1``.
+    ``OrderedCategorical``, ``Numeric``, offset, and interaction blocks are not
+    re-centred.
 
     Raises
     ------
     ValueError
         If ``centering``, ``continuous_kind``, or ``offset_kind`` is invalid;
-        if the model link is not ``log`` or the family is ``Binomial``; if
+        if ``band_se`` or ``band_max_error`` is not positive and finite; if
+        ``bin_strategy="exact"`` is combined with ``offset_kind="binned"`` on an
+        offset-fitted model, a ``Constraint.postfit`` term, or an editor-edited
+        model; if the model link is not ``log`` or the family is ``Binomial``;
+        if a ``SplineCategorical`` parent has distinct levels sharing the same
+        string text; if ``offset`` or ``offset_source`` is missing, mismatched,
+        non-proportional (``OffsetRelationError``), or exceeds
+        ``offset_max_exact_levels`` under ``offset_kind="discrete"``; if
         ``model.predict`` saturates on ``X``; if any emitted relativity or
         per-unit offset multiplier is non-finite or outside
         ``(exp(-500), exp(500))``; or under ``continuous_kind="ppform"`` if a
@@ -2011,11 +2074,16 @@ def build_rating_table_payload(
         ``extrapolation="extend"`` without
         ``allow_unbounded_extrapolation=True``. Checked before
         ``base_relativity`` when both fail.
+    OverflowError
+        If an approximated prediction at the exported ``n_bins`` resolution is
+        non-finite or zero (even when ``impact_bins=()``).
     RatingTableBaseNotRepresentableError
-        If ``base_relativity`` overflows, underflows to zero, or is subnormal.
+        Subclass of ``OverflowError`` raised if ``base_relativity`` overflows,
+        underflows to zero, or is subnormal.
     NotImplementedError
         If the model contains an unsupported term type (``RandomEffect``,
-        ``FactorSmooth``, or an unsupported custom interaction).
+        ``FactorSmooth``, a grid interaction over an unpositionable parent, or
+        an unsupported custom interaction).
     RuntimeError
         If ``model`` has not been fitted.
     """
@@ -2342,17 +2410,26 @@ def export_rating_tables(
         maximum band count under ``bin_strategy="exact"``.
     impact_bins : tuple of int, default (20, 50, 100, 200, 250)
         Bin counts swept on the discretization-impact sheet alongside ``n_bins``.
+        Passing an empty tuple ``()`` leaves the impact table and sheet empty
+        (headers only) while still evaluating and validating the exported
+        ``n_bins`` resolution (raising ``OverflowError`` if an approximated
+        prediction is non-finite or zero).
     bin_strategy : str, default "exposure_quantile"
         Binning rule for binned continuous blocks: ``"exposure_quantile"``,
         ``"uniform"``, ``"winsorized"``, or ``"exact"``. Under ``"exact"``,
         band averages stay within ``min(band_se * SE, log(1 + band_max_error))``
-        of the curve unless ``n_bins`` forces a wider limit (which warns).
+        of the curve at every positive-weight observed value in ``X`` (not at
+        unobserved values between them), and jointly for each level and each
+        level combination observed among positive-weight rows of ``X`` for
+        shared spline-by-categorical interactions (unobserved level combinations
+        are not certified), unless ``n_bins`` forces a wider limit (which warns).
     band_se : float, default 1.0
         Pointwise standard-error tolerance under ``bin_strategy="exact"``.
     band_max_error : float, default 0.10
         Maximum relative error tolerance under ``bin_strategy="exact"``.
     format : str or None, default None
-        Optional explicit output format (Excel ``"xlsx"``).
+        Optional explicit output format (``"xlsx"``, ``"xlsm"``, or ``"excel"``;
+        inferred from ``file_path`` when ``None``).
     sheet_name : str, default "Rating Tables"
         Worksheet name for main-effect and interaction rating tables.
     summary_sheet_name : str, default "Model Summary"
@@ -2361,7 +2438,7 @@ def export_rating_tables(
         Worksheet name for the discretization-impact sweep.
     centering : {"native", "mean"}, default "native"
         Block centering convention; ``base_relativity`` absorbs any shift so
-        the product of all blocks reproduces ``model.predict``.
+        the product of all blocks is unchanged across centerings.
     continuous_kind : {"binned", "ppform"}, default "binned"
         How continuous main-effect terms are represented on the sheet:
 
@@ -2370,21 +2447,23 @@ def export_rating_tables(
           the worst row was mis-rated by 60% in sparse tail intervals).
         - ``"ppform"`` writes each spline's exact piecewise-polynomial form as
           SEVEN columns rather than three: ``<feature>``, ``Relativity``, and
-          ``Weight`` followed by ``a``, ``b``, ``c``, ``d``. A consumer reads
-          both bounds back out of the interval key and evaluates
-          ``exp(a + b*u + c*u**2 + d*u**3)`` with
+          ``Weight`` followed by ``a``, ``b``, ``c``, ``d`` (blocks are laid
+          out at their own widths, so a seven-column block shifts blocks to its
+          right). A consumer reads both bounds back out of the interval key and
+          evaluates ``exp(a + b*u + c*u**2 + d*u**3)`` with
           ``u = (x - lower) / (upper - lower)`` on bounded rows, and reads
           ``Relativity`` directly on unbounded tail rows (which carry text
-          bounds such as ``[-inf, 18.0)`` and ``b = c = d = 0``). An
-          un-upgraded loader still reads it as a step function from the first
-          three columns; a consumer storing coefficients must include them in
-          any content digest so models differing only in coefficients do not
-          fingerprint identically.
+          bounds such as ``[-inf, 18.0)`` and ``b = c = d = 0``; do not evaluate
+          the cubic formula where ``u`` is ``nan``). An un-upgraded loader still
+          reads it as a step function from the first three columns; a consumer
+          storing coefficients must include them in any content digest so models
+          differing only in coefficients do not fingerprint identically.
         - Under ``"ppform"``, ``extrapolation="clip"`` emits constant tail
-          rows, ``extrapolation="error"`` emits no unbounded rows, and
-          ``extrapolation="extend"`` raises unless
-          ``allow_unbounded_extrapolation=True`` (which clips tails). Terms
-          with ``Constraint.postfit`` repairs are refused under ``"ppform"``;
+          rows, ``extrapolation="error"`` emits no unbounded rows (with the last
+          knot interval right-closed), and ``extrapolation="extend"`` raises
+          unless ``allow_unbounded_extrapolation=True`` (which clips tails, so
+          exactness holds over the knot range alone). Terms with
+          ``Constraint.postfit`` repairs are refused under ``"ppform"``;
           ``Polynomial`` terms stay binned, as do continuous interaction grids.
     allow_unbounded_extrapolation : bool, default False
         Allow exporting ``extrapolation="extend"`` splines under

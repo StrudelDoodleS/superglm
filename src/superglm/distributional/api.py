@@ -801,8 +801,9 @@ class SuperLSS:
             Smoothing-parameter estimation family. Only ``"efs"`` is supported.
         max_reml_iter : int, default=100
             Maximum outer smoothing iterations (Fellner--Schall and Newton
-            combined). If a default Newton finish stalls at an infinite-
-            smoothing boundary, up to 16 additional iterations may run.
+            combined). If a default Newton finish stalls on an active exact
+            face or unresolved upper bound, its rolled-back steps are not
+            counted, so up to 16 additional iterations may run.
         reml_tol : float, default=1e-6
             Stopping tolerance for the smoothing optimiser. Tightening it also
             tightens the flat-term stationarity bar (``1e-4`` nats per
@@ -841,9 +842,13 @@ class SuperLSS:
         acceleration_max_amplification : float, default=8.0
             Maximum step-amplification factor permitted for accelerated updates.
         practical_reml : bool, default=True
-            Allow Fellner--Schall updates to stop once objective and fitted-
-            parameter movement stay negligible over consecutive iterations.
-            Set ``False`` to require strict fixed-point convergence.
+            Allow Fellner--Schall updates to stop after sustained negligible
+            objective and fitted-parameter movement across comparable trials.
+            Set ``False`` to disable this approximate plateau stop (under
+            Newton schedules a fit can still converge with ``stationary``
+            independently of the Fellner--Schall fixed-point residual;
+            ``lambda_change`` and ``objective_plateau`` indicate that residual
+            met its tolerance).
         retain_history_rows : bool, default=False
             If True, keep per-iteration ``eta`` and ``theta`` arrays for
             debugging instead of only the terminal fit and recent plateau
@@ -858,7 +863,9 @@ class SuperLSS:
             Fellner--Schall updates alone. ``"efs+finish"`` runs them to a
             plateau and finishes with Newton steps on the LAML objective in
             log-lambda (Wood, Pya and Säfken 2016, section 3.1).
-            ``"efs+newton"`` hands off to Newton steps after a shorter warm-up.
+            ``"efs+newton"`` hands off to Newton steps after a shorter warm-up
+            (or once the Fellner--Schall loop stops with a converged
+            coefficient fit).
             ``"efs+stationary"`` continues until the projected LAML gradient
             meets the stationarity tolerance. ``None`` (default) selects
             ``"efs+finish"``, except for families with discontinuous curvature

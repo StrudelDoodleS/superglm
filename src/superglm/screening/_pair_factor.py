@@ -21,8 +21,9 @@ so the two never disagree.)
 The reduction operates on the exact cell design rather than individual rows:
 both margins are constant within each joint cell, so weighting cell ``(i, j)``
 by ``sqrt(W_cell[i, j])`` with working response
-``S_cell[i, j] / sqrt(W_cell[i, j])`` (zero where ``W_cell == 0``) reproduces
-the row-level Gram and score identically.
+``S_cell[i, j] / sqrt(W_cell[i, j])`` (zero where ``W_cell == 0``, which is
+exact because non-negative working weights make ``W_cell == 0`` force
+``S_cell == 0``) reproduces the row-level Gram and score identically.
 
 The reduction is chunked and sequential rather than a binary tree: each outer
 support chunk feeds roughly ``w`` new rows into the ``(w, w)`` accumulator so

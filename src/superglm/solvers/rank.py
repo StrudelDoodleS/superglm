@@ -144,7 +144,7 @@ def _eigensolver_relative_bar(order: int) -> float:
     in the same section that "large eigenvalues ... are computed to high
     relative accuracy and small ones may not be". The bound is *absolute* and
     scaled by ``||A||_2``, so nothing below it is a property of the matrix.
-    We take ``p(n) = n`` (matching ``numpy.linalg.matrix_rank``, MATLAB's
+    We take ``p(n) = max(n, 1)`` (matching ``numpy.linalg.matrix_rank``, MATLAB's
     ``rank``, *Numerical Recipes*, 3rd ed., p. 795, SuiteSparseQR's
     ``20 (m + n) eps * max_j ||A(:,j)||_2`` in Foster & Davis, *ACM TOMS*
     40(1) Art. 7, 2013, LAPACK ``?PSTRF``'s ``n u max_k A(k,k)``, and
@@ -1464,8 +1464,8 @@ def _earliest_representatives(null_vectors: NDArray, rank: int) -> NDArray | Non
     onto the first axis and dropping it, keeping rows orthonormal and
     basis-invariant.
 
-    Returns ``None`` when fewer than ``k`` columns can be rejected, allowing
-    the caller to retain its fallback path.
+    Returns ``None`` when ``null_vectors`` is non-finite or fewer than ``k``
+    columns can be rejected to leave ``rank``, keeping the caller's fallback.
     """
     floor = float(np.sqrt(np.finfo(float).eps)) ** 2
 
@@ -1539,19 +1539,19 @@ _PIVOT_THRESHOLD = 0.5
 def _leverage_pivot_representatives(null_vectors: NDArray, rank: int) -> NDArray | None:
     """Choose conditioned representatives using basis-invariant null-space leverage.
 
-    Because ``eigh`` and ``svd`` return an arbitrary orthonormal basis ``N`` of
-    the null space, rejecting columns by null-space leverage ``diag(N @ N.T)``
-    (which satisfies ``(N Q)(N Q).T = N N.T``) makes selection invariant to
-    orthogonal basis rotations. Each rejected column ``c`` is deflated with a
-    Householder reflection onto ``{v in S : v_c = 0}``, keeping every step
+    Rejecting columns by null-space leverage ``diag(N @ N.T)`` (invariant to
+    orthogonal rotations ``N Q``) and deflating each rejected column ``c`` with
+    a Householder reflection onto ``{v in S : v_c = 0}`` keeps every step
     basis-invariant, orthonormal, and ``O(k^2 m)`` in the nullity ``k``.
 
-    ``_PIVOT_THRESHOLD`` is applied on the ``sqrt(leverage)`` scale: among
-    columns carrying at least that fraction of the maximum available leverage,
-    the latest column is rejected, preserving index order when conditioning
-    does not require breaking it and resolving exact alias ties to the latest
-    column. ``_conditioned_representatives`` compares this selection against
-    the earliest selection so the result is never worse than index order.
+    Leverage at or below ``_EPS`` is zeroed as noise. Among columns reaching
+    ``(_PIVOT_THRESHOLD**2) * max(leverage)`` (``_PIVOT_THRESHOLD`` on the
+    ``sqrt(leverage)`` scale), the latest is rejected, preserving index order
+    where conditioning allows and breaking exact alias ties to the latest
+    column. Greedy selection need not attain ``_achievable_amplification``;
+    ``_conditioned_representatives`` compares this against the earliest choice.
+    Returns ``None`` if ``null_vectors`` is non-finite, no column exceeds
+    ``_EPS``, or fewer than ``k`` columns can be rejected to leave ``rank``.
     """
 
     def largest_share(leverage: NDArray) -> int | None:
@@ -1840,11 +1840,11 @@ def _conditioned_representatives(
     So the convention is kept and screened by ``_selection_amplification``
     (which costs ``O(k^3)`` in the nullity and bounds
     ``sigma_min(X[:, keep]) >= sigma_rank(X) * sigma_min(N_R)``). Because
-    ``sigma_max`` also varies with the column choice, the amplification bound
-    triggers the alternative search rather than deciding it: when the caller
-    supplies ``block_condition``, the alternative selection is taken only if
-    its actual principal-block condition number is strictly smaller. Callers
-    without ``block_condition`` fall back to comparing the amplification bound.
+    ``sigma_max`` also varies with the column choice, exceeding
+    ``_achievable_amplification`` triggers the alternative search rather than
+    deciding it: when ``block_condition`` is given, the alternative is taken
+    only if its actual principal-block condition is strictly smaller; otherwise
+    the amplification bound decides (documented as weaker).
 
     ``maximum_condition`` is the absolute backstop after that relative choice.
     Picking the better of two representative blocks does not make either one
@@ -1852,8 +1852,8 @@ def _conditioned_representatives(
     both may be catastrophically conditioned even though Cholesky accepts
     them. In that case ``None`` tells the caller to keep the spectral
     decomposition rather than replace it with an unstable coefficient basis.
-    A maximum requires ``block_condition`` because the null-space
-    amplification alone cannot certify an individual principal block.
+    A maximum requires ``block_condition`` (raising ``ValueError`` otherwise)
+    because null-space amplification alone cannot certify one principal block.
 
     ``block_admissible`` is a stricter postcondition owned by the caller's
     decomposition policy.  Production uses it to require the ORIGINAL
