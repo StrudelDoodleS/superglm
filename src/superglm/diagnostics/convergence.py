@@ -25,11 +25,14 @@ class FitPrecisionWarning(UserWarning):
     """Some rows of a fit's first working system lie beyond what binary64 carries.
 
     Issued once by a published ``fit``, ``fit_reml`` or profiled refit, after
-    the fit, when a row of positive sample weight has a subnormal weight or
+    the fit or before its error if it raises, when a row of positive sample
+    weight has a subnormal weight or
     initial working information, information that rounds to zero, a weight or
     information at least 2**49 (about 5.6e14) times another row's, or, under a
     log link, an initial mean that underflows or overflows before clipping.
-    Rows of weight zero contribute nothing to the fit and are not read. The
+    Rows of weight zero contribute nothing to the fit and are not read. A
+    spread compares all rows, so the two it names may inform separate
+    coefficients and lose nothing. The
     check only reports: the fit is the same with or without it. Check the
     sample_weight units and the offsets on the rows it names;
     ``model.diagnostics()['_model']['initial_precision']``
@@ -75,6 +78,11 @@ def initial_precision_advisory(model, *, enabled: bool):
     token = _INITIAL_PRECISION.set((model, findings) if enabled else None)
     try:
         yield findings
+    except Exception:
+        # A fit that raises is never published, so it states its findings here.
+        if enabled and findings:
+            warn_initial_precision(findings)
+        raise
     finally:
         _INITIAL_PRECISION.reset(token)
 
@@ -86,18 +94,14 @@ def inspect_initial_precision(groups, rows, eta_unclipped, link) -> None:
         return
     model, findings = capture
     _INITIAL_PRECISION.set(None)
-    findings.update(
-        _scan_initial_precision(
-            model._fit_weights, rows.weights, eta_unclipped, model._fit_offset, link
-        )
-    )
+    findings.update(_scan_initial_precision(model._fit_weights, rows.weights, eta_unclipped, link))
     for kind, finding in findings.items():
         if kind.endswith("information") or kind == "information_spread":
             finding["curvature_source"] = rows.curvature_source
 
 
 def warn_initial_precision(findings: dict) -> None:
-    """Disclose the collected findings once the fit has passed publication checks."""
+    """Disclose one fit's findings: at publication, or as a fit that raises leaves."""
     parts = []
     checks = {}
     for kind, finding in findings.items():
@@ -124,16 +128,17 @@ def warn_initial_precision(findings: dict) -> None:
     )
 
 
-def _scan_initial_precision(weights, information, eta, offset, link) -> dict:
+def _scan_initial_precision(weights, information, eta, link) -> dict:
     """One sweep in fixed-size blocks. Keep counts and up to three row examples.
 
     A row of weight zero is exact in binary64 and contributes nothing, so it
-    is not an event: padding a fit with such rows changes no finding.
+    is not an event: padding a fit with such rows changes no finding. Nor is
+    information that is zero analytically, where the inverse link's derivative
+    has an isolated zero (a square-root link at eta = 0), not rounding.
     """
     findings: dict = {}
     extrema = [[(inf, -1), (0.0, -1)] for _ in range(2)]
-    offset_low, offset_high = inf, -inf
-    log_link = type(link) is LogLink
+    log_link = isinstance(link, LogLink)
 
     def record(kind, mask, start):
         count = int(np.count_nonzero(mask))
@@ -149,7 +154,12 @@ def _scan_initial_precision(weights, information, eta, offset, link) -> dict:
         weight, info = weights[block], information[block]
         active = weight > 0.0
         record("subnormal_sample_weight", active & (weight < TINY), start)
-        record("zero_information", active & (info == 0.0), start)
+        zero_information = active & (info == 0.0)
+        if zero_information.any():
+            zero_information[zero_information] = ~_isolated_zero_slope(
+                link, eta[block][zero_information]
+            )
+        record("zero_information", zero_information, start)
         finite_positive_info = active & (info > 0.0) & np.isfinite(info)
         record("subnormal_information", finite_positive_info & (info < TINY), start)
         for values, positive, pair in zip((weight, info), (active, finite_positive_info), extrema):
@@ -168,19 +178,7 @@ def _scan_initial_precision(weights, information, eta, offset, link) -> dict:
                 start,
             )
             record("log_mean_overflow", active & (raw_eta > _LOG_MEAN_LIMIT), start)
-            if offset is not None:
-                offset_low = min(
-                    offset_low, float(np.min(offset[block], where=active, initial=inf))
-                )
-                offset_high = max(
-                    offset_high, float(np.max(offset[block], where=active, initial=-inf))
-                )
 
-    # An extreme common offset can be absorbed by the intercept. Keep any
-    # actual working-information findings even when that offset is constant.
-    if offset is not None and offset_low == offset_high:
-        for kind in ("log_mean_zero", "log_mean_subnormal", "log_mean_overflow"):
-            findings.pop(kind, None)
     for kind, ((low, low_row), (high, high_row)) in zip(
         ("sample_weight_spread", "information_spread"), extrema
     ):
@@ -190,6 +188,17 @@ def _scan_initial_precision(weights, information, eta, offset, link) -> dict:
         if low_row >= 0 and spread >= _SPREAD_BITS:
             findings[kind] = {"rows": (low_row, high_row), "values": (low, high)}
     return findings
+
+
+def _isolated_zero_slope(link, eta):
+    """Where d(mu)/d(eta) is zero at eta but not at either neighbouring float.
+
+    Such a zero is the derivative's own, not an underflow: one that rounded
+    to zero is still zero a float away.
+    """
+    with np.errstate(all="ignore"):
+        slopes = [np.abs(link.deriv_inverse(np.nextafter(eta, toward))) for toward in (-inf, inf)]
+        return (np.abs(link.deriv_inverse(eta)) == 0.0) & (slopes[0] > 0.0) & (slopes[1] > 0.0)
 
 
 class ConvergenceWarning(UserWarning):

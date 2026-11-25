@@ -10,10 +10,18 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, Numeric, PSpline, Ridge, SuperGLM, generate_tweedie_cpg
+from superglm import (
+    Categorical,
+    Numeric,
+    PSpline,
+    Ridge,
+    SeparationError,
+    SuperGLM,
+    generate_tweedie_cpg,
+)
 from superglm.diagnostics import convergence
 from superglm.distributions import NegativeBinomial, Tweedie
-from superglm.links import IdentityLink, LogLink
+from superglm.links import IdentityLink, LogLink, SqrtLink
 from superglm.profiling import nb
 from superglm.solvers.working_rows import CoefficientWorkingRows
 
@@ -26,17 +34,135 @@ def _findings(model):
     return model.diagnostics()["_model"]["initial_precision"]
 
 
-@pytest.mark.parametrize("family, offset", [("binomial", 800.0), ("poisson", -800.0)])
-def test_recoverable_constant_offsets_stay_silent(family, offset):
+def test_a_constant_offset_the_start_absorbs_stays_silent():
+    """The binomial log start puts its intercept inside the mean's range, so a
+    constant offset of 800 never reaches the working rows and the fit converges."""
     X = pd.DataFrame({"level": ["a", "a", "b", "b"]})
+    offset = np.full(4, 800.0)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        model = SuperGLM(family=family, link="log", features={"level": Categorical()}).fit(
-            X, np.array([0.0, 1.0, 0.0, 1.0]), offset=np.full(4, offset), max_iter=2
+        model = SuperGLM(family="binomial", link="log", features={"level": Categorical()}).fit(
+            X, np.array([0.0, 1.0, 0.0, 1.0]), offset=offset
         )
 
     assert _advisories(caught) == []
     assert _findings(model) == {}
+    assert model.result.converged
+    # Each level's Bernoulli optimum is its sample mean, 1/2.
+    np.testing.assert_allclose(model.predict(X, offset=offset), 0.5, rtol=1e-6)
+
+
+def test_a_constant_offset_the_start_cannot_absorb_is_reported():
+    """Mutation: a constant offset suppressed every log-mean finding, so this fit
+    returned ``step_rejected`` with every mean rounded to zero and no advisory."""
+    X = pd.DataFrame({"x": np.arange(8.0)})
+    y = np.tile([1.0, 3.0], 4)
+    # The Poisson start adds the offset to log(mean(y)) = log(2).
+    assert math.exp(math.log(2.0) - 800.0) == 0.0
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model = SuperGLM(family="poisson", features={"x": Numeric()}).fit(
+            X, y, offset=np.full(8, -800.0)
+        )
+
+    (advisory,) = _advisories(caught)
+    assert "rounds to zero" in str(advisory.message)
+    assert _findings(model) == {"log_mean_zero": {"count": 8, "rows": (0, 1, 2)}}
+
+
+def test_an_inherited_log_link_is_read_as_a_log_link():
+    """Mutation: an exact-class test skipped the log-mean check for subclasses."""
+
+    class InheritedLogLink(LogLink):
+        pass
+
+    X = pd.DataFrame({"x": np.arange(8.0)})
+    y = np.tile([1.0, 3.0], 4)
+    offset = np.r_[-801.0, np.full(7, -800.0)]
+    findings = []
+    for link in (LogLink(), InheritedLogLink()):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model = SuperGLM(family="poisson", link=link, features={"x": Numeric()}).fit(
+                X, y, offset=offset
+            )
+        assert len(_advisories(caught)) == 1
+        findings.append(_findings(model))
+    assert findings[0] == findings[1] == {"log_mean_zero": {"count": 8, "rows": (0, 1, 2)}}
+
+
+_SEPARATED_OFFSETS = np.array([0.0, -745.5, -746.0, 711.0, 0.0, 0.0, 0.0, 0.0])
+
+
+def _offset_fit(**kwargs):
+    model = SuperGLM(family="poisson", features={"x": Numeric()}, **kwargs)
+    return model, (pd.DataFrame({"x": np.arange(8.0)}), np.full(8, 2.0))
+
+
+def test_the_advisory_precedes_a_separation_error():
+    """Mutation: the advisory followed the separation disclosure, so a
+    ``SeparationError`` left the caller without the offsets' diagnosis."""
+    model, (X, y) = _offset_fit(separation="error")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(SeparationError):
+            model.fit(X, y, offset=_SEPARATED_OFFSETS, max_iter=1)
+
+    (advisory,) = _advisories(caught)
+    assert "rounds to zero" in str(advisory.message) and "overflows" in str(advisory.message)
+
+
+@pytest.mark.parametrize("discarded", [False, True])
+def test_a_fit_that_raises_after_the_scan_warns_once_unless_discarded(discarded, monkeypatch):
+    """Mutation: findings were stated only at publication, so a solver error lost them."""
+    from superglm.model import fit_ops
+
+    solve = fit_ops._fit_in_workspace
+
+    def solve_then_fail(*args, **kwargs):
+        solve(*args, **kwargs)
+        raise RuntimeError("solver failed")
+
+    monkeypatch.setattr(fit_ops, "_fit_in_workspace", solve_then_fail)
+    model, (X, y) = _offset_fit()
+    model._discarded_fit = discarded
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(RuntimeError, match="solver failed"):
+            model.fit(X, y, offset=_SEPARATED_OFFSETS, max_iter=1)
+
+    assert len(_advisories(caught)) == (0 if discarded else 1)
+
+
+@pytest.mark.parametrize("penalty", [None, Ridge(lambda1=0.05)], ids=["direct", "pirls"])
+def test_information_that_is_zero_analytically_is_not_a_precision_loss(penalty):
+    """The square-root link's slope 2 * eta is exactly zero at eta = 0, so Gaussian
+    Fisher information is zero there with no rounding. Mutation: every zero was a
+    ``zero_information`` event and asked the caller to check weights and offsets."""
+    X = pd.DataFrame({"x": np.arange(8.0)})
+    y = np.array([0.0, 2.0, 2.0, 1.0, 0.5, 0.75, 1.25, 1.5])
+    offset = np.zeros(8)
+    # The start's predictor is sqrt(mean(y)) plus the offset: zero on row 0.
+    offset[0] = -np.sqrt(np.mean(y))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model = SuperGLM(
+            family="gaussian", link="sqrt", features={"x": Numeric()}, penalty=penalty
+        ).fit(X, y, offset=offset)
+
+    assert _advisories(caught) == []
+    assert _findings(model) == {}
+    assert model.result.converged
+
+
+def test_zero_information_from_underflow_is_still_reported():
+    # A log-link slope that rounded to zero is zero a float away too; a
+    # square-root slope at eta = 0 is not.
+    eta = np.array([-800.0, 0.0])
+    ones, zeros = np.ones(2), np.zeros(2)
+    scan = convergence._scan_initial_precision
+    assert scan(ones, zeros, eta, LogLink())["zero_information"] == {"count": 2, "rows": (0, 1)}
+    assert scan(ones, zeros, eta, SqrtLink())["zero_information"] == {"count": 1, "rows": (0,)}
 
 
 @pytest.mark.parametrize("method", ["fit", "fit_reml"])
@@ -176,9 +302,9 @@ def test_spread_threshold_compares_mantissas_at_equal_exponent_gap():
     at = np.array([2.0**-49, 1.0])
     below = np.array([np.nextafter(at[0], np.inf), 1.0])
     scan = convergence._scan_initial_precision
-    equal = scan(at, at, np.zeros(2), None, IdentityLink())
+    equal = scan(at, at, np.zeros(2), IdentityLink())
     assert equal["sample_weight_spread"]["values"] == tuple(at)
-    assert scan(below, below, np.zeros(2), None, IdentityLink()) == {}
+    assert scan(below, below, np.zeros(2), IdentityLink()) == {}
 
 
 def test_log_range_limits_distinguish_binary64_neighbours():
@@ -203,7 +329,7 @@ def test_log_range_limits_distinguish_binary64_neighbours():
     )
     weight = np.ones_like(eta)
     scan = convergence._scan_initial_precision
-    findings = scan(weight, weight, eta, eta, LogLink())
+    findings = scan(weight, weight, eta, LogLink())
     for name, condition in (
         ("log_mean_zero", lambda value: value < cutoffs[0]),
         ("log_mean_subnormal", lambda value: cutoffs[0] < value < cutoffs[1]),
@@ -211,12 +337,12 @@ def test_log_range_limits_distinguish_binary64_neighbours():
     ):
         expected = tuple(i for i, value in enumerate(eta) if condition(Decimal(value)))
         assert findings[name] == {"count": len(expected), "rows": expected[:3]}
-    assert scan(weight, weight, eta, eta, IdentityLink()) == {}
+    assert scan(weight, weight, eta, IdentityLink()) == {}
 
 
 def test_advisory_uses_the_primary_rows_and_labels_their_curvature():
     group_list = []
-    model = SimpleNamespace(_groups=group_list, _fit_weights=np.ones(2), _fit_offset=None)
+    model = SimpleNamespace(_groups=group_list, _fit_weights=np.ones(2))
     eta = np.zeros(2)
     nested = CoefficientWorkingRows(np.ones(2), eta, "fisher")
     primary = CoefficientWorkingRows(np.array([0.0, 1.0]), eta, "observed")
