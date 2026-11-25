@@ -31,3 +31,11 @@ def test_reml_publishes_objective_in_original_coordinates(spline_without_ssp, di
     assert diagnostics["objective"] == pytest.approx(
         diagnostics["objective_history"][-1], rel=0, abs=1e-12
     )
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "discrete"])
+def test_a_row_subset_keeps_the_spline_out_of_ssp(spline_without_ssp, discrete):
+    """Pin the opt-out on a row subset, which a later lambda update reads before whitening."""
+    group = spline_without_ssp._dm.group_matrices[0]
+    assert group.row_subset(np.arange(0, 400, 2)).reparametrize is False

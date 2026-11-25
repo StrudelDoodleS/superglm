@@ -367,40 +367,31 @@ def test_public_discrete_tensor_only_factors_singleton_marginals(monkeypatch):
         assert 0 < rank <= width < min(tensor_widths)
 
 
-@pytest.mark.pins_behaviour
-def test_public_singleton_raw_support_survives_null_round_off_above_the_floor(monkeypatch):
-    """Pins that a lifted singleton's raw support survives null round-off above the eigensolver floor.
+def test_public_singleton_support_decomposes_no_null_space(monkeypatch):
+    """A natural-spline singleton reaches the support decomposition on its range alone.
 
-    A penalty restricted by boundary constraints and lifted to its raw basis
-    carries formation round-off in its null space at the eigensolver's floor
-    ``p(n) eps ||A||`` (up to 0.85 of it on x86-64, 0.03 for ps). Another
-    BLAS build can resolve one such direction above the floor, which made the
-    raw support one rank wider than the declared rank and refused it. A cr
-    term holds its penalty in its own coordinates, exactly zero on its null
-    space, so it carries none; an ns term declares no null basis and is
-    lifted. Plant one at ``1e-14`` relative (about 60 floors once
-    equilibrated, 300 times below the declared ``eps**(2/3)`` cut, outside
-    the band of 32 on both sides), and require the singletons to stay on
-    their raw basis.
+    Lifted to its raw basis, a penalty restricted by boundary constraints
+    carried formation round-off in its null space at the eigensolver's floor
+    ``p(n) eps ||A||``, and another BLAS build could resolve one such
+    direction above the floor, making the raw support wider than the declared
+    rank. The penalty's root now carries an ns singleton in its range
+    coordinates, so every Gram the support decomposes is square at its own
+    rank and holds no null space for round-off to sit in.
     """
     import superglm.reml.penalty_support as support_module
 
     original = support_module.decompose_gram
-    floor_ranks = []
+    decomposed = []
 
-    def planted(matrix, **kwargs):
-        matrix = np.asarray(matrix, dtype=float)
-        if matrix.shape == (9, 9):
-            values, vectors = np.linalg.eigh(matrix)
-            null = vectors[:, np.argmin(np.abs(values))]
-            matrix = matrix + 1e-14 * values.max() * np.outer(null, null)
-            floor_ranks.append(original(matrix, **kwargs).rank)
-        return original(matrix, **kwargs)
+    def spy(matrix, **kwargs):
+        result = original(matrix, **kwargs)
+        decomposed.append((np.shape(matrix), result.rank))
+        return result
 
-    monkeypatch.setattr(support_module, "decompose_gram", planted)
+    monkeypatch.setattr(support_module, "decompose_gram", spy)
     _run_discrete_tensor_singleton_marginals(monkeypatch, kind="ns")
-    # The plant is resolved at the floor: the floor rank alone would refuse.
-    assert floor_ranks and set(floor_ranks) == {7}
+    assert decomposed
+    assert all(shape == (rank, rank) for shape, rank in decomposed), decomposed
 
 
 @pytest.mark.parametrize("bad", [-1.0, np.inf, np.nan])
