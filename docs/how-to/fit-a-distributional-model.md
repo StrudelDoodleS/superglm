@@ -1306,13 +1306,17 @@ cases the fit keeps the stop described above. Fits can remain
 start-dependent; vary `initial_lambda` when comparing solutions.
 
 A Fellner--Schall step can also fail outright: the LAML rises at the full step
-and at every shorter one. The step is then no descent direction, which says
-nothing about whether the fit is at an optimum, so `efs+finish` runs the same
-Newton finish from there, as `efs+newton` runs its Newton steps. The fit
-reports `stationary` if the finish reaches a stationary point. If the finish
-stalls, the fit is the one the failed step left and reports
-`objective_rejected` with `converged=False`; under plain `outer="efs"` a failed
-step reports that at once.
+and at every shorter one. Under `efs` and `efs+finish` the fit stops there and
+reports `objective_rejected` with `converged=False`; `efs+newton` runs its
+Newton steps from that point. `efs+finish` makes one exception, for a search
+holding a penalty at the cap a trial put it on. A penalty that walks to its cap
+lowers the LAML a little every round, and on that fall the other penalties'
+steps are accepted until the search reaches its plateau and the Newton finish.
+The trial takes the whole fall at once, so the same steps can then fail. A step
+that fails beside such a cap therefore runs the Newton finish, after the
+exact-face check on the cap. The fit reports `stationary` if the finish reaches
+a stationary point. If the finish stalls, the fit is the one the failed step
+left and reports `objective_rejected` with `converged=False`.
 
 While a penalty is held at its cap, a term that is not fitted in its penalty's
 own coordinates (a spline subclass, or a spline whose rows do not identify its

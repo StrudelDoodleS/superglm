@@ -793,10 +793,9 @@ class SuperLSS:
 
         ``outer`` selects the smoothing optimiser. ``"efs"`` runs generalised
         Fellner-Schall updates alone. ``"efs+finish"`` runs them to a practical
-        plateau, or to a step the LAML rejects at every length, then finishes
-        with Newton steps on the LAML gradient and Hessian in log lambda, aiming
-        for a stationary point of the LAML over the smoothing-parameter box
-        (Wood, Pya and Saefken 2016, section 3.1).
+        plateau, then finishes with Newton steps on the LAML gradient and Hessian
+        in log lambda, aiming for a stationary point of the LAML over the
+        smoothing-parameter box (Wood, Pya and Saefken 2016, section 3.1).
         ``"efs+newton"`` hands to those Newton steps after a shorter warm-up, on
         any Fellner-Schall stop. ``"efs+stationary"`` requires the projected
         profile score at the returned fit. A flat term must have small

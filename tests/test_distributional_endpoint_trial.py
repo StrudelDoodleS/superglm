@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from superglm import ConvergenceWarning
 from superglm.distributional import GaussianLS, Predictor
 from superglm.distributional.fit_diagnostics import _ordinary_updates
 from superglm.distributional.results.iteration import DistributionalEFSConfig
@@ -25,6 +26,10 @@ from superglm.reml.convergence import flat_tail_certified
 from superglm.reml.efs_update import EFSComponentState, wood_fasiolo_update
 from superglm.types import LambdaPolicy
 from tests.bound_predictor_fixtures import model_from_templates
+from tests.test_distributional_newton_practical_handoff import (
+    _refuse_fellner_schall_steps_after,
+    _spy_on_the_endgame,
+)
 
 _Outer = Literal["efs", "efs+finish", "efs+newton", "efs+stationary"]
 _X, _Z, _W = "location:x#wiggle", "location:z#wiggle", "location:w#wiggle"
@@ -205,6 +210,75 @@ def test_a_flat_tail_its_own_step_puts_on_its_bound_is_tried_there(outer: _Outer
     assert model.exact_face_components_ == (_Z,)
     assert history[-1].revalidated_face_components == (_Z,)
     assert smoothing.unresolved_upper_bound == ()
+
+
+def test_a_step_rejected_at_every_length_beside_a_trial_s_cap_goes_to_the_finish(
+    monkeypatch,
+) -> None:
+    """Beside a cap an endpoint trial holds, a rejected Fellner-Schall round is no stop.
+
+    The trial takes at once the fall ``z``'s walk to its bound would have spread
+    over the rounds to come, so ``x``'s later steps stand on their own. The
+    objective is made to refuse every step after the trial's round, so the next is
+    rejected at all nine lengths. The held cap is judged and promoted, and the
+    finish runs on its face to the optimum the unforced search reaches. Mutation
+    check: with the rejected round's verdict returned, as it is beside no trial's
+    cap, the fit reports ``objective_rejected`` and does not converge.
+    """
+    _, reference = _fit("efs+finish")
+    (trial,) = _trials(reference)
+    calls = _spy_on_the_endgame(monkeypatch)
+    _refuse_fellner_schall_steps_after(monkeypatch, trial + 1)
+    _, smoothing = _fit("efs+finish")
+
+    history = smoothing.history
+    assert history[trial].step_source == "endpoint"
+    rejected = history[trial + 1]
+    assert (rejected.stage, rejected.accepted) == ("efs", False)
+    assert rejected.backtracks == smoothing.config.max_backtracks
+    assert rejected.lambdas_before[_Z] == smoothing.config.upper(_Z)
+    assert history[trial + 2].activated_face_components == (_Z,)
+    finish = history[trial + 3 : -1]
+    assert finish and all(row.stage == "newton" for row in finish)
+    assert history[-1].revalidated_face_components == (_Z,)
+    (call,) = calls
+    assert call["state"].face is not None
+    assert (smoothing.converged, smoothing.convergence_reason) == (True, "stationary")
+    assert smoothing.objective == pytest.approx(reference.objective, abs=1.0e-6)
+    np.testing.assert_allclose(
+        smoothing.terminal_fit.theta, reference.terminal_fit.theta, rtol=0.0, atol=1.0e-4
+    )
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["gradient_unresolved", "max_iterations", "objective_rejected", "derivative_unavailable"],
+)
+def test_a_finish_that_stalls_after_a_rejected_round_leaves_the_round_s_verdict(
+    monkeypatch, kind
+) -> None:
+    """A rejected round earned no plateau, so a finish that stalls from it reports none.
+
+    The round is rejected beside a trial's cap, which is promoted to its face
+    before the finish runs. The fit is the one that round left, on that face: not
+    converged, at the round's smoothing parameters, with the finish's steps
+    dropped. Mutation check: read as a plateau's finish, the stall returns the
+    search to Fellner-Schall rounds on the face, and a second rejected round
+    follows the promotion.
+    """
+    _, reference = _fit("efs+finish")
+    (trial,) = _trials(reference)
+    calls = _spy_on_the_endgame(monkeypatch, lambda outcome: replace(outcome, kind=kind))
+    _refuse_fellner_schall_steps_after(monkeypatch, trial + 1)
+    with pytest.warns(ConvergenceWarning, match="objective_rejected"):
+        _, smoothing = _fit("efs+finish")
+
+    assert len(calls) == 1
+    assert (smoothing.converged, smoothing.convergence_reason) == (False, "objective_rejected")
+    rejected, promoted = smoothing.history[trial + 1 :]
+    assert (rejected.stage, rejected.accepted) == ("efs", False)
+    assert promoted.activated_face_components == (_Z,)
+    assert smoothing.lambdas == rejected.lambdas_before
 
 
 def test_a_plateau_earned_in_the_last_round_keeps_its_terminal_checks() -> None:

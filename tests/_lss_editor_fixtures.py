@@ -117,8 +117,10 @@ def curved_lognormal_case() -> FitCase:
     ``power`` acts linearly on the log mean, so its smooth has no finite optimum:
     the search of ``lognormal_case`` ends with it on an exact face, and a fit on an
     exact face is never certified. Here every smooth has an optimum inside its
-    limits, so this fit and its refits on folds converge off every limit and
-    report that the search passed its own check, wherever the search steps.
+    limits, so this fit converges off every limit and reports that the search
+    passed its own check, wherever the search steps, and so does a refit on a
+    fold by the same search (``outer="efs+newton"``). The default search can stop
+    such a refit at a step the LAML rejects, not converged.
     """
     X, y, _ = _lognormal_rows(_SEEDS[LogNormalLS], N_ROWS)
     family = LogNormalLS()

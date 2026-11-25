@@ -178,8 +178,10 @@ def test_cv_tab_draws_folds_and_runs_cv_and_final_fit(open_lss_editor_page):
 
 
 def test_diagnose_tab_lists_the_fits_and_switches_between_them(open_lss_editor_page):
-    # Every smooth of this case has an optimum inside its limits, so the four fits converge
-    # off every limit and share one verdict, wherever their searches step.
+    # Every smooth of this case has an optimum inside its limits, and the folds are refitted
+    # by the search that made the case's own fit, which takes its Newton steps from any
+    # Fellner-Schall stop. So the four fits converge off every limit and share one verdict,
+    # wherever their searches step.
     case = curved_lognormal_case()
     cv = cross_validate(
         case.model,
@@ -187,6 +189,7 @@ def test_diagnose_tab_lists_the_fits_and_switches_between_them(open_lss_editor_p
         case.y,
         cv=KFold(3, shuffle=True, random_state=0),
         fit_mode="fit_reml",
+        fit_kwargs={"outer": "efs+newton"},
         return_estimators=True,
         error_score="raise",
     )

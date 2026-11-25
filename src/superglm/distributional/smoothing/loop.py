@@ -391,11 +391,19 @@ def fit_distributional_efs(
     # which is what decides an optimum on it (Mishchenko, Holmgren and Ronnegard, arXiv
     # 0711.2619, section 4.3), so a stationary endgame hands the caps a trial reached to
     # the assessor (``handed_over``), whose refusal leaves its verdict standing.
+    # The trial takes at once the fall that component's walk spreads over the rounds
+    # to come. On that fall the walk's rounds are accepted, whatever the other
+    # components' steps do to the objective, up to the plateau the default search
+    # finishes. With the fall taken the same steps can be rejected at every length,
+    # so beside a cap a trial holds a rejected round goes to the finish as that
+    # plateau does. It has earned no plateau (``unearned``), so a finish that stalls
+    # leaves the round's verdict.
     endpoint_tried: set[str] = set()
     endpoint_caps: set[str] = set()
     endgame_due = False
     handed_over = False
     plateau_earned = False
+    unearned = False
     # The objective's fall over the last two accepted Fellner--Schall rounds.
     fall = previous_fall = math.inf
 
@@ -711,11 +719,12 @@ def fit_distributional_efs(
         if accelerator is not None:
             accelerator.reset()
 
-    def _run_endgame(*, earned: bool = True) -> DistributionalEFSResult | None:
+    def _run_endgame() -> DistributionalEFSResult | None:
         """Run the endgame from the accepted state; a result ends the fit, ``None`` continues.
 
-        A finish that stalls leaves a plateau standing. One entered from a rejected
-        round has earned none (``earned`` false) and leaves that round's verdict.
+        A finish that stalls leaves a plateau standing. One a rejected round came to
+        (``unearned``), at once or after the caps it held were judged, has none and
+        leaves that round's verdict.
         """
         nonlocal current_lambdas, current_fit, current_objective, terminal_fit_index
         nonlocal terminal_evidence, endgame_outcome, endgame_stationary, pending_cap, newton_budget
@@ -753,7 +762,7 @@ def fit_distributional_efs(
         terminal_evidence = state.evidence
         if stalled:
             endgame_outcome = None
-            if not earned:
+            if unearned:
                 return _result(converged=False, reason="objective_rejected")
             if current_face is None and not terminal_evidence.unresolved_upper_bound:
                 return _result(converged=True, reason="practical_plateau")
@@ -1652,17 +1661,20 @@ def fit_distributional_efs(
             reason: EFSConvergenceReason = (
                 "objective_rejected" if any_converged_trial else "coefficient_not_converged"
             )
-            # A Fellner--Schall step the objective rejects at every length says the
-            # fixed-point direction is no descent direction here, not that the point is
-            # stationary, so the exact gradient decides: a finish, as an endgame does.
-            unearned = reason == "objective_rejected" and _plateau_finishes()
+            # A step rejected at every length is the default search's stop, but beside
+            # a cap an endpoint trial holds, where the finish decides.
+            unearned = (
+                reason == "objective_rejected"
+                and _plateau_finishes()
+                and not endpoint_caps.isdisjoint(cap_held)
+            )
             if _endgame_budget() > 0 and (
                 unearned
                 or should_hand_off(
                     reason, max_accepted_step=0.0, iterations=len(history), config=outer_config
                 )
             ):
-                endgame_result = _run_endgame(earned=not unearned)
+                endgame_result = _run_endgame()
                 if endgame_result is not None:
                     return endgame_result
                 continue
