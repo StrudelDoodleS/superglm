@@ -385,8 +385,7 @@ def _centered_leaf_pass(
     ``dev_l = sum_r a_r (x_r - m_l)``. The scatter is ``P'P - N'N`` per chunk (``_root_scatter``),
     never a raw-moment subtraction, compensated and symmetrized; the absolute mass is
     ``sum_r e_r (x_rj - m_lj)^2``, ``e_r`` from ``error`` (``|a|`` by default). Random-effect
-    border blocks are summed by (leaf, level) pair (``_indicator_pairs``); a given ``mean`` must
-    vanish off each leaf's levels.
+    border blocks are summed by pair; a given ``mean`` must vanish off each leaf's levels.
     """
     n = len(weights)
     order, starts = layout.leaf_order, layout.leaf_starts
@@ -624,18 +623,15 @@ def _indicator_pairs(
 ) -> tuple[NDArray, NDArray, NDArray, NDArray, NDArray]:
     """A chunk's statistics of the sparse indicator columns, from its (leaf, level) pair sums.
 
-    Within a segment the rows of one pair share their centred indicator row,
-    so each row is added once to its pair (``leaf_kernels._pair_sums``) and
-    every sum over rows follows from the pairs, a term of the row sum for a
-    term (``leaf_kernels``): no row is written once per level its leaf meets.
-    The pairs are those the chunk's rows take, so the dense scratch has at
-    most a row per row of the chunk; a level of a cut leaf that its piece
-    does not meet is the caller's (``_absent_pairs``).
-    Returns ``scatter`` ``(indicator columns, q)``, their rows of ``sum_r a_r
-    (x_r - m)(x_r - m)'``, and per pair its segment ``owner``, its ``column``
-    among the indicator columns, ``deviation`` ``(pairs, 3)`` the segment's
-    ``sum_r v_r (x_rj - m_j)`` for ``v = a``, ``error`` and ``max(-a, 0)``, and
-    ``mass`` ``sum_r error_r (x_rj - m_j)^2``.
+    Within a segment the rows of one pair share their centred indicator row, so each row is added
+    once to its pair (``leaf_kernels._pair_sums``) and every sum over rows follows from the pairs:
+    no row is written once per level its leaf meets. The pairs are those the chunk's rows take, so
+    the dense scratch has at most a row per row of the chunk; a level of a cut leaf that its piece
+    does not meet is the caller's (``_absent_pairs``). Returns ``scatter``
+    ``(indicator columns, q)``, their rows of ``sum_r a_r (x_r - m)(x_r - m)'``, and per pair its
+    segment ``owner``, its ``column`` among the indicator columns, ``deviation`` ``(pairs, 3)`` the
+    segment's ``sum_r v_r (x_rj - m_j)`` for ``v = a``, ``error`` and ``max(-a, 0)``, and ``mass``
+    ``sum_r error_r (x_rj - m_j)^2``.
     """
     scatter = np.zeros((mean.shape[1] - width, mean.shape[1]))
     segments = np.arange(len(leaves))
