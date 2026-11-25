@@ -221,6 +221,42 @@ def _grid_values(spec: FactorSmooth, grid: int | NDArray | None) -> NDArray:
     return values
 
 
+def _level_curves(
+    spec,
+    grid_values: NDArray,
+    basis: NDArray,
+    level_indices: NDArray,
+    level_coefficients: NDArray,
+    level_covariance,
+    solver,
+    critical_value: float,
+) -> pd.DataFrame:
+    """Each selected level's curve on the grid, with its posterior error and interval."""
+    from superglm._weight_units import standard_errors
+
+    frames = []
+    for level_index in level_indices:
+        effect = basis @ level_coefficients[int(level_index)]
+        covariance = level_covariance(int(level_index))
+        variance = np.einsum("ij,jk,ik->i", basis, covariance, basis, optimize=True)
+        posterior_se = standard_errors(variance, solver)
+        frames.append(
+            pd.DataFrame(
+                {
+                    "level": np.full(
+                        len(grid_values), spec._levels[int(level_index)], dtype=object
+                    ),
+                    spec.variable: grid_values,
+                    "effect": effect,
+                    "posterior_se": posterior_se,
+                    "lower": effect - critical_value * posterior_se,
+                    "upper": effect + critical_value * posterior_se,
+                }
+            )
+        )
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
 def factor_smooth_result(
     model,
     name: str,
@@ -244,11 +280,7 @@ def factor_smooth_result(
         _component_suffix(group.name, component.name): float(fitted_lambdas[component.name])
         for component in penalties
     }
-    from superglm._weight_units import (
-        physical_variance,
-        scale_penalties,
-        standard_errors,
-    )
+    from superglm._weight_units import physical_variance, scale_penalties
     from superglm.model.reml_finalize import variance_component_scale
 
     solver = model._solver_pirls_result()
@@ -329,6 +361,13 @@ def factor_smooth_result(
         & (information_trace > 0.0)
     )
     sufficient_support = information_rank == spec.k
+    support_columns = {
+        "level": spec._levels,
+        "count": np.asarray(support.count, dtype=np.int64),
+        "fit_weight": np.asarray(support.fit_weight, dtype=np.float64),
+        "information_trace": information_trace,
+        "information_rank": information_rank,
+    }
 
     if levels is None:
         selected_level_indices = np.arange(n_levels, dtype=np.intp)
@@ -394,11 +433,7 @@ def factor_smooth_result(
         )
         table = pd.DataFrame(
             {
-                "level": spec._levels,
-                "count": np.asarray(support.count, dtype=np.int64),
-                "fit_weight": np.asarray(support.fit_weight, dtype=np.float64),
-                "information_trace": information_trace,
-                "information_rank": information_rank,
+                **support_columns,
                 "effective_df": level_edf,
                 "credibility": local_credibility,
                 "shrinkage": 1.0 - local_credibility,
@@ -409,44 +444,21 @@ def factor_smooth_result(
             }
         )
 
-        curve_frames: list[pd.DataFrame] = []
-        for level_index in selected_level_indices:
-            local_start = active_group.start + int(level_index) * spec.k
-            augmented_indices = np.arange(
-                1 + local_start,
-                1 + local_start + spec.k,
-                dtype=np.intp,
-            )
-            covariance = covariance_selected_block(
-                inference["XtWX_inv_aug"],
-                augmented_indices,
-            )
-            effect = basis @ coefficients[level_index]
-            variance = np.einsum(
-                "ij,jk,ik->i",
-                basis,
-                covariance,
-                basis,
-                optimize=True,
-            )
-            posterior_se = standard_errors(variance, solver)
-            curve_frames.append(
-                pd.DataFrame(
-                    {
-                        "level": np.full(
-                            len(grid_values),
-                            spec._levels[int(level_index)],
-                            dtype=object,
-                        ),
-                        spec.variable: grid_values,
-                        "effect": effect,
-                        "posterior_se": posterior_se,
-                        "lower": effect - critical_value * posterior_se,
-                        "upper": effect + critical_value * posterior_se,
-                    }
-                )
-            )
-        curves = pd.concat(curve_frames, ignore_index=True) if curve_frames else pd.DataFrame()
+        def fs_level_covariance(level_index: int) -> NDArray:
+            local_start = active_group.start + level_index * spec.k
+            augmented_indices = np.arange(1 + local_start, 1 + local_start + spec.k, dtype=np.intp)
+            return covariance_selected_block(inference["XtWX_inv_aug"], augmented_indices)
+
+        curves = _level_curves(
+            spec,
+            grid_values,
+            basis,
+            selected_level_indices,
+            coefficients,
+            fs_level_covariance,
+            solver,
+            critical_value,
+        )
         credibility_violation = bool(
             np.any(local_credibility < -1.0e-10) or np.any(local_credibility > 1.0 + 1.0e-10)
         )
@@ -511,11 +523,7 @@ def factor_smooth_result(
             )
         table = pd.DataFrame(
             {
-                "level": spec._levels,
-                "count": np.asarray(support.count, dtype=np.int64),
-                "fit_weight": np.asarray(support.fit_weight, dtype=np.float64),
-                "information_trace": information_trace,
-                "information_rank": information_rank,
+                **support_columns,
                 "effective_df": level_edf,
                 "coefficient_norm": np.linalg.norm(deviations, axis=1),
                 "has_information": has_information,
@@ -523,35 +531,16 @@ def factor_smooth_result(
             }
         )
 
-        curve_frames = []
-        for level_index in selected_level_indices:
-            covariance = level_covariances[int(level_index)]
-            effect = basis @ deviations[int(level_index)]
-            variance = np.einsum(
-                "ij,jk,ik->i",
-                basis,
-                covariance,
-                basis,
-                optimize=True,
-            )
-            posterior_se = standard_errors(variance, solver)
-            curve_frames.append(
-                pd.DataFrame(
-                    {
-                        "level": np.full(
-                            len(grid_values),
-                            spec._levels[int(level_index)],
-                            dtype=object,
-                        ),
-                        spec.variable: grid_values,
-                        "effect": effect,
-                        "posterior_se": posterior_se,
-                        "lower": effect - critical_value * posterior_se,
-                        "upper": effect + critical_value * posterior_se,
-                    }
-                )
-            )
-        curves = pd.concat(curve_frames, ignore_index=True) if curve_frames else pd.DataFrame()
+        curves = _level_curves(
+            spec,
+            grid_values,
+            basis,
+            selected_level_indices,
+            deviations,
+            level_covariances.__getitem__,
+            solver,
+            critical_value,
+        )
         all_effects = basis @ coefficients.T
         diagnostics = {
             "max_abs_level_effect_sum": float(
