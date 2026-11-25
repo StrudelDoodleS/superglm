@@ -24,6 +24,7 @@ from superglm.distributional.fit_diagnostics import (
 from superglm.distributional.model import DenseDistributionalModel, fit_dense_distributional
 from superglm.distributional.predictor import Predictor
 from superglm.distributional.results.iteration import DistributionalEFSConfig
+from superglm.distributional.results.shape import ShapeFace
 from superglm.distributional.results.solver import (
     DenseSolverConfig,
 )
@@ -1163,6 +1164,67 @@ def test_a_fit_converged_on_an_exact_face_reports_that_status_and_no_failed_chec
         smoothing=replace(smoothing, converged=False, convergence_reason="max_iterations"),
     )
     assert _fit_status(stopped) == "not_converged"
+
+
+def test_a_terminal_direction_toward_finite_smoothing_does_not_certify_the_face(
+    face_model,
+) -> None:
+    smoothing = face_model.smoothing
+    assert smoothing is not None
+    ((name, endpoint),) = smoothing.terminal_endpoint_directions.items()
+    finite = replace(
+        endpoint,
+        decision="finite",
+        analytic_derivative=-1.0,
+        profile_score_term=-2.0,
+        curvature_schur_term=0.0,
+        curvature_drift_term=0.0,
+        numerical_error=0.0,
+        lower_bound=-1.0,
+        upper_bound=-1.0,
+    )
+    assert finite._derived_authority_matches()
+    history = tuple(
+        replace(item, endpoint_direction_evidence=finite)
+        if item.endpoint_direction_evidence is endpoint
+        else item
+        for item in smoothing.history
+    )
+    model = _replace_smoothing(
+        face_model,
+        replace(smoothing, history=history, terminal_endpoint_directions={name: finite}),
+    )
+
+    report = diagnose_distributional_fit(model)
+
+    assert report.fit_status == "converged_uncertified"
+    assert "fit.termination_uncertified" in {item.code for item in report.findings}
+
+
+def test_a_shape_only_face_is_not_an_exact_smoothing_face(score_certified_model) -> None:
+    smoothing = score_certified_model.smoothing
+    assert smoothing is not None
+    names = tuple(score_certified_model.layout.coefficient_names)
+    width = len(names)
+    face = ShapeFace(
+        component_names=(),
+        coefficient_names=names,
+        constraint_matrix=np.diag(np.r_[np.zeros(width - 1), 1.0]),
+        null_basis=np.eye(width)[:, :-1],
+        constraint_basis=np.eye(width)[:, -1:],
+        constraint_rank=1,
+        anchor=np.zeros(width),
+    )
+    fits = list(smoothing.coefficient_fits)
+    index = smoothing.terminal_fit_index
+    fits[index] = replace(fits[index], coefficient_face=face)
+    model = _replace_smoothing(
+        score_certified_model, replace(smoothing, coefficient_fits=tuple(fits))
+    )
+
+    assert not model.smoothing.certified_on_exact_face
+    assert not model.smoothing.matched_certified
+    assert _fit_status(_LSSDiagnosticContext.from_model(model)) == "converged_uncertified"
 
 
 def test_fully_penalized_exact_face_omits_retained_null_space_caveat(face_model) -> None:

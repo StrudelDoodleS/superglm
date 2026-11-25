@@ -135,9 +135,9 @@ def test_a_folded_section_stays_as_it_was_left_when_another_fit_opens(open_lss_e
 def _three_fits_on_an_exact_face():
     """The case whose ``power`` smooth has no finite optimum, beside a fold stopped at its second round.
 
-    The fit on all rows and the first and third folds are that fit: it converged
-    with ``power`` on its exact face and passed every other check. Only the
-    stopped fold is named in the line across the fits.
+    The fit on all rows and the genuine first and third folds converged with
+    ``power`` on its exact face and passed every other check. Only the stopped
+    fold is named in the line across the fits.
     """
     case = lognormal_case()
     assert case.model.diagnose().fit_status == "converged_exact_face"
@@ -151,9 +151,11 @@ def _three_fits_on_an_exact_face():
         return_estimators=True,
         error_score="raise",
     )
+    genuine = [cv.estimators[0], cv.estimators[2]]
+    assert [fold.diagnose().fit_status for fold in genuine] == ["converged_exact_face"] * 2
     return {
         "case": case,
-        "cv": dataclasses.replace(cv, estimators=[case.model, stopped, case.model]),
+        "cv": dataclasses.replace(cv, estimators=[genuine[0], stopped, genuine[1]]),
     }
 
 
