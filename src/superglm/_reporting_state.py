@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -143,6 +143,8 @@ def build_reporting_support_state(
             )
             continue
 
+        # The filter above admits factor smooths and random effects only.
+        matrix = cast(RandomEffectGroupMatrix, matrix)
         if information is None:
             information = matrix.rmatvec(working_weights)
         unpooled = None

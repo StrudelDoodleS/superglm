@@ -872,7 +872,7 @@ def _coded_group(info: GroupInfo) -> GroupMatrix:
             lambda_policies=info.lambda_policies,
             nested_in=info.random_effect_nested_in,
         )
-    return CategoricalGroupMatrix(info.cat_codes, info.n_cols)
+    return CategoricalGroupMatrix(cast(NDArray, info.cat_codes), info.n_cols)
 
 
 def _spline_by_level_group(info, group_name, sample_weight, lambda2, in_term, term_roots):
@@ -905,7 +905,9 @@ def _spline_by_level_group(info, group_name, sample_weight, lambda2, in_term, te
         )
         R_inv_local = None
     if not support:
-        gm = SplineCategoricalGroupMatrix._from_level_rows(rows, R_inv, row_idx, len(mask))
+        gm = SplineCategoricalGroupMatrix._from_level_rows(
+            cast(sp.csr_matrix, rows), R_inv, row_idx, len(mask)
+        )
     else:
         # Same storage, different contract: the lossless support indexes
         # exact distinct rows, so the class must not claim the binned route.
@@ -914,12 +916,13 @@ def _spline_by_level_group(info, group_name, sample_weight, lambda2, in_term, te
             if info.spline_cat_support_lossless
             else DiscretizedSplineCategoricalGroupMatrix
         )
+        support_rows = cast(NDArray, rows)
         if info.spline_cat_bin_idx_is_level:
             gm = level_cls(
-                rows, R_inv, bin_idx_level, row_idx, n_rows=len(mask), bin_idx_is_level=True
+                support_rows, R_inv, bin_idx_level, row_idx, n_rows=len(mask), bin_idx_is_level=True
             )
         else:
-            gm = level_cls(rows, R_inv, info.spline_cat_bin_idx, row_idx)
+            gm = level_cls(support_rows, R_inv, info.spline_cat_bin_idx, row_idx)
     gm.spline_cat_level = info.spline_cat_level
     gm.spline_cat_feature = info.spline_cat_feature
     return gm, R_inv, R_inv_local

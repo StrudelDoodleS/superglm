@@ -357,7 +357,7 @@ class _Build:
     """What every term of one compile reads: the frame, its weights and the build settings."""
 
     X: EagerFrame
-    specs: Mapping[str, FeatureSpec]
+    specs: dict[str, FeatureSpec]
     sample_weight: NDArray
     geometry_weight: NDArray | None
     reporting_weight: NDArray
@@ -462,7 +462,7 @@ def _binned_spline_infos(build: _Build, term: _MainEffect) -> tuple[list[GroupIn
     spec, x_col, weight = cast(_SplineBase, term.spec), term.x_col, term.weight
     omega, n_cols, projection, (constraints, monotone_engine, raw_to_solver_map) = term.built
     bin_centers, bin_idx = discretize_positive_support(
-        x_col, term.n_bins, weight, bin_knots(spec, x_col, weight)
+        x_col, cast(int, term.n_bins), weight, bin_knots(spec, x_col, weight)
     )
     # A bin is read on the basis the unbinned build and prediction read
     # their rows on, under the extrapolation policy.
@@ -701,7 +701,7 @@ def _curve_separation(build: _Build, ispec: Any) -> tuple | None:
 
 
 def _exact_interaction_build(
-    build: _Build, ispec: Any, x1: NDArray, x2: NDArray, parent_specs: Mapping, weight
+    build: _Build, ispec: Any, x1: NDArray, x2: NDArray, parent_specs: dict, weight
 ):
     """An interaction's GroupInfos built on its rows.
 
@@ -810,7 +810,7 @@ def _build_interaction(
     if build.separation_boundaries and isinstance(ispec, CategoricalInteraction):
         records.append(("inter", iname, spec1, spec2, x1, x2, p1, p2))
     if spec1 is specs.get(p1) and spec2 is specs.get(p2):
-        parent_specs: Mapping = specs
+        parent_specs: dict = specs
     else:
         parent_specs = {**specs, p1: spec1, p2: spec2}
     tensor, by_level, factor_smooth = routes
@@ -989,9 +989,9 @@ def compile_predictor_design(
     )
     assembly = _Assembly(group_pricing)
     sz_groups: dict[str, list[str]] = {}
-    for term in interaction_specs.values():
-        if isinstance(term, FactorSmooth) and term.basis == "sz" and not term._selects_lines:
-            sz_groups.setdefault(term.variable, []).append(term.group)
+    for ispec in interaction_specs.values():
+        if isinstance(ispec, FactorSmooth) and ispec.basis == "sz" and not ispec._selects_lines:
+            sz_groups.setdefault(ispec.variable, []).append(ispec.group)
     for name in feature_order:
         term = _main_effect(build, name)
         # A build's messages are emitted from this frame, so they name the
