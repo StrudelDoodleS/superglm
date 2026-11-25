@@ -499,9 +499,10 @@ def section_threads() -> int:
     override = _override.get()
     if override is not None and override.n_jobs is not None:
         return override.n_jobs
-    import numba
+    import numpy.random
+    from numba import get_num_threads
 
-    return min(resolve_n_jobs(), numba.get_num_threads())
+    return min(resolve_n_jobs(), get_num_threads())
 
 
 def pooled_map(fn: Callable, items: list, item_bytes: int) -> Generator:

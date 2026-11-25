@@ -9,6 +9,8 @@ from functools import cache, cached_property, partial
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
+import scipy.linalg
+import scipy.spatial
 from numpy.typing import NDArray
 from scipy.special import gammaln
 

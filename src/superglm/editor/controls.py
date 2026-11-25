@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import scipy.linalg
 from numpy.typing import NDArray
 
 from superglm._roundoff import gamma as _gamma

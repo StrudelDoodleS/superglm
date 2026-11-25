@@ -150,6 +150,11 @@ ignore = [
 [tool.ruff.lint.isort]
 known-first-party = ["superglm"]
 
+[tool.ruff.lint.pyflakes]
+# Imported ahead of a package that enters them through a submodule, not for a name they bind
+# (_ENTER_FIRST and _PARENT_FIRST in tests/test_import_compat.py).
+allowed-unused-imports = ["html", "numba", "numpy.random", "scipy.linalg", "scipy.spatial"]
+
 # ── pytest ──────────────────────────────────────────────────────
 [tool.pytest.ini_options]
 testpaths = ["tests"]

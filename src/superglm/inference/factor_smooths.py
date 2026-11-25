@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
+import scipy.spatial
 from numpy.typing import NDArray
 
 from superglm._lambda_box import fitted_lambda_box

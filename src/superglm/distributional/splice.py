@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 import numpy as np
 import pandas as pd
+import scipy.linalg
 from numpy.typing import ArrayLike, NDArray
 from scipy import integrate, optimize, special
 

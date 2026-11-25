@@ -18,6 +18,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import numpy.random
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 

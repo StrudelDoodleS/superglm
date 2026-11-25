@@ -57,6 +57,7 @@ class _CompileClock:
         numba = sys.modules.get("numba")
         if self.installed or numba is None:
             return
+        import numba
         from numba.core import event
 
         clock = self

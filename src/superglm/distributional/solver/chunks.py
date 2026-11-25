@@ -64,6 +64,7 @@ from superglm.distributional.solver.derivatives import (
     transform_natural_derivatives,
     transform_natural_information,
 )
+from superglm.distributional.solver.packing import packed_pairs
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     UnsupportedLikelihoodContractError,
@@ -1565,6 +1566,53 @@ def maximum_chunked_predictor_change(
     return maximum
 
 
+def subspace_row_curvature(moves: NDArray, curvature_packed: NDArray) -> NDArray[np.float64]:
+    """``sum_i M_i' W_i M_i`` for the row moves ``M`` (rows, parameters, width) of a subspace."""
+    width = moves.shape[2]
+    total = np.zeros((width, width))
+    for channel, (left, right) in enumerate(packed_pairs(moves.shape[1])):
+        block = moves[:, left].T @ (curvature_packed[:, channel, None] * moves[:, right])
+        total += block if left == right else block + block.T
+    return total
+
+
+def chunked_subspace_curvature(
+    family: DistributionalFamily,
+    layout: StackedLayout,
+    y: NDArray,
+    likelihood_plan,
+    coefficients: NDArray,
+    basis: NDArray,
+    *,
+    chunk_size: ChunkSize,
+    curvature_source: CurvatureSource,
+    likelihood_cache=None,
+) -> NDArray[np.float64]:
+    """The data curvature ``B'X'WX B`` of a coefficient subspace, from the rows of ``X B``."""
+    columns = [_validated_coefficients(layout, np.ascontiguousarray(column)) for column in basis.T]
+    total = np.zeros((len(columns), len(columns)))
+    for chunk in iter_likelihood_chunks(
+        family,
+        layout,
+        y,
+        likelihood_plan,
+        coefficients,
+        chunk_size=chunk_size,
+        curvature_source=curvature_source,
+        _range_geometry=True,
+        likelihood_cache=likelihood_cache,
+    ):
+        moves = np.stack(
+            [
+                _predictor_values(layout, column, chunk.rows, include_offsets=False)
+                for column in columns
+            ],
+            axis=2,
+        )
+        total += subspace_row_curvature(moves, chunk.curvature_packed)
+    return total
+
+
 def materialize_terminal_predictions(
     layout: StackedLayout,
     coefficients: NDArray,
@@ -1656,6 +1704,7 @@ __all__ = [
     "LikelihoodChunk",
     "RowChunk",
     "assemble_chunked_geometry",
+    "chunked_subspace_curvature",
     "evaluate_chunked_log_likelihood",
     "iter_likelihood_chunks",
     "iter_row_chunks",
@@ -1663,4 +1712,5 @@ __all__ = [
     "maximum_chunked_predictor_change",
     "layout_chunk_size",
     "resolve_chunk_size",
+    "subspace_row_curvature",
 ]

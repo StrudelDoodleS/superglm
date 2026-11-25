@@ -513,6 +513,7 @@ def simultaneous_band_and_critical_value(
     covariance ``V_f`` (``_population_curve_map``). Every covariance is drawn
     through its principal square root (``_principal_root``).
     """
+    import scipy.spatial
     from scipy.stats import norm
 
     from superglm.features.spline import _SplineBase

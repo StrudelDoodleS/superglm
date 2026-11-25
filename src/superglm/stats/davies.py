@@ -61,6 +61,8 @@ def psum_chisq(
         use, a one-sided support boundary, or components too disparate in
         scale. 4 = invalid input.
     """
+    import scipy.linalg
+    import scipy.spatial
     from scipy.integrate import quad
     from scipy.stats import chi2 as chi2_dist
     from scipy.stats import f as f_dist
@@ -460,6 +462,7 @@ def satterthwaite(
     d : float
         Effective degrees of freedom.
     """
+    import scipy.spatial
     from scipy.stats import chi2 as chi2_dist
 
     weights = np.asarray(weights, dtype=np.float64).ravel()

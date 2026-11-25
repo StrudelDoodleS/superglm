@@ -21,6 +21,7 @@ from math import frexp
 from operator import add, mul
 
 import numpy as np
+import numpy.random
 from numba import njit, types  # type: ignore[import-untyped]
 
 from superglm._numba_compile import compile_closed

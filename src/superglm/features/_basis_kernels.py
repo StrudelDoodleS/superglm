@@ -32,6 +32,7 @@ from math import isfinite
 from typing import Any
 
 import numpy as np
+import numpy.random
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 

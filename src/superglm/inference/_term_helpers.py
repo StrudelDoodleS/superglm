@@ -102,6 +102,7 @@ def _recenter_term(
         ti.ci_upper_simultaneous * factor if ti.ci_upper_simultaneous is not None else None
     )
     if se_centered is not None:
+        import scipy.spatial
         from scipy.stats import norm
 
         new_se = np.asarray(se_centered, dtype=np.float64)

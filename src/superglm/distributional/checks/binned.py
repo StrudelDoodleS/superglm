@@ -18,6 +18,7 @@ from typing import Any, NamedTuple
 
 import numpy as np
 import pandas as pd
+import scipy.spatial
 from numpy.typing import NDArray
 
 from superglm.distributional._common import readonly

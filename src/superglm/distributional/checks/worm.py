@@ -21,6 +21,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import scipy.linalg
+import scipy.spatial
 from numpy.typing import NDArray
 from scipy import special
 

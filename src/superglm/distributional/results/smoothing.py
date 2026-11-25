@@ -170,7 +170,7 @@ class DistributionalEFSResult:
     def stationarity_bar(self) -> float:
         """The projected-gradient bar of the Newton endgame at this objective."""
 
-        return self.config.tolerance * (1.0 + abs(self.objective))
+        return self.config.score_bar(self.objective)
 
     def bound_pressure(self) -> tuple[tuple[str, str], ...]:
         """``(name, "floor" | "ceiling")`` for each component a bound held back.
