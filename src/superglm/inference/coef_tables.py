@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Hashable
-from typing import Any
+from dataclasses import dataclass
+from functools import cache
+from typing import Any, NamedTuple
 
 import numpy as np
 import scipy.spatial
@@ -12,12 +14,25 @@ from numpy.typing import NDArray
 from superglm._weight_units import coefficient_covariance, standard_errors
 from superglm.features.constraint import rules_of
 from superglm.inference._metrics_design import MetricsDesign, factor_from_gram, weighted_moments
+from superglm.inference._term_covariance import (
+    contrast_determined,
+    feature_se_from_cov,
+    function_determined,
+    ordered_level_contrasts,
+)
+from superglm.inference._term_helpers import (
+    _resolve_group_lambda,
+    ordered_level_fit,
+    spline_group_enrichment,
+    spline_groups,
+)
 from superglm.inference.covariance import (
     BinaryScaledCovariance,
+    augmented_group_block,
+    augmented_group_diagonal,
     covariance_contrast_se,
     covariance_quadratic_form,
     covariance_selected_block,
-    covariance_selected_diagonal,
     covariance_slope_view,
     covariance_wald_statistic,
 )
@@ -213,6 +228,1094 @@ def _ordered_piecewise_structural_rows(
     return rows
 
 
+def _selected_names(result: Any, groups: list[GroupSlice], selected_group_names) -> set[str]:
+    """The groups the selected model keeps: the caller's set, else the fit's selection."""
+    if selected_group_names is None:
+        return selected_group_name_set(result, groups)
+    return set(selected_group_names)
+
+
+def _coefficient_mask(result: Any, override: NDArray | None) -> NDArray[np.bool_]:
+    """Which coefficients show a standard error: the caller's mask, else the fit's rank record's."""
+    if override is not None:
+        return np.asarray(override, dtype=bool)
+    if getattr(result, "rank_info", None) is not None:
+        return result.rank_info.coefficient_estimable()
+    return np.ones(len(result.beta), dtype=bool)
+
+
+def _error_reader(result: Any, known_scale: bool, is_sandwich: bool) -> Callable[[Any], Any]:
+    """Standard errors from variances: a robust covariance's own, else the fitted family's."""
+    if is_sandwich:
+        return lambda variance: np.sqrt(np.maximum(variance, 0.0))
+    return lambda variance: standard_errors(variance, result, known_scale=known_scale)
+
+
+def _level_diagnostics(
+    groups: list[GroupSlice],
+    group_matrices: list | None,
+    sample_weights: NDArray | None,
+    weight_semantics: str | None,
+) -> dict[str, dict[int, tuple[int, float, bool]]]:
+    """Each categorical level's row count, weight share and thinness (``_thin_levels``)."""
+    from superglm.group_matrix import CategoricalGroupMatrix
+
+    if group_matrices is None or sample_weights is None:
+        return {}
+    total_weight = float(np.sum(sample_weights))
+    diagnostics = {}
+    for gm, g in zip(group_matrices, groups):
+        if not isinstance(gm, CategoricalGroupMatrix):
+            continue
+        K = gm.n_levels
+        n_per = np.bincount(gm.codes, minlength=K + 1)[:K]
+        exp_per = np.bincount(gm.codes, weights=sample_weights, minlength=K + 1)[:K]
+        exp_share = exp_per / max(total_weight, 1e-300)
+        thin = _thin_levels(gm.codes, K, sample_weights, weight_semantics)
+        diagnostics[g.name] = {
+            i: (int(n_per[i]), float(exp_share[i]), bool(thin[i])) for i in range(K)
+        }
+    return diagnostics
+
+
+class _GroupTest(NamedTuple):
+    """A whole-group test row's statistic, p-value and reference df."""
+
+    stat: float | None
+    p: float | None
+    ref_df: float | None
+    # The fit does not determine what the test is of, so the test is withheld.
+    undetermined: bool = False
+
+
+_WITHHELD = _GroupTest(None, None, None, undetermined=True)
+
+
+@cache
+def _row_producers() -> tuple[tuple[Any, Callable[..., list[_CoefRow]]], ...]:
+    """Each feature class's row producer, in the order the classes are tested."""
+    from superglm.features.categorical import Categorical
+    from superglm.features.factor_smooth import FactorSmooth
+    from superglm.features.interaction import (
+        CategoricalInteraction,
+        NumericCategorical,
+        NumericInteraction,
+        PolynomialCategorical,
+        PolynomialInteraction,
+        SplineCategorical,
+        TensorInteraction,
+    )
+    from superglm.features.numeric import Numeric
+    from superglm.features.ordered_categorical import OrderedCategorical
+    from superglm.features.piecewise import Piecewise
+    from superglm.features.polynomial import Polynomial
+    from superglm.features.random_effect import RandomEffect
+    from superglm.features.spline import _SplineBase
+
+    return (
+        (RandomEffect, _CoefTable.random_effect_rows),
+        (FactorSmooth, _CoefTable.factor_smooth_rows),
+        (OrderedCategorical, _CoefTable.ordered_rows),
+        (_SplineBase, _CoefTable.spline_rows),
+        (Categorical, _CoefTable.categorical_rows),
+        (SplineCategorical, _CoefTable.spline_by_level_rows),
+        (Polynomial, _CoefTable.polynomial_rows),
+        (PolynomialCategorical, _CoefTable.polynomial_by_level_rows),
+        (CategoricalInteraction, _CoefTable.crossed_level_rows),
+        (NumericCategorical, _CoefTable.numeric_by_level_rows),
+        (NumericInteraction | PolynomialInteraction, _CoefTable.numeric_interaction_rows),
+        (TensorInteraction, _CoefTable.tensor_rows),
+        (Numeric, _CoefTable.numeric_rows),
+        (Piecewise, _CoefTable.piecewise_rows),
+    )
+
+
+@dataclass(kw_only=True, eq=False)
+class _CoefTable:
+    """One coefficient table: ``build_coef_rows``' arguments, field for field, and its rows.
+
+    The per-call state (the fit, its covariance, the options) is read once here, and
+    each feature class's rows come from one producer method (``_row_producers``).
+    """
+
+    groups: list[GroupSlice]
+    specs: dict
+    interaction_specs: dict
+    result: Any
+    X_a: Any
+    W: NDArray
+    XtWX_inv: NDArray
+    XtWX_inv_aug: Any
+    active_groups: list[GroupSlice]
+    known_scale: bool
+    group_edf_map: dict | None
+    reml_lambdas: dict | None
+    lambda2: float | dict
+    n_obs: int
+    alpha: float
+    monotone_repairs: dict | None
+    precomputed_R_a: NDArray | None  # noqa: N815 -- the argument of build_coef_rows
+    precomputed_edf: NDArray | None
+    precomputed_edf1: NDArray | None
+    precomputed_design_moments: tuple[NDArray, NDArray, NDArray] | None
+    test_bases: dict[str, NDArray] | None
+    coefficient_estimable_override: NDArray | None
+    selected_group_names: set[str] | None
+    group_matrices: list | None
+    sample_weights: NDArray | None
+    weight_semantics: str | None
+    recorded_likelihood_size: float | None
+    selection_shrunk_group_names: set[str] | None
+    rules_enforced: bool
+    sandwich_covariance: Any | None
+    contrast_estimable: Callable[..., bool] | None
+    information_underflowed: bool | None
+    intercept_centre: NDArray | None
+
+    def __post_init__(self) -> None:
+        from superglm.model.separated_levels import separated_coefficients
+
+        result, sandwich = self.result, self.sandwich_covariance
+        self.beta = result.beta
+        self.selected = _selected_names(result, self.groups, self.selected_group_names)
+        self.estimable = _coefficient_mask(result, self.coefficient_estimable_override)
+        if self.contrast_estimable is None and self.coefficient_estimable_override is None:
+            rank_info = getattr(result, "rank_info", None)
+            self.contrast_estimable = None if rank_info is None else rank_info.is_estimable
+        if self.information_underflowed is None:
+            self.information_underflowed = bool(getattr(result, "information_underflowed", False))
+        self.is_sandwich = sandwich is not None
+        self.sandwich_penalized = (
+            frozenset() if sandwich is None else frozenset(sandwich.penalized_group_names)
+        )
+        self.wald_df_limit = None if sandwich is None else sandwich.wald_df_limit
+        # The slope blocks of the metrics a robust fit's level and curve errors are read
+        # with (``UndeterminedDirections.metrics``), formed once, or none.
+        self.undetermined = None if sandwich is None else sandwich.undetermined
+        self.undetermined_metrics = (
+            None
+            if self.undetermined is None
+            else tuple(metric[1:, 1:] for metric in self.undetermined.metrics())
+        )
+        self.read_errors = _error_reader(result, self.known_scale, self.is_sandwich)
+        self.active_by_name = {group.name: group for group in self.active_groups}
+        self.errors = {g.name: self._group_errors(g) for g in self.groups}
+        # The coefficients a separated level or cell moves (``separated_coefficients``,
+        # the intercept last): each keeps its estimate, with its Wald fields blank.
+        self.separated = separated_coefficients(self.groups, self.specs, self.interaction_specs)
+        self.level_diag = _level_diagnostics(
+            self.groups, self.group_matrices, self.sample_weights, self.weight_semantics
+        )
+        self.repaired = self.monotone_repairs or {}
+        self._moments = self.precomputed_design_moments
+        self._R = self.precomputed_R_a
+        self._influence = (
+            None
+            if self.precomputed_edf is None or self.precomputed_edf1 is None
+            else (self.precomputed_edf, self.precomputed_edf1)
+        )
+        self._group_edf = self.group_edf_map
+        self._ordered_done: set[Hashable] = set()
+        self._ordered_levels: dict[Hashable, NDArray[np.bool_]] = {}
+
+    def rows(self) -> list[_CoefRow]:
+        """The intercept row, then each group's rows from its feature class's producer."""
+        producers = _row_producers()
+        rows = [self.intercept_row()]
+        for g in self.groups:
+            spec = self.specs.get(g.feature_name) or self.interaction_specs.get(g.feature_name)
+            produce = next(
+                (method for kinds, method in producers if isinstance(spec, kinds)),
+                _CoefTable.default_rows,
+            )
+            rows.extend(produce(self, g, spec))
+        # Not every producer sets ``estimable``; a blank error always means it is False.
+        for row in rows:
+            if row.se is not None and np.isnan(row.se):
+                row.estimable = False
+        _flag_outsized_errors(rows)
+        return rows
+
+    # ── Errors and determinacy ────────────────────────────────────
+
+    def _group_errors(self, g: GroupSlice) -> NDArray:
+        """A group's coefficient standard errors, NaN where the fit does not determine one."""
+        if g.name not in self.selected:
+            return np.zeros(g.size)
+        active_group = self.active_by_name.get(g.name)
+        errors = (
+            np.zeros(g.size)
+            if active_group is None
+            else self.read_errors(augmented_group_diagonal(self.XtWX_inv_aug, active_group))
+        )
+        errors = errors.astype(float, copy=True)
+        errors[~self.estimable[g.sl]] = np.nan
+        return errors
+
+    def cov_from_aug(self, matrix: Any) -> Any:
+        """A block of the augmented inverse as a coefficient covariance."""
+        if self.is_sandwich:
+            return matrix
+        return coefficient_covariance(matrix, self.result, known_scale=self.known_scale)
+
+    def group_block(self, active_group: GroupSlice) -> NDArray:
+        """An active group's coefficient covariance block."""
+        return self.cov_from_aug(augmented_group_block(self.XtWX_inv_aug, active_group))
+
+    def coef_stats(self, coef: float, se: float, group_name: str):
+        """z, p and interval of one coefficient; a penalised block's robust z and p are blank."""
+        z, p, ci_lo, ci_hi = _compute_coef_stats(coef, se, self.alpha)
+        if self.is_sandwich and group_name in self.sandwich_penalized:
+            return None, None, ci_lo, ci_hi
+        return z, p, ci_lo, ci_hi
+
+    def moves(self, column: int) -> bool:
+        return self.separated is not None and bool(self.separated[column])
+
+    def determined(self, contrast: NDArray, intercept: float = 0.0) -> bool:
+        """Whether the default covariance determines ``contrast @ beta`` (``contrast_determined``)."""
+        return contrast_determined(contrast, self.estimable, self.contrast_estimable, intercept)
+
+    def mask_determines(self, g_slice: slice) -> Callable[[NDArray], NDArray[np.bool_]]:
+        """Which contrasts of the coefficients at ``g_slice`` the default covariance determines."""
+
+        def determined(contrast: NDArray) -> bool:
+            full = np.zeros(len(self.beta))
+            full[g_slice] = contrast
+            return self.determined(full)
+
+        return lambda contrasts: np.array([determined(c) for c in contrasts], dtype=bool)
+
+    def function_determined(self, term_groups: list[GroupSlice]) -> bool:
+        """Whether the default covariance determines the fitted function of ``term_groups``' blocks.
+
+        Wood's test is of that function: each design row's part on the blocks' coefficients
+        is one of its contrasts (``function_determined``).
+        """
+        columns = np.zeros(len(self.beta), dtype=bool)
+        for group in term_groups:
+            columns[group.sl] = True
+        return function_determined(columns, self.estimable, self.contrast_estimable)
+
+    def block_test_withheld(self, g_slice: slice) -> bool:
+        """Whether the default path withholds a chi-square of ``beta = 0`` on the block at ``g_slice``.
+
+        Each coefficient is a tested contrast, and every one must be ``determined``.
+        """
+        return not self.is_sandwich and not np.all(
+            self.mask_determines(g_slice)(np.eye(g_slice.stop - g_slice.start))
+        )
+
+    def block_determines(self, start: int) -> Callable[[NDArray], NDArray[np.bool_]] | None:
+        """``determines`` of a robust covariance for contrasts of the block at ``start``, or none."""
+        covariance = self.sandwich_covariance
+        if covariance is None:
+            return None
+
+        def determines(contrasts: NDArray) -> NDArray[np.bool_]:
+            rows = np.zeros((len(contrasts), covariance.n_params))
+            rows[:, start : start + contrasts.shape[1]] = contrasts
+            return covariance.determines(rows)
+
+        return determines
+
+    def feature_se(self, feature_name: Hashable) -> NDArray:
+        """A term's level or curve errors from the slope covariance (``feature_se_from_cov``).
+
+        A robust covariance blanks each one whose contrast the fit does not determine:
+        the term's own map, read with the covariance replaced by each metric of
+        ``UndeterminedDirections``, gives every row's share along the undetermined
+        directions.
+        """
+
+        def read(covariance: Any) -> NDArray:
+            return np.asarray(
+                feature_se_from_cov(
+                    feature_name,
+                    covariance,
+                    self.active_groups,
+                    self.result,
+                    self.groups,
+                    self.specs,
+                    self.interaction_specs,
+                ),
+                dtype=np.float64,
+            )
+
+        from superglm.features.ordered_categorical import OrderedCategorical
+
+        se = read(self.cov_from_aug(covariance_slope_view(self.XtWX_inv_aug)))
+        if not self.is_sandwich and isinstance(self.specs.get(feature_name), OrderedCategorical):
+            return np.where(self.ordered_levels_determined(feature_name), se, np.nan)
+        if self.undetermined is None or self.undetermined_metrics is None:
+            return se
+        norms = [read(metric) for metric in self.undetermined_metrics]
+        return np.where(self.undetermined.determined(*norms), se, np.nan)
+
+    def ordered_levels_determined(self, feature_name: Hashable) -> NDArray[np.bool_]:
+        """Which levels of an ordered term the default covariance determines (``determined``)."""
+        if feature_name not in self._ordered_levels:
+            contrasts = ordered_level_contrasts(
+                self.specs[feature_name],
+                feature_name,
+                [g for g in self.groups if g.feature_name == feature_name],
+                self.interaction_specs,
+                len(self.beta),
+                self.selected,
+            )
+            self._ordered_levels[feature_name] = np.array(
+                [self.determined(c) for c in contrasts], dtype=bool
+            )
+        return self._ordered_levels[feature_name]
+
+    def curve_se_range(self, feature_name: Hashable) -> tuple[float, float]:
+        """The smallest and largest error on a spline term's curve.
+
+        A specials term's errors include its FREE levels, whose uncertainty is not a
+        point on the curve; levels are ordered smooth-then-special (the build()
+        contract), so the tail is dropped.
+        """
+        se_curve = self.feature_se(feature_name)
+        n_special = len(getattr(self.specs.get(feature_name), "_specials", ()) or ())
+        if n_special and len(se_curve) > n_special:
+            se_curve = np.asarray(se_curve)[:-n_special]
+        return float(np.min(se_curve)), float(np.max(se_curve))
+
+    # ── Whole-group tests ─────────────────────────────────────────
+
+    def untested(self, size: int) -> _GroupTest:
+        """A group test not computed: blank under a robust covariance, NaN on ``size`` df otherwise."""
+        if self.is_sandwich:
+            return _GroupTest(None, None, None)
+        return _GroupTest(float("nan"), float("nan"), float(size))
+
+    def block_wald(
+        self, b_block: NDArray, V_block: NDArray, g_slice: slice, group_name: str
+    ) -> _GroupTest:
+        """The chi-square of ``beta = 0`` on one unpenalised block."""
+        from scipy.stats import chi2 as chi2_dist
+
+        ref_df = float(len(b_block))
+        if self.is_sandwich:
+            return self._robust_block_wald(b_block, V_block, g_slice, group_name, ref_df)
+        try:
+            stat = covariance_wald_statistic(b_block, V_block)
+            return _GroupTest(stat, 1.0 - chi2_dist.cdf(stat, ref_df), ref_df)
+        except np.linalg.LinAlgError:
+            return _GroupTest(float("nan"), float("nan"), ref_df)
+
+    def _robust_block_wald(self, b_block, V_block, g_slice, group_name, ref_df) -> _GroupTest:
+        from superglm.inference._sandwich_core import wald_block_statistic
+
+        # The penalty that voids an ordinary Wald test is the one on this block.
+        if (
+            group_name in self.sandwich_penalized
+            or not np.all(self.estimable[g_slice])
+            or any(self.moves(idx) for idx in range(g_slice.start, g_slice.stop))
+        ):
+            return _GroupTest(None, None, None)
+        stat, p = wald_block_statistic(b_block, V_block, df_limit=self.wald_df_limit)
+        return _GroupTest(None, None, None) if stat is None else _GroupTest(stat, p, ref_df)
+
+    def group_wald_test(self, g: GroupSlice, *, undetermined: bool) -> _GroupTest:
+        """The chi-square on an active group's whole block, unless ``undetermined``."""
+        if undetermined:
+            return _WITHHELD
+        V_block = self.group_block(self.active_by_name[g.name])
+        return self.block_wald(self.beta[g.sl], V_block, g.sl, g.name)
+
+    def wood_test(
+        self,
+        term_groups: list[GroupSlice],
+        coef: NDArray,
+        columns: slice | NDArray,
+        covariance: NDArray,
+        size: int,
+        *,
+        withhold_undetermined: bool,
+        catch: type[Exception],
+    ) -> _GroupTest:
+        """Wood's (2013) test of ``term_groups``' fitted function, at ``columns`` of the active design.
+
+        ``withhold_undetermined`` withholds it where the fit does not determine that
+        function; ``catch`` is the failure that leaves the row untested.
+        """
+        R_a = self.R_factor()
+        edf, edf1 = self.influence_edf()
+        rank = float(np.sum(edf1[columns]))
+        design = R_a[:, columns]
+        residual_df = self.wood_residual_df(edf)
+        if withhold_undetermined and not self.function_determined(term_groups):
+            return _WITHHELD
+        try:
+            return _GroupTest(
+                *self.wood_statistic(term_groups, coef, design, covariance, rank, residual_df)
+            )
+        except catch:
+            return self.untested(size)
+
+    def group_wood_test(
+        self, g: GroupSlice, *, withhold_undetermined: bool, catch: type[Exception]
+    ) -> _GroupTest:
+        """Wood's test of one active group's function; a robust covariance reports none."""
+        if self.is_sandwich:
+            return self.untested(g.size)
+        active_group = self.active_by_name[g.name]
+        return self.wood_test(
+            [g],
+            self.beta[g.sl],
+            active_group.sl,
+            self.group_block(active_group),
+            g.size,
+            withhold_undetermined=withhold_undetermined,
+            catch=catch,
+        )
+
+    def wood_statistic(self, term_groups, coef, design, covariance, rank, residual_df):
+        from scipy.linalg import block_diag
+
+        from superglm.stats.wood_pvalue import wood_test_smooth
+
+        test_bases = self.test_bases
+        if not test_bases or not any(g.name in test_bases for g in term_groups):
+            return wood_test_smooth(coef, design, covariance, rank, residual_df)
+        bases = [
+            test_bases[g.name] if g.name in test_bases else np.eye(g.size) for g in term_groups
+        ]
+        basis = bases[0] if len(bases) == 1 else block_diag(*bases)
+        return wood_test_smooth(coef, design, covariance, rank, residual_df, term_basis=basis)
+
+    def wood_residual_df(self, edf: NDArray) -> float:
+        if self.known_scale:
+            return -1.0
+        effective_df = 1.0 + float(np.sum(edf))
+        if self.weight_semantics is not None and self.sample_weights is not None:
+            from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
+
+            return pearson_residual_degrees_of_freedom(
+                self.sample_weights,
+                effective_df,
+                weight_semantics=self.weight_semantics,
+            )
+        # A released fit (``retain_fit_state=False``) has no weight rows left, but the fit
+        # recorded its own likelihood size before discarding them: ``n_obs`` would be the
+        # row count for a prior-contract fit carrying zero weights, and ``sum(w)`` is not
+        # the row count under ``"frequency"`` either.
+        if self.recorded_likelihood_size is not None:
+            return max(float(self.recorded_likelihood_size) - effective_df, 1.0)
+        return max(float(self.n_obs) - effective_df, 1.0)
+
+    # ── Lazily formed design quantities (only Wood's test and EDF read them) ──
+
+    def design_moments(self):
+        if self._moments is None:
+            self._moments = weighted_moments(self.X_a, self.W)
+        return self._moments
+
+    def R_factor(self) -> NDArray:
+        if self._R is None:
+            self._R = (
+                np.empty((0, 0))
+                if self.X_a.shape[1] == 0
+                else factor_from_gram(self.design_moments()[2])
+            )
+        return self._R
+
+    def influence_edf(self) -> tuple[NDArray, NDArray]:
+        if self._influence is None:
+            if self.X_a.shape[1] == 0:
+                self._influence = (np.array([]), np.array([]))
+            else:
+                F = self.XtWX_inv_aug[1:, 1:] @ self.design_moments()[2]
+                edf = np.diag(F)
+                self._influence = (edf, 2.0 * edf - diagonal_of_square(F))
+        return self._influence
+
+    def group_edf(self) -> dict[str, float]:
+        if self._group_edf is None:
+            edf, _ = self.influence_edf()
+            self._group_edf = {ag.name: float(np.sum(edf[ag.sl])) for ag in self.active_groups}
+        return self._group_edf
+
+    def mapped_edf(self, group_name: str) -> float | None:
+        """A group's EDF from the group map, or ``None`` when the map is empty."""
+        edf_map = self.group_edf()
+        return edf_map.get(group_name) if edf_map else None
+
+    # ── Row metadata ──────────────────────────────────────────────
+
+    def spline_fields(self, group_name: str, spec: Any) -> dict[str, Any]:
+        """A spline row's EDF, smoothing lambda and basis description (``spline_group_enrichment``)."""
+        return spline_group_enrichment(
+            group_name, spec, self.group_edf(), self.reml_lambdas, self.lambda2
+        )
+
+    def rule_fields(self, spec: Any, g: GroupSlice) -> dict[str, Any]:
+        """A spline term's rule line: its rules, the engine, and whether a repair moved it."""
+        return {
+            "monotone": rules_of(spec).describe() or None,
+            "monotone_engine": self.engine_tag(spec, g.monotone_engine),
+            "monotone_repaired": g.feature_name in self.repaired,
+        }
+
+    def engine_tag(self, spec: Any, engine: str | None) -> str | None:
+        """The engine on a term's rule line, or the mark that a path did not enforce its rules."""
+        if engine is None or self.rules_enforced:
+            return engine
+        return unenforced_rules_tag(rules_of(spec))
+
+    def structured_lambdas(self, group_name: str) -> tuple[tuple[str, float], ...]:
+        source = self.reml_lambdas if self.reml_lambdas is not None else self.lambda2
+        if not isinstance(source, dict):
+            return (("lambda", float(source)),)
+        exact = (("lambda", float(source[group_name])),) if group_name in source else ()
+        prefix = f"{group_name}:"
+        components = tuple(
+            (name[len(prefix) :], float(value))
+            for name, value in source.items()
+            if name.startswith(prefix)
+        )
+        return exact + components
+
+    # ── Row shapes ────────────────────────────────────────────────
+
+    def coefficient_row(
+        self,
+        g: GroupSlice,
+        i: int,
+        name: str,
+        group: str,
+        *,
+        blank: bool = False,
+        withheld: bool = False,
+        **fields: Any,
+    ) -> _CoefRow:
+        """Coefficient ``i`` of group ``g`` with its standard error, z, p and interval.
+
+        ``blank`` (a separated level or cell) keeps only the estimate; ``withheld``
+        keeps the error but not z, p or the interval.
+        """
+        coef = float(self.beta[g.start + i])
+        if blank:
+            return _CoefRow(name=name, group=group, coef=coef, separated=True, **fields)
+        se = float(self.errors[g.name][i])
+        z, p, ci_lo, ci_hi = (None,) * 4 if withheld else self.coef_stats(coef, se, g.name)
+        return _CoefRow(
+            name=name,
+            group=group,
+            coef=coef,
+            se=se,
+            z=z,
+            p=p,
+            ci_low=ci_lo,
+            ci_high=ci_hi,
+            **fields,
+        )
+
+    def group_row(self, g: GroupSlice, test: _GroupTest | None, **fields: Any) -> _CoefRow:
+        """Group ``g``'s whole-term test row: active with ``test``, or inactive (``None``)."""
+        common = {
+            "name": g.name,
+            "group": str(g.feature_name),
+            "is_spline": True,
+            "n_params": g.size,
+        }
+        if test is None:
+            return _CoefRow(**common, active=False, group_norm=0.0, **fields)
+        return _CoefRow(
+            **common,
+            active=True,
+            group_norm=float(np.linalg.norm(self.beta[g.sl])),
+            wald_chi2=test.stat,
+            wald_p=test.p,
+            ref_df=test.ref_df,
+            estimable=not test.undetermined,
+            **fields,
+        )
+
+    # ── The intercept ─────────────────────────────────────────────
+
+    def intercept_row(self) -> _CoefRow:
+        """The intercept at each ordered term's base level, the effects being reported there.
+
+        The same affine shift is applied to its covariance.  On the default path the
+        reported intercept, the centred one less the centre and plus the ordered terms'
+        base-level effects, is decided by the mask's rule as that one estimate: the centred
+        intercept's unit weight is part of its size, so a centre of rounding size beside it
+        decides nothing.
+        """
+        from superglm.inference._ordered_reference import (
+            ordered_reference_beta_contrast,
+            ordered_reference_intercept,
+        )
+
+        beta, groups, specs = self.beta, self.groups, self.specs
+        feature_order = list(specs)
+        intercept = ordered_reference_intercept(
+            self.result.intercept, beta, feature_order, specs, groups
+        )
+        full_contrast = ordered_reference_beta_contrast(len(beta), feature_order, specs, groups)
+        augmented_contrast = np.zeros(self.XtWX_inv_aug.shape[0], dtype=np.float64)
+        augmented_contrast[0] = 1.0
+        original_groups = {group.name: group for group in groups}
+        for active_group in self.active_groups:
+            original_group = original_groups[active_group.name]
+            augmented_contrast[1 + active_group.start : 1 + active_group.end] = full_contrast[
+                original_group.sl
+            ]
+        icpt_se = float(
+            self.read_errors(covariance_quadratic_form(self.XtWX_inv_aug, augmented_contrast))
+        )
+        # Blank where the fit does not determine the base-level contrast, not only the
+        # unadjusted intercept.
+        if self.is_sandwich and not self.sandwich_covariance.determines(augmented_contrast)[0]:
+            icpt_se = float("nan")
+        if self.information_underflowed:
+            icpt_se = float("nan")
+        z, p, ci_lo, ci_hi = _compute_coef_stats(intercept, icpt_se, self.alpha)
+        blank = self.moves(-1)
+        selected_columns = np.zeros(len(beta), dtype=bool)
+        for group in groups:
+            selected_columns[group.sl] = group.name in self.selected
+        contrast = full_contrast
+        if self.intercept_centre is not None:
+            contrast = contrast - np.asarray(self.intercept_centre, dtype=np.float64)
+        undetermined = not self.is_sandwich and not self.determined(
+            np.where(selected_columns, contrast, 0.0),
+            intercept=0.0 if self.intercept_centre is None else 1.0,
+        )
+        withheld = blank or undetermined
+        return _CoefRow(
+            name="Intercept",
+            coef=intercept,
+            se=None if withheld else icpt_se,
+            z=None if withheld else z,
+            p=None if withheld else p,
+            ci_low=None if withheld else ci_lo,
+            ci_high=None if withheld else ci_hi,
+            estimable=not undetermined,
+            separated=blank,
+        )
+
+    # ── Producers: one per feature class ──────────────────────────
+
+    def random_effect_rows(self, g: GroupSlice, spec: Any) -> list[_CoefRow]:
+        return [self._structured_row(g, spec, "random_effect")]
+
+    def factor_smooth_rows(self, g: GroupSlice, spec: Any) -> list[_CoefRow]:
+        return [self._structured_row(g, spec, f"factor_smooth_{spec.basis}")]
+
+    def _structured_row(self, g: GroupSlice, spec: Any, kind: str) -> _CoefRow:
+        """One summary row for a structured term; its levels have a dedicated report."""
+        active = g.name in self.selected
+        lambdas = self.structured_lambdas(g.name)
+        return _CoefRow(
+            name=g.name,
+            group=str(g.feature_name),
+            structured_kind=kind,
+            n_levels=len(spec._levels),
+            n_params=g.size,
+            active=active,
+            group_norm=float(np.linalg.norm(self.beta[g.sl])) if active else 0.0,
+            edf=self.group_edf().get(g.name, 0.0) if active else 0.0,
+            smoothing_lambda=(lambdas[0][1] if len(lambdas) == 1 else None),
+            smoothing_lambdas=lambdas,
+        )
+
+    def ordered_rows(self, g: GroupSlice, spec: Any) -> list[_CoefRow]:
+        """An ordered term's rows, once for all its groups: the whole-term row(s), then its levels.
+
+        A specials term owns a second, unpenalized GroupSlice under the same feature
+        name. ``reconstruct`` needs the full-width vector, but every statistic on the
+        whole-term row (edf, the test, ref_df, n_params) is a statement about the
+        spline block.  ``feature_active`` (any block survived selection) gates the level
+        table, as a free special keeps a real SE when the curve is dropped;
+        ``smooth_active`` (the spline block alone) gates the whole-term row.
+        """
+        name = g.feature_name
+        if name in self._ordered_done:
+            return []
+        self._ordered_done.add(name)
+        feature_groups = [fg for fg in self.groups if fg.feature_name == name]
+        smooth_groups = spline_groups(feature_groups)
+        feature_active = any(fg.name in self.selected for fg in feature_groups)
+        smooth_active = any(fg.name in self.selected for fg in smooth_groups)
+        feature_edf = (
+            sum(self.group_edf().get(fg.name, 0.0) for fg in smooth_groups)
+            if smooth_active
+            else 0.0
+        )
+        se_levels = self.feature_se(name)
+        raw = spec.reconstruct(np.concatenate([self.beta[fg.sl] for fg in feature_groups]))
+        inner_kind = spec.basis_kind
+        if inner_kind == "spline":
+            rows = [self._ordered_spline_row(g, spec, smooth_groups, smooth_active, feature_edf)]
+        else:
+            rows = self._ordered_parametric_rows(
+                g, spec, inner_kind, smooth_groups[0], smooth_active, feature_edf
+            )
+        return rows + self._ordered_level_rows(g, spec, raw, se_levels, feature_active, inner_kind)
+
+    def _ordered_spline_row(self, g, spec, smooth_groups, smooth_active, feature_edf) -> _CoefRow:
+        """An ordered spline's Wood test row, over the active blocks of its smooth."""
+        blocks = [fg for fg in smooth_groups if fg.name in self.active_by_name]
+        size = sum(fg.size for fg in smooth_groups)
+        test = self.untested(size)
+        curve_se = (float("nan"), float("nan"))
+        beta_active = (
+            np.concatenate([self.beta[fg.sl] for fg in blocks])
+            if blocks
+            else np.empty(0, dtype=float)
+        )
+        if blocks:
+            if not self.is_sandwich:
+                active = [self.active_by_name[fg.name] for fg in blocks]
+                columns = np.concatenate([np.arange(ag.start, ag.end) for ag in active])
+                covariance = self.cov_from_aug(
+                    covariance_selected_block(self.XtWX_inv_aug, columns + 1)
+                )
+                test = self.wood_test(
+                    blocks,
+                    beta_active,
+                    columns,
+                    covariance,
+                    size,
+                    withhold_undetermined=True,
+                    catch=np.linalg.LinAlgError,
+                )
+            curve_se = self.curve_se_range(g.feature_name)
+        fields = self.spline_fields(smooth_groups[0].name, spec._basis_spline)
+        fields["edf"] = feature_edf
+        return _CoefRow(
+            name=str(g.feature_name),
+            group=str(g.feature_name),
+            is_spline=True,
+            n_params=size,
+            active=smooth_active,
+            group_norm=float(np.linalg.norm(beta_active)),
+            wald_chi2=test.stat if smooth_active else None,
+            wald_p=test.p if smooth_active else None,
+            ref_df=test.ref_df if smooth_active else None,
+            curve_se_min=curve_se[0],
+            curve_se_max=curve_se[1],
+            subgroup_type="ordered_spline",
+            estimable=not test.undetermined,
+            # The wrapper forwards its basis's rules, and raises on a step-mode pickle, which is
+            # safe because ``spec.reconstruct(...)`` and ``spec.basis_kind`` already raised the
+            # migration error first.
+            monotone=rules_of(spec).describe() or None,
+            monotone_engine=self.engine_tag(spec, g.monotone_engine),
+            monotone_repaired=g.feature_name in self.repaired,
+            **fields,
+        )
+
+    def _ordered_parametric_rows(
+        self, g, spec, inner_kind, main_group, smooth_active, feature_edf
+    ) -> list[_CoefRow]:
+        """An ordered Piecewise or Polynomial basis: a Wald row, then per-power or structural rows.
+
+        The inner block is UNPENALIZED, so the whole-term test is a plain Wald chi-square,
+        not Wood's smooth test: no smoothing parameter was estimated.
+        """
+        name, label = g.feature_name, str(g.feature_name)
+        b_main = self.beta[main_group.sl]
+        test = self.untested(main_group.size)
+        V_b_main: NDArray | None = None
+        determines = None
+        active_group = self.active_by_name.get(main_group.name) if smooth_active else None
+        if active_group is not None:
+            V_b_main = self.group_block(active_group)
+            determines = (
+                self.block_determines(1 + active_group.start)
+                if self.is_sandwich
+                else self.mask_determines(main_group.sl)
+            )
+            # The chi-square tests beta_main = 0: each coefficient is a contrast.
+            test = (
+                self.block_wald(b_main, V_b_main, main_group.sl, main_group.name)
+                if np.all(determines(np.eye(main_group.size)))
+                else _WITHHELD
+            )
+        rows = [
+            _CoefRow(
+                name=label,
+                group=label,
+                is_spline=True,
+                n_params=main_group.size,
+                active=smooth_active,
+                group_norm=float(np.linalg.norm(b_main)) if smooth_active else 0.0,
+                wald_chi2=test.stat if smooth_active else None,
+                wald_p=test.p if smooth_active else None,
+                ref_df=test.ref_df if smooth_active else None,
+                subgroup_type=f"ordered_{inner_kind}",
+                estimable=not test.undetermined,
+                edf=feature_edf,
+            )
+        ]
+        if inner_kind == "polynomial":
+            # Per-power rows, labelled by the stated powers as a numeric Polynomial's are.
+            powers = spec._basis_spline.powers
+            rows += [
+                self.coefficient_row(main_group, i, f"{name}[P{powers[i]}]", label)
+                for i in range(main_group.size)
+            ]
+        elif V_b_main is not None:
+            # Structural contrast rows (Smith 1979): no per-segment per-power z rows,
+            # which do not exist under C0 seams.
+            rows += _ordered_piecewise_structural_rows(
+                spec,
+                name,
+                label,
+                b_main,
+                V_b_main,
+                self.alpha,
+                is_sandwich=self.is_sandwich,
+                sandwich_penalized=main_group.name in self.sandwich_penalized,
+                wald_df_limit=self.wald_df_limit,
+                determines=determines,
+            )
+        return rows
+
+    def _ordered_level_rows(
+        self, g, spec, raw, se_levels, feature_active, inner_kind
+    ) -> list[_CoefRow]:
+        """One row per ordered level, against the base level, with its Fit column word.
+
+        Specials come from ``raw["special_levels"]``, not ``spec._specials``, which is
+        string-coerced: for ``specials=[9]`` the level is 9 here and "9" there.  A level
+        carried by an unpenalized parametric block is "piecewise"/"polynomial", not
+        "smooth", beside its "free" neighbours.
+        """
+        special_labels = set(raw.get("special_levels") or ()) if spec.has_specials else None
+        pinned_labels = set(raw.get("pinned_specials") or ())
+        main_fit = "smooth" if inner_kind == "spline" else inner_kind
+        rows = []
+        for i, level in enumerate(raw["levels"]):
+            coef = float(raw["level_log_relativities"][level])
+            se: float | None = (
+                float(se_levels[i]) if feature_active and i < len(se_levels) else None
+            )
+            estimable = se is None or not np.isnan(se)
+            ci_lo: float | None
+            ci_hi: float | None
+            if se is not None and np.isfinite(se) and se > 0.0:
+                _, _, ci_lo, ci_hi = _compute_coef_stats(coef, se, self.alpha)
+            elif se is not None and np.isfinite(se) and level == spec._base_level:
+                ci_lo = ci_hi = coef
+            else:
+                se = ci_lo = ci_hi = None
+            fit = ordered_level_fit(
+                level, special_labels=special_labels, pinned_labels=pinned_labels, main_fit=main_fit
+            )
+            rows.append(
+                _CoefRow(
+                    name=f"{g.feature_name}[{level}]",
+                    group=str(g.feature_name),
+                    coef=coef,
+                    se=se,
+                    ci_low=ci_lo,
+                    ci_high=ci_hi,
+                    estimable=estimable,
+                    level_fit=fit,
+                )
+            )
+        return rows
+
+    def spline_rows(self, g: GroupSlice, spec: Any) -> list[_CoefRow]:
+        """A spline group's Wood test row (a legacy ``linear`` subgroup's is a Wald test)."""
+        fields = {
+            **self.spline_fields(g.name, spec),
+            **self.rule_fields(spec, g),
+            "subgroup_type": g.subgroup_type,
+        }
+        if g.name not in self.selected:
+            return [self.group_row(g, None, **{**fields, "edf": 0.0})]
+        if g.subgroup_type == "linear":
+            test = self.group_wald_test(g, undetermined=self.block_test_withheld(g.sl))
+        else:
+            test = self.group_wood_test(g, withhold_undetermined=True, catch=Exception)
+        curve_min, curve_max = self.curve_se_range(g.feature_name)
+        return [self.group_row(g, test, curve_se_min=curve_min, curve_se_max=curve_max, **fields)]
+
+    def categorical_rows(self, g: GroupSlice, spec: Any) -> list[_CoefRow]:
+        """One row per non-base level, with its experience and a separated level blank."""
+        edf = self.group_edf().get(g.name, 0.0) if g.name in self.selected else 0.0
+        diag = self.level_diag.get(g.name, {})
+        rules = rules_of(spec).describe() or None
+        engine = self.engine_tag(spec, g.monotone_engine if rules else None)
+        rows = []
+        for i, level in enumerate(spec._non_base):
+            blank = self.moves(g.start + i)
+            n_obs, exposure_share, thin = diag.get(i, (None, None, False))
+            # a blank row's interval is not shown, so no note about it is either
+            thin = thin and not blank
+            rows.append(
+                self.coefficient_row(
+                    g,
+                    i,
+                    f"{g.name}[{level}]",
+                    g.name,
+                    blank=blank,
+                    edf=edf if i == 0 else None,
+                    level_n_obs=n_obs,
+                    level_exposure_share=exposure_share,
+                    quasi_separated=thin,
+                    advisory_trigger="thin_level" if thin else "",
+                    monotone=rules,
+                    monotone_engine=engine,
+                )
+            )
+        return rows
+
+    def spline_by_level_rows(self, g: GroupSlice, spec: Any) -> list[_CoefRow]:
+        """A by-level curve's Wood test row, which is not withheld on an undetermined function."""
+        if g.name not in self.selected:
+            return [self.group_row(g, None)]
+        test = self.group_wood_test(g, withhold_undetermined=False, catch=Exception)
+        return [
+            self.group_row(
+                g,
+                test,
+                edf=self.mapped_edf(g.name),
+                smoothing_lambda=_resolve_group_lambda(g.name, self.reml_lambdas, self.lambda2),
+            )
+        ]
+
+    def polynomial_rows(self, g: GroupSlice, spec: Any) -> list[_CoefRow]:
+        """One row per stated power: with powers={1, 2, 4} the third row is [P4]."""
+        powers = spec.powers
+        if powers == tuple(range(1, spec.degree + 1)):
+            group = f"{g.name} P({spec.degree})"
+        else:
+            group = f"{g.name} P({','.join(str(p) for p in powers)})"
+        return [self.coefficient_row(g, i, f"{g.name}[P{powers[i]}]", group) for i in range(g.size)]
+
+    def polynomial_by_level_rows(self, g: GroupSlice, spec: Any) -> list[_CoefRow]:
+        """A by-level polynomial's Wald test row, which is not withheld on an undetermined block."""
+        if g.name not in self.selected:
+            return [self.group_row(g, None)]
+        return [self.group_row(g, self.group_wald_test(g, undetermined=False))]
+
+    def crossed_level_rows(self, g: GroupSlice, spec: Any) -> list[_CoefRow]:
+        """One row per crossed cell, a separated cell blank."""
+        return [
+            self.coefficient_row(
+                g, i, f"{g.name}[{lev1}:{lev2}]", g.name, blank=self.moves(g.start + i)
+            )
+            for i, (lev1, lev2) in enumerate(spec._pairs)
+        ]
+
+    def numeric_by_level_rows(self, g: GroupSlice, spec: Any) -> list[_CoefRow]:
+        """One slope row per non-base level."""
+        return [
+            self.coefficient_row(g, i, f"{g.name}[{level}]", g.name)
+            for i, level in enumerate(spec._non_base)
+        ]
+
+    def numeric_interaction_rows(self, g: GroupSlice, spec: Any) -> list[_CoefRow]:
+        """Up to four coefficient rows, else one Wald test row (not withheld on an undetermined block)."""
+        if g.name not in self.selected:
+            return [self.group_row(g, None)]
+        if g.size <= 4:
+            return [
+                self.coefficient_row(g, i, f"{g.name}[{i}]" if g.size > 1 else g.name, g.name)
+                for i in range(g.size)
+            ]
+        test = self.group_wald_test(g, undetermined=False)
+        return [
+            self.group_row(
+                g,
+                test,
+                edf=self.mapped_edf(g.name),
+                smoothing_lambda=_resolve_group_lambda(g.name, self.reml_lambdas, self.lambda2),
+            )
+        ]
+
+    def tensor_rows(self, g: GroupSlice, spec: Any) -> list[_CoefRow]:
+        """A tensor's Wood test row, which is not withheld on an undetermined function."""
+        lam = _resolve_group_lambda(g.name, self.reml_lambdas, self.lambda2)
+        if g.name not in self.selected:
+            return [self.group_row(g, None, edf=0.0, smoothing_lambda=lam)]
+        test = self.group_wood_test(g, withhold_undetermined=False, catch=Exception)
+        return [self.group_row(g, test, edf=self.mapped_edf(g.name), smoothing_lambda=lam)]
+
+    def numeric_rows(self, g: GroupSlice, spec: Any) -> list[_CoefRow]:
+        edf = self.group_edf().get(g.name, 0.0) if g.name in self.selected else 0.0
+        estimable = bool(self.estimable[g.start])
+        return [self.coefficient_row(g, 0, g.name, g.name, edf=edf, estimable=estimable)]
+
+    def piecewise_rows(self, g: GroupSlice, spec: Any) -> list[_CoefRow]:
+        """Per-knot rows, then the whole-term row carrying the edf and a J+1 df chi-square.
+
+        The edf is on the whole-term row alone, or the summary's parametric and smooth
+        buckets would both count it.
+        """
+        # Per-knot Wald rows, CIs and edf = J+1 are valid only when all four hold; otherwise the
+        # per-coefficient p-values are withdrawn: (1) the term is unpenalized (an L1 slope-change
+        # penalty is trend filtering, whose df is data-dependent); (2) the group carries no selection
+        # shrinkage (enforced here: z/p/CI and the whole-term chi-square are withheld, estimates and
+        # SEs stay); (3) the breakpoints are fixed inputs, not selected on the response (the
+        # statistic then converges to a supremum of a nonstandard Gaussian process even though df
+        # stays nominally J+1; quantile placement ``breaks=int`` looks only at x and is milder; kinks
+        # read off a fitted Spline and refit on the same data are the offender); (4) the term is
+        # unconstrained (an active monotone constraint makes df the data-dependent size of the face).
+        active = g.name in self.selected
+        shrunk = g.name in (self.selection_shrunk_group_names or ())
+        knots = spec._knots
+        edf = self.group_edf().get(g.name, 0.0) if active else 0.0
+        rows = [
+            self.coefficient_row(
+                g, i, f"{g.name}[{float(knots[knot_index]):.10g}]", g.name, withheld=shrunk
+            )
+            for i, knot_index in enumerate(spec._non_base_indices)
+        ]
+        test = None
+        if active:
+            test = (
+                _GroupTest(None, None, None)
+                if shrunk
+                else self.group_wald_test(g, undetermined=self.block_test_withheld(g.sl))
+            )
+        # ``subgroup_type`` names the row for what it is in both renderers, which
+        # otherwise label every group-test row "spline".
+        rows.append(self.group_row(g, test, subgroup_type="piecewise", edf=edf))
+        return rows
+
+    def default_rows(self, g: GroupSlice, spec: Any) -> list[_CoefRow]:
+        estimable = bool(self.estimable[g.start])
+        return [self.coefficient_row(g, 0, g.name, g.name, estimable=estimable)]
+
+
+def _flag_outsized_errors(rows: list[_CoefRow]) -> None:
+    """Flag a non-categorical coefficient whose error is far above the model's typical one.
+
+    The low-credibility advisory has two disjoint triggers, neither a separation test
+    (separation is a joint property of design and response, issue #239). Primary:
+    categorical levels with too little experience (``_thin_levels``). This fallback, for
+    rows without per-level counts, is SE-based with threshold ``max(50 * median_se,
+    10.0)``, which is not scale-invariant (rescaling one predictor trips it) and is
+    dominated by the absolute 10.0 when the median parametric SE is under 0.2 (issue #304).
+    """
+    parametric_ses = [
+        r.se
+        for r in rows
+        if r.se is not None
+        and r.se > 0
+        and r.p is not None
+        and not r.is_spline
+        and r.name != "Intercept"
+    ]
+    if not parametric_ses:
+        return
+    threshold = max(float(np.median(parametric_ses)) * 50, 10.0)
+    for r in rows:
+        if r.quasi_separated or r.is_spline or r.name == "Intercept" or r.p is None:
+            continue
+        if r.level_n_obs is None and r.se is not None and r.se > threshold:
+            r.quasi_separated = True
+            r.advisory_trigger = "outsized_se"
+
+
 def build_coef_rows(
     *,
     groups: list[GroupSlice],
@@ -282,1297 +1385,8 @@ def build_coef_rows(
         decides the two together.  Without it, only the ordered terms' base-level
         adjustment is decided.
     """
-    from superglm.features.categorical import Categorical
-    from superglm.features.factor_smooth import FactorSmooth
-    from superglm.features.interaction import (
-        CategoricalInteraction,
-        NumericCategorical,
-        NumericInteraction,
-        PolynomialCategorical,
-        PolynomialInteraction,
-        SplineCategorical,
-        TensorInteraction,
-    )
-    from superglm.features.numeric import Numeric
-    from superglm.features.ordered_categorical import OrderedCategorical
-    from superglm.features.piecewise import Piecewise
-    from superglm.features.polynomial import Polynomial
-    from superglm.features.random_effect import RandomEffect
-    from superglm.features.spline import _SplineBase
-    from superglm.group_matrix import CategoricalGroupMatrix
-    from superglm.inference._ordered_reference import (
-        ordered_reference_beta_contrast,
-        ordered_reference_intercept,
-    )
-    from superglm.inference._term_covariance import (
-        contrast_determined,
-        feature_se_from_cov,
-        function_determined,
-        ordered_level_contrasts,
-    )
-    from superglm.inference._term_helpers import (
-        _resolve_group_lambda,
-        ordered_level_fit,
-        spline_group_enrichment,
-        spline_groups,
-    )
-
-    beta = result.beta
-    selected_names = (
-        selected_group_name_set(result, groups)
-        if selected_group_names is None
-        else set(selected_group_names)
-    )
-    coefficient_estimable = (
-        np.asarray(coefficient_estimable_override, dtype=bool)
-        if coefficient_estimable_override is not None
-        else (
-            result.rank_info.coefficient_estimable()
-            if getattr(result, "rank_info", None) is not None
-            else np.ones(len(beta), dtype=bool)
-        )
-    )
-    if contrast_estimable is None and coefficient_estimable_override is None:
-        rank_info = getattr(result, "rank_info", None)
-        contrast_estimable = None if rank_info is None else rank_info.is_estimable
-    # A dropped group's coefficients are held at zero by the selected model.
-    selected_columns = np.zeros(len(beta), dtype=bool)
-    for group in groups:
-        selected_columns[group.sl] = group.name in selected_names
-
-    # ── Per-level diagnostics for categorical features ────────────
-    # Compute observation count, exposure share and thinness per non-base level.
-    _level_diag: dict[str, dict[int, tuple[int, float, bool]]] = {}
-    if group_matrices is not None and sample_weights is not None:
-        total_weight = float(np.sum(sample_weights))
-        for gm, g in zip(group_matrices, groups):
-            if isinstance(gm, CategoricalGroupMatrix):
-                K = gm.n_levels
-                n_per = np.bincount(gm.codes, minlength=K + 1)[:K]
-                exp_per = np.bincount(gm.codes, weights=sample_weights, minlength=K + 1)[:K]
-                exp_share = exp_per / max(total_weight, 1e-300)
-                thin = _thin_levels(gm.codes, K, sample_weights, weight_semantics)
-                _level_diag[g.name] = {
-                    i: (int(n_per[i]), float(exp_share[i]), bool(thin[i])) for i in range(K)
-                }
-
-    def _wood_test(groups, coef, design, covariance, rank, residual_df):
-        from scipy.linalg import block_diag
-
-        from superglm.stats.wood_pvalue import wood_test_smooth
-
-        if not test_bases or not any(g.name in test_bases for g in groups):
-            return wood_test_smooth(coef, design, covariance, rank, residual_df)
-        bases = [test_bases[g.name] if g.name in test_bases else np.eye(g.size) for g in groups]
-        basis = bases[0] if len(bases) == 1 else block_diag(*bases)
-        return wood_test_smooth(coef, design, covariance, rank, residual_df, term_basis=basis)
-
-    def _wood_residual_df(edf: NDArray) -> float:
-        if known_scale:
-            return -1.0
-        effective_df = 1.0 + float(np.sum(edf))
-        if weight_semantics is not None and sample_weights is not None:
-            from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
-
-            return pearson_residual_degrees_of_freedom(
-                sample_weights,
-                effective_df,
-                weight_semantics=weight_semantics,
-            )
-        # A released fit (``retain_fit_state=False``) has no weight rows left,
-        # but the fit recorded its own likelihood size before discarding them.
-        # Falling back to ``n_obs`` there would report the row count for a
-        # prior-contract fit carrying zero weights, and ``sum(w)`` is not the
-        # row count under ``"frequency"`` either.
-        if recorded_likelihood_size is not None:
-            return max(float(recorded_likelihood_size) - effective_df, 1.0)
-        return max(float(n_obs) - effective_df, 1.0)
-
-    is_sandwich = sandwich_covariance is not None
-    sandwich_penalized_groups: frozenset[str] = (
-        frozenset(sandwich_covariance.penalized_group_names) if is_sandwich else frozenset()
-    )
-    wald_df_limit = sandwich_covariance.wald_df_limit if is_sandwich else None
-
-    def _se_from_var(var: NDArray | float) -> Any:
-        if is_sandwich:
-            return np.sqrt(np.maximum(var, 0.0))
-        return standard_errors(var, result, known_scale=known_scale)
-
-    def _cov_from_aug(mat: Any) -> Any:
-        if is_sandwich:
-            return mat
-        return coefficient_covariance(mat, result, known_scale=known_scale)
-
-    def _coef_stats_for(
-        coef_val: float,
-        se_val: float,
-        group_name: str | None = None,
-    ) -> tuple[float | None, float | None, float, float]:
-        z_v, p_v, lo_v, hi_v = _compute_coef_stats(coef_val, se_val, alpha)
-        if is_sandwich and group_name is not None and group_name in sandwich_penalized_groups:
-            return None, None, lo_v, hi_v
-        return z_v, p_v, lo_v, hi_v
-
-    # Compute per-group SEs from augmented inverse (accounts for intercept).
-    # The augmented inverse has intercept at row/col 0; feature blocks start at 1.
-    se_dict: dict[str, NDArray] = {}
-    for g in groups:
-        if g.name not in selected_names:
-            se_dict[g.name] = np.zeros(g.size)
-        else:
-            ag = next((a for a in active_groups if a.name == g.name), None)
-            if ag is None:
-                se_dict[g.name] = np.zeros(g.size)
-            else:
-                augmented_indices = np.arange(
-                    1 + ag.start,
-                    1 + ag.end,
-                    dtype=np.intp,
-                )
-                var_diag = covariance_selected_diagonal(
-                    XtWX_inv_aug,
-                    augmented_indices,
-                )
-                se_dict[g.name] = _se_from_var(var_diag)
-        if g.name in selected_names:
-            se_dict[g.name] = se_dict[g.name].astype(float, copy=True)
-            se_dict[g.name][~coefficient_estimable[g.sl]] = np.nan
-
-    # Ordered spline effects are displayed relative to their chosen base levels.
-    # Apply the same affine transformation to the intercept and its covariance.
-    feature_order = list(specs)
-    intercept = ordered_reference_intercept(
-        result.intercept,
-        beta,
-        feature_order,
-        specs,
-        groups,
-    )
-    full_reference_contrast = ordered_reference_beta_contrast(
-        len(beta),
-        feature_order,
-        specs,
-        groups,
-    )
-    augmented_reference_contrast = np.zeros(XtWX_inv_aug.shape[0], dtype=np.float64)
-    augmented_reference_contrast[0] = 1.0
-    original_groups = {group.name: group for group in groups}
-    for active_group in active_groups:
-        original_group = original_groups[active_group.name]
-        augmented_reference_contrast[1 + active_group.start : 1 + active_group.end] = (
-            full_reference_contrast[original_group.sl]
-        )
-    icpt_var = covariance_quadratic_form(
-        XtWX_inv_aug,
-        augmented_reference_contrast,
-    )
-    icpt_se = float(_se_from_var(icpt_var))
-    # The reported intercept is at each ordered term's base level: blank where the fit
-    # does not determine that contrast, not only the unadjusted intercept.
-    if is_sandwich and not sandwich_covariance.determines(augmented_reference_contrast)[0]:
-        icpt_se = float("nan")
-    if information_underflowed is None:
-        information_underflowed = bool(getattr(result, "information_underflowed", False))
-    if information_underflowed:
-        icpt_se = float("nan")
-
-    rows: list[_CoefRow] = []
-    # The coefficients a separated level or cell moves (``separated_coefficients``,
-    # the intercept last): each keeps its estimate, with its Wald fields blank.
-    from superglm.model.separated_levels import separated_coefficients
-
-    separated = separated_coefficients(groups, specs, interaction_specs)
-
-    def moves(column: int) -> bool:
-        return separated is not None and bool(separated[column])
-
-    def _determined(contrast: NDArray, intercept: float = 0.0) -> bool:
-        """Whether the default covariance determines ``contrast @ beta`` (``contrast_determined``)."""
-        return contrast_determined(contrast, coefficient_estimable, contrast_estimable, intercept)
-
-    def _mask_determines(g_slice: slice) -> Callable[[NDArray], NDArray[np.bool_]]:
-        """Which contrasts of the coefficients at ``g_slice`` the default covariance determines."""
-
-        def determined(contrast: NDArray) -> bool:
-            full = np.zeros(len(beta))
-            full[g_slice] = contrast
-            return _determined(full)
-
-        return lambda contrasts: np.array([determined(c) for c in contrasts], dtype=bool)
-
-    def _function_determined(term_groups: list[GroupSlice]) -> bool:
-        """Whether the default covariance determines the fitted function of ``term_groups``' blocks.
-
-        Wood's test is of that function: each design row's part on the blocks' coefficients
-        is one of its contrasts (``function_determined``).
-        """
-        columns = np.zeros(len(beta), dtype=bool)
-        for group in term_groups:
-            columns[group.sl] = True
-        return function_determined(columns, coefficient_estimable, contrast_estimable)
-
-    def _block_test_withheld(g_slice: slice) -> bool:
-        """Whether the default path withholds a chi-square of ``beta = 0`` on the block at ``g_slice``.
-
-        Each coefficient is a tested contrast, and every one must be ``_determined``.
-        """
-        return not is_sandwich and not np.all(
-            _mask_determines(g_slice)(np.eye(g_slice.stop - g_slice.start))
-        )
-
-    def _block_determines(start: int) -> Callable[[NDArray], NDArray[np.bool_]] | None:
-        """``determines`` of a robust covariance for contrasts of the block at ``start``, or none."""
-        covariance = sandwich_covariance
-        if covariance is None:
-            return None
-
-        def determines(contrasts: NDArray) -> NDArray[np.bool_]:
-            rows = np.zeros((len(contrasts), covariance.n_params))
-            rows[:, start : start + contrasts.shape[1]] = contrasts
-            return covariance.determines(rows)
-
-        return determines
-
-    def _block_wald_for(
-        b_block: NDArray,
-        V_block: NDArray,
-        g_slice: slice,
-        group_name: str,
-    ) -> tuple[float | None, float | None, float | None]:
-        from scipy.stats import chi2 as chi2_dist
-
-        ref_df_val = float(len(b_block))
-        if is_sandwich:
-            # The penalty that voids an ordinary Wald test is the one on this block.
-            if group_name in sandwich_penalized_groups:
-                return None, None, None
-            if not np.all(coefficient_estimable[g_slice]):
-                return None, None, None
-            if any(moves(idx) for idx in range(g_slice.start, g_slice.stop)):
-                return None, None, None
-            from superglm.inference._sandwich_core import wald_block_statistic
-
-            stat_v, p_v = wald_block_statistic(b_block, V_block, df_limit=wald_df_limit)
-            if stat_v is None:
-                return None, None, None
-            return stat_v, p_v, ref_df_val
-        try:
-            stat_v = covariance_wald_statistic(b_block, V_block)
-            p_v = 1.0 - chi2_dist.cdf(stat_v, ref_df_val)
-            return stat_v, p_v, ref_df_val
-        except np.linalg.LinAlgError:
-            return float("nan"), float("nan"), ref_df_val
-
-    # Intercept row. On the default path the reported intercept, the centred one less the
-    # centre and plus the ordered terms' base-level effects, is decided by the mask's rule
-    # as that one estimate: the centred intercept's unit weight is part of its size, so a
-    # centre of rounding size beside it decides nothing.
-    z, p, ci_lo, ci_hi = _compute_coef_stats(intercept, icpt_se, alpha)
-    blank = moves(-1)
-    intercept_contrast = full_reference_contrast
-    if intercept_centre is not None:
-        intercept_contrast = intercept_contrast - np.asarray(intercept_centre, dtype=np.float64)
-    undetermined_intercept = not is_sandwich and not _determined(
-        np.where(selected_columns, intercept_contrast, 0.0),
-        intercept=0.0 if intercept_centre is None else 1.0,
-    )
-    withheld = blank or undetermined_intercept
-    rows.append(
-        _CoefRow(
-            name="Intercept",
-            coef=intercept,
-            se=None if withheld else icpt_se,
-            z=None if withheld else z,
-            p=None if withheld else p,
-            ci_low=None if withheld else ci_lo,
-            ci_high=None if withheld else ci_hi,
-            estimable=not undetermined_intercept,
-            separated=blank,
-        )
-    )
-
-    # Lazily computed R factor and influence edf (only needed for smooth tests).
-    # When precomputed values are provided, use them directly.
-    _R_factor = precomputed_R_a
-    _influence_edf = None
-    _design_moments = precomputed_design_moments
-    if precomputed_edf is not None and precomputed_edf1 is not None:
-        _influence_edf = (precomputed_edf, precomputed_edf1)
-
-    def _get_design_moments():
-        nonlocal _design_moments
-        if _design_moments is None:
-            _design_moments = weighted_moments(X_a, W)
-        return _design_moments
-
-    def _get_R_factor():
-        nonlocal _R_factor
-        if _R_factor is None:
-            if X_a.shape[1] == 0:
-                _R_factor = np.empty((0, 0))
-            else:
-                _R_factor = factor_from_gram(_get_design_moments()[2])
-        return _R_factor
-
-    def _get_influence_edf():
-        nonlocal _influence_edf
-        if _influence_edf is None:
-            if X_a.shape[1] == 0:
-                _influence_edf = (np.array([]), np.array([]))
-            else:
-                data_gram = _get_design_moments()[2]
-                F = XtWX_inv_aug[1:, 1:] @ data_gram
-                edf = np.diag(F)
-                edf1 = 2.0 * edf - diagonal_of_square(F)
-                _influence_edf = (edf, edf1)
-        return _influence_edf
-
-    # Per-group EDF map: use precomputed group_edf_map when provided.
-    _group_edf_cache: dict[str, float] | None = group_edf_map
-
-    def _get_group_edf_map() -> dict[str, float]:
-        nonlocal _group_edf_cache
-        if _group_edf_cache is None:
-            edf, _ = _get_influence_edf()
-            _group_edf_cache = {}
-            for ag in active_groups:
-                _group_edf_cache[ag.name] = float(np.sum(edf[ag.sl]))
-        return _group_edf_cache
-
-    # The slope blocks of the metrics a robust fit's level and curve errors are read
-    # with (``UndeterminedDirections.metrics``), formed once, or none.
-    undetermined = sandwich_covariance.undetermined if is_sandwich else None
-    undetermined_metrics: tuple[NDArray, ...] | None = None
-    if undetermined is not None:
-        undetermined_metrics = tuple(metric[1:, 1:] for metric in undetermined.metrics())
-
-    def _feature_se(feature_name):
-        """A term's level or curve errors from the slope covariance (``feature_se_from_cov``).
-
-        A robust covariance blanks each one whose contrast the fit does not determine:
-        the term's own map, read with the covariance replaced by each metric of
-        ``UndeterminedDirections``, gives every row's share along the undetermined
-        directions.
-        """
-
-        # Use the feature block of the augmented inverse for correct marginal SEs
-        def read(covariance):
-            return np.asarray(
-                feature_se_from_cov(
-                    feature_name,
-                    covariance,
-                    active_groups,
-                    result,
-                    groups,
-                    specs,
-                    interaction_specs,
-                ),
-                dtype=np.float64,
-            )
-
-        se = read(_cov_from_aug(covariance_slope_view(XtWX_inv_aug)))
-        if not is_sandwich and isinstance(specs.get(feature_name), OrderedCategorical):
-            return np.where(_ordered_levels_determined(feature_name), se, np.nan)
-        if undetermined is None or undetermined_metrics is None:
-            return se
-        norms = [read(metric) for metric in undetermined_metrics]
-        return np.where(undetermined.determined(*norms), se, np.nan)
-
-    ordered_levels_determined: dict[Hashable, NDArray[np.bool_]] = {}
-
-    def _ordered_levels_determined(feature_name) -> NDArray[np.bool_]:
-        """Which levels of an ordered term the default covariance determines (``_determined``)."""
-        if feature_name not in ordered_levels_determined:
-            contrasts = ordered_level_contrasts(
-                specs[feature_name],
-                feature_name,
-                [g for g in groups if g.feature_name == feature_name],
-                interaction_specs,
-                len(beta),
-                selected_names,
-            )
-            ordered_levels_determined[feature_name] = np.array(
-                [_determined(c) for c in contrasts], dtype=bool
-            )
-        return ordered_levels_determined[feature_name]
-
-    def _curve_se_range(feature_name):
-        """Compute curve SE min/max for a spline feature."""
-        se_curve = _feature_se(feature_name)
-        # One SE per level, and for a specials term that includes the FREE levels,
-        # whose uncertainty is not a point on the curve. Every other statistic on
-        # the ordered-spline row describes the spline block; _term_ops already
-        # filters the special block out of the curve's own SE band. Levels are
-        # ordered smooth-then-special (the build() contract), so drop the tail.
-        spec = specs.get(feature_name)
-        n_special = len(getattr(spec, "_specials", ()) or ())
-        if n_special and len(se_curve) > n_special:
-            se_curve = np.asarray(se_curve)[:-n_special]
-        return float(np.min(se_curve)), float(np.max(se_curve))
-
-    def _augmented_group_block(active_group: GroupSlice) -> NDArray:
-        augmented_indices = np.arange(
-            1 + active_group.start,
-            1 + active_group.end,
-            dtype=np.intp,
-        )
-        covariance = covariance_selected_block(
-            XtWX_inv_aug,
-            augmented_indices,
-        )
-        return _cov_from_aug(covariance)
-
-    def _spline_enrichment(g_name, spec):
-        d = spline_group_enrichment(g_name, spec, _get_group_edf_map(), reml_lambdas, lambda2)
-        return (
-            d["edf"],
-            d["smoothing_lambda"],
-            d["spline_kind"],
-            d["knot_strategy"],
-            d["boundary"],
-            d["difference_penalty"],
-        )
-
-    def _structured_lambdas(group_name: str) -> tuple[tuple[str, float], ...]:
-        source = reml_lambdas if reml_lambdas is not None else lambda2
-        if isinstance(source, dict):
-            exact = (("lambda", float(source[group_name])),) if group_name in source else ()
-            prefix = f"{group_name}:"
-            components = tuple(
-                (name[len(prefix) :], float(value))
-                for name, value in source.items()
-                if name.startswith(prefix)
-            )
-            return exact + components
-        return (("lambda", float(source)),)
-
-    # Monotone repair info
-    _mono_repairs = monotone_repairs or {}
-
-    def _engine_tag(spec, engine):
-        """The engine on a term's rule line, or the mark that a path did not enforce its rules."""
-        if engine is None or rules_enforced:
-            return engine
-        return unenforced_rules_tag(rules_of(spec))
-
-    handled_ordered_features: set[Hashable] = set()
-
-    # Feature rows
-    for g in groups:
-        spec = specs.get(g.feature_name) or interaction_specs.get(g.feature_name)
-        feature_label = str(g.feature_name)
-        b_g = beta[g.sl]
-        se_g = se_dict[g.name]
-        active = g.name in selected_names
-
-        if isinstance(spec, RandomEffect | FactorSmooth):
-            edf = _get_group_edf_map().get(g.name, 0.0) if active else 0.0
-            lambdas = _structured_lambdas(g.name)
-            if isinstance(spec, RandomEffect):
-                structured_kind = "random_effect"
-            else:
-                structured_kind = f"factor_smooth_{spec.basis}"
-            rows.append(
-                _CoefRow(
-                    name=g.name,
-                    group=feature_label,
-                    structured_kind=structured_kind,
-                    n_levels=len(spec._levels),
-                    n_params=g.size,
-                    active=active,
-                    group_norm=float(np.linalg.norm(b_g)) if active else 0.0,
-                    edf=edf,
-                    smoothing_lambda=(lambdas[0][1] if len(lambdas) == 1 else None),
-                    smoothing_lambdas=lambdas,
-                )
-            )
-            continue
-
-        if isinstance(spec, OrderedCategorical):
-            if g.feature_name in handled_ordered_features:
-                continue
-            handled_ordered_features.add(g.feature_name)
-
-            feature_groups = [fg for fg in groups if fg.feature_name == g.feature_name]
-            # A specials term owns a second, unpenalized GroupSlice under the
-            # same feature_name.  ``reconstruct`` needs the full-width vector,
-            # but every statistic reported on the smooth row — edf, the Wood
-            # test, ref_df, n_params — is a statement about the spline block.
-            smooth_groups = spline_groups(feature_groups)
-            beta_combined = np.concatenate([beta[fg.sl] for fg in feature_groups])
-            # ``feature_active``: any block survived selection; gates the level table (a free special
-            # keeps a real SE even when the curve is dropped). ``smooth_active``: the spline block alone;
-            # gates the smooth row (an unpenalized specials block is always selected).
-            feature_active = any(fg.name in selected_names for fg in feature_groups)
-            smooth_active = any(fg.name in selected_names for fg in smooth_groups)
-            feature_edf = (
-                sum(_get_group_edf_map().get(fg.name, 0.0) for fg in smooth_groups)
-                if smooth_active
-                else 0.0
-            )
-
-            se_levels = _feature_se(g.feature_name)
-            raw = spec.reconstruct(beta_combined)
-            inner_kind = spec.basis_kind
-
-            if inner_kind == "spline":
-                active_pairs = []
-                for feature_group in smooth_groups:
-                    active_group = next(
-                        (ag for ag in active_groups if ag.name == feature_group.name),
-                        None,
-                    )
-                    if active_group is not None:
-                        active_pairs.append((feature_group, active_group))
-
-                stat: float | None = None if is_sandwich else float("nan")
-                p_val: float | None = None if is_sandwich else float("nan")
-                ref_df: float | None = (
-                    None if is_sandwich else float(sum(fg.size for fg in smooth_groups))
-                )
-                curve_se_min = float("nan")
-                curve_se_max = float("nan")
-                test_undetermined = False
-                beta_active = (
-                    np.concatenate([beta[fg.sl] for fg, _ in active_pairs])
-                    if active_pairs
-                    else np.empty(0, dtype=float)
-                )
-
-                if active_pairs:
-                    if not is_sandwich:
-                        active_indices = np.concatenate(
-                            [np.arange(ag.start, ag.end) for _, ag in active_pairs]
-                        )
-                        augmented_indices = active_indices + 1
-                        V_b_j = _cov_from_aug(
-                            covariance_selected_block(XtWX_inv_aug, augmented_indices)
-                        )
-                        R_a = _get_R_factor()
-                        edf, edf1 = _get_influence_edf()
-                        edf1_j = float(np.sum(edf1[active_indices]))
-                        X_j = R_a[:, active_indices]
-                        res_df = _wood_residual_df(edf)
-                        test_undetermined = not _function_determined([fg for fg, _ in active_pairs])
-
-                        if test_undetermined:
-                            stat = p_val = ref_df = None
-                        else:
-                            try:
-                                stat, p_val, ref_df = _wood_test(
-                                    [fg for fg, _ in active_pairs],
-                                    beta_active,
-                                    X_j,
-                                    V_b_j,
-                                    edf1_j,
-                                    res_df,
-                                )
-                            except np.linalg.LinAlgError:
-                                pass
-                    curve_se_min, curve_se_max = _curve_se_range(g.feature_name)
-
-                _, s_lam, s_kind, s_knot_strat, s_bnd, s_penalty = _spline_enrichment(
-                    smooth_groups[0].name,
-                    spec._basis_spline,
-                )
-                rows.append(
-                    _CoefRow(
-                        name=feature_label,
-                        group=feature_label,
-                        is_spline=True,
-                        n_params=sum(fg.size for fg in smooth_groups),
-                        active=smooth_active,
-                        group_norm=float(np.linalg.norm(beta_active)),
-                        wald_chi2=stat if smooth_active else None,
-                        wald_p=p_val if smooth_active else None,
-                        ref_df=ref_df if smooth_active else None,
-                        curve_se_min=curve_se_min,
-                        curve_se_max=curve_se_max,
-                        subgroup_type="ordered_spline",
-                        estimable=not test_undetermined,
-                        edf=feature_edf,
-                        smoothing_lambda=s_lam,
-                        spline_kind=s_kind,
-                        knot_strategy=s_knot_strat,
-                        boundary=s_bnd,
-                        difference_penalty=s_penalty,
-                        # The wrapper forwards its basis's rules, and raises on a step-mode pickle, which is
-                        # safe because ``spec.reconstruct(...)`` and ``spec.basis_kind`` above already raise
-                        # the migration error first.
-                        monotone=rules_of(spec).describe() or None,
-                        monotone_engine=_engine_tag(spec, g.monotone_engine),
-                        monotone_repaired=g.feature_name in _mono_repairs,
-                    )
-                )
-
-            else:
-                # Piecewise/Polynomial inner basis: an UNPENALIZED parametric
-                # block, so the whole-term test is a plain Wald chi-square --
-                # deliberately not Wood's smooth test, because there is no
-                # smoothing parameter to have been estimated (the same
-                # reasoning as the numeric Piecewise branch below).
-                main_group = smooth_groups[0]
-                b_main = beta[main_group.sl]
-                se_main = se_dict[main_group.name]
-                stat = None if is_sandwich else float("nan")
-                p_val = None if is_sandwich else float("nan")
-                ref_df = None if is_sandwich else float(main_group.size)
-                V_b_main: NDArray | None = None
-                main_determines = None
-                test_undetermined = False
-                if smooth_active:
-                    ag = next(
-                        (a for a in active_groups if a.name == main_group.name),
-                        None,
-                    )
-                    if ag is not None:
-                        V_b_main = _augmented_group_block(ag)
-                        main_determines = (
-                            _block_determines(1 + ag.start)
-                            if is_sandwich
-                            else _mask_determines(main_group.sl)
-                        )
-                        # The chi-square tests beta_main = 0: each coefficient is a contrast.
-                        test_undetermined = not np.all(main_determines(np.eye(main_group.size)))
-                        if test_undetermined:
-                            stat = p_val = ref_df = None
-                        else:
-                            stat, p_val, ref_df = _block_wald_for(
-                                b_main, V_b_main, main_group.sl, main_group.name
-                            )
-                rows.append(
-                    _CoefRow(
-                        name=feature_label,
-                        group=feature_label,
-                        is_spline=True,
-                        n_params=main_group.size,
-                        active=smooth_active,
-                        group_norm=float(np.linalg.norm(b_main)) if smooth_active else 0.0,
-                        wald_chi2=stat if smooth_active else None,
-                        wald_p=p_val if smooth_active else None,
-                        ref_df=ref_df if smooth_active else None,
-                        subgroup_type=(
-                            "ordered_piecewise"
-                            if inner_kind == "piecewise"
-                            else "ordered_polynomial"
-                        ),
-                        estimable=not test_undetermined,
-                        edf=feature_edf,
-                    )
-                )
-                if inner_kind == "polynomial":
-                    # Per-power rows with the clean z: the main-effect property
-                    # of the exposure-orthonormal ordinal contrasts. Labels
-                    # follow the stated powers, exactly as the numeric
-                    # Polynomial branch does.
-                    powers = spec._basis_spline.powers
-                    for i in range(main_group.size):
-                        coef_val = float(b_main[i])
-                        se_val = float(se_main[i]) if len(se_main) > i else 0.0
-                        z, p, ci_lo, ci_hi = _coef_stats_for(coef_val, se_val, main_group.name)
-                        rows.append(
-                            _CoefRow(
-                                name=f"{g.feature_name}[P{powers[i]}]",
-                                group=feature_label,
-                                coef=coef_val,
-                                se=se_val,
-                                z=z,
-                                p=p,
-                                ci_low=ci_lo,
-                                ci_high=ci_hi,
-                            )
-                        )
-                elif V_b_main is not None:
-                    # Structural contrast rows -- the fixed-knot truncated-power
-                    # inference vocabulary (Smith 1979): one slope-change row
-                    # per stated break, one curvature family per degree>=2
-                    # segment. Deliberately NO per-segment per-power z rows:
-                    # under C0 seams that geometry does not exist.
-                    rows.extend(
-                        _ordered_piecewise_structural_rows(
-                            spec,
-                            g.feature_name,
-                            feature_label,
-                            b_main,
-                            V_b_main,
-                            alpha,
-                            is_sandwich=is_sandwich,
-                            sandwich_penalized=main_group.name in sandwich_penalized_groups,
-                            wald_df_limit=wald_df_limit,
-                            determines=main_determines,
-                        )
-                    )
-
-            levels = raw["levels"]
-            # `raw["special_levels"]`, not `spec._specials`: the latter is
-            # string-coerced, so for `specials=[9]` the free level is 9 in
-            # `levels` and "9" here, `9 in {"9"}` is False, and the Fit
-            # column silently reports the free level as "smooth".
-            special_labels = set(raw.get("special_levels") or ()) if spec.has_specials else None
-            pinned_labels = set(raw.get("pinned_specials") or ())
-            # The Fit column's word matches the whole-term classification: a
-            # level carried by an unpenalized parametric block is not
-            # "smooth", it is "piecewise"/"polynomial" beside its "free"
-            # neighbours.
-            main_fit = "smooth" if inner_kind == "spline" else inner_kind
-            for i, level in enumerate(levels):
-                coef_val = float(raw["level_log_relativities"][level])
-                se_val: float | None = (
-                    float(se_levels[i]) if feature_active and i < len(se_levels) else None
-                )
-                level_estimable = se_val is None or not np.isnan(se_val)
-                level_ci_lo: float | None
-                level_ci_hi: float | None
-                if se_val is not None and np.isfinite(se_val) and se_val > 0.0:
-                    _, _, level_ci_lo, level_ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
-                elif se_val is not None and np.isfinite(se_val) and level == spec._base_level:
-                    level_ci_lo = level_ci_hi = coef_val
-                else:
-                    se_val = None
-                    level_ci_lo = level_ci_hi = None
-                rows.append(
-                    _CoefRow(
-                        name=f"{g.feature_name}[{level}]",
-                        group=feature_label,
-                        coef=coef_val,
-                        se=se_val,
-                        ci_low=level_ci_lo,
-                        ci_high=level_ci_hi,
-                        estimable=level_estimable,
-                        level_fit=ordered_level_fit(
-                            level,
-                            special_labels=special_labels,
-                            pinned_labels=pinned_labels,
-                            main_fit=main_fit,
-                        ),
-                    )
-                )
-            continue
-
-        if isinstance(spec, _SplineBase):
-            is_linear_subgroup = g.subgroup_type == "linear"
-            _mono_dir = rules_of(spec).describe() or None
-            _mono_engine = _engine_tag(spec, g.monotone_engine)
-            _mono_repaired = g.feature_name in _mono_repairs
-            if active:
-                stat = None if is_sandwich else float("nan")
-                p_val = None if is_sandwich else float("nan")
-                ref_df = None if is_sandwich else float(g.size)
-                curve_se_min = float("nan")
-                curve_se_max = float("nan")
-
-                ag = next(a for a in active_groups if a.name == g.name)
-                V_b_j = _augmented_group_block(ag)
-                test_undetermined = False
-
-                if is_linear_subgroup:
-                    test_undetermined = _block_test_withheld(g.sl)
-                    if test_undetermined:
-                        stat = p_val = ref_df = None
-                    else:
-                        stat, p_val, ref_df = _block_wald_for(b_g, V_b_j, g.sl, g.name)
-                    curve_se_min, curve_se_max = _curve_se_range(g.feature_name)
-                else:
-                    if not is_sandwich:
-                        R_a = _get_R_factor()
-                        edf, edf1 = _get_influence_edf()
-                        edf1_j = float(np.sum(edf1[ag.sl]))
-                        X_j = R_a[:, ag.sl]
-                        res_df = _wood_residual_df(edf)
-                        test_undetermined = not _function_determined([g])
-
-                        if test_undetermined:
-                            stat = p_val = ref_df = None
-                        else:
-                            try:
-                                stat, p_val, ref_df = _wood_test(
-                                    [g], b_g, X_j, V_b_j, edf1_j, res_df
-                                )
-                            except Exception:
-                                pass
-
-                    curve_se_min, curve_se_max = _curve_se_range(g.feature_name)
-
-                s_edf, s_lam, s_kind, s_knot_strat, s_bnd, s_penalty = _spline_enrichment(
-                    g.name, spec
-                )
-                rows.append(
-                    _CoefRow(
-                        name=g.name,
-                        group=feature_label,
-                        is_spline=True,
-                        n_params=g.size,
-                        active=True,
-                        group_norm=float(np.linalg.norm(b_g)),
-                        wald_chi2=stat,
-                        wald_p=p_val,
-                        ref_df=ref_df,
-                        curve_se_min=curve_se_min,
-                        curve_se_max=curve_se_max,
-                        subgroup_type=g.subgroup_type,
-                        estimable=not test_undetermined,
-                        edf=s_edf,
-                        smoothing_lambda=s_lam,
-                        spline_kind=s_kind,
-                        knot_strategy=s_knot_strat,
-                        boundary=s_bnd,
-                        difference_penalty=s_penalty,
-                        monotone=_mono_dir,
-                        monotone_engine=_mono_engine,
-                        monotone_repaired=_mono_repaired,
-                    )
-                )
-            else:
-                s_edf, s_lam, s_kind, s_knot_strat, s_bnd, s_penalty = _spline_enrichment(
-                    g.name, spec
-                )
-                rows.append(
-                    _CoefRow(
-                        name=g.name,
-                        group=feature_label,
-                        is_spline=True,
-                        n_params=g.size,
-                        active=False,
-                        group_norm=0.0,
-                        subgroup_type=g.subgroup_type,
-                        edf=0.0,
-                        smoothing_lambda=s_lam,
-                        spline_kind=s_kind,
-                        knot_strategy=s_knot_strat,
-                        boundary=s_bnd,
-                        difference_penalty=s_penalty,
-                        monotone=_mono_dir,
-                        monotone_engine=_mono_engine,
-                        monotone_repaired=_mono_repaired,
-                    )
-                )
-
-        elif isinstance(spec, Categorical):
-            gedf = _get_group_edf_map()
-            cat_edf = gedf.get(g.name, 0.0) if active else 0.0
-            diag = _level_diag.get(g.name, {})
-            cat_rules = rules_of(spec).describe() or None
-            for i, level in enumerate(spec._non_base):
-                coef_val = float(b_g[i])
-                se_val = float(se_g[i])
-                z, p, ci_lo, ci_hi = _coef_stats_for(coef_val, se_val, g.name)
-                blank = moves(g.start + i)
-                n_obs_i, exp_share_i, thin_i = diag.get(i, (None, None, False))
-                # a blank row's interval is not shown, so no note about it is either
-                thin_i = thin_i and not blank
-                rows.append(
-                    _CoefRow(
-                        name=f"{g.name}[{level}]",
-                        group=g.name,
-                        coef=coef_val,
-                        se=None if blank else se_val,
-                        z=None if blank else z,
-                        p=None if blank else p,
-                        ci_low=None if blank else ci_lo,
-                        ci_high=None if blank else ci_hi,
-                        edf=cat_edf if i == 0 else None,
-                        level_n_obs=n_obs_i,
-                        level_exposure_share=exp_share_i,
-                        quasi_separated=thin_i,
-                        advisory_trigger="thin_level" if thin_i else "",
-                        separated=blank,
-                        monotone=cat_rules,
-                        monotone_engine=_engine_tag(spec, g.monotone_engine if cat_rules else None),
-                    )
-                )
-
-        elif isinstance(spec, SplineCategorical):
-            if active:
-                stat = None if is_sandwich else float("nan")
-                p_val = None if is_sandwich else float("nan")
-                ref_df = None if is_sandwich else float(g.size)
-
-                if not is_sandwich:
-                    ag = next(a for a in active_groups if a.name == g.name)
-                    V_b_j = _augmented_group_block(ag)
-
-                    R_a = _get_R_factor()
-                    edf, edf1 = _get_influence_edf()
-                    edf1_j = float(np.sum(edf1[ag.sl]))
-                    X_j = R_a[:, ag.sl]
-                    res_df = _wood_residual_df(edf)
-
-                    try:
-                        stat, p_val, ref_df = _wood_test([g], b_g, X_j, V_b_j, edf1_j, res_df)
-                    except Exception:
-                        pass
-
-                _edf_map = _get_group_edf_map()
-                rows.append(
-                    _CoefRow(
-                        name=g.name,
-                        group=feature_label,
-                        is_spline=True,
-                        n_params=g.size,
-                        active=True,
-                        group_norm=float(np.linalg.norm(b_g)),
-                        wald_chi2=stat,
-                        wald_p=p_val,
-                        ref_df=ref_df,
-                        edf=_edf_map.get(g.name) if _edf_map else None,
-                        smoothing_lambda=_resolve_group_lambda(g.name, reml_lambdas, lambda2),
-                    )
-                )
-            else:
-                rows.append(
-                    _CoefRow(
-                        name=g.name,
-                        group=feature_label,
-                        is_spline=True,
-                        n_params=g.size,
-                        active=False,
-                        group_norm=0.0,
-                    )
-                )
-
-        elif isinstance(spec, Polynomial):
-            # Rows are labelled by the stated power, not by column position:
-            # with powers={1, 2, 4} the third row is [P4].
-            powers = spec.powers
-            if powers == tuple(range(1, spec.degree + 1)):
-                poly_group = f"{g.name} P({spec.degree})"
-            else:
-                poly_group = f"{g.name} P({','.join(str(p) for p in powers)})"
-            for i in range(g.size):
-                coef_val = float(b_g[i])
-                se_val = float(se_g[i]) if len(se_g) > i else 0.0
-                z, p, ci_lo, ci_hi = _coef_stats_for(coef_val, se_val, g.name)
-                rows.append(
-                    _CoefRow(
-                        name=f"{g.name}[P{powers[i]}]",
-                        group=poly_group,
-                        coef=coef_val,
-                        se=se_val,
-                        z=z,
-                        p=p,
-                        ci_low=ci_lo,
-                        ci_high=ci_hi,
-                    )
-                )
-
-        elif isinstance(spec, PolynomialCategorical):
-            if active:
-                ag = next(a for a in active_groups if a.name == g.name)
-                V_b_j = _augmented_group_block(ag)
-                stat, p_val, ref_df = _block_wald_for(b_g, V_b_j, g.sl, g.name)
-
-                rows.append(
-                    _CoefRow(
-                        name=g.name,
-                        group=feature_label,
-                        is_spline=True,
-                        n_params=g.size,
-                        active=True,
-                        group_norm=float(np.linalg.norm(b_g)),
-                        wald_chi2=stat,
-                        wald_p=p_val,
-                        ref_df=ref_df,
-                    )
-                )
-            else:
-                rows.append(
-                    _CoefRow(
-                        name=g.name,
-                        group=feature_label,
-                        is_spline=True,
-                        n_params=g.size,
-                        active=False,
-                        group_norm=0.0,
-                    )
-                )
-
-        elif isinstance(spec, CategoricalInteraction):
-            for i, (lev1, lev2) in enumerate(spec._pairs):
-                coef_val = float(b_g[i])
-                se_val = float(se_g[i])
-                z, p, ci_lo, ci_hi = _coef_stats_for(coef_val, se_val, g.name)
-                blank = moves(g.start + i)
-                rows.append(
-                    _CoefRow(
-                        name=f"{g.name}[{lev1}:{lev2}]",
-                        group=g.name,
-                        coef=coef_val,
-                        se=None if blank else se_val,
-                        z=None if blank else z,
-                        p=None if blank else p,
-                        ci_low=None if blank else ci_lo,
-                        ci_high=None if blank else ci_hi,
-                        separated=blank,
-                    )
-                )
-
-        elif isinstance(spec, NumericCategorical):
-            for i, level in enumerate(spec._non_base):
-                coef_val = float(b_g[i])
-                se_val = float(se_g[i])
-                z, p, ci_lo, ci_hi = _coef_stats_for(coef_val, se_val, g.name)
-                rows.append(
-                    _CoefRow(
-                        name=f"{g.name}[{level}]",
-                        group=g.name,
-                        coef=coef_val,
-                        se=se_val,
-                        z=z,
-                        p=p,
-                        ci_low=ci_lo,
-                        ci_high=ci_hi,
-                    )
-                )
-
-        elif isinstance(spec, NumericInteraction | PolynomialInteraction):
-            if active and g.size <= 4:
-                for i in range(g.size):
-                    coef_val = float(b_g[i])
-                    se_val = float(se_g[i])
-                    z, p, ci_lo, ci_hi = _coef_stats_for(coef_val, se_val, g.name)
-                    rows.append(
-                        _CoefRow(
-                            name=f"{g.name}[{i}]" if g.size > 1 else g.name,
-                            group=g.name,
-                            coef=coef_val,
-                            se=se_val,
-                            z=z,
-                            p=p,
-                            ci_low=ci_lo,
-                            ci_high=ci_hi,
-                        )
-                    )
-            elif active:
-                ag = next(a for a in active_groups if a.name == g.name)
-                V_b_j = _augmented_group_block(ag)
-                stat, p_val, ref_df = _block_wald_for(b_g, V_b_j, g.sl, g.name)
-                _edf_map = _get_group_edf_map()
-                rows.append(
-                    _CoefRow(
-                        name=g.name,
-                        group=feature_label,
-                        is_spline=True,
-                        n_params=g.size,
-                        active=True,
-                        group_norm=float(np.linalg.norm(b_g)),
-                        wald_chi2=stat,
-                        wald_p=p_val,
-                        ref_df=ref_df,
-                        edf=_edf_map.get(g.name) if _edf_map else None,
-                        smoothing_lambda=_resolve_group_lambda(g.name, reml_lambdas, lambda2),
-                    )
-                )
-            else:
-                rows.append(
-                    _CoefRow(
-                        name=g.name,
-                        group=feature_label,
-                        is_spline=True,
-                        n_params=g.size,
-                        active=False,
-                        group_norm=0.0,
-                    )
-                )
-
-        elif isinstance(spec, TensorInteraction):
-            _edf_map = _get_group_edf_map()
-            ti_edf = _edf_map.get(g.name) if _edf_map else None
-            ti_lam = _resolve_group_lambda(g.name, reml_lambdas, lambda2)
-            if active:
-                stat = None if is_sandwich else float("nan")
-                p_val = None if is_sandwich else float("nan")
-                ref_df = None if is_sandwich else float(g.size)
-
-                if not is_sandwich:
-                    ag = next(a for a in active_groups if a.name == g.name)
-                    V_b_j = _augmented_group_block(ag)
-
-                    R_a = _get_R_factor()
-                    edf, edf1 = _get_influence_edf()
-                    edf1_j = float(np.sum(edf1[ag.sl]))
-                    X_j = R_a[:, ag.sl]
-                    res_df = _wood_residual_df(edf)
-
-                    try:
-                        stat, p_val, ref_df = _wood_test([g], b_g, X_j, V_b_j, edf1_j, res_df)
-                    except Exception:
-                        pass
-
-                rows.append(
-                    _CoefRow(
-                        name=g.name,
-                        group=feature_label,
-                        is_spline=True,
-                        n_params=g.size,
-                        active=True,
-                        group_norm=float(np.linalg.norm(b_g)),
-                        wald_chi2=stat,
-                        wald_p=p_val,
-                        ref_df=ref_df,
-                        edf=ti_edf,
-                        smoothing_lambda=ti_lam,
-                    )
-                )
-            else:
-                rows.append(
-                    _CoefRow(
-                        name=g.name,
-                        group=feature_label,
-                        is_spline=True,
-                        n_params=g.size,
-                        active=False,
-                        group_norm=0.0,
-                        edf=0.0,
-                        smoothing_lambda=ti_lam,
-                    )
-                )
-
-        elif isinstance(spec, Numeric):
-            gedf = _get_group_edf_map()
-            num_edf = gedf.get(g.name, 0.0) if active else 0.0
-            coef_display = float(b_g[0])
-            se_display = float(se_g[0])
-            z, p, ci_lo, ci_hi = _coef_stats_for(coef_display, se_display, g.name)
-            rows.append(
-                _CoefRow(
-                    name=g.name,
-                    group=g.name,
-                    coef=coef_display,
-                    se=se_display,
-                    z=z,
-                    edf=num_edf,
-                    p=p,
-                    ci_low=ci_lo,
-                    ci_high=ci_hi,
-                    estimable=bool(coefficient_estimable[g.start]),
-                )
-            )
-
-        elif isinstance(spec, Piecewise):
-            # Per-knot Wald rows, CIs and edf = J+1 are valid only when all four hold; otherwise the
-            # per-coefficient p-values are withdrawn: (1) the term is unpenalized (an L1 slope-change
-            # penalty is trend filtering, whose df is data-dependent); (2) the group carries no selection
-            # shrinkage (enforced below: z/p/CI and the whole-term chi-square are withheld, estimates and
-            # SEs stay); (3) the breakpoints are fixed inputs, not selected on the response (the
-            # statistic then converges to a supremum of a nonstandard Gaussian process even though df
-            # stays nominally J+1; quantile placement ``breaks=int`` looks only at x and is milder; kinks
-            # read off a fitted Spline and refit on the same data are the offender); (4) the term is
-            # unconstrained (an active monotone constraint makes df the data-dependent size of the face).
-            shrunk = g.name in (selection_shrunk_group_names or ())
-            knots = spec._knots
-            pw_edf = _get_group_edf_map().get(g.name, 0.0) if active else 0.0
-            for i, knot_index in enumerate(spec._non_base_indices):
-                coef_val = float(b_g[i])
-                se_val = float(se_g[i]) if len(se_g) > i else 0.0
-                if shrunk:
-                    z = p = ci_lo = ci_hi = None
-                else:
-                    z, p, ci_lo, ci_hi = _coef_stats_for(coef_val, se_val, g.name)
-                rows.append(
-                    _CoefRow(
-                        name=f"{g.name}[{float(knots[knot_index]):.10g}]",
-                        group=g.name,
-                        coef=coef_val,
-                        se=se_val,
-                        z=z,
-                        p=p,
-                        ci_low=ci_lo,
-                        ci_high=ci_hi,
-                    )
-                )
-
-            # edf is carried by the whole-term row alone; reporting it twice would put the same df in
-            # the summary's parametric and smooth buckets. The whole-term test is a J+1 df chi-square on
-            # all coefficients jointly (flat term), not a Wood smooth test: no smoothing parameter was
-            # estimated.
-            stat = None if is_sandwich else float("nan")
-            p_val = None if is_sandwich else float("nan")
-            ref_df = None if is_sandwich else float(g.size)
-            reportable = active and not shrunk
-            test_undetermined = reportable and _block_test_withheld(g.sl)
-            if test_undetermined:
-                stat = p_val = ref_df = None
-            elif reportable:
-                ag = next(a for a in active_groups if a.name == g.name)
-                V_b_j = _augmented_group_block(ag)
-                stat, p_val, ref_df = _block_wald_for(b_g, V_b_j, g.sl, g.name)
-            rows.append(
-                _CoefRow(
-                    name=g.name,
-                    group=feature_label,
-                    is_spline=True,
-                    n_params=g.size,
-                    active=active,
-                    group_norm=float(np.linalg.norm(b_g)) if active else 0.0,
-                    wald_chi2=stat if reportable else None,
-                    wald_p=p_val if reportable else None,
-                    ref_df=ref_df if reportable else None,
-                    # Names the row for what it is in both renderers, which
-                    # otherwise label every group-test row "spline".
-                    subgroup_type="piecewise",
-                    estimable=not test_undetermined,
-                    edf=pw_edf,
-                )
-            )
-
-        else:
-            coef_val = float(b_g[0])
-            se_val = float(se_g[0]) if len(se_g) > 0 else 0.0
-            z, p, ci_lo, ci_hi = _coef_stats_for(coef_val, se_val, g.name)
-            rows.append(
-                _CoefRow(
-                    name=g.name,
-                    group=g.name,
-                    coef=coef_val,
-                    se=se_val,
-                    z=z,
-                    p=p,
-                    ci_low=ci_lo,
-                    ci_high=ci_hi,
-                    estimable=bool(coefficient_estimable[g.start]),
-                )
-            )
-
-    # Every coefficient-style branch consumes the same masked SE arrays, but
-    # not every feature-specific row constructor sets ``estimable`` directly.
-    # Keep the public flag consistent with the rank mask for categoricals,
-    # polynomials, and interaction coefficient rows as well as numerics.
-    for row in rows:
-        if row.se is not None and np.isnan(row.se):
-            row.estimable = False
-
-    # ── Low-credibility advisory ────────────────────────────────
-    # Two disjoint triggers, neither a separation test (separation is a joint property of design
-    # and response, issue #239). Primary: categorical levels with too little experience
-    # (``_thin_levels``). Fallback, for non-categorical features or when per-level diagnostics are
-    # unavailable: SE-based, threshold ``max(50 * median_se, 10.0)``, which is not scale-invariant
-    # (rescaling one predictor trips it) and is dominated by the absolute 10.0 when the median
-    # parametric SE is under 0.2 (issue #304).
-    parametric_ses = [
-        r.se
-        for r in rows
-        if r.se is not None
-        and r.se > 0
-        and r.p is not None
-        and not r.is_spline
-        and r.name != "Intercept"
-    ]
-    if parametric_ses:
-        median_se = float(np.median(parametric_ses))
-        sep_threshold = max(median_se * 50, 10.0)
-        for r in rows:
-            if r.quasi_separated or r.is_spline or r.name == "Intercept":
-                continue
-            if r.p is None:
-                continue
-            if r.level_n_obs is not None:
-                continue  # already handled by data-driven check
-            if r.se is not None and r.se > sep_threshold:
-                r.quasi_separated = True
-                r.advisory_trigger = "outsized_se"
-
-    return rows
+    # The arguments are the table's inputs, field for field.
+    return _CoefTable(**locals()).rows()
 
 
 def build_basis_detail(
@@ -1596,76 +1410,44 @@ def build_basis_detail(
     from superglm.features.spline import _SplineBase
 
     is_sandwich = sandwich_covariance is not None
-    sandwich_penalized_groups: frozenset[str] = (
-        frozenset(sandwich_covariance.penalized_group_names) if is_sandwich else frozenset()
-    )
-    beta = result.beta
-    selected_names = (
-        selected_group_name_set(result, groups)
-        if selected_group_names is None
-        else set(selected_group_names)
-    )
-    coefficient_estimable = (
-        np.asarray(coefficient_estimable_override, dtype=bool)
-        if coefficient_estimable_override is not None
-        else (
-            result.rank_info.coefficient_estimable()
-            if getattr(result, "rank_info", None) is not None
-            else np.ones(len(beta), dtype=bool)
-        )
-    )
+    penalized = frozenset(sandwich_covariance.penalized_group_names) if is_sandwich else frozenset()
+    selected_names = _selected_names(result, groups, selected_group_names)
+    coefficient_estimable = _coefficient_mask(result, coefficient_estimable_override)
+    read_errors = _error_reader(result, known_scale, is_sandwich)
+    active_by_name = {group.name: group for group in active_groups}
     detail: dict[str, list] = {}
-
     for g in groups:
         # V1: skip interactions
-        if g.feature_name in interaction_specs:
+        if g.feature_name in interaction_specs or not isinstance(
+            specs.get(g.feature_name), _SplineBase
+        ):
             continue
-        spec = specs.get(g.feature_name)
-        if not isinstance(spec, _SplineBase):
+        ag = active_by_name.get(g.name)
+        if g.name not in selected_names or ag is None:
             continue
-        b_g = beta[g.sl]
-        if g.name not in selected_names:
-            continue
-
-        ag = next((a for a in active_groups if a.name == g.name), None)
-        if ag is None:
-            continue
-
-        augmented_indices = np.arange(
-            1 + ag.start,
-            1 + ag.end,
-            dtype=np.intp,
-        )
-        var_diag = covariance_selected_diagonal(
-            XtWX_inv_aug,
-            augmented_indices,
-        )
-        se_arr = (
-            np.sqrt(np.maximum(var_diag, 0.0))
-            if is_sandwich
-            else standard_errors(var_diag, result, known_scale=known_scale)
-        )
-        se_arr = se_arr.astype(float, copy=True)
+        se_arr = read_errors(augmented_group_diagonal(XtWX_inv_aug, ag)).astype(float, copy=True)
         se_arr[~coefficient_estimable[g.sl]] = np.nan
-
-        rows = []
-        withhold_zp = is_sandwich and g.name in sandwich_penalized_groups
-        for i in range(g.size):
-            coef_val = float(b_g[i])
-            se_val = float(se_arr[i])
-            z, p, ci_lo, ci_hi = _compute_coef_stats(coef_val, se_val, alpha)
-            rows.append(
-                _BasisDetailRow(
-                    parent_name=g.name,
-                    basis_index=i,
-                    coef=coef_val,
-                    se=se_val,
-                    z=None if withhold_zp else z,
-                    p=None if withhold_zp else p,
-                    ci_low=ci_lo,
-                    ci_high=ci_hi,
-                )
+        withhold_zp = is_sandwich and g.name in penalized
+        detail[g.name] = [
+            _basis_detail_row(
+                g, i, float(result.beta[g.start + i]), float(se_arr[i]), alpha, withhold_zp
             )
-        detail[g.name] = rows
-
+            for i in range(g.size)
+        ]
     return detail
+
+
+def _basis_detail_row(
+    g: GroupSlice, i: int, coef: float, se: float, alpha: float, withhold_zp: bool
+) -> _BasisDetailRow:
+    z, p, ci_lo, ci_hi = _compute_coef_stats(coef, se, alpha)
+    return _BasisDetailRow(
+        parent_name=g.name,
+        basis_index=i,
+        coef=coef,
+        se=se,
+        z=None if withhold_zp else z,
+        p=None if withhold_zp else p,
+        ci_low=ci_lo,
+        ci_high=ci_hi,
+    )
