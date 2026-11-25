@@ -290,6 +290,23 @@ def contrast_determined(
     return bool(contrast_estimable(contrast))
 
 
+def function_determined(
+    columns: NDArray,
+    coefficient_estimable: NDArray,
+    contrast_estimable: Callable[..., bool] | None,
+) -> bool:
+    """Whether a covariance determines each design row's part on the coefficients ``columns`` marks.
+
+    That is the fitted function of a term whose coefficients are the marked ones.  It is
+    determined when the mask shows them all; otherwise
+    ``contrast_estimable(columns, design_rows=True)`` decides
+    (``RankDecomposition.function_estimable``), and it is not without it.
+    """
+    if np.all(coefficient_estimable[columns]):
+        return True
+    return contrast_estimable is not None and bool(contrast_estimable(columns, design_rows=True))
+
+
 def withhold_undetermined(se: NDArray, determines, contrasts) -> NDArray:
     """``se`` with NaN at each row of ``contrasts()`` that ``determines`` does not determine."""
     if determines is None:

@@ -670,12 +670,15 @@ def fit_intercept_centre(model, inference: dict) -> NDArray | None:
     return None if rank_info is None else rank_intercept_centre(model, rank_info)
 
 
-def _structured_contrast_estimable(inference: dict, state, contrast: NDArray) -> bool:
+def _structured_contrast_estimable(
+    inference: dict, state, contrast: NDArray, design_rows: bool = False
+) -> bool:
     """Whether a structured fit's data determine ``contrast``, by its coefficient mask's rule.
 
     The mask's geometry (``fit_inference_info``) is formed again on the first contrast a
     reader asks about, and kept in ``inference``, the fit's inference record: it lives and
-    is dropped with that record.
+    is dropped with that record.  With ``design_rows``, ``contrast`` marks a term's
+    coefficients and the answer is of its fitted function (``function_estimable``).
     """
     decision = inference.get("contrast_estimability")
     if decision is None:
@@ -686,6 +689,8 @@ def _structured_contrast_estimable(inference: dict, state, contrast: NDArray) ->
             else centered_operator_contrast_estimability(state.centered_data_operator)
         )
         inference["contrast_estimability"] = decision
+    if design_rows:
+        return decision.function_estimable(np.asarray(contrast, dtype=bool))
     return decision.is_estimable(contrast)
 
 

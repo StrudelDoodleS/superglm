@@ -755,6 +755,99 @@ def test_a_single_numeric_term_keeps_its_whole_term_test(basis) -> None:
             np.testing.assert_allclose(row.wald_p, 0.0012851369121335832, rtol=1e-5)
 
 
+def _three_point_spline(extra=None, *, group=False):
+    """``Spline(n_knots=4)`` on a column with three support points, beside ``extra`` numeric
+    columns and, with ``group``, a random effect on 40 levels."""
+    n = 720 if group else 120
+    x = np.tile([0.0, 0.4, 1.0], n // 3)
+    X = pd.DataFrame({"x": x, **{name: column(x) for name, column in (extra or {}).items()}})
+    y = 2.0 + x + np.sin(np.arange(float(n)))
+    features = {"x": Spline(n_knots=4), **{name: Numeric() for name in (extra or {})}}
+    if group:
+        level = np.tile(np.repeat(np.arange(40), 2), 9)
+        X["g"], y = level.astype(str), y + 2.0 * np.cos(level)
+        model = SuperGLM(family="gaussian", features={"g": RandomEffect(), **features})
+        return model.fit_reml(X, y), X, y
+    model = SuperGLM(family="gaussian", features=features, spline_penalty=0)
+    return model.fit(X, y), X, y
+
+
+def _spline_test_rows(model, X, y):
+    """Term ``x``'s whole-term row on the default summary and the three metrics summaries."""
+    weights = np.linspace(0.5, 1.5, len(y))
+    part = slice(0, 3 * len(y) // 4)
+    summaries = [
+        model.summary(),
+        model.metrics(X, y).summary(),
+        model.metrics(X, y, sample_weight=weights).summary(),
+        model.metrics(X.iloc[part].reset_index(drop=True), y[part]).summary(),
+    ]
+    return [_numeric_test_rows(summary, ("x",))["x"] for summary in summaries]
+
+
+def test_a_term_aliased_only_within_itself_keeps_its_whole_term_test() -> None:
+    """Three support points alias a spline's coefficients, not its fitted function (#740).
+
+    Every design row lies in the row space, so Wood's test is formed: for this unpenalized
+    Gaussian fit it is the one-way layout's F test of the three support points, with
+    chi-square ``2 F`` on 2 degrees of freedom.  b2c29ad87 asked each row of the Gram's
+    untruncated square root, three of them rounding of norm 1e-8 to 1e-7 and outside the
+    row space, and withheld the test on every summary.  The gate reads the null space the
+    coefficient mask reads: the function is determined when each null direction keeps to
+    the term's coefficients or leaves them alone.
+
+    Beside ``2**-24 x`` as a numeric term the spline's linear part can move to it, however
+    small that column is: the function raises the design's rank when appended, and the
+    test stays withheld, on a dense fit and beside a random effect.
+    """
+    from scipy.stats import f as f_distribution
+
+    model, X, y = _three_point_spline()
+    assert not np.any(model.result.rank_info.coefficient_estimable())
+    cells = [y[X["x"] == value] for value in (0.0, 0.4, 1.0)]
+    between = sum(len(cell) * (cell.mean() - y.mean()) ** 2 for cell in cells) / 2
+    within = sum(float(np.sum((cell - cell.mean()) ** 2)) for cell in cells) / (len(y) - 3)
+    rows = _spline_test_rows(model, X, y)
+    for row in rows:
+        assert row.estimable is True and row.wald_chi2 > 0.0 and 0.0 < row.wald_p < 1e-4
+    for row in rows[:2]:
+        np.testing.assert_allclose([row.wald_chi2, row.ref_df], [2 * between / within, 2], 1e-9)
+        expected = f_distribution.sf(between / within, 2, len(y) - 3)
+        np.testing.assert_allclose(row.wald_p, expected, rtol=1e-6)
+
+    for group in (False, True):
+        model, X, y = _three_point_spline({"z": lambda x: 2.0**-24 * x}, group=group)
+        term = next(g for g in model._groups if g.name == "x")
+        function = np.zeros((len(y), len(model.result.beta)))
+        function[:, term.sl] = _design(model)[:, 1 + term.start : 1 + term.end]
+        assert _rank_gain(model, function) > 0
+        for row in _spline_test_rows(model, X, y):
+            assert row.wald_chi2 is None and row.wald_p is None and row.ref_df is None
+            assert row.estimable is False
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("group", [False, True], ids=["dense", "random effect"])
+def test_twins_elsewhere_do_not_take_a_self_aliased_terms_test(group) -> None:
+    """Control (pins): numeric twins beside the three-point spline leave it its test.
+
+    The twins leave the penalized fit uncertified, so the data's mask blanks every
+    coefficient the three support points alias; no null direction joins the spline to
+    another term, and its test is the one of the fit with one twin, on a dense fit and
+    beside a random effect, whose reader keeps only the border rows of the null space.
+    b2c29ad87 withheld it on both.
+    """
+    twin = {"u": lambda x: 0.5 + 0.5 * np.sin(0.7 * np.arange(float(len(x))))}
+    model, X, y = _three_point_spline({**twin, "v": twin["u"]}, group=group)
+    assert bool(model._fit_inference_info.get("structured_covariance")) is group
+    reference, _, _ = _three_point_spline(twin, group=group)
+    expected = _numeric_test_rows(reference.summary(), ("x",))["x"]
+    for summary in (model.summary(), model.metrics(X, y).summary()):
+        row = _numeric_test_rows(summary, ("x",))["x"]
+        assert row.estimable is True
+        np.testing.assert_allclose(row.wald_chi2, expected.wald_chi2, rtol=1e-6)
+
+
 def _term_inference_errors(model, name):
     """``term_inference(name)``'s level and curve errors, the curve's at the base removed."""
     inference = model.term_inference(name)

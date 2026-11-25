@@ -268,9 +268,9 @@ def build_coef_rows(
         constrained then says its rules were not enforced.
     contrast_estimable : whether the decomposition that decided the coefficient mask
         determines a contrast over the fitted coefficients
-        (``RankDecomposition.is_estimable``); the fit's own rank record's when the mask
-        is.  A contrast whose coefficients the mask all shows is determined without it;
-        without it, any other is not.
+        (``RankInfo.is_estimable``, which also answers for a term's fitted function); the
+        fit's own rank record's when the mask is.  A contrast whose coefficients the mask
+        all shows is determined without it; without it, any other is not.
     intercept_centre : the public column mean, over the fitted coefficients, that the
         decomposition behind ``contrast_estimable`` was centred on.  The reported
         intercept is the centred one, which the fit always determines, less
@@ -303,6 +303,7 @@ def build_coef_rows(
     from superglm.inference._term_covariance import (
         contrast_determined,
         feature_se_from_cov,
+        function_determined,
         ordered_level_contrasts,
     )
     from superglm.inference._term_helpers import (
@@ -492,21 +493,16 @@ def build_coef_rows(
 
         return lambda contrasts: np.array([determined(c) for c in contrasts], dtype=bool)
 
-    def _function_determined(term_groups: list[GroupSlice], design: NDArray) -> bool:
-        """Whether the default covariance determines ``design @ beta`` of ``term_groups``' blocks.
+    def _function_determined(term_groups: list[GroupSlice]) -> bool:
+        """Whether the default covariance determines the fitted function of ``term_groups``' blocks.
 
-        Wood's test is of that fitted function: each row of ``design`` (columns in the
-        blocks' order) is one of its contrasts, and every one must be ``_determined``.
+        Wood's test is of that function: each design row's part on the blocks' coefficients
+        is one of its contrasts (``function_determined``).
         """
-        columns = np.concatenate([np.arange(g.start, g.end) for g in term_groups])
-        if np.all(coefficient_estimable[columns]):
-            return True
-        contrast = np.zeros(len(beta))
-        for row in design:
-            contrast[columns] = row
-            if not _determined(contrast):
-                return False
-        return True
+        columns = np.zeros(len(beta), dtype=bool)
+        for group in term_groups:
+            columns[group.sl] = True
+        return function_determined(columns, coefficient_estimable, contrast_estimable)
 
     def _block_test_withheld(g_slice: slice) -> bool:
         """Whether the default path withholds a chi-square of ``beta = 0`` on the block at ``g_slice``.
@@ -850,9 +846,7 @@ def build_coef_rows(
                         edf1_j = float(np.sum(edf1[active_indices]))
                         X_j = R_a[:, active_indices]
                         res_df = _wood_residual_df(edf)
-                        test_undetermined = not _function_determined(
-                            [fg for fg, _ in active_pairs], X_j
-                        )
+                        test_undetermined = not _function_determined([fg for fg, _ in active_pairs])
 
                         if test_undetermined:
                             stat = p_val = ref_df = None
@@ -1078,7 +1072,7 @@ def build_coef_rows(
                         edf1_j = float(np.sum(edf1[ag.sl]))
                         X_j = R_a[:, ag.sl]
                         res_df = _wood_residual_df(edf)
-                        test_undetermined = not _function_determined([g], X_j)
+                        test_undetermined = not _function_determined([g])
 
                         if test_undetermined:
                             stat = p_val = ref_df = None

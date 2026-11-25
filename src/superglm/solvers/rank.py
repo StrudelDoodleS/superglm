@@ -955,6 +955,26 @@ def _exact_orthogonal_columns(coordinates: NDArray) -> tuple[NDArray, float]:
     return basis, math.fsum(log_norms)
 
 
+def null_directions_keep_to(inside: NDArray, outside: NDArray | None = None) -> bool:
+    """Whether each direction of a null space lies in a set of coordinates or leaves them alone.
+
+    ``inside`` holds those coordinates' rows of an orthonormal basis of the space and
+    ``outside`` its other rows.  Their singular values are the cosines ``c`` and sines
+    ``s`` of the space's principal angles to the coordinates (Bjorck & Golub, "Numerical
+    methods for computing angles between linear subspaces", Math. Comp. 27, 1973), and
+    ``inside @ outside.T`` has the products ``c s``: each is within ``factor_rcond`` of
+    zero when every direction has ``c`` or ``s`` there, the rule ``coefficient_estimable``
+    reads of one coordinate.  Without ``outside`` (a reader that keeps only some rows)
+    ``s**2`` is known only as ``1 - c**2``, to the rounding of the basis, and is held to
+    ``factor_rcond`` itself.
+    """
+    rcond = SHARED_RANK_POLICY.factor_rcond
+    if outside is not None:
+        return bool(np.linalg.norm(inside @ outside.T) <= rcond)
+    cosines = np.linalg.svd(inside, compute_uv=False)
+    return bool(np.all((cosines <= rcond) | (1.0 - cosines**2 <= rcond)))
+
+
 @dataclass(frozen=True)
 class RankDecomposition:
     """The rank-revealing decomposition chosen for one design matrix."""
@@ -1195,6 +1215,29 @@ class RankDecomposition:
         )
         return bool(np.linalg.norm(projection) <= tolerance)
 
+    def function_estimable(self, columns: NDArray) -> bool:
+        """Whether each design row's part on the coefficients ``columns`` marks is estimable.
+
+        Those parts, zero on the other coefficients, are the fitted function of a term
+        whose coefficients are the marked ones.  A term's function is estimable when its
+        columns share no direction with the others' (Rao, *Linear Statistical Inference
+        and Its Applications*, 2nd ed., 1973, p. 282; Seely & Birkes, "Estimability in
+        partitioned linear models", Ann. Statist. 8(2), 1980): every null direction is
+        then one of the term's columns alone or of the others alone
+        (``null_directions_keep_to``).  This reads the null space the coefficient mask
+        reads, and no row of a design factor.
+        """
+        scaled = self.column_scale > 0.0
+        if self.equilibrated_null_basis is not None:
+            null = self.equilibrated_null_basis[scaled]
+        else:
+            null = self.null_basis()[scaled] * self.column_scale[scaled, None]
+            norms = np.linalg.norm(null, axis=0)
+            retained = norms > np.finfo(float).eps
+            null = null[:, retained] / norms[retained]
+        marked = np.asarray(columns, dtype=bool)[scaled]
+        return null_directions_keep_to(null[marked], null[~marked])
+
     def estimability_only(self) -> RankDecomposition:
         """This decomposition without its factor and solution bases.
 
@@ -1364,14 +1407,22 @@ class RankInfo:
             return self.coefficient.pseudo_inverse()
         return face_pseudo_inverse(self.face_coefficient, self.face)
 
-    def is_estimable(self, contrast: NDArray, intercept: float = 0.0) -> bool:
+    def is_estimable(
+        self, contrast: NDArray, intercept: float = 0.0, design_rows: bool = False
+    ) -> bool:
         """Whether the data determine ``intercept * a + contrast @ beta``.
 
         ``a`` is the intercept beside the centred columns, which every fit determines, so
         its weight only adds to the size the contrast's undetermined part is compared with
         (``RankDecomposition.is_estimable``): the centred constant column has scale
-        ``sqrt(sum_w)``.
+        ``sqrt(sum_w)``.  With ``design_rows``, ``contrast`` marks coefficients, and the
+        answer is ``RankDecomposition.function_estimable`` of the marked ones the fit
+        selected.
         """
+        if design_rows:
+            return self.data.function_estimable(
+                np.asarray(contrast, dtype=bool)[self.selected_columns]
+            )
         contrast = np.asarray(contrast, dtype=float)
         if contrast.shape != self.mean_x.shape:
             raise ValueError("contrast width does not match fitted coefficient space")

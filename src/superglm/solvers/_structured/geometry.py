@@ -21,6 +21,7 @@ from superglm.solvers.rank import (
     RankDecomposition,
     decompose_gram,
     needs_factor_certification,
+    null_directions_keep_to,
 )
 
 if TYPE_CHECKING:
@@ -62,6 +63,18 @@ class BorderNullSpace:
         projection = equilibrated @ self.basis[scaled]
         tolerance = SHARED_RANK_POLICY.factor_rcond * max(float(np.linalg.norm(equilibrated)), tiny)
         return bool(np.linalg.norm(projection) <= tolerance)
+
+    def function_estimable(self, columns: NDArray) -> bool:
+        """``RankDecomposition.function_estimable`` for coefficients on the border.
+
+        A marked structured coordinate reads as not determined, as in ``is_estimable``.
+        """
+        marked = np.asarray(columns, dtype=bool)
+        outside = np.ones(len(marked), dtype=bool)
+        outside[self.indices] = False
+        if np.any(marked[outside]):
+            return False
+        return null_directions_keep_to(self.basis[marked[self.indices] & (self.column_scale > 0.0)])
 
 
 def _bounded_centered_estimability(operator: CenteredBlockOperator) -> NDArray:

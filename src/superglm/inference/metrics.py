@@ -402,13 +402,20 @@ def _active_centre(
 
 
 def _active_contrast_estimable(
-    data_rank, columns: NDArray, contrast: NDArray, intercept: float = 0.0, sum_w=None
+    data_rank,
+    columns: NDArray,
+    contrast: NDArray,
+    intercept: float = 0.0,
+    design_rows: bool = False,
+    sum_w=None,
 ) -> bool:
     """Whether ``data_rank`` determines ``contrast``, whose active coordinates sit at ``columns``.
 
-    ``intercept`` is ``RankInfo.is_estimable``'s; a reader saved without ``sum_w`` decides
-    the contrast alone.
+    ``intercept`` and ``design_rows`` are ``RankInfo.is_estimable``'s; a reader saved
+    without ``sum_w`` decides the contrast alone.
     """
+    if design_rows:
+        return bool(data_rank.function_estimable(np.asarray(contrast, dtype=bool)[columns]))
     outside = np.ones(len(contrast), dtype=bool)
     outside[columns] = False
     if np.any(contrast[outside] != 0.0):
