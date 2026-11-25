@@ -36,10 +36,13 @@ class TestNBThetaProfileCI:
         assert ci_hi > ci_lo
 
     def test_ci_endpoints_invert_the_profile_likelihood_ratio(self):
-        """The 95% interval's endpoints solve 2 (l(theta_hat) - l(theta)) = chi2_1(0.95) on
-        the profile log-likelihood, recomputed with statsmodels' NB2 GLM at each fixed theta
-        (Venables and Ripley, MASS, 4th ed., section 7.4); an interval of the wrong width
-        would still contain the true theta."""
+        """The 95% interval's endpoints solve 2 (l(theta_opt) - l(theta)) = chi2_1(0.95) on
+        the NB2 log-likelihood in theta alone, at a mean fitted once and then frozen, as
+        ``NBProfileResult.interval()`` documents ("the fixed-mean profile" at the published
+        mean). The mean is statsmodels' joint NB2 maximum-likelihood fit and the likelihood is
+        SciPy's ``nbinom.logpmf`` (Venables and Ripley, MASS, 4th ed., section 7.4); an
+        interval of the wrong width would still contain the true theta, and a reference that
+        refits the mean at each theta moves these endpoints by about 4e-5 relative."""
         sm = pytest.importorskip("statsmodels.api")
         from scipy import optimize, stats
 
@@ -50,16 +53,24 @@ class TestNBThetaProfileCI:
         y = rng.negative_binomial(5.0, 5.0 / (mu + 5.0)).astype(float)
         design = np.column_stack([np.ones(n), x])
 
-        def profile_ll(log_theta):
-            family = sm.families.NegativeBinomial(alpha=np.exp(-log_theta))
-            return sm.GLM(y, design, family=family).fit(tol=1e-13, maxiter=200).llf
+        joint = sm.NegativeBinomial(y, design, loglike_method="nb2").fit(
+            method="newton", tol=1e-12, maxiter=100, disp=0
+        )
+        mu_frozen = np.exp(design @ joint.params[:2])
+
+        def fixed_mean_ll(log_theta):
+            theta = np.exp(log_theta)
+            return stats.nbinom.logpmf(y, theta, theta / (theta + mu_frozen)).sum()
 
         best = optimize.minimize_scalar(
-            lambda t: -profile_ll(t), bounds=(0.0, 4.0), method="bounded", options={"xatol": 1e-9}
+            lambda t: -fixed_mean_ll(t),
+            bounds=(0.0, 4.0),
+            method="bounded",
+            options={"xatol": 1e-10},
         )
-        cut = profile_ll(best.x) - 0.5 * stats.chi2.isf(0.05, 1)
-        lower = np.exp(optimize.brentq(lambda t: profile_ll(t) - cut, -2.0, best.x, xtol=1e-12))
-        upper = np.exp(optimize.brentq(lambda t: profile_ll(t) - cut, best.x, 6.0, xtol=1e-12))
+        cut = fixed_mean_ll(best.x) - 0.5 * stats.chi2.isf(0.05, 1)
+        lower = np.exp(optimize.brentq(lambda t: fixed_mean_ll(t) - cut, -2.0, best.x, xtol=1e-13))
+        upper = np.exp(optimize.brentq(lambda t: fixed_mean_ll(t) - cut, best.x, 6.0, xtol=1e-13))
 
         model = SuperGLM(
             family=NegativeBinomial(theta=1.0),
@@ -67,9 +78,11 @@ class TestNBThetaProfileCI:
             features={"x": Numeric()},
         )
         ci_lo, ci_hi = model.estimate_theta(pd.DataFrame({"x": x}), y).ci(alpha=0.05)
-        # The library roots in log theta to 1e-6; both fits converge the mean far
-        # tighter than the 1e-4 that would move an endpoint by that much.
-        np.testing.assert_allclose([ci_lo, ci_hi], [lower, upper], rtol=1e-4)
+        # The library roots each endpoint in log theta to xtol = 1e-6, so an endpoint
+        # errs by at most exp(1e-6) - 1 ~ 1e-6 relative; the reference roots to 1e-13.
+        # The second 1e-6 covers the published mean, which matches the joint maximum-
+        # likelihood mean only to the alternation's convergence (5e-8 relative here).
+        np.testing.assert_allclose([ci_lo, ci_hi], [lower, upper], rtol=2e-6)
 
     def test_ci_is_interval(self):
         """Lower bound should be less than upper bound."""
