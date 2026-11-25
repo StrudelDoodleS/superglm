@@ -16,7 +16,11 @@ predictor, accurate in both tails, for the logit, probit and cloglog links
 (exact types: a subclass may change the inverse link and must not inherit
 them).  ``log(1 + e^x)`` and ``log(1 - e^-x)`` follow Maechler (2012,
 *Accurately Computing log(1 - exp(-|a|))*, Rmpfr vignette); the probit rows
-are the inverse Mills ratios.
+are the inverse Mills ratios.  A row float64 can hold is returned wherever a
+form's own intermediate cannot be: where a tail probability rounds to 0, an
+exponential overflows or a difference cancels, the row is formed in log space
+or from its asymptotic series (``_logit_tail_rows``, ``_probit_event_rows``,
+``_cloglog_event_rows``), and every other row keeps its closed form.
 
 ``ClipRows`` is the one tagged value that says which rows a fit reads where
 the clip holds one, with its table of moves and its only writer.
@@ -66,13 +70,57 @@ CLIP_ROWS_MOVES: dict[tuple[ClipRowsState, str], ClipRowsState] = {
 # information itself.
 _RESPONSE_REACH = 2.0**26
 
-# The probit predictor past which a row against its outcome has no working
-# row.  Its score is an inverse Mills ratio, the exponential of a difference
-# of two terms near ``eta^2 / 2``, so its relative error grows as ``u eta^2``
-# and that of the curvature ``l1 (l1 + eta)``, whose second factor is ``1 /
-# |eta|``, as ``u eta^4``: ``7e-4`` here, and no digit by ``2^13``, where a
-# Newton step is as wrong as its curvature (``tail_rows_readable``).
+# The probit predictor past which a fit reads no row against its outcome and
+# stops ``clip_held`` (``tail_rows_readable``).  Only a step from the clipped
+# rows that overshoots the root by orders of magnitude lands there: ``1e8``
+# from pairs held at ``+-9``.
 _MILLS_REACH = 2.0**10
+
+# The probit predictors past which the closed forms of ``_probit_event_rows``
+# give way.  On the side of the outcome ``phi / Phi`` is a float64 subnormal
+# from 37.6 and 0 from 38.6, while its products with ``eta`` stay float64
+# values to 38.9.  Against the outcome ``phi / Phi + eta`` is a difference
+# that loses ``eta^2``, and each derivative of the curvature another ``eta``:
+# at the edge of the solver's band, 20, the second derivative still holds
+# four digits, and at 800 none.
+_PROBIT_FAR = 37.5
+_MILLS_SERIES_FROM = 20.0
+
+# The smallest normal float64: a smaller positive value is a subnormal, which
+# holds fewer digits.
+_TINY = float(np.finfo(np.float64).tiny)
+
+# ``t = e^eta`` below which ``t^2`` is a float64 subnormal: the cloglog event's
+# curvature is ``t / 2`` there and ``log(1 - e^-t)`` is ``eta``.
+_CLOGLOG_FAR = 2.0**-511
+
+# Every cloglog event row is 0 by ``t = 772``; a larger ``t`` is read as this
+# one, which keeps each factor of ``_cloglog_event_rows`` finite.
+_CLOGLOG_REACH = 2.0**11
+
+
+def _inverse_mills_series(terms: int) -> NDArray:
+    """Series coefficients of ``l = phi / Phi`` at ``eta = -x`` and of its curvature's rows, as ``x -> inf``.
+
+    ``l = x + sum_k b_k x^(1 - 2k)`` is the reciprocal of Laplace's series for
+    the Mills ratio, ``(1 - Phi(x)) / phi(x) = sum_j (-1)^j (2j - 1)!!
+    x^(-2j - 1)`` (NIST DLMF, section 7.12(i)), so ``b_n = -sum_{j=1..n}
+    (-1)^j (2j - 1)!! b_{n-j}`` from ``b_0 = 1``: 1, -2, 10, -74, ...  Each
+    ``eta`` derivative multiplies a term by its power, so column ``d`` holds
+    ``b_k (2k - 1) (2k) ... (2k + d - 2)``.  Fourteen terms hold ``1e-17`` of
+    every row at ``_MILLS_SERIES_FROM``, and to there the recurrence's
+    integers stay below ``2^53``, so float64 forms each ``b_k`` exactly.
+    """
+    laplace, b = [1.0], [1.0]
+    for n in range(1, terms + 1):
+        laplace.append(-laplace[-1] * (2 * n - 1))
+        b.append(-sum(laplace[j] * b[n - j] for j in range(1, n + 1)))
+    k = np.arange(1, terms + 1)
+    powers = np.cumprod([np.ones(terms), 2 * k - 1, 2 * k, 2 * k + 1], axis=0)
+    return (np.array(b[1:]) * powers).T
+
+
+_MILLS_SERIES = _inverse_mills_series(14)
 
 
 class ClipRows:
@@ -185,9 +233,9 @@ def _logit_tail_rows(eta: NDArray) -> tuple[NDArray, NDArray, NDArray]:
     """``p = expit(eta)``, ``q = expit(-eta)`` and the Fisher information ``p q``.
 
     ``expit`` rounds a tail probability to 0 once its own exponential
-    overflows, near ``|eta| = 709``, while ``p q`` stays a float64 subnormal to
-    about 745.  There the information is ``exp(-log(1 + e^-eta) - log(1 +
-    e^eta))``, which ``logaddexp`` forms without overflow.
+    overflows, near ``|eta| = 709``, while the probability stays a float64
+    subnormal to about 745.  There the two are ``exp(-log(1 + e^-eta))`` and
+    ``exp(-log(1 + e^eta))``, which ``logaddexp`` forms without overflow.
     """
     from scipy.special import expit
 
@@ -196,7 +244,8 @@ def _logit_tail_rows(eta: NDArray) -> tuple[NDArray, NDArray, NDArray]:
     rounded = information == 0.0
     if np.any(rounded):
         tail = eta[rounded]
-        information[rounded] = np.exp(-np.logaddexp(0.0, tail) - np.logaddexp(0.0, -tail))
+        p[rounded], q[rounded] = np.exp(-np.logaddexp(0.0, -tail)), np.exp(-np.logaddexp(0.0, tail))
+        information[rounded] = p[rounded] * q[rounded]
     return p, q, information
 
 
@@ -221,8 +270,9 @@ def tail_rows(link: object, y: NDArray, eta: NDArray) -> tuple[NDArray, NDArray,
     information ``-d2l/deta2`` is the logit's Fisher information, and the
     probit and cloglog rows of ``working_rows``; it is never negative (each
     log-likelihood is concave in ``eta``; Pratt 1981, JASA 76(373)), and is
-    read only as an iteration's metric.  A predictor whose likelihood float64
-    cannot hold gives a non-finite row.
+    read only as an iteration's metric.  Each figure is the float64 value of
+    the row wherever it has one, a subnormal included; a predictor whose
+    likelihood float64 cannot hold gives a non-finite row.
     """
     from scipy.special import log_ndtr
 
@@ -240,22 +290,35 @@ def tail_rows(link: object, y: NDArray, eta: NDArray) -> tuple[NDArray, NDArray,
             observed, score = _probit_observed_rows(y=y, eta=eta, sample_weight=unit)
             log_phi = -0.5 * eta * eta - 0.5 * math.log(2.0 * math.pi)
             log_p, log_q = log_ndtr(eta), log_ndtr(-eta)
+            far = (np.abs(eta) > _PROBIT_FAR) | (_against(y, eta) > _MILLS_SERIES_FROM)
+            if np.any(far):
+                # log_ndtr rounds the larger probability's logarithm to 0: it is minus the smaller
+                log_p = np.where(eta > _PROBIT_FAR, -np.exp(log_q), log_p)
+                log_q = np.where(eta < -_PROBIT_FAR, -np.exp(log_p), log_q)
+                event, non_event = _probit_event_rows(eta[far]), _probit_event_rows(-eta[far])
+                score[far] = _by_outcome(y[far], event[0], -non_event[0])
+                observed[far] = _by_outcome(y[far], event[1], non_event[1])
             information = np.exp(2.0 * log_phi - log_p - log_q)
             return y * log_p + (1.0 - y) * log_q, score, information, observed
         if type(link) is CloglogLink:
             observed, _ = _cloglog_observed_rows(y=y, eta=eta, sample_weight=unit)
             t = np.exp(eta)
             growth = np.expm1(t)
-            # r = t / (e^t - 1): 1 where t underflows, 0 where e^t overflows
+            # r = t / (e^t - 1): 1 where t underflows
             ratio = np.where(np.isfinite(growth), np.where(t > 0.0, t / growth, 1.0), 0.0)
+            information = t * ratio
             log_p = np.where(t > math.log(2.0), np.log1p(-np.exp(-t)), np.log(-np.expm1(-t)))
+            far = ~np.isfinite(growth) | (t < _CLOGLOG_FAR)
+            if np.any(far):
+                ratio[far], information[far], curvature = _cloglog_event_rows(t[far])[:3]
+                observed[far] = _by_outcome(y[far], curvature, t[far])
+                log_p = np.where(t < _CLOGLOG_FAR, eta, log_p)
             # each term only where the response carries it: 0 * inf is not a row
             event, non_event = y > 0.0, y < 1.0
             log_likelihood = np.where(event, y * log_p, 0.0) - np.where(
                 non_event, (1.0 - y) * t, 0.0
             )
             score = np.where(event, y * ratio, 0.0) - np.where(non_event, (1.0 - y) * t, 0.0)
-            information = np.where(np.isfinite(growth), t * ratio, 0.0)
             return log_likelihood, score, information, observed
     raise TypeError(f"no tail rows are declared for {type(link).__name__}")
 
@@ -302,11 +365,12 @@ def information_underflowed(information: NDArray) -> bool:
     """Whether a state's rows hold none of the likelihood's information in float64.
 
     A held row's Fisher information underflows to 0 past a predictor of about
-    ``+-745`` (logit, cloglog) or ``+-38`` (probit).  Where that leaves no row
-    any, the data identify no coefficient at that state: a fit returned there
-    shows no standard error (``PIRLSResult.information_underflowed``), and its
-    geometry is formed from the clipped state's rows, since a centred system
-    needs a positive total.
+    ``+-745`` (logit) or ``+-38.7`` (probit), and below ``-745`` or above
+    ``6.63`` (cloglog).  Where that leaves no row any, the data identify no
+    coefficient at that state: a fit returned there shows no standard error
+    (``PIRLSResult.information_underflowed``), and its geometry is formed
+    from the clipped state's rows, since a centred system needs a positive
+    total.
     """
     return not np.any(information > 0.0)
 
@@ -407,16 +471,13 @@ def tail_rows_readable(link: object, y: NDArray, eta: NDArray, weights: NDArray)
     """Whether float64 holds the likelihood's working rows at ``eta``, under either curvature.
 
     ``tail_working_rows`` finite in every weight and response, and no probit
-    row past ``_MILLS_REACH`` on the side against its outcome, where the row
-    is finite and its curvature has no digit.  A fit reads the likelihood's
-    rows only at such a state: a row whose score or curvature float64 cannot
-    form has no working row for the next step to solve.
+    row past ``_MILLS_REACH`` on the side against its outcome.  A fit reads
+    the likelihood's rows only at such a state: a row whose score or
+    curvature float64 cannot form has no working row for the next step to
+    solve.
     """
-    if type(link) is ProbitLink:
-        # how far each predictor lies on the side against its response
-        against = np.maximum(np.where(y > 0.0, -eta, 0.0), np.where(y < 1.0, eta, 0.0))
-        if np.any(against > _MILLS_REACH):
-            return False
+    if type(link) is ProbitLink and np.any(_against(y, eta) > _MILLS_REACH):
+        return False
     return all(
         bool(np.all(np.isfinite(part)))
         for observed in (False, True)
@@ -507,29 +568,54 @@ def likelihood_information(
     return exported_information(family, link, eta_unclipped, eta, mu, sample_weight, information)[0]
 
 
-def _probit_event_curvature(eta: NDArray) -> tuple[NDArray, NDArray, NDArray]:
-    """``a = -d2 log Phi / deta2 = l1 (l1 + eta)`` and its first two derivatives, ``l1 = phi / Phi``.
+def _probit_event_rows(eta: NDArray) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+    """``l1 = phi / Phi``, ``a = -d2 log Phi / deta2 = l1 (l1 + eta)`` and ``a``'s first two derivatives.
 
     ``l1' = -a`` gives ``a' = l1 - a (2 l1 + eta)`` and ``a'' = 2 a (a - 1) - a' (2 l1 + eta)``.
+    Above ``_PROBIT_FAR`` ``l1 = e^L`` is below ``1e-306`` and the three are
+    ``l1`` times ``eta``, ``1 - eta^2`` and ``eta^3 - 3 eta``, formed as one
+    exponential of ``L`` plus the factor's logarithm, so a subnormal ``l1``
+    does not round the product.  Below ``-_MILLS_SERIES_FROM`` the four are
+    the asymptotic series of ``_inverse_mills_series`` in ``1 / eta^2``,
+    which no difference enters.
     """
+    from numpy.polynomial.polynomial import polyval
     from scipy.special import log_ndtr
 
-    mills = np.exp(-0.5 * eta * eta - 0.5 * math.log(2.0 * math.pi) - log_ndtr(eta))
+    log_mills = -0.5 * eta * eta - 0.5 * math.log(2.0 * math.pi) - log_ndtr(eta)
+    mills = np.exp(log_mills)
     curvature = mills * (mills + eta)
     first = mills - curvature * (2.0 * mills + eta)
-    return curvature, first, 2.0 * curvature * (curvature - 1.0) - first * (2.0 * mills + eta)
+    second = 2.0 * curvature * (curvature - 1.0) - first * (2.0 * mills + eta)
+    upper, lower = eta > _PROBIT_FAR, eta < -_MILLS_SERIES_FROM
+    if np.any(upper):
+        scale, x = log_mills[upper], eta[upper]
+        log_x, v = np.log(x), 1.0 / (x * x)
+        curvature[upper] = np.exp(scale + log_x)
+        first[upper] = -np.exp(scale + 2.0 * log_x + np.log1p(-v))
+        second[upper] = np.exp(scale + 3.0 * log_x + np.log1p(-3.0 * v))
+    if np.any(lower):
+        x = -eta[lower]
+        v = 1.0 / (x * x)
+        sums = polyval(v, _MILLS_SERIES)
+        mills[lower], curvature[lower] = x + sums[0] / x, 1.0 - v * sums[1]
+        first[lower], second[lower] = -(v / x) * sums[2], -(v * v) * sums[3]
+    return mills, curvature, first, second
 
 
-def _cloglog_event_curvature(t: NDArray) -> tuple[NDArray, NDArray, NDArray]:
-    """``c = -d2 log(1 - e^-t) / deta2`` and its first two derivatives in ``eta``, ``t = e^eta``.
+def _cloglog_event_rows(t: NDArray) -> tuple[NDArray, NDArray, NDArray, NDArray, NDArray]:
+    """``r``, ``t r``, ``c = -d2 log(1 - e^-t) / deta2`` and ``c``'s first two ``eta`` derivatives, ``t = e^eta``.
 
     With ``r = t / (e^t - 1)``, ``m = t / (1 - e^-t) - 1`` and ``k = 1 - r = t - m``,
     which have ``r' = -r m``, ``m' = (m + 1) k`` and ``k' = r m``:
     ``c = r m``, ``c' = r g`` and ``c'' = r (g' - m g)``, where
     ``g = (m + 1) k - m^2`` and ``g' = (m + 1) (k^2 + r m - 2 m k)``.
     ``m`` takes its series ``t/2 + t^2/12 - ...`` below ``t = 0.1``, where the
-    difference cancels.
+    difference cancels, and ``t/2`` below ``_CLOGLOG_FAR``.  Where ``e^t``
+    overflows ``r = e^(log t - t)`` is a subnormal or 0 while its products
+    are not: each is one exponential of ``log t - t`` plus its factor's logarithm.
     """
+    t = np.minimum(t, _CLOGLOG_REACH)
     growth = np.expm1(t)
     ratio = np.where(np.isfinite(growth), np.where(t > 0.0, t / growth, 1.0), 0.0)
     small = t < 0.1
@@ -541,10 +627,19 @@ def _cloglog_event_curvature(t: NDArray) -> tuple[NDArray, NDArray, NDArray]:
         if order >= 2:
             series = series + term
     excess = np.where(t > 0.0, np.where(small, series, t + np.expm1(-t)) / gap, 0.0)
+    excess = np.where(t < _CLOGLOG_FAR, 0.5 * t, excess)
     rest = t - excess
     slope = (excess + 1.0) * rest - excess * excess
     slope_first = (excess + 1.0) * (rest * rest + ratio * excess - 2.0 * excess * rest)
-    return ratio * excess, ratio * slope, ratio * (slope_first - excess * slope)
+    factors = (t, excess, slope, slope_first - excess * slope)
+    rows = [ratio, *(ratio * factor for factor in factors)]
+    far = ~np.isfinite(growth)
+    if np.any(far):
+        scale = np.log(t[far]) - t[far]
+        rows[0][far] = np.exp(scale)
+        for row, factor in zip(rows[1:], factors, strict=True):
+            row[far] = np.sign(factor[far]) * np.exp(scale + np.log(np.abs(factor[far])))
+    return rows[0], rows[1], rows[2], rows[3], rows[4]
 
 
 def tail_observed_curvature(
@@ -565,8 +660,8 @@ def tail_observed_curvature(
     cloglog  ``c``, ``c'``, ``c''`` ``t``, ``t``, ``t``
     ======== ====================== ========================================
 
-    (``_probit_event_curvature``, ``_cloglog_event_curvature``).  The logit's
-    are its Fisher information's too.
+    (``_probit_event_rows``, ``_cloglog_event_rows``).  The logit's are its
+    Fisher information's too.
     """
     y = np.asarray(y, dtype=np.float64)
     eta = np.asarray(eta, dtype=np.float64)
@@ -575,12 +670,12 @@ def tail_observed_curvature(
             p, q, information = _logit_tail_rows(eta)
             return information, information * (q - p), information * (1.0 - 6.0 * information)
         if type(link) is ProbitLink:
-            event = _probit_event_curvature(eta)
-            mirrored = _probit_event_curvature(-eta)
+            event = _probit_event_rows(eta)[1:]
+            mirrored = _probit_event_rows(-eta)[1:]
             non_event = (mirrored[0], -mirrored[1], mirrored[2])
         elif type(link) is CloglogLink:
             t = np.exp(eta)
-            event, non_event = _cloglog_event_curvature(t), (t, t, t)
+            event, non_event = _cloglog_event_rows(t)[2:], (t, t, t)
         else:
             raise TypeError(f"no tail rows are declared for {type(link).__name__}")
         curvature, first, second = (
@@ -644,6 +739,11 @@ def likelihood_fisher_curvature(
     )
 
 
+def _against(y: NDArray, eta: NDArray) -> NDArray:
+    """How far each predictor lies on the side against its response."""
+    return np.maximum(np.where(y > 0.0, -eta, 0.0), np.where(y < 1.0, eta, 0.0))
+
+
 def _by_outcome(y: NDArray, event: NDArray, non_event: NDArray) -> NDArray:
     """``y * event + (1 - y) * non_event``, each term only where the response carries it."""
     with np.errstate(invalid="ignore", over="ignore"):
@@ -666,11 +766,22 @@ class HeldRows:
     working residual  ``(y - p) / p' = y / e0 - (1 - y) / e1``
     ================= ======================================================
 
-    Each is a sum of one term per outcome, so neither tail cancels.  A figure
-    float64 cannot hold (a Pearson residual past ``1.3e154``) is infinite.
+    Each is a sum of one term per outcome, so neither tail cancels, and is
+    the row's float64 value wherever it has one: where a score or the scores'
+    ratio leaves the normal range the Pearson residual is ``exp(+-(log(1 - p)
+    - log p) / 2)``.  A figure float64 cannot hold is infinite.
     """
 
-    __slots__ = ("index", "y", "log_p", "log_q", "event_score", "non_event_score", "_clipped")
+    __slots__ = (
+        "index",
+        "y",
+        "eta",
+        "log_p",
+        "log_q",
+        "event_score",
+        "non_event_score",
+        "_clipped",
+    )
 
     def __init__(
         self,
@@ -683,9 +794,11 @@ class HeldRows:
     ) -> None:
         self.index = index
         self.y = y
+        self.eta = eta
         self.log_p, self.event_score = tail_rows(link, np.ones_like(eta), eta)[:2]
         self.log_q, non_event = tail_rows(link, np.zeros_like(eta), eta)[:2]
-        self.non_event_score = -non_event
+        # a magnitude: one that underflows is +0, whose reciprocal is +inf
+        self.non_event_score = np.abs(non_event)
         # the clipped mean's unit deviance and squared Pearson residual, which the sums trade away
         self._clipped = (
             np.asarray(family.deviance_unit(y, mu), dtype=np.float64),
@@ -707,15 +820,24 @@ class HeldRows:
 
     @property
     def pearson_residual(self) -> NDArray:
-        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-            odds_against = np.sqrt(self.event_score / self.non_event_score)
-            odds = np.sqrt(self.non_event_score / self.event_score)
+        event, non_event = self.event_score, self.non_event_score
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore", under="ignore"):
+            ratio = event / non_event
+            # the scores' ratio q / p, where float64 holds both scores and it as normal numbers
+            normal = (np.minimum(event, non_event) >= _TINY) & np.isfinite(event + non_event)
+            normal &= (ratio >= _TINY) & (ratio <= 1.0 / _TINY)
+            half_log_odds = 0.5 * (self.log_q - self.log_p)
+            odds_against = np.where(normal, np.sqrt(ratio), np.exp(half_log_odds))
+            odds = np.where(normal, np.sqrt(non_event / event), np.exp(-half_log_odds))
         return _by_outcome(self.y, odds_against, -odds)
 
     @property
     def working_residual(self) -> NDArray:
         with np.errstate(divide="ignore", over="ignore"):
-            return _by_outcome(self.y, 1.0 / self.non_event_score, -1.0 / self.event_score)
+            event = 1.0 / self.non_event_score
+            # the one score that overflows is the cloglog non-event's e^eta: its reciprocal is e^-eta
+            event = np.where(np.isinf(self.non_event_score), np.exp(-self.eta), event)
+            return _by_outcome(self.y, event, -1.0 / self.event_score)
 
     def pearson(self, weights: NDArray) -> NDArray:
         """``sqrt(w)`` times the Pearson residual, an exact 0 on a row of weight 0."""

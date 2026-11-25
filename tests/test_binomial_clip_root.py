@@ -914,6 +914,244 @@ def test_tail_rows_are_the_likelihoods_rows_in_both_tails(link, etas):
         assert np.all(rows[3] >= 0.0)
 
 
+# every per-row figure the held-row path forms, by where it is read
+_ROW_FIGURES = ("log_likelihood", "score", "fisher", "observed")
+_CURVATURE_FIGURES = ("curvature", "first", "second")
+_HELD_FIGURES = {
+    "deviance": "deviance",
+    "complement": "complement",
+    "residual": "residual",
+    "pearson": "pearson_residual",
+    "working": "working_residual",
+}
+
+
+def _exact_figures(link: str, eta: float, event: bool) -> dict:
+    """Each figure of one row from its definition in mpmath, at the precision the caller set.
+
+    ``p``, its four ``eta`` derivatives and the quotient rule give the
+    derivatives of ``log p`` and of ``log(1 - p)``: no closed form of
+    ``clip_rows`` is read.  The quotients cancel by up to 348 digits (a logit
+    or cloglog row at ``-800``) and by 23 in the probit.
+    """
+    import mpmath as mp
+
+    x = mp.mpf(eta)
+    if link == "logit":
+        p, q = 1 / (1 + mp.exp(-x)), 1 / (1 + mp.exp(x))
+        slopes = [p * q, p * q * (q - p), p * q * (1 - 6 * p * q)]
+        slopes.append(p * q * (q - p) * (1 - 12 * p * q))
+    elif link == "probit":
+        p, q, phi = mp.ncdf(x), mp.ncdf(-x), mp.npdf(x)
+        slopes = [phi, -x * phi, (x * x - 1) * phi, -(x**3 - 3 * x) * phi]
+    else:
+        t = mp.exp(x)
+        p, q = -mp.expm1(-t), mp.exp(-t)
+        slopes = [t * q, (t - t**2) * q, (t - 3 * t**2 + t**3) * q]
+        slopes.append((t - 7 * t**2 + 6 * t**3 - t**4) * q)
+    # each log from the smaller of the pair, so neither rounds to log(1)
+    log_p = mp.log(p) if p < q else mp.log1p(-q)
+    log_q = mp.log(q) if q < p else mp.log1p(-p)
+    if link == "cloglog" and not event:
+        orders = [-t] * 4  # log(1 - p) = -e^eta, with no quotient to cancel
+    else:
+        r1, r2, r3, r4 = (slope / p if event else -slope / q for slope in slopes)
+        orders = [r1, r2 - r1**2, r3 - 3 * r1 * r2 + 2 * r1**3]
+        orders.append(r4 - 4 * r1 * r3 - 3 * r2**2 + 12 * r1**2 * r2 - 6 * r1**4)
+    log_likelihood = log_p if event else log_q
+    return {
+        "log_likelihood": log_likelihood,
+        "score": orders[0],
+        "fisher": slopes[0] ** 2 / (p * q),
+        "observed": -orders[1],
+        "curvature": -orders[1],
+        "first": -orders[2],
+        "second": -orders[3],
+        "deviance": -2 * log_likelihood,
+        "complement": q,
+        "residual": q if event else -p,
+        "pearson": mp.sqrt(q / p) if event else -mp.sqrt(p / q),
+        "working": q / slopes[0] if event else -p / slopes[0],
+    }
+
+
+def _tail_grid(link: str) -> np.ndarray:
+    """Predictors over ``[-800, 800]``, dense about each edge where a closed form leaves float64."""
+    points = list(np.arange(-800.0, 801.0, 20.0))
+    points += [s * v for s in (-1.0, 1.0) for v in (0.3, 3.0, 5.3, 9.0, 12.0, 16.5, 20.5, 30.0)]
+    steps = np.array([-2.0, -1.0, -0.5, -0.1, -0.01, 0.01, 0.1, 0.5, 1.0, 2.0])
+    if link == "logit":
+        # expit rounds a probability to 0 at 709.78; the probability is 0 at 745.13
+        edges, reach = [708.4, 709.78, 745.13], 1.0
+    elif link == "probit":
+        # the series starts at 20; phi is a subnormal from 37.6 and 0 at 38.6; a Pearson
+        # residual overflows at 53.1
+        edges, reach = [20.0, 37.5, 38.6, 53.1], 0.25
+        points += [s * v for s in (-1.0, 1.0) for v in np.arange(21.0, 60.0)]
+    else:
+        # below: t = e^eta is 0 at -745.13, a subnormal from -708.4, and t^2 from -354.2
+        edges, reach = [-745.13, -708.4, -372.6, -354.2], 1.0
+        # above, in t: e^t overflows at 709.78, the score is 0 at 751, the information at 758
+        # and the last curvature row at 771; a Pearson residual overflows at 1420, and is 0 at 1489
+        points += list(np.log(np.r_[np.arange(690.0, 790.0, 2.0), np.arange(1380.0, 1520.0, 10.0)]))
+        points += [math.log(709.78), math.log(709.79), math.log(720.0)]
+        # t itself overflows at 709.78, where the event's working residual e^-eta is a subnormal
+        points += [edge + step for edge in (709.78, 745.13) for step in steps]
+    points += [s * (edge + step * reach) for s in (-1.0, 1.0) for edge in edges for step in steps]
+    return np.array(sorted({point for point in points if abs(point) <= 800.0}))
+
+
+@pytest.mark.parametrize("event", [True, False], ids=["event", "non_event"])
+@pytest.mark.parametrize("link", ["logit", "probit", "cloglog"])
+def test_every_figure_of_a_held_row_is_the_likelihoods_wherever_float64_holds_it(link, event):
+    """Every per-row figure of the held-row path against its definition, over ``[-800, 800]``.
+
+    Log-likelihood, score, Fisher and observed information, the two curvature
+    derivatives a REML fit reads, and a held row's deviance, complement and
+    response, Pearson and working residuals.  Each must be the float64 value
+    of the definition wherever it has one, a subnormal included: 0 only where
+    the definition is within a few subnormal spacings of it, infinite only
+    where it is past the largest float64, never NaN.
+
+    The allowance is ``256 u`` times the size of the figure's logarithm, the
+    exponent whose rounding the figure carries, plus four subnormal spacings
+    (an exponential a spacing off, doubled by the deviance).  A probit row
+    inside the solver's band of 20 keeps the Mills ratio's difference forms,
+    which lose ``eta^2`` in the score and one more ``eta`` per derivative
+    after it: ``8 u eta^2`` of each figure and, against the outcome, ``8 u
+    |eta|^(4 + d)`` of the curvature's ``d``-th derivative.
+
+    The unfixed rows fail every case: a logit score and Pearson residual past
+    709, a cloglog score, information and curvature once ``e^t`` overflows,
+    its event's log-likelihood below ``-745``, the probit's curvature
+    derivatives against the outcome (-14.5 for -1.5e-11 at -800), and the
+    sign of an overflowed working residual.
+    """
+    import mpmath as mp
+
+    from superglm.distributions import Binomial
+    from superglm.links import CloglogLink, LogitLink, ProbitLink
+    from superglm.solvers.clip_rows import (
+        held_likelihood_rows,
+        tail_observed_curvature,
+        tail_rows,
+        tail_working_rows,
+    )
+
+    link_object = {"logit": LogitLink, "probit": ProbitLink, "cloglog": CloglogLink}[link]()
+    eta = _tail_grid(link)
+    y = np.full(len(eta), 1.0 if event else 0.0)
+    rows = tail_rows(link_object, y, eta)
+    computed = dict(zip(_ROW_FIGURES, rows, strict=True))
+    computed |= zip(_CURVATURE_FIGURES, tail_observed_curvature(link_object, y, eta), strict=True)
+    held = held_likelihood_rows(Binomial(), link_object, y, eta)
+    with np.errstate(all="ignore"):
+        for name, attribute in _HELD_FIGURES.items():
+            computed[name] = np.full(len(eta), np.nan)
+            computed[name][held.index] = getattr(held, attribute)
+    is_held = np.isin(np.arange(len(eta)), held.index)
+
+    u, quantum = 2.0**-53, 2.0**-1074
+    largest = mp.mpf(float(np.finfo(np.float64).max))
+    failures = []
+    with mp.workdps(80 if link == "probit" else 420):
+        for index, value in enumerate(eta):
+            exact = _exact_figures(link, float(value), event)
+            against = -value if event else value
+            for name, reference in exact.items():
+                if name in _HELD_FIGURES and not is_held[index]:
+                    continue
+                got = float(computed[name][index])
+                size = abs(reference)
+                relative = 256.0 * u * max(1.0, abs(float(mp.log(size))) if size else 1.0)
+                allowance = 4.0 * quantum
+                if link == "probit" and abs(value) <= 20.0:
+                    relative += 8.0 * u * value * value
+                    if against > 0.0 and name in ("observed", *_CURVATURE_FIGURES):
+                        order = {"first": 1, "second": 2}.get(name, 0)
+                        allowance += 8.0 * u * max(1.0, against) ** (4 + order)
+                if size > largest * (1 + mp.mpf(1e-9)):
+                    good = math.isinf(got) and (got > 0.0) == (reference > 0)
+                elif math.isfinite(got):
+                    good = abs(mp.mpf(got) - reference) <= relative * size + allowance
+                else:
+                    # an infinity is the figure only at the very edge of float64
+                    good = math.isinf(got) and size > largest * (1 - mp.mpf(1e-9))
+                    good = good and (got > 0.0) == (reference > 0)
+                if not good:
+                    wanted = mp.nstr(reference, 17)
+                    failures.append(f"{name} at {float(value)!r}: {got!r} for {wanted}")
+    assert not failures, f"{len(failures)} figures, the first: {failures[:6]}"
+
+    # the rows a fit solves and returns: the exported weight is the Fisher information itself,
+    # and weight * (response - eta) is the score wherever float64 holds all three
+    score, fisher = rows[1], rows[2]
+    unit = np.ones(len(eta))
+    for observed, exported in ((False, True), (False, False), (True, False)):
+        weight, response = tail_working_rows(
+            link_object, y, eta, unit, observed=observed, exported=exported
+        )
+        if exported:
+            np.testing.assert_array_equal(weight, fisher)
+        with np.errstate(all="ignore"):
+            step = np.abs(score) / weight
+            formed = np.isfinite(score) & np.isfinite(weight) & (weight > 0.0) & np.isfinite(step)
+            gap = np.abs(weight * (response - eta) - score)
+            bound = 4.0 * u * (np.abs(score) + weight * np.abs(response)) + 4.0 * quantum
+        assert np.all(np.isfinite(response[formed]))
+        assert np.all(gap[formed] <= bound[formed])
+
+
+def test_cloglog_rows_past_the_overflow_of_exp_t_publish_their_information():
+    """Ten cloglog rows at a predictor of ``log(720)``: their error is the likelihood's, not blank.
+
+    ``t = e^eta = 720`` is past 709.78, where ``e^t`` overflows, and each row's
+    Fisher information ``t^2 e^-t / (1 - e^-t)`` is ``1.05e-307``, a normal
+    float64.  The unfixed row read it as 0, so ``metrics()`` on these rows
+    found no information and showed a blank intercept error; beside rows of
+    less information it would have overstated one.  The reference is the
+    information's logarithm, which nothing overflows.  The rows are scored on
+    an ordinary fit, by an offset, so their predictor does not depend on where
+    a fit of them would stop.
+    """
+    case = _Case("cloglog", np.r_[np.ones(6), np.zeros(4)], np.zeros(10))
+    model, coefficients = case.fit()
+    assert model.result.converged
+    offset = np.full(10, math.log(720.0) - coefficients[0])
+    frame = pd.DataFrame(index=range(10))
+    metrics = model.metrics(frame, np.ones(10), offset=offset, sample_weight=np.ones(10))
+    log_information = _log_information_rows("cloglog", coefficients[0] + offset)
+    assert np.all(log_information > math.log(np.finfo(np.float64).tiny))  # the control
+    expected = math.exp(-0.5 * (math.log(10.0) + float(log_information[0])))
+    np.testing.assert_allclose(metrics.intercept_se_raw, expected, rtol=1e-9)
+    np.testing.assert_allclose(metrics.summary()._coef_rows[0].se, expected, rtol=1e-9)
+
+
+def test_pearson_residuals_of_logit_rows_past_709_are_the_likelihoods():
+    """Fifty logit pairs held at ``+-720``: each Pearson residual is ``+-e^(-+eta / 2)``, about ``1e156``.
+
+    ``(y - p) / sqrt(p (1 - p))`` is ``e^(-eta / 2)`` for an event and
+    ``-e^(eta / 2)`` for a non-event, float64 values to a predictor of
+    ``+-1419``.  The unfixed rows took the square root of a ratio of
+    probabilities that ``expit`` had rounded to 0 and showed ``nan`` and
+    ``-inf`` in turn, and a Pearson statistic of ``nan``.  The statistic's
+    own value, a sum of ``e^|eta|``, is past float64: infinite.  Both
+    references are read at the returned coefficients.
+    """
+    case = _ALL_HELD_AGAINST["logit_50_pairs_at_720"]()
+    model, coefficients = case.fit()
+    eta = case.X @ coefficients + case.offset
+    frame = pd.DataFrame(index=range(len(case.y)))
+    metrics = model.metrics(frame, case.y, offset=case.offset, sample_weight=case.weights)
+    expected = np.where(case.y > 0.0, np.exp(-0.5 * eta), -np.exp(0.5 * eta))
+    assert np.all(np.isfinite(expected)) and np.all(np.abs(eta) > 709.78)  # the controls
+    np.testing.assert_allclose(metrics.residuals("pearson"), expected, rtol=1e-9)
+    assert np.max(np.abs(eta)) > math.log(
+        np.finfo(np.float64).max
+    )  # the control: e^|eta| overflows
+    assert metrics.pearson_chi2 == math.inf
+
+
 def test_the_rows_a_fit_reads_move_one_way():
     """``ClipRows`` walks its table: a solve moves ``working`` to ``likelihood`` and never back.
 
