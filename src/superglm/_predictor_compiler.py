@@ -408,27 +408,61 @@ def _adopt_level_universe(build: _Build, name: str, spec: Any) -> None:
             spec.apply_level_binding(binding)
 
 
-def _binned_spline_infos(
-    build: _Build, name: str, spec: _SplineBase, x_col: NDArray, weight: NDArray | None
-) -> tuple[list[GroupInfo], BinnedRows]:
-    """A binned spline's GroupInfos, built on its bin centres, and its binned rows."""
-    from superglm.dm_builder import resolve_discrete_n_bins
+@dataclass
+class _MainEffect:
+    """One main effect as it compiles: its inputs, then its build's output.
 
-    n_bins = resolve_discrete_n_bins(name, spec, build.n_bins_config)
-    with feature_build_messages(name):
-        build_knots = spec.build_knots_and_penalty
-        warning_context = (
-            {"feature_name": name}
-            if getattr(build_knots, "__func__", None) is _SPLINE_KNOT_BUILD
-            else {}
-        )
-        omega, n_cols, projection = build_knots(x_col, weight, n_bins, **warning_context)
-        # QP monotone constraint metadata (coefficient-space, survives discretization).
-        constraints, monotone_engine, raw_to_solver_map = qp_geometry(
-            spec, shape_engine(spec), projection
-        )
+    ``n_bins`` is set for a spline that bins at fit time; ``scan`` says the
+    separation scan reads its levels.
+    """
+
+    name: str
+    spec: Any
+    x_col: NDArray
+    weight: NDArray | None
+    n_bins: int | None
+    scan: bool
+    built: Any = None
+
+
+def _main_effect(build: _Build, name: str) -> _MainEffect:
+    """A main effect's inputs: its spec, its column, the weights it learns from and its route."""
+    from superglm.dm_builder import resolve_discrete_n_bins, spline_bins
+
+    spec = build.specs[name]
+    # The physical-rows rule reaches hosted model geometry too (an
+    # OrderedCategorical's inner basis, a hosted Piecewise).
+    if isinstance(spec, OrderedCategorical):
+        spec._inner_geometry_physical_rows = build.physical_rows
+    x_col = build.X.column_array(name)
+    scan = bool(build.separation_boundaries) and isinstance(spec, Categorical)
+    _adopt_level_universe(build, name, spec)
+    weight = build.weight(spec)
+    bins = _bins_as_built_in(name, spec, spline_bins(spec, build.model_discrete))
+    n_bins = resolve_discrete_n_bins(name, spec, build.n_bins_config) if bins else None
+    return _MainEffect(name, spec, x_col, weight, n_bins, scan)
+
+
+def _spline_knots(term: _MainEffect) -> tuple:
+    """A binned spline's own build: its knots, penalty and projection, and its QP geometry."""
+    spec = cast(_SplineBase, term.spec)
+    build_knots = spec.build_knots_and_penalty
+    warning_context = (
+        {"feature_name": term.name}
+        if getattr(build_knots, "__func__", None) is _SPLINE_KNOT_BUILD
+        else {}
+    )
+    omega, n_cols, projection = build_knots(term.x_col, term.weight, term.n_bins, **warning_context)
+    # QP monotone constraint metadata (coefficient-space, survives discretization).
+    return omega, n_cols, projection, qp_geometry(spec, shape_engine(spec), projection)
+
+
+def _binned_spline_infos(build: _Build, term: _MainEffect) -> tuple[list[GroupInfo], BinnedRows]:
+    """A binned spline's GroupInfos, built on its bin centres, and its binned rows."""
+    spec, x_col, weight = cast(_SplineBase, term.spec), term.x_col, term.weight
+    omega, n_cols, projection, (constraints, monotone_engine, raw_to_solver_map) = term.built
     bin_centers, bin_idx = discretize_positive_support(
-        x_col, n_bins, weight, bin_knots(spec, x_col, weight)
+        x_col, term.n_bins, weight, bin_knots(spec, x_col, weight)
     )
     # A bin is read on the basis the unbinned build and prediction read
     # their rows on, under the extrapolation policy.
@@ -455,15 +489,14 @@ def _binned_spline_infos(
     return [finish_penalties(spec, info, B_unique, exposure_agg)], binned
 
 
-def _exact_build(
-    build: _Build, assembly: _Assembly, name: str, spec: Any, x_col: NDArray, weight, scan: bool
-):
+def _exact_build(build: _Build, assembly: _Assembly, term: _MainEffect):
     """A main effect's build on its rows: one GroupInfo or a list.
 
     The built-in builds are replaced by the design's own, which keep the row
     support or codes they find; a subclass override, or a build() patched in
     later, keeps its own build.
     """
+    name, spec, x_col, weight = term.name, term.spec, term.x_col, term.weight
     if isinstance(spec, OrderedCategorical):
         return spec._build_with_geometry(
             x_col,
@@ -480,7 +513,7 @@ def _exact_build(
         )
         # Held until the scan, across every other term's build:
         # one byte a row for the usual few levels, not eight.
-        if scan:
+        if term.scan:
             assembly.scan_codes[name] = row_codes.astype(np.min_scalar_type(len(spec._levels)))
         return result
     if build_method is _SPLINE_BUILD:
@@ -540,36 +573,26 @@ def _sz_turn(build: _Build, info: GroupInfo, name: str, binned, label: Hashable)
     )
 
 
-def _compile_main_effect(
-    build: _Build, assembly: _Assembly, name: str, sz_labels: Sequence[Hashable]
+def _place_main_effect(
+    build: _Build, assembly: _Assembly, term: _MainEffect, sz_labels: Sequence[Hashable]
 ) -> None:
-    """Build one main effect, place its groups and hand its spec their solver map.
+    """Turn a built main effect into groups, place them and hand its spec their solver map.
 
     ``sz_labels`` are the group columns of the ``sz`` factor smooths on this
     variable, which decide whether its term coordinates hold.
     """
-    from superglm.dm_builder import _process_info, spline_bins
+    from superglm.dm_builder import _process_info
 
-    spec = build.specs[name]
-    # The physical-rows rule reaches hosted model geometry too (an
-    # OrderedCategorical's inner basis, a hosted Piecewise).
-    if isinstance(spec, OrderedCategorical):
-        spec._inner_geometry_physical_rows = build.physical_rows
-    x_col = build.X.column_array(name)
-    scan_levels = bool(build.separation_boundaries) and isinstance(spec, Categorical)
-    _adopt_level_universe(build, name, spec)
-    weight = build.weight(spec)
+    name, spec = term.name, term.spec
     binned = None
-    if _bins_as_built_in(name, spec, spline_bins(spec, build.model_discrete)):
-        infos, binned = _binned_spline_infos(build, name, cast(_SplineBase, spec), x_col, weight)
+    if term.n_bins is not None:
+        infos, binned = _binned_spline_infos(build, term)
     else:
-        with feature_build_messages(name):
-            result = _exact_build(build, assembly, name, spec, x_col, weight, scan_levels)
-        infos = result if isinstance(result, list) else [result]
-    if scan_levels:
+        infos = term.built if isinstance(term.built, list) else [term.built]
+    if term.scan:
         # Scanned after the loops, once the spec has learned its levels
         # and the GroupSlices exist for the penalty exemption.
-        assembly.separation_records.append(("cat", name, spec, x_col))
+        assembly.separation_records.append(("cat", name, spec, term.x_col))
     _resolve_lambda_policies(spec, infos)
 
     r_inv_parts: list[NDArray] = []
@@ -970,7 +993,14 @@ def compile_predictor_design(
         if isinstance(term, FactorSmooth) and term.basis == "sz" and not term._selects_lines:
             sz_groups.setdefault(term.variable, []).append(term.group)
     for name in feature_order:
-        _compile_main_effect(build, assembly, name, sz_groups.get(name, ()))
+        term = _main_effect(build, name)
+        # A build's messages are emitted from this frame, so they name the
+        # compile's caller (``feature_build_messages``).
+        with feature_build_messages(name):
+            term.built = (
+                _exact_build(build, assembly, term) if term.n_bins is None else _spline_knots(term)
+            )
+        _place_main_effect(build, assembly, term, sz_groups.get(name, ()))
 
     # Resolve pending interactions from constructor
     for pair in pending_interactions:
