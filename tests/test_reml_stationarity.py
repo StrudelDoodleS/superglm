@@ -304,32 +304,29 @@ def test_a_finish_with_only_held_terms_uses_one_gradient_pass(monkeypatch):
     assert passes == [False]
 
 
-@pytest.mark.parametrize(
-    ("replay", "reason"),
-    [
-        ("cap_pressure", "lambda_cap_unresolved"),
-        ("max_iterations", "gradient_unresolved"),
-        ("derivative_unavailable", "derivative_unavailable"),
-    ],
-)
-def test_a_face_refit_must_supply_its_own_stationarity(replay, reason, monkeypatch):
+def test_a_revalidated_face_publishes_the_fit_its_stationarity_was_judged_on(monkeypatch):
+    """A stationary stop on an exact face publishes the fit the exact gradient judged.
+
+    The face revalidation judges that fit and does not fit the face again, so
+    the stop needs no second verdict: the endgame runs once, and the fit it
+    called stationary is the terminal fit. Mutation check: a revalidation that
+    fits the face again publishes another fit, whose stationarity the endgame
+    never judged.
+    """
     from .test_distributional_newton_practical_handoff import _forced_face_plateau_fit
 
     fits = []
 
     def verdict(result):
         fits.append(result.state.fit)
-        if len(fits) == 1:
-            return replace(result, kind="stationary")
-        caps = tuple(result.derivatives.names[:1]) if replay == "cap_pressure" else ()
-        return replace(result, kind=replay, cap_pressure=caps)
+        return replace(result, kind="stationary")
 
     calls, sm = _forced_face_plateau_fit(monkeypatch, verdict, outer="efs+stationary")
-    assert len(calls) == 2
-    assert calls[1]["budget"] == 0
-    assert fits[1] is sm.terminal_fit and fits[0] is not fits[1]
-    assert not sm.converged and sm.convergence_reason == reason
-    assert bool(sm.unresolved_upper_bound) == (replay == "cap_pressure")
+    assert len(calls) == 1
+    assert fits[0] is sm.terminal_fit
+    assert sm.converged and sm.convergence_reason == "stationary"
+    assert sm.history[-1].revalidated_face_components
+    assert sm.unresolved_upper_bound == ()
 
 
 def test_a_validated_face_with_no_free_terms_has_an_empty_projected_score():

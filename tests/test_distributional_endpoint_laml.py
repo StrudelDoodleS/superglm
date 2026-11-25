@@ -2442,9 +2442,16 @@ def test_efs_activates_two_independent_cap_components_as_one_joint_face(
     ) == (layout.penalty_names,)
 
 
-def test_efs_revalidates_a_joint_face_from_one_fresh_common_fit(
+def test_efs_revalidates_a_joint_face_on_the_fit_it_stands_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The terminal recheck judges the joint-face fit the search stopped on.
+
+    The authority fits the joint face once, at its promotion. The recheck lists
+    that fit as its one assessment and evaluates the directions at it: fitting
+    the same face again from its own solution could only move the coefficients
+    by round-off.
+    """
     layout, smoothing, authority_faces = _independent_penalty_efs_fit(
         monkeypatch,
         (0.5, 0.5),
@@ -2452,33 +2459,21 @@ def test_efs_revalidates_a_joint_face_from_one_fresh_common_fit(
 
     activation = next(item for item in smoothing.history if item.activated_face_components)
     revalidations = tuple(item for item in smoothing.history if item.revalidated_face_components)
-    assessment_shape = tuple(
-        (
-            item.revalidated_face_components,
-            tuple(
-                authority_faces[id(smoothing.coefficient_fits[index].terminal_rank)]
-                for index in item.coefficient_fit_indices
-            ),
-        )
-        for item in revalidations
+    assert tuple(item.revalidated_face_components for item in revalidations) == (
+        layout.penalty_names,
     )
-    assert assessment_shape == ((layout.penalty_names, (layout.penalty_names,)),)
 
     revalidation = revalidations[0]
     assert smoothing.converged is True
     assert revalidation.accepted_fit_index == revalidation.coefficient_fit_indices[0]
-    assert revalidation.accepted_fit_index != activation.accepted_fit_index
     assert smoothing.terminal_fit_index == revalidation.accepted_fit_index
     common_fit = smoothing.coefficient_fits[revalidation.accepted_fit_index]
-    assert common_fit is not smoothing.coefficient_fits[activation.accepted_fit_index]
+    assert common_fit is smoothing.coefficient_fits[activation.accepted_fit_index]
     assert tuple(
         fit_id
         for fit_id, face_names in authority_faces.items()
         if face_names == layout.penalty_names
-    ) == (
-        id(smoothing.coefficient_fits[activation.accepted_fit_index].terminal_rank),
-        id(common_fit.terminal_rank),
-    )
+    ) == (id(common_fit.terminal_rank),)
     assert common_fit.config.tolerance == 1.0e-12
     assert common_fit.config.coefficient_curvature == "observed"
     assert common_fit.terminal_curvature.actual_source == "observed"
@@ -2511,9 +2506,18 @@ def test_joint_terminal_revalidation_consumes_one_outer_iteration(
     assert len(smoothing.history[-1].revalidated_face_components) == 2
 
 
-def test_efs_rolls_back_the_complete_joint_face_when_the_second_recheck_is_finite(
+def test_efs_releases_a_joint_face_when_one_recheck_is_finite_and_carries_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A joint face holding one component whose direction turned inward is released, not failed.
+
+    The second component's terminal direction is made finite once. The whole
+    face goes back to its finite caps in one row that keeps the directions
+    which released it, and the search carries on from there: judged again on
+    its real directions, the face is promoted and rechecked and the fit
+    converges on it. Mutation check: a search that ends at the release reports
+    ``endpoint_revalidation_failed`` after six directions.
+    """
     direction_calls = 0
     real_resolve = smoothing_faces.resolve_endpoint_direction
 
@@ -2544,29 +2548,31 @@ def test_efs_rolls_back_the_complete_joint_face_when_the_second_recheck_is_finit
         starting_lambdas=(10.0, 0.1, 0.1),
     )
 
-    assert direction_calls == 6
-    assert smoothing.converged is False
-    assert smoothing.convergence_reason == "endpoint_revalidation_failed"
-    assert smoothing.terminal_endpoint_directions == {}
-    assert not any(item.revalidated_face_components for item in smoothing.history)
-    retraction = smoothing.history[-1]
-    assert retraction.deactivated_face_components == layout.penalty_names
-    assert len(retraction.coefficient_fit_indices) == 2
-    assert retraction.accepted_fit_index == retraction.coefficient_fit_indices[-1]
+    assert direction_calls == 12
+    release = next(item for item in smoothing.history if item.deactivated_face_components)
+    assert release.deactivated_face_components == layout.penalty_names
+    assert len(release.coefficient_fit_indices) == 2
+    assert release.accepted_fit_index == release.coefficient_fit_indices[-1]
     assert tuple(
         authority_faces[id(smoothing.coefficient_fits[index].terminal_rank)]
-        for index in retraction.coefficient_fit_indices
+        for index in release.coefficient_fit_indices
     ) == (layout.penalty_names, ())
-    direction = retraction.endpoint_direction_evidence
+    direction = release.endpoint_direction_evidence
     assert isinstance(direction, JointEndpointDirectionEvidence)
     assert direction.decision == "finite"
-    assert direction.fit_indices == retraction.coefficient_fit_indices[:1]
-    assert direction.component_directions[0][1].decision == "endpoint"
-    assert direction.component_directions[1][1].decision == "finite"
-    assert direction.component_directions[2][1].decision == "endpoint"
-    assert smoothing.terminal_fit_index == retraction.accepted_fit_index
-    assert smoothing.terminal_fit.coefficient_face is None
-    assert smoothing.terminal_fit.converged is True
+    assert direction.fit_indices == release.coefficient_fit_indices[:1]
+    assert [item.decision for _name, item in direction.component_directions] == [
+        "endpoint",
+        "finite",
+        "endpoint",
+    ]
+    after = smoothing.history[smoothing.history.index(release) + 1 :]
+    assert [item.activated_face_components for item in after] == [layout.penalty_names, ()]
+    assert after[-1].revalidated_face_components == layout.penalty_names
+    assert smoothing.converged is True
+    assert smoothing.terminal_fit.coefficient_face is not None
+    assert smoothing.terminal_fit.coefficient_face.component_names == layout.penalty_names
+    assert tuple(smoothing.terminal_endpoint_directions) == layout.penalty_names
     assert tuple(
         index for item in smoothing.history for index in item.coefficient_fit_indices
     ) == tuple(range(1, len(smoothing.coefficient_fits)))
@@ -2605,8 +2611,13 @@ def test_efs_refuses_a_joint_face_when_one_cap_direction_is_weakly_finite(
     )
 
     assert not any(item.activated_face_components for item in smoothing.history)
+    # The refused cap is held while the second penalty steps back from its own cap,
+    # which takes more rounds than this search has.
+    assert smoothing.convergence_reason == "max_iterations"
     assert smoothing.unresolved_upper_bound == (layout.penalty_names[0],)
-    refusal = smoothing.history[-1]
+    assert all(item.accepted for item in smoothing.history[1:])
+    assert smoothing.lambdas[layout.penalty_names[1]] < 100.0
+    refusal = smoothing.history[0]
     assert refusal.refused_face_components == layout.penalty_names
     assert len(refusal.coefficient_fit_indices) == 1
     assert isinstance(refusal.endpoint_direction_evidence, JointEndpointDirectionEvidence)
@@ -2696,12 +2707,22 @@ def test_efs_records_typed_joint_failures_with_their_one_fitted_face(
     layout, smoothing, _authority_faces = _independent_penalty_efs_fit(
         monkeypatch,
         response,
+        max_iterations=30 if failure_mode == "objective_rejected" else 8,
     )
 
-    refusal = smoothing.history[-1]
+    refusal = smoothing.history[0]
     assert refusal.refused_face_components == layout.penalty_names
     assert refusal.endpoint_direction_evidence is None
     assert refusal.endpoint_assessment_failure_reason == failure_reason
+    if failure_mode == "objective_rejected":
+        # The refused cap is held while the second penalty reaches its optimum,
+        # 1 / (2**2 - 1); judged again there, the first is an exact face.
+        assert smoothing.converged is True
+        assert smoothing.lambdas[layout.penalty_names[1]] == pytest.approx(1.0 / 3.0, rel=1.0e-6)
+        face = smoothing.terminal_fit.coefficient_face
+        assert face is not None and face.component_names == layout.penalty_names[:1]
+    else:
+        assert len(smoothing.history) == 1
     assert len(refusal.coefficient_fit_indices) == 1
     joint_fit = smoothing.coefficient_fits[refusal.coefficient_fit_indices[0]]
     assert joint_fit.coefficient_face is not None
@@ -3295,160 +3316,112 @@ def test_efs_rechecks_a_true_infinity_optimum_before_reporting_convergence(
         assert_matched_certified(smoothing)
 
 
-def test_terminal_face_recheck_preserves_the_canonical_endpoint_start(
+def test_terminal_face_recheck_judges_the_fit_the_search_stopped_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The finite-cap comparison must not perturb the face state being certified."""
-    calls: list[tuple[np.ndarray, np.ndarray | None]] = []
-    real_check = smoothing_faces._check_face_direction
+    """The recheck's endpoint fit is the fit the search stands on, not a second solve of it.
 
-    def record_endpoint_start(*args: object, **kwargs: object):
-        initial = np.array(kwargs["initial"], copy=True)
-        endpoint_initial_value = kwargs.get("endpoint_initial")
-        endpoint_initial = (
-            None if endpoint_initial_value is None else np.array(endpoint_initial_value, copy=True)
-        )
-        calls.append((initial, endpoint_initial))
-        return real_check(*args, **kwargs)  # type: ignore[arg-type]
+    The recheck fits the finite cap it compares with, which is another
+    problem. The one exact-face fit the authority makes is the promotion's.
+    """
+    face_fits: list[DenseSolverResult] = []
+    real_fit = smoothing_faces._fit_endpoint_authority_stationary
 
-    monkeypatch.setattr(smoothing_faces, "_check_face_direction", record_endpoint_start)
-    _component_name, smoothing = _scalar_efs_fit(0.5)
+    def record_face_fits(*args: object, **kwargs: object) -> DenseSolverResult:
+        fit = real_fit(*args, **kwargs)  # type: ignore[arg-type]
+        if kwargs["face"] is not None:
+            face_fits.append(fit)
+        return fit
+
+    monkeypatch.setattr(smoothing_faces, "_fit_endpoint_authority_stationary", record_face_fits)
+    component_name, smoothing = _scalar_efs_fit(0.5)
 
     assert smoothing.converged is True
-    assert len(calls) == 2
-    assert calls[0][1] is None
-    assert calls[1][1] is not None
-    np.testing.assert_array_equal(calls[1][1], calls[1][0])
     revalidation = smoothing.history[-1]
-    assert revalidation.revalidated_face_components
+    assert revalidation.revalidated_face_components == (component_name,)
     assert revalidation.endpoint_direction_evidence is not None
+    assert len(face_fits) == 1
     endpoint_index = revalidation.endpoint_direction_evidence.fit_indices[1]
-    np.testing.assert_array_equal(
-        smoothing.coefficient_fits[endpoint_index].coefficients,
-        smoothing.coefficient_fits[revalidation.source_fit_index].coefficients,
-    )
+    assert smoothing.coefficient_fits[endpoint_index] is face_fits[0]
+    assert smoothing.coefficient_fits[revalidation.source_fit_index] is face_fits[0]
+    assert smoothing.terminal_fit is face_fits[0]
 
 
-@pytest.mark.parametrize("failed_cap", [False, True])
-def test_terminal_face_recheck_refuses_a_moving_endpoint_state(
+@pytest.mark.parametrize("moved", [1.0e-14, 1.0e-4])
+def test_a_face_refit_that_lands_elsewhere_cannot_fail_the_terminal_recheck(
     monkeypatch: pytest.MonkeyPatch,
-    failed_cap: bool,
+    moved: float,
 ) -> None:
-    calls = 0
-    inject_endpoint_result = False
-    injected = False
-    real_check = smoothing_faces._check_face_direction
-    real_fit = smoothing_faces._fit_endpoint_authority_stationary
-    real_run = solver_module._run_iterations
+    """The recheck's verdict does not read a second solve of the face it stands on.
 
-    def stall_recheck_cap(context, state, config, **kwargs):
-        if not (failed_cap and inject_endpoint_result and context.coefficient_face is None):
-            return real_run(context, state, config, **kwargs)
-        geometry = solver_module._measured_geometry(context, state, "observed", None)
-        return solver_module._OptimizationRun(
-            state=state,
-            geometry=geometry,
-            history=(),
-            converged=False,
-            reason="line_search_failed",
-            score_relative=solver_module._optimization_score_relative(
-                context, geometry.score_penalized, state.penalized_optimizing_log_likelihood
-            ),
-            objective_relative_change=0.0,
-            step_relative=0.0,
-        )
-
-    def inject_solver_result(*args: object, **kwargs: object):
-        nonlocal injected
-        fit = real_fit(*args, **kwargs)  # type: ignore[arg-type]
-        if inject_endpoint_result and not injected and kwargs.get("face") is not None:
-            face = kwargs["face"]
-            assert face is not None
-            moved = np.array(fit.coefficients, copy=True)
-            moved += 1.0e-4 * face.constraint_basis[:, 0]
-            object.__setattr__(fit, "coefficients", moved)
-            injected = True
-        return fit
-
-    def perturb_revalidation_start(*args: object, **kwargs: object):
-        nonlocal calls, inject_endpoint_result
-        calls += 1
-        if calls == 2:
-            np.testing.assert_array_equal(kwargs["endpoint_initial"], kwargs["initial"])
-            inject_endpoint_result = True
-        try:
-            return real_check(*args, **kwargs)  # type: ignore[arg-type]
-        finally:
-            inject_endpoint_result = False
-
-    monkeypatch.setattr(solver_module, "_run_iterations", stall_recheck_cap)
-    monkeypatch.setattr(smoothing_faces, "_fit_endpoint_authority_stationary", inject_solver_result)
-    monkeypatch.setattr(smoothing_faces, "_check_face_direction", perturb_revalidation_start)
-    component_name, smoothing = _scalar_efs_fit(0.5)
-
-    assert calls == 2
-    assert smoothing.converged is False
-    assert smoothing.terminal_fit.coefficient_face is None
-    assert smoothing.history[-1].deactivated_face_components == (component_name,)
-    assert smoothing.history[-1].endpoint_direction_evidence is None
-
-    if failed_cap:
-        cap_index = smoothing.history[-1].coefficient_fit_indices[0]
-        assert not smoothing.coefficient_fits[cap_index].converged
-
-
-def test_stationary_cap_recheck_refuses_tiny_endpoint_state_movement(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Kills applying the direct-route refit envelope to an ordinary cap."""
-    calls = 0
-    inject_endpoint_result = False
-    injected = False
-    real_check = smoothing_faces._check_face_direction
+    Fitting a face again from its own solution moves the coefficients by
+    round-off that differs from one BLAS kernel to the next. Here every
+    exact-face fit after the promotion is made to land ``moved`` away, the
+    event a kernel produces by chance. The recheck makes no such fit, so the
+    search converges on its face with the promotion's coefficients. Mutation
+    check: a recheck that refits the face reads the moved coefficients and
+    ends ``endpoint_revalidation_failed``.
+    """
+    face_fits = 0
     real_fit = smoothing_faces._fit_endpoint_authority_stationary
 
-    def inject_solver_result(*args: object, **kwargs: object):
-        nonlocal injected
+    def land_elsewhere(*args: object, **kwargs: object) -> DenseSolverResult:
+        nonlocal face_fits
         fit = real_fit(*args, **kwargs)  # type: ignore[arg-type]
-        if inject_endpoint_result and not injected and kwargs.get("face") is not None:
-            face = kwargs["face"]
-            assert face is not None
-            moved = np.array(fit.coefficients, copy=True)
-            moved += 1.0e-14 * face.constraint_basis[:, 0]
-            object.__setattr__(fit, "coefficients", moved)
-            injected = True
+        face = kwargs["face"]
+        if face is None:
+            return fit
+        face_fits += 1
+        if face_fits > 1:
+            away = fit.coefficients + moved * face.constraint_basis[:, 0]  # type: ignore[attr-defined]
+            object.__setattr__(fit, "coefficients", away)
         return fit
 
-    def perturb_revalidation_start(*args: object, **kwargs: object):
-        nonlocal calls, inject_endpoint_result
-        calls += 1
-        if calls == 2:
-            np.testing.assert_array_equal(kwargs["endpoint_initial"], kwargs["initial"])
-            inject_endpoint_result = True
-        try:
-            return real_check(*args, **kwargs)  # type: ignore[arg-type]
-        finally:
-            inject_endpoint_result = False
-
-    monkeypatch.setattr(smoothing_faces, "_fit_endpoint_authority_stationary", inject_solver_result)
-    monkeypatch.setattr(smoothing_faces, "_check_face_direction", perturb_revalidation_start)
+    monkeypatch.setattr(smoothing_faces, "_fit_endpoint_authority_stationary", land_elsewhere)
     component_name, smoothing = _scalar_efs_fit(0.5)
 
-    assert calls == 2
-    terminal_event = smoothing.history[-1]
-    endpoint_index = terminal_event.coefficient_fit_indices[1]
-    endpoint_fit = smoothing.coefficient_fits[endpoint_index]
-    source_fit = smoothing.coefficient_fits[terminal_event.source_fit_index]
-    movement = float(
-        np.max(np.abs(endpoint_fit.coefficients - source_fit.coefficients), initial=0.0)
-    )
-    assert movement > 0.0
+    assert face_fits == 1
+    assert smoothing.converged is True
+    assert smoothing.terminal_fit.coefficient_face is not None
+    assert smoothing.terminal_fit.coefficient_face.component_names == (component_name,)
+    assert smoothing.history[-1].revalidated_face_components == (component_name,)
+    np.testing.assert_array_equal(smoothing.terminal_fit.coefficients, np.zeros(1))
 
-    assert smoothing.converged is False
-    assert smoothing.convergence_reason == "endpoint_revalidation_failed"
-    assert smoothing.terminal_fit.coefficient_face is None
-    assert terminal_event.deactivated_face_components == (component_name,)
-    assert terminal_event.endpoint_direction_evidence is None
+
+def test_a_joint_face_refit_that_lands_elsewhere_cannot_fail_the_terminal_recheck(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A joint face's recheck does not read a second solve of the face either.
+
+    Every joint-face fit after the promotion is made to end with a retained
+    score far above the authority's bar, as a refit that stepped on round-off
+    can. The recheck makes no such fit and the search converges on the joint
+    face. Mutation check: a recheck that refits the face finds that fit not
+    stationary and ends ``endpoint_revalidation_failed``.
+    """
+    face_fits = 0
+    real_fit = smoothing_faces._fit_endpoint_authority_stationary
+
+    def land_elsewhere(*args: object, **kwargs: object) -> DenseSolverResult:
+        nonlocal face_fits
+        fit = real_fit(*args, **kwargs)  # type: ignore[arg-type]
+        face = kwargs["face"]
+        if face is None:
+            return fit
+        face_fits += 1
+        if face_fits > 1:
+            pushed = fit.terminal_score + 1.0e-3 * face.null_basis[:, 0]  # type: ignore[attr-defined]
+            object.__setattr__(fit, "terminal_score", pushed)
+        return fit
+
+    monkeypatch.setattr(smoothing_faces, "_fit_endpoint_authority_stationary", land_elsewhere)
+    layout, smoothing, _authority_faces = _independent_penalty_efs_fit(monkeypatch, (0.5, 0.5))
+
+    assert face_fits == 1
+    assert smoothing.converged is True
+    assert smoothing.terminal_fit.coefficient_face is not None
+    assert smoothing.terminal_fit.coefficient_face.component_names == layout.penalty_names
+    assert smoothing.history[-1].revalidated_face_components == layout.penalty_names
 
 
 def test_endpoint_assessment_on_two_noise_effects_returns_a_valid_result() -> None:
@@ -3778,13 +3751,15 @@ def _joint_terminal_analytic_failure(
     *,
     retain_history_rows: bool = False,
 ) -> tuple[tuple[str, str], DistributionalEFSResult]:
-    calls = 0
+    failed: list[str] = []
     real_derivative = smoothing_faces.evaluate_endpoint_laplace_derivative
 
     def fail_second_terminal_direction(*args: object, **kwargs: object):
-        nonlocal calls
-        calls += 1
-        if calls == 4:
+        # The second component is promoted alone, so the face of both first takes its
+        # direction at the terminal check, however many derivatives the search took before.
+        face_names = kwargs["endpoint_face"].component_names  # type: ignore[attr-defined]
+        if len(face_names) == 2 and kwargs["component_name"] == face_names[1]:
+            failed.append(face_names[1])
             raise EndpointLaplaceError("test mutation")
         return real_derivative(*args, **kwargs)  # type: ignore[arg-type]
 
@@ -3792,7 +3767,7 @@ def _joint_terminal_analytic_failure(
         smoothing_faces, "evaluate_endpoint_laplace_derivative", fail_second_terminal_direction
     )
     names, smoothing = _two_face_efs_fit(retain_history_rows=retain_history_rows)
-    assert calls == 4
+    assert failed == [names[1]]
     return names, smoothing
 
 
@@ -3868,7 +3843,13 @@ def test_terminal_face_revalidation_failure_stays_nonconverged_without_upper_pre
     monkeypatch: pytest.MonkeyPatch,
     terminal_failure: str,
 ) -> None:
-    """Kills recovering from a failed terminal face certificate after rollback."""
+    """A terminal face certificate that decides nothing is not recovered from after rollback.
+
+    An unresolved direction, an unavailable assessment and a failed objective
+    comparison leave the fit not converged, whatever the rolled-back state's
+    evidence says. A certified inward direction is a decision: it releases the
+    face, and the search goes on to the stop its own evidence gives.
+    """
     check_calls = 0
     saw_exact_face = False
     real_check = smoothing_faces._check_face_direction
@@ -3937,8 +3918,11 @@ def test_terminal_face_revalidation_failure_stays_nonconverged_without_upper_pre
     component_name, smoothing = _scalar_efs_fit(0.5)
 
     assert check_calls == 2
-    assert smoothing.converged is False
-    assert smoothing.convergence_reason == "endpoint_revalidation_failed"
+    released = terminal_failure == "negative"
+    assert smoothing.converged is released
+    assert smoothing.convergence_reason == (
+        "lambda_change" if released else "endpoint_revalidation_failed"
+    )
     assert smoothing.unresolved_upper_bound == ()
     assert smoothing.terminal_fit.coefficient_face is None
     assert smoothing.terminal_fit.converged is True
@@ -4016,10 +4000,18 @@ def test_efs_refuses_a_face_promotion_when_the_stationary_cap_has_a_better_objec
     assert not any(item.activated_face_components for item in smoothing.history)
 
 
-def test_efs_retracts_a_face_when_terminal_direction_resolves_finite(
+def test_efs_releases_a_face_when_terminal_direction_resolves_finite_and_carries_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A two-fit finite direction must coexist with the separate rollback fit."""
+    """A face whose terminal direction is certified inward is released and the search continues.
+
+    The terminal direction is made finite once. The release row keeps that
+    two-fit direction beside its separate rollback fit, and the search carries
+    on from the finite cap: judged again on its real direction, the component
+    is promoted and rechecked and the fit converges on its face. Mutation
+    check: a search that ends at the release has two assessments and no
+    converged fit.
+    """
     calls = 0
     real_check = smoothing_faces._check_face_direction
 
@@ -4047,17 +4039,19 @@ def test_efs_retracts_a_face_when_terminal_direction_resolves_finite(
     monkeypatch.setattr(smoothing_faces, "_check_face_direction", make_terminal_direction_finite)
     component_name, smoothing = _scalar_efs_fit(0.5)
 
-    assert calls == 2
-    retraction = smoothing.history[-1]
-    assert retraction.deactivated_face_components == (component_name,)
-    assert retraction.endpoint_direction_evidence is not None
-    assert retraction.endpoint_direction_evidence.decision == "finite"
-    assert len(retraction.coefficient_fit_indices) == 3
-    assert (
-        retraction.endpoint_direction_evidence.fit_indices
-        == (retraction.coefficient_fit_indices[:2])
-    )
-    assert smoothing.terminal_fit.coefficient_face is None
+    assert calls == 4
+    _activation, release, again, revalidation = smoothing.history
+    assert release.deactivated_face_components == (component_name,)
+    assert release.endpoint_direction_evidence is not None
+    assert release.endpoint_direction_evidence.decision == "finite"
+    assert len(release.coefficient_fit_indices) == 3
+    assert release.endpoint_direction_evidence.fit_indices == (release.coefficient_fit_indices[:2])
+    assert smoothing.coefficient_fits[release.accepted_fit_index].coefficient_face is None
+    assert again.activated_face_components == (component_name,)
+    assert revalidation.revalidated_face_components == (component_name,)
+    assert smoothing.converged is True
+    assert smoothing.terminal_fit.coefficient_face is not None
+    assert smoothing.terminal_fit.coefficient_face.component_names == (component_name,)
 
 
 def test_efs_retracts_a_face_when_terminal_assessment_provenance_changes(
@@ -4097,7 +4091,8 @@ def test_efs_retracts_a_face_when_terminal_assessment_provenance_changes(
     assert smoothing.history[-1].deactivated_face_components == (component_name,)
     assert smoothing.history[-1].endpoint_direction_evidence is None
     assert smoothing.matched_certified is False
-    assert len(smoothing.coefficient_fits) == fit_calls + 1
+    # The recheck lists the exact-face fit it stands on without fitting it again.
+    assert len(smoothing.coefficient_fits) == fit_calls + 2
 
 
 @pytest.mark.parametrize("mean", [1.0, 1.01])

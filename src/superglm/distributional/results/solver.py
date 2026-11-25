@@ -231,53 +231,6 @@ def _assessment_is_numerically_stationary(
     )
 
 
-def _endpoint_revalidation_projection_bound(
-    face: PenaltyFace,
-    coefficients: NDArray,
-) -> float | None:
-    """Bound one floating-point replay of the exact-face projection."""
-    values = np.asarray(coefficients)
-    if values.shape != (face.width,) or values.dtype.kind != "f" or not np.all(np.isfinite(values)):
-        return None
-    basis = np.asarray(face.null_basis)
-    width, retained_width = basis.shape
-    if width != face.width:
-        return None
-    epsilon = float(np.finfo(np.result_type(values.dtype, basis.dtype)).eps)
-    projection_error = float(face.orthogonality_bound)
-    if not math.isfinite(projection_error) or projection_error < 0.0 or projection_error >= 1.0:
-        return None
-    projection_norm = float(np.linalg.norm(basis, ord="fro"))
-    coefficient_norm = float(np.linalg.norm(values, ord=2))
-    if (
-        not math.isfinite(projection_norm)
-        or not math.isfinite(coefficient_norm)
-        or projection_norm < 0.0
-    ):
-        return None
-    projection_operations = width * epsilon
-    reduction_operations = retained_width * epsilon
-    if projection_operations >= 1.0 or reduction_operations >= 1.0:
-        return None
-    gamma_projection = projection_operations / (1.0 - projection_operations)
-    gamma_reduction = reduction_operations / (1.0 - reduction_operations)
-    basis_scale = math.sqrt(1.0 + projection_error)
-    denominator = math.sqrt(1.0 - projection_error) - gamma_reduction * projection_norm
-    if denominator <= 0.0 or not math.isfinite(denominator):
-        return None
-    lift_error = gamma_reduction * projection_norm / denominator
-    factor = (
-        projection_error
-        + (1.0 + projection_error) * lift_error
-        + (gamma_projection + gamma_reduction) * projection_norm * basis_scale
-        + gamma_projection * gamma_reduction * projection_norm**2
-    )
-    if not math.isfinite(factor) or factor < 0.0:
-        return None
-    bound = float(np.nextafter(factor * coefficient_norm, math.inf))
-    return bound if math.isfinite(bound) else None
-
-
 def _frozen_endpoint_mapping(
     values: Mapping[str, EndpointDirectionEvidence],
 ) -> Mapping[str, EndpointDirectionEvidence]:

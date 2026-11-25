@@ -26,6 +26,7 @@ from tests.test_distributional_endpoint_direction import (
 from tests.test_distributional_practical_stop import _preempt_fixture
 
 
+@pytest.mark.usefixtures("no_endpoint_trial")
 @pytest.mark.parametrize("outer", ["efs", "efs+newton", "efs+finish"])
 @pytest.mark.parametrize("budget", [3, 4, 20])
 def test_outward_practical_plateau_can_finish_before_newton(monkeypatch, outer, budget):
@@ -239,8 +240,59 @@ def test_a_finish_that_stalled_leaves_the_fit_at_its_plateau(monkeypatch, kind):
     assert np.all(np.isfinite(corrected))
 
 
+def _refuse_fellner_schall_steps_after(monkeypatch, rounds):
+    """The objective refuses every Fellner-Schall step once ``rounds`` of them are accepted."""
+    within, accepted = loop._within_ceiling, []
+
+    def refuse_later_steps(*args):
+        if len(accepted) < rounds and within(*args):
+            accepted.append(args)
+            return True
+        return False
+
+    monkeypatch.setattr(loop, "_within_ceiling", refuse_later_steps)
+
+
+@pytest.mark.pins_behaviour
+def test_a_step_rejected_at_every_length_beside_no_trial_s_cap_stops_the_default_search(
+    monkeypatch,
+):
+    """Pins the default search's stop at a rejected Fellner-Schall round with no trial's cap beside it.
+
+    Neither smooth of this fit is flat, so no endpoint trial puts a penalty on its
+    bound. The objective is made to refuse every step after the second round, so
+    the third is rejected at all nine lengths, and the fit stops there, not
+    converged, without running the finish. Only a round rejected beside a cap a
+    trial holds goes to the finish, which the endpoint-trial tests cover.
+    """
+    calls = _spy_on_the_endgame(monkeypatch)
+    _refuse_fellner_schall_steps_after(monkeypatch, 2)
+    model, frame, response = _two_smooth_gaussian()
+    with pytest.warns(ConvergenceWarning, match="objective_rejected"):
+        model.fit_reml(frame, response)
+
+    smoothing = model._require_fitted().smoothing
+    assert calls == []
+    assert (smoothing.converged, smoothing.convergence_reason) == (False, "objective_rejected")
+    assert [(row.stage, row.accepted) for row in smoothing.history] == [
+        ("efs", True),
+        ("efs", True),
+        ("efs", False),
+    ]
+    assert smoothing.history[-1].backtracks == smoothing.config.max_backtracks
+    assert all(value < smoothing.config.upper(name) for name, value in smoothing.lambdas.items())
+    assert smoothing.lambdas == smoothing.history[-1].lambdas_before
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.usefixtures("no_endpoint_trial")
 def test_a_finish_that_moved_far_and_was_rejected_does_not_relabel_where_it_stalled():
-    """Where Newton is rejected far from the plateau, the published state is the plateau's."""
+    """Where Newton is rejected far from the plateau, the published state is the plateau's.
+
+    Pins the plateau a rejected finish leaves on a fit whose scale penalty walks
+    outward. Taken to its bound by an endpoint trial, that penalty is promoted to
+    its face and the finish is stationary there, so the test makes no trial.
+    """
     rng = np.random.default_rng(2)
     x, z = rng.uniform(-1.0, 1.0, (2, 100))
     response = rng.pareto(3.0, 100) * np.exp(0.21 * np.sin(2.6 * x)) + 0.001

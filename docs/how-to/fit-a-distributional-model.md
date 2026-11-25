@@ -1213,11 +1213,56 @@ optimum: without a root or an endpoint certificate the fit reports
 component. A component at the cap whose gradient is within the bar is a
 stationary point of the box and is reported as such.
 
-`smoothing_certified_` (`matched_certified`) means: the terminal stop carries
-its own authority — the projected gradient and every gradient certificate
-within the bar for `stationary`, the Fellner–Schall residual within `reml_tol`
-otherwise — no curvature fallback occurred, no endpoint assessment was refused,
-and every exact face carries analytic endpoint evidence. When the Newton
+A penalty heading for infinity is not walked to `max_lambda` a step at a time.
+Once the Fellner–Schall evidence says its own working problem keeps improving
+all the way to the cap, and no other penalty still proposes more than one log
+unit, the search tries it at the cap once. The trial is kept only if the REML
+score there is no worse and the evidence at the cap still points outward; a
+penalty whose trial is refused takes ordinary steps from then on. A penalty the
+trial puts on its cap is held there while the other penalties finish, so their
+fits stay ordinary ones, and its exact face is assessed once, where they stop:
+before the Newton steps of `"efs+finish"`, or at the practical plateau or the
+fixed point of `"efs"`. A plateau reads one round's change, which a slow steady
+drift keeps small, so while a search holds such a cap, or has a term on an
+exact face, its plateau stands only if the REML score is also not on course to
+fall further than the plateau's tolerance: with falls `d'` then `d` in its last
+two rounds, by `d a / (1 - a)` at the rate `a = d / d'` (Aitken's estimate).
+Otherwise the search goes on, to a later plateau, its fixed point or
+`max_reml_iter`.
+
+The Newton steps make the same trial for a penalty whose evidence first
+qualifies there: the first point their line search tries has that penalty on
+its cap, and a search about to stop tries it there before it does. They keep
+it when the REML score is no worse, and their next exact gradient takes the
+penalty back if it asks for a smaller value. Under
+`"efs+newton"` and `"efs+stationary"` the exact gradient is taken with such a
+penalty at its cap. A gradient in log λ is inside any bar that far out, whether
+the optimum is infinite or only just beyond the cap, so when it leaves the
+search stationary the exact-face check is made on the penalties a trial put
+there. If the check supports the face the gradient is taken again on it and
+the fit reports `stationary` with the term in `exact_face_components_`; if
+not, the stationary fit stands with the penalty at its cap and the refused
+check in the search history. Next to another penalty's cap no exact face can
+be promoted, so there the exact gradient alone decides.
+Only a penalty alone on its coefficients is tried this way, so a tensor
+margin never is, and a search with `acceleration="multisecant"` makes no trial.
+A history row lists the penalties it tried in `endpoint_components`; an
+accepted row with `step_source="endpoint"` is a trial that was kept.
+
+Every exact face is checked once more where the search stops, on the fit it
+stopped on. If the other penalties have moved so that a term's endpoint
+derivative is now negative, the term leaves its exact face and the search
+carries on to the finite optimum. Only a check that cannot decide the sign
+ends the fit, as `endpoint_revalidation_failed` with `converged=False`.
+
+`smoothing_certified_` (`matched_certified`) is `True` only for a strict stop
+off every bound. The terminal stop carries its own authority — the projected
+gradient and every gradient certificate within the bar for `stationary`, the
+Fellner–Schall residual within `reml_tol` otherwise — no curvature fallback
+occurred, no endpoint assessment was refused, and no term ended on an exact
+face, pushing against its cap or, after a `stationary` stop, resting on it. A
+fit with a term on an exact face is therefore never certified, whatever its
+endpoint evidence: read `exact_face_components_` beside the flag. When the Newton
 endgame computes the exact Hessian of the LAML in log λ, it publishes that
 matrix as `smoothing_hessian`, with its certificate, for smoothing-parameter
 uncertainty. A stationary fit can stop before that Hessian pass. If it retained
@@ -1260,11 +1305,40 @@ to its cap with the gradient still pointing outward, the fit reports
 cases the fit keeps the stop described above. Fits can remain
 start-dependent; vary `initial_lambda` when comparing solutions.
 
+A Fellner--Schall step can also fail outright: the LAML rises at the full step
+and at every shorter one. Under `efs` and `efs+finish` the fit stops there and
+reports `objective_rejected` with `converged=False`; `efs+newton` runs its
+Newton steps from that point. `efs+finish` makes one exception, for a search
+holding a penalty at the cap a trial put it on. A penalty that walks to its cap
+lowers the LAML a little every round, and on that fall the other penalties'
+steps are accepted until the search reaches its plateau and the Newton finish.
+The trial takes the whole fall at once, so the same steps can then fail. A step
+that fails beside such a cap therefore runs the Newton finish, after the
+exact-face check on the cap. The fit reports `stationary` if the finish reaches
+a stationary point. If the finish stalls, the fit is the one the failed step
+left and reports `objective_rejected` with `converged=False`.
+
+While a penalty is held at its cap, a term that is not fitted in its penalty's
+own coordinates (a spline subclass, or a spline whose rows do not identify its
+unpenalized part) leaves the LAML undetermined by more than the tolerance a step
+is tested against: about 1e-8 of the LAML at a cap of 1e10, against 1e-9. A
+Fellner--Schall step whose LAML rises by less than that rounding is taken at its
+full length: the LAML cannot say that it rose, and a shorter step chosen inside
+rounding would differ between machines. A larger rise shortens or refuses the
+step as before. A built-in spline fitted in its penalty's own coordinates, the
+usual case, has an exact LAML at its cap, where every rise beyond the tolerance
+shortens the step.
+
 A search can also push a penalty to its cap long before any plateau. If the
 exact-face check does not settle that penalty, `efs+finish` and `efs+newton` ask
 the exact gradient next, so the fit reports `lambda_cap_unresolved` only if the
 gradient leaves the penalty unresolved too. Plain `outer="efs"` has no exact
-gradient and reports it at once.
+gradient. It holds that penalty at its cap while the other penalties finish,
+then repeats the exact-face check where they stop, and reports
+`lambda_cap_unresolved` only if that check does not settle it either. A penalty
+held this way moves again as soon as the search wants a smaller value for it,
+and a fit that runs out of rounds first reports `max_iterations` and still
+names the held penalty in `smoothing_unresolved_upper_bound_`.
 
 ```python
 model.fit_reml(X_train, y_train)

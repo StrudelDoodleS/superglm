@@ -213,6 +213,7 @@ def test_reuse_session_and_caches_are_collected_without_cyclic_gc(chunk_size):
             gc.enable()
 
 
+@pytest.mark.usefixtures("no_endpoint_trial")
 @pytest.mark.parametrize("practical", [True, False])
 def test_plateau_and_exact_face_keep_replay_authority(practical):
     frame = pd.DataFrame({"effect": np.repeat(["a", "b", "c", "d"], 10)})

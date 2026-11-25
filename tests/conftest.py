@@ -199,6 +199,18 @@ def pytest_runtest_setup(item):
                 pytest.fail(f"SUPERGLM_REQUIRE_DATA is set, but {reason}", pytrace=False)
 
 
+@pytest.fixture
+def no_endpoint_trial(monkeypatch):
+    """Let a flat smoothing component walk to its bound: the search makes no endpoint trial.
+
+    For a test whose subject is what such a walk leads to, as an outward plateau
+    or a cap reached late.
+    """
+    from superglm.distributional.smoothing import loop
+
+    monkeypatch.setattr(loop, "endpoint_trial_names", lambda *_: ())
+
+
 @pytest.fixture(autouse=True)
 def _close_matplotlib_figures():
     """Close all matplotlib figures after each test to prevent resource leaks."""
