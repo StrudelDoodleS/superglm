@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.results.iteration import DistributionalEFSConfig
@@ -16,6 +16,7 @@ from superglm.distributional.smoothing.objective import (
 )
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.distributional.smoothing.penalty_geometry import _PenaltyEvaluationMemo
+from superglm.distributional.smoothing.proposals import flat_tail_fall, flat_tail_names
 from superglm.reml.efs_update import EFSComponentState, EFSUpdateResult, wood_fasiolo_update
 
 
@@ -29,6 +30,10 @@ class _FreshRawEvidence:
     maximum: float
     working_infinity: tuple[str, ...]
     unresolved_upper_bound: tuple[str, ...]
+    cap_held: tuple[str, ...] = ()
+    # Components an endpoint trial may take to their upper bounds (``flat_tail_names``),
+    # each with the most its working problem falls on the way (``flat_tail_fall``).
+    flat_tail: Mapping[str, float] = field(default_factory=dict)
 
 
 def _fresh_raw_evidence(
@@ -39,8 +44,17 @@ def _fresh_raw_evidence(
     *,
     face: PenaltyFace | None = None,
     penalty_memo: _PenaltyEvaluationMemo | None = None,
+    held: frozenset[str] = frozenset(),
 ) -> _FreshRawEvidence:
-    """Rebuild the proposal and normalized stationarity residual at one fit."""
+    """Rebuild the proposal and normalized stationarity residual at one fit.
+
+    ``held`` names caps the caller holds as active bounds while the other
+    components move (Burke and Moré 1988). One stays held, in ``cap_held``,
+    while it sits at its cap and its raw step is not materially inward. It is
+    then no part of ``maximum``, ``working_infinity`` or
+    ``unresolved_upper_bound``, and the caller answers for its cap before it
+    returns. A held name whose raw step turns inward is ordinary evidence again.
+    """
 
     components = (
         _component_states(layout, lambdas)
@@ -80,11 +94,17 @@ def _fresh_raw_evidence(
         update,
         config,
     )
-    working_infinity = tuple(
-        name for name in estimated_names if update.proposal_kinds[name] == "working_infinity"
-    )
     capped_names = frozenset(
         name for name in estimated_names if lambdas[name] == config.upper(name)
+    )
+    cap_held = tuple(
+        name
+        for name in estimated_names
+        if name in held and name in capped_names and update.raw_log_steps[name] >= -config.tolerance
+    )
+    judged_names = tuple(name for name in estimated_names if name not in cap_held)
+    working_infinity = tuple(
+        name for name in judged_names if update.proposal_kinds[name] == "working_infinity"
     )
     # Normalized fixed-point stationarity is the finite convergence
     # certificate.  The raw GFS quotient is cancellation-amplified near a
@@ -96,9 +116,9 @@ def _fresh_raw_evidence(
     # from λ = ∞.  Roundoff-sized negative drift is compatible with a finite
     # optimum at the cap itself.
     convergence_evidence = [
-        abs(float(update.stationarity_log_residuals[name])) for name in estimated_names
+        abs(float(update.stationarity_log_residuals[name])) for name in judged_names
     ]
-    for name in estimated_names:
+    for name in judged_names:
         raw_step = float(update.raw_log_steps[name])
         if name in stable_raw_names or update.proposal_kinds[name] == "working_infinity":
             convergence_evidence.append(abs(raw_step))
@@ -106,10 +126,22 @@ def _fresh_raw_evidence(
             convergence_evidence.append(abs(raw_step))
     maximum = max(convergence_evidence, default=0.0)
     unresolved_upper_bound = tuple(
-        name
-        for name in estimated_names
-        if name in capped_names and update.raw_log_steps[name] > 0.0
+        name for name in judged_names if name in capped_names and update.raw_log_steps[name] > 0.0
     )
+    # The block algebra behind a flat tail needs the inverse of the whole curvature.
+    rank = fit.terminal_rank if fit.coefficient_face is None else fit.terminal_reduced_rank
+    flat_tail = (
+        flat_tail_names(
+            components,
+            tuple((penalty.name, penalty.group_sl) for penalty in layout.penalties),
+            update,
+            inverse,
+            config,
+        )
+        if rank is not None and rank.rank == rank.width
+        else ()
+    )
+    by_name = {component.name: component for component in components}
     return _FreshRawEvidence(
         components=components,
         estimated_names=estimated_names,
@@ -117,6 +149,8 @@ def _fresh_raw_evidence(
         maximum=maximum,
         working_infinity=working_infinity,
         unresolved_upper_bound=unresolved_upper_bound,
+        cap_held=cap_held,
+        flat_tail={name: flat_tail_fall(by_name[name], update) for name in flat_tail},
     )
 
 

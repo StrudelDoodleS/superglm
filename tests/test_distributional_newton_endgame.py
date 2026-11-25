@@ -82,6 +82,30 @@ def test_bfgs_update_keeps_positive_definiteness_under_bad_curvature() -> None:
     assert float(np.array([1.0, 1.0]) @ step) < 0.0
 
 
+def test_bfgs_update_reads_no_curvature_from_a_coordinate_that_did_not_move() -> None:
+    """A held term's gradient rounding stays out of the block that steps.
+
+    Two smoothing parameters step beside one held at its cap, whose inverse
+    curvature the memory holds at the modified-Newton floor, 1e8. The held
+    term's gradient, which vanishes at the cap, moves by 6e-8 of rounding. The
+    stepping block is updated as if it were alone, and the held entry keeps its
+    value. Mutation check: with the held change in the pair, the second term's
+    inverse curvature goes from 62 to 584, so its next step is nine times too long.
+    """
+    hessian = np.array([[0.94, 9.6e-4, 0.0], [9.6e-4, 1.72e-2, 0.0], [0.0, 0.0, 1.0e-8]])
+    inverse = np.linalg.inv(hessian)
+    step = np.array([3.3e-6, 1.641e-3, 0.0])
+    change = np.array([[0.90, 1.1e-3], [1.1e-3, 1.60e-2]]) @ step[:2]
+    alone = bfgs_update(inverse[:2, :2], step[:2], change)
+
+    assert alone[1, 1] == pytest.approx(62.5, rel=1.0e-2)
+    for rounding in (6.0e-8, -6.0e-8):
+        updated = bfgs_update(inverse, step, np.append(change, rounding))
+        assert updated[:2, :2] == pytest.approx(alone, rel=1.0e-12)
+        assert updated[2, 2] == inverse[2, 2]
+        assert not updated[:2, 2].any()
+
+
 def test_should_hand_off_rules() -> None:
     cfg = DistributionalEFSConfig(outer="efs+newton", handoff_step=0.5, handoff_iterations=10)
     assert should_hand_off(None, max_accepted_step=0.4, iterations=2, config=cfg)

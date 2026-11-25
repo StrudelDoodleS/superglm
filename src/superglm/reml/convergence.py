@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 
 from superglm._roundoff import NEWTON_EIGENVALUE_FLOOR
 
@@ -151,6 +151,29 @@ def direction_penalty_ranks(penalty_components, penalty_ranks) -> NDArray:
     )
 
 
+def flat_tail_certified(edf: ArrayLike, fit: ArrayLike) -> NDArray[np.bool_]:
+    """Whether an isolated penalty's fixed working problem falls all the way to zero variance.
+
+    For the fixed Gaussian working problem let E be the penalized EDF and
+    B = lambda * beta'S beta / phi. Its score is (B - E)/2. In the penalty
+    eigenbasis E is a sum of fractions d/(lambda+d), with d the data curvature
+    profiled onto the block. When every d >= 0 and E < 1, each
+    1 + d/lambda <= 1/(1-E), so B at any larger lambda' is at most
+    B * (lambda/lambda') / (1-E)^2 while E there is at least E * lambda/lambda'.
+    Consequently B < E*(1-E)^2 keeps the variance-direction score outward down
+    to zero variance. Nonnegative d is the caller's premise: Fisher weights give
+    it, an observed Hessian need not. Other terms and weights can move, so this
+    nominates a trial and the actual objective decides it.
+    """
+    edf = np.atleast_1d(np.asarray(edf, dtype=np.float64))
+    fit = np.atleast_1d(np.asarray(fit, dtype=np.float64))
+    certified = (edf > 0.0) & (edf < 1.0) & (fit >= 0.0)
+    # Evaluate the inequality only in its domain; an unrelated informative
+    # term need not have a bounded fitted quadratic.
+    certified[certified] = fit[certified] < edf[certified] * (1.0 - edf[certified]) ** 2
+    return certified
+
+
 def flat_tail_trial(
     delta: NDArray,
     projected: NDArray,
@@ -164,14 +187,11 @@ def flat_tail_trial(
 ) -> NDArray | None:
     """An outward line-search trial for an isolated, nearly suppressed term.
 
-    For the fixed Gaussian working problem let E be the penalized EDF and
-    B = lambda * beta'S beta / phi. Its score is (B - E)/2. In the penalty
-    eigenbasis E is a sum of fractions d/(lambda+d). When E < 1 each
-    1 + d/lambda <= 1/(1-E). Consequently B < E*(1-E)^2 keeps the
-    variance-direction score outward down to zero variance, and increasing
-    lambda by a factor E/((1-E)*bar) reduces E below bar. Other terms and
-    weights can move: only try this in Newton's local region and let the
-    actual objective decide. The next candidate recomputes every score.
+    A term certified by ``flat_tail_certified`` has E = fit - 2 * partial below
+    one, and increasing lambda by a factor E/((1-E)*bar) reduces E below bar.
+    Other terms and weights can move: only try this in Newton's local region
+    and let the actual objective decide. The next candidate recomputes every
+    score.
     """
     edf = fit - 2.0 * partial
     tail = (
@@ -180,13 +200,8 @@ def flat_tail_trial(
         & (projected <= -bar)
         & (delta > 0.0)
         & (decision.normalized_curvature < decision.curvature_bar)
-        & (edf > 0.0)
-        & (edf < 1.0)
-        & (fit >= 0.0)
+        & flat_tail_certified(edf, fit)
     )
-    # Evaluate this inequality only in its domain; an unrelated informative
-    # term need not have a bounded fitted quadratic.
-    tail[tail] = fit[tail] < edf[tail] * (1.0 - edf[tail]) ** 2
     if not tail.any() or np.max(np.abs(delta[~tail]), initial=0.0) > 1.0:
         return None
     target = np.minimum(np.log(edf[tail] / ((1.0 - edf[tail]) * bar)), step_cap)

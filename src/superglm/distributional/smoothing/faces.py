@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import math
+import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -28,10 +28,8 @@ from superglm.distributional.results.solver import (
     DenseSolverResult,
     _assessment_is_numerically_stationary,
     _assessment_unchanged_failed_cap,
-    _endpoint_revalidation_projection_bound,
 )
 from superglm.distributional.smoothing.authority import (
-    _endpoint_candidate_refit_bound,
     _endpoint_retained_rank,
     _endpoint_shared_provenance,
     _face_authority_config,
@@ -41,12 +39,17 @@ from superglm.distributional.smoothing.authority import (
 )
 from superglm.distributional.smoothing.endpoint_laml import (
     EndpointDirectionEvidence,
+    EndpointLaplaceDerivative,
     EndpointLaplaceError,
     evaluate_endpoint_laplace_derivative,
     resolve_endpoint_direction,
 )
 from superglm.distributional.smoothing.evidence import _FreshRawEvidence
-from superglm.distributional.smoothing.objective import _complete_mapping, _laplace_objective
+from superglm.distributional.smoothing.objective import (
+    _complete_mapping,
+    _laplace_objective,
+    no_higher_within_rounding,
+)
 from superglm.distributional.smoothing.penalty_face import (
     PenaltyFace,
     PenaltyFaceError,
@@ -86,6 +89,17 @@ class _FaceDirectionCheck:
 
         return (self.cap_fit, self.endpoint_fit)
 
+    def no_higher_than(self, objective: float, fit: DenseSolverResult, tolerance: float) -> bool:
+        """Whether the face's objective is no higher than the finite state ``fit``'s.
+
+        Inside the rounding of the two the endpoint derivative, which the face
+        resolves, decides alone.
+        """
+
+        return no_higher_within_rounding(
+            self.endpoint_objective, self.endpoint_fit, objective, fit, tolerance
+        )
+
 
 @dataclass(frozen=True)
 class _FaceDirectionAttempt:
@@ -94,7 +108,7 @@ class _FaceDirectionAttempt:
     check: _FaceDirectionCheck | None
     assessment_fits: tuple[DenseSolverResult, ...]
     coefficient_tolerance: float
-    failure_reason: EndpointAssessmentFailureReason | Literal["endpoint_state_changed"] | None
+    failure_reason: EndpointAssessmentFailureReason | None
 
 
 @dataclass(frozen=True)
@@ -129,6 +143,37 @@ class _FaceRecheck:
     retraction: _FaceRetraction | None
 
 
+class _EndpointDerivativeMemo:
+    """The endpoint derivatives taken at one face fit.
+
+    Within a search ``evaluate_endpoint_laplace_derivative`` is a function of the
+    endpoint fit and the component: the endpoint face is the fit's own and the
+    finite face is that face without the component. A promotion and the
+    revalidation of the stop it ends on assess one fit, so the second finds the
+    derivative here and makes no further pass over the rows.
+    Owner: the smoothing loop; lifetime: that loop; assessing another fit empties it.
+    A lookup matches only the same fit object, which is held weakly.
+    """
+
+    __slots__ = ("_fit", "_taken")
+
+    def __init__(self) -> None:
+        self._fit: weakref.ReferenceType[DenseSolverResult] | None = None
+        self._taken: dict[str, EndpointLaplaceDerivative] = {}
+
+    def derivative(
+        self, *args, component_name: str, endpoint_fit: DenseSolverResult, **kwargs
+    ) -> EndpointLaplaceDerivative:
+        """``evaluate_endpoint_laplace_derivative`` of these arguments, taken once."""
+        if self._fit is None or self._fit() is not endpoint_fit:
+            self._fit, self._taken = weakref.ref(endpoint_fit), {}
+        if component_name not in self._taken:
+            self._taken[component_name] = evaluate_endpoint_laplace_derivative(
+                *args, component_name=component_name, endpoint_fit=endpoint_fit, **kwargs
+            )
+        return self._taken[component_name]
+
+
 def _check_face_direction(
     family: DistributionalFamily,
     layout: StackedLayout,
@@ -140,7 +185,7 @@ def _check_face_direction(
     finite_face: PenaltyFace | None,
     endpoint_face: PenaltyFace,
     initial: NDArray,
-    endpoint_initial: NDArray | None = None,
+    endpoint_fit: DenseSolverResult | None = None,
     allow_nonstationary_cap: bool = False,
     source_fit: DenseSolverResult | None = None,
     solver_config: DenseSolverConfig,
@@ -148,12 +193,21 @@ def _check_face_direction(
     chunk_size: ChunkSize | None,
     phase_recorder: FitPhaseRecorder | None,
     _reuse_session: _DenseObservedReuseSession | None = None,
+    derivatives: _EndpointDerivativeMemo | None = None,
 ) -> _FaceDirectionAttempt:
-    """Evaluate one τ = 0+ direction, refusing unstable fit provenance."""
+    """Evaluate one τ = 0+ direction, refusing unstable fit provenance.
+
+    ``endpoint_fit`` is the fit on ``endpoint_face`` at ``lambdas`` when the
+    caller already stands on it. A search on a face fits every state it
+    accepts to this authority's standard, so a recheck judges that fit: solving
+    the same problem again from its own solution moves the coefficients only
+    by round-off, and a verdict that read those moves would differ from one
+    machine to the next.
+    """
     authority_config = _face_authority_config(solver_config)
 
     def refused(
-        reason: EndpointAssessmentFailureReason | Literal["endpoint_state_changed"] | None,
+        reason: EndpointAssessmentFailureReason | None,
         *fits: DenseSolverResult,
     ) -> _FaceDirectionAttempt:
         return _FaceDirectionAttempt(
@@ -200,19 +254,20 @@ def _check_face_direction(
             face=finite_face,
             objective_tolerance=objective_tolerance,
         )
-    endpoint_fit = _fit_endpoint_authority_stationary(
-        family,
-        layout,
-        y,
-        likelihood_plan,
-        lambdas=lambdas,
-        face=endpoint_face,
-        initial=cap_fit.coefficients if endpoint_initial is None else endpoint_initial,
-        config=authority_config,
-        chunk_size=chunk_size,
-        phase_recorder=phase_recorder,
-        _reuse_session=_reuse_session,
-    )
+    if endpoint_fit is None:
+        endpoint_fit = _fit_endpoint_authority_stationary(
+            family,
+            layout,
+            y,
+            likelihood_plan,
+            lambdas=lambdas,
+            face=endpoint_face,
+            initial=cap_fit.coefficients,
+            config=authority_config,
+            chunk_size=chunk_size,
+            phase_recorder=phase_recorder,
+            _reuse_session=_reuse_session,
+        )
     if not endpoint_fit.converged:
         return refused("endpoint_not_converged", cap_fit, endpoint_fit)
     if not _assessment_is_numerically_stationary(
@@ -237,46 +292,6 @@ def _check_face_direction(
             return refused("analytic_unavailable", cap_fit, endpoint_fit)
     if _endpoint_shared_provenance(endpoint_fit) != _endpoint_shared_provenance(cap_fit):
         return refused("provenance_changed", cap_fit, endpoint_fit)
-    if endpoint_initial is not None and not np.array_equal(
-        endpoint_fit.coefficients,
-        endpoint_initial,
-    ):
-        with np.errstate(over="ignore", invalid="ignore"):
-            endpoint_movement = float(
-                np.linalg.norm(endpoint_fit.coefficients - endpoint_initial, ord=2)
-            )
-        # A replay that takes no step must be the projection of its start; a
-        # replay that steps stays within the refit envelope of its start.
-        if cap_stationary and endpoint_fit.iterations == 0:
-            try:
-                projected_initial = endpoint_face.project(endpoint_initial)
-            except ValueError:
-                return refused("endpoint_state_changed", cap_fit, endpoint_fit)
-            projection_bound = _endpoint_revalidation_projection_bound(
-                endpoint_face,
-                np.asarray(endpoint_initial),
-            )
-            if (
-                not np.array_equal(endpoint_fit.coefficients, projected_initial)
-                or projection_bound is None
-                or not math.isfinite(endpoint_movement)
-                or endpoint_movement > projection_bound
-            ):
-                return refused("endpoint_state_changed", cap_fit, endpoint_fit)
-        else:
-            if not cap_stationary and not allow_nonstationary_cap:
-                return refused("endpoint_state_changed", cap_fit, endpoint_fit)
-            endpoint_bound = _endpoint_candidate_refit_bound(
-                np.asarray(endpoint_initial),
-                endpoint_fit,
-                tolerance=authority_config.tolerance,
-            )
-            if (
-                endpoint_bound is None
-                or not math.isfinite(endpoint_movement)
-                or endpoint_movement > endpoint_bound
-            ):
-                return refused("endpoint_state_changed", cap_fit, endpoint_fit)
     with measure_phase(phase_recorder, "efs_update_backtracking"):
         resolved_endpoint_objective = _laplace_objective(
             endpoint_fit,
@@ -286,7 +301,7 @@ def _check_face_direction(
             objective_tolerance=objective_tolerance,
         )
         try:
-            analytic = evaluate_endpoint_laplace_derivative(
+            analytic = (derivatives or _EndpointDerivativeMemo()).derivative(
                 family,
                 layout,
                 y,
@@ -332,13 +347,19 @@ def _assess_joint_face_directions(
     finite_faces: tuple[tuple[str, PenaltyFace | None], ...],
     source_fit: DenseSolverResult,
     source_objective: float,
+    endpoint_fit: DenseSolverResult | None = None,
     solver_config: DenseSolverConfig,
     efs_config: DistributionalEFSConfig,
     chunk_size: ChunkSize | None,
     phase_recorder: FitPhaseRecorder | None,
     _reuse_session: _DenseObservedReuseSession | None = None,
+    derivatives: _EndpointDerivativeMemo | None = None,
 ) -> _JointFaceDirectionAttempt:
-    """Evaluate named directions from one strict common exact-face fit."""
+    """Evaluate named directions from one strict common exact-face fit.
+
+    ``endpoint_fit`` is that fit when the caller already stands on it (see
+    ``_check_face_direction``); a promotion leaves it out and fits the face.
+    """
     authority_config = _face_authority_config(solver_config)
 
     def refused(
@@ -355,19 +376,20 @@ def _assess_joint_face_directions(
             failure_reason=reason,
         )
 
-    endpoint_fit = _fit_endpoint_authority_stationary(
-        family,
-        layout,
-        y,
-        likelihood_plan,
-        lambdas=lambdas,
-        face=joint_face,
-        initial=source_fit.coefficients,
-        config=authority_config,
-        chunk_size=chunk_size,
-        phase_recorder=phase_recorder,
-        _reuse_session=_reuse_session,
-    )
+    if endpoint_fit is None:
+        endpoint_fit = _fit_endpoint_authority_stationary(
+            family,
+            layout,
+            y,
+            likelihood_plan,
+            lambdas=lambdas,
+            face=joint_face,
+            initial=source_fit.coefficients,
+            config=authority_config,
+            chunk_size=chunk_size,
+            phase_recorder=phase_recorder,
+            _reuse_session=_reuse_session,
+        )
     if not endpoint_fit.converged:
         return refused("joint_endpoint_not_converged", endpoint_fit)
     if not _assessment_is_numerically_stationary(
@@ -402,17 +424,21 @@ def _assess_joint_face_directions(
             )
         except (ValueError, FloatingPointError, np.linalg.LinAlgError):
             return refused("joint_analytic_unavailable", endpoint_fit)
-    current_ceiling = source_objective + efs_config.objective_tolerance * (
-        1.0 + abs(source_objective)
-    )
-    if endpoint_objective > current_ceiling:
+    if not no_higher_within_rounding(
+        endpoint_objective,
+        endpoint_fit,
+        source_objective,
+        source_fit,
+        efs_config.objective_tolerance,
+    ):
         return refused("joint_objective_rejected", endpoint_fit)
 
     component_directions: list[tuple[str, EndpointDirectionEvidence]] = []
+    derivatives = derivatives or _EndpointDerivativeMemo()
     with measure_phase(phase_recorder, "efs_update_backtracking"):
         for name, finite_face in finite_faces:
             try:
-                analytic = evaluate_endpoint_laplace_derivative(
+                analytic = derivatives.derivative(
                     family,
                     layout,
                     y,
@@ -451,6 +477,19 @@ def _assess_joint_face_directions(
     )
 
 
+def _direction_leaves_face(
+    direction: EndpointDirectionEvidence | JointEndpointDirectionEvidence | None,
+) -> bool:
+    """Whether a rechecked face holds a component the objective falls on releasing.
+
+    A face is an active bound and its endpoint derivative is the bound's
+    multiplier. One certified negative is not a failed check: it says how to
+    go on, by taking the bound out of the active set and continuing (Gill,
+    Murray and Wright 1981, sec. 8.3.1.2). An unresolved sign decides nothing.
+    """
+    return direction is not None and direction.decision == "finite"
+
+
 def _joint_direction_is_endpoint(attempt: _JointFaceDirectionAttempt) -> bool:
     direction = attempt.direction
     return bool(
@@ -478,6 +517,7 @@ def _try_joint_exact_face(
     chunk_size: ChunkSize | None,
     phase_recorder: FitPhaseRecorder | None,
     _reuse_session: _DenseObservedReuseSession | None = None,
+    derivatives: _EndpointDerivativeMemo | None = None,
 ) -> tuple[_FacePromotion | None, _JointFaceDirectionAttempt | None]:
     """Assess all capped non-active components from one common exact-face fit."""
 
@@ -527,6 +567,7 @@ def _try_joint_exact_face(
         chunk_size=chunk_size,
         phase_recorder=phase_recorder,
         _reuse_session=_reuse_session,
+        derivatives=derivatives,
     )
     if not _joint_direction_is_endpoint(attempt):
         return None, attempt
@@ -562,6 +603,7 @@ def _try_exact_face(
     chunk_size: ChunkSize | None,
     phase_recorder: FitPhaseRecorder | None,
     _reuse_session: _DenseObservedReuseSession | None = None,
+    derivatives: _EndpointDerivativeMemo | None = None,
 ) -> tuple[_FacePromotion | None, _FaceDirectionAttempt | None]:
     """Promote one capped coordinate only after a resolved τ = 0+ test."""
     if not terminal_evidence.unresolved_upper_bound:
@@ -598,27 +640,26 @@ def _try_exact_face(
         chunk_size=chunk_size,
         phase_recorder=phase_recorder,
         _reuse_session=_reuse_session,
+        derivatives=derivatives,
     )
     check = attempt.check
     if check is None:
         return None, attempt
     if not sole_capped_component:
         return None, attempt
-    current_ceiling = current_objective + efs_config.objective_tolerance * (
-        1.0 + abs(current_objective)
-    )
-    cap_ceiling = check.cap_objective + efs_config.objective_tolerance * (
-        1.0 + abs(check.cap_objective)
-    )
     cap_stationary = check.cap_fit.converged and _assessment_is_numerically_stationary(
         check.cap_fit,
         check.coefficient_tolerance,
     )
+    tolerance = efs_config.objective_tolerance
     if (
         check.direction.decision != "endpoint"
         or check.direction.lower_bound <= 0.0
-        or check.endpoint_objective > current_ceiling
-        or (cap_stationary and check.endpoint_objective > cap_ceiling)
+        or not check.no_higher_than(current_objective, current_fit, tolerance)
+        or (
+            cap_stationary
+            and not check.no_higher_than(check.cap_objective, check.cap_fit, tolerance)
+        )
     ):
         return None, attempt
     return (
@@ -650,6 +691,7 @@ def _recheck_exact_face(
     phase_recorder: FitPhaseRecorder | None,
     _reuse_session: _DenseObservedReuseSession | None = None,
     other_caps_stationary: bool = False,
+    derivatives: _EndpointDerivativeMemo | None = None,
 ) -> _FaceRecheck:
     """Revalidate every active component at the terminal finite smoothing state.
 
@@ -685,7 +727,7 @@ def _recheck_exact_face(
                 finite_face=finite_face,
                 endpoint_face=face,
                 initial=canonical_fit.coefficients,
-                endpoint_initial=canonical_fit.coefficients,
+                endpoint_fit=canonical_fit,
                 allow_nonstationary_cap=sole_capped_component,
                 source_fit=canonical_fit,
                 solver_config=solver_config,
@@ -693,6 +735,7 @@ def _recheck_exact_face(
                 chunk_size=chunk_size,
                 phase_recorder=phase_recorder,
                 _reuse_session=_reuse_session,
+                derivatives=derivatives,
             )
         check = None if attempt is None else attempt.check
         direction_resolved = (
@@ -702,18 +745,16 @@ def _recheck_exact_face(
         )
         objective_resolved = False
         if check is not None:
-            current_ceiling = accepted_objective + efs_config.objective_tolerance * (
-                1.0 + abs(accepted_objective)
-            )
-            cap_ceiling = check.cap_objective + efs_config.objective_tolerance * (
-                1.0 + abs(check.cap_objective)
-            )
             cap_stationary = check.cap_fit.converged and _assessment_is_numerically_stationary(
                 check.cap_fit,
                 check.coefficient_tolerance,
             )
-            objective_resolved = check.endpoint_objective <= current_ceiling and (
-                not cap_stationary or check.endpoint_objective <= cap_ceiling
+            tolerance = efs_config.objective_tolerance
+            objective_resolved = check.no_higher_than(
+                accepted_objective, canonical_fit, tolerance
+            ) and (
+                not cap_stationary
+                or check.no_higher_than(check.cap_objective, check.cap_fit, tolerance)
             )
         if not direction_resolved or not objective_resolved:
             authority_config = _face_authority_config(solver_config)
@@ -749,15 +790,7 @@ def _recheck_exact_face(
                         if check is not None and check.direction.decision != "endpoint"
                         else None
                     ),
-                    failure_reason=(
-                        attempt.failure_reason
-                        if (
-                            attempt is not None
-                            and len(face.component_names) == 1
-                            and attempt.failure_reason == "endpoint_state_changed"
-                        )
-                        else None
-                    ),
+                    failure_reason=None,
                     coefficient_tolerance=authority_config.tolerance,
                     assessment_fits=(*failed_assessments, cap_fit),
                 ),

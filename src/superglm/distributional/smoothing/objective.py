@@ -10,7 +10,7 @@ from typing import cast
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._roundoff import UNIT_ROUNDOFF, gamma_up
+from superglm._roundoff import UNIT_ROUNDOFF, gamma, gamma_up
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.results.iteration import DistributionalEFSConfig
 from superglm.distributional.results.solver import DenseSolverResult, RetainedCoordinates
@@ -235,6 +235,62 @@ def _laplace_objective(
         penalty_memo=penalty_memo,
         objective_tolerance=objective_tolerance,
     ).objective
+
+
+def laplace_objective_rounding(result: DenseSolverResult) -> float:
+    """How far the float64 penalty leaves a fit's Laplace objective undetermined.
+
+    The penalty ``P = sum_j lambda_j S_j`` is stored to about ``gamma_k |P|``
+    entrywise, ``k`` the most nonzeros in a row plus two (the roundings
+    ``_score_within_rounding_floor`` counts in a row of ``P b``). In the data's
+    coordinates a null direction of ``S_j`` is therefore null in ``P`` only to
+    that, and at a large ``lambda_j`` the stored penalty charges it; a block in
+    its penalty's null coordinates stores exact zeros there. The criterion reads
+    ``P`` in ``b'Pb / 2`` and in ``log|H + P| / 2``. A change ``dP`` moves those by
+    ``b'dPb / 2`` and, to first order, ``tr((H + P)^-1 dP) / 2``, so by at most
+    ``gamma_k (|b|'|P||b| + sum_ij |(H + P)^-1|_ij |P|_ij) / 2``. On an exact
+    face the component's range is eliminated and its penalty is zero, which
+    takes this back to a few ``u``: a 100-row fit with one penalty at 1e10
+    has 4e-6 here and differs from its face by 1e-7, against 1e-14 on the face.
+
+    This is the scale of one error, ``u`` times the penalty's magnitude and the
+    curvature's conditioning, not a bound on every rounding in ``V``; the
+    comparisons that read it add it to their own tolerance.
+    """
+    face = result.coefficient_face
+    rank = result.terminal_rank if face is None else result.terminal_reduced_rank
+    assert rank is not None
+    coefficients = np.abs(np.asarray(result.coefficients, dtype=np.float64))
+    penalty = np.abs(np.asarray(result.penalty, dtype=np.float64))
+    retained = penalty if face is None else np.abs(face.reduce_matrix(result.penalty))
+    roundings = int(np.count_nonzero(penalty, axis=1).max(initial=0)) + 2
+    quadratic = float(coefficients @ penalty @ coefficients)
+    log_determinant = float(np.sum(np.abs(rank.pseudo_inverse()) * retained))
+    return 0.5 * float(gamma(roundings)) * (quadratic + log_determinant)
+
+
+def no_higher_within_rounding(
+    candidate: float,
+    candidate_fit: DenseSolverResult,
+    reference: float,
+    reference_fit: DenseSolverResult,
+    objective_tolerance: float,
+) -> bool:
+    """Whether one fit's Laplace objective is no higher than another's.
+
+    Each value carries its stored penalty's rounding
+    (``laplace_objective_rounding``), which beside a penalty at its bound in
+    the data's coordinates exceeds the tolerance. A difference inside the
+    rounding of the two values is not an order: a comparison of values known to
+    ``e_a`` and ``e_b`` is relaxed by ``e_a + e_b`` (Shi, Xie, Byrd and Nocedal,
+    arXiv 2010.04352, sec. 4.2). What decides there is the caller's: evidence
+    it resolves, or its tie rule.
+    """
+    ceiling = reference + objective_tolerance * (1.0 + abs(reference))
+    if candidate <= ceiling:
+        return True
+    rounding = laplace_objective_rounding(candidate_fit) + laplace_objective_rounding(reference_fit)
+    return candidate <= ceiling + rounding
 
 
 def _penalty_lambdas(
@@ -671,3 +727,23 @@ def _complete_mapping(
             value = cast(float, missing)
         completed[name] = float(value)
     return completed
+
+
+def remaining_fall(fall: float, previous_fall: float, resolution: float) -> float:
+    """Aitken's estimate of how far a linearly converging objective still has to fall.
+
+    Successive falls d' then d of an objective converging at a constant rate
+    a = d / d' leave d a / (1 - a) to its limit. Stopping on that estimate
+    rather than on d itself is the convergence criterion of Boehning, Dietz,
+    Schaub, Schlattmann and Lindsay (1994) for EM iterations, which a
+    Fellner--Schall round approximates: one round's change is a measure of
+    progress, not of distance, and a slow steady drift keeps it small. A fall
+    within ``resolution`` is none; one that is not contracting, or has no
+    finite fall before it, has no such limit.
+    """
+    if fall <= resolution:
+        return 0.0
+    if previous_fall <= fall or not math.isfinite(previous_fall):
+        return math.inf
+    rate = fall / previous_fall
+    return fall * rate / (1.0 - rate)

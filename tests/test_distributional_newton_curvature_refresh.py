@@ -22,13 +22,19 @@ def _case(kind):
     return lss_model(GeneralizedParetoLSS(), 3), frame, book["losses"][keep] - 1000
 
 
+@pytest.mark.pins_behaviour
+@pytest.mark.usefixtures("no_endpoint_trial")
 @pytest.mark.parametrize("kind", ["gaussian", "gpd"])
 def test_newton_refreshes_indefinite_curvature_after_accepted_bfgs_steps(monkeypatch, kind):
-    """The old Hessian must not veto completion at every later accepted point.
+    """Pin the fresh Hessian an endgame forms after its first one was indefinite.
 
+    The old Hessian must not veto completion at every later accepted point.
     On the unfixed solver, these real fits exhaust the Newton budget despite
     satisfying the gradient, objective-change and remaining-gain checks.
     They request one Hessian and retain its negative-curvature flag throughout.
+    The GPD fit's hand-off point is indefinite only where a flat shape penalty's
+    walk leaves it, short of its cap, so the search makes no endpoint trial; the
+    Gaussian fit makes none either way.
     """
     real_derivatives = newton.laml_derivatives
     real_freeze = newton.freeze_flat_directions

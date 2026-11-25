@@ -438,6 +438,7 @@ def test_a_custom_scorer_of_a_builtin_name_is_not_recorded_as_built_in():
     assert result.builtin_scores == ("crps",)
 
 
+@pytest.mark.usefixtures("no_endpoint_trial")
 def test_reml_folds_start_cold_unless_asked_and_disclose_their_iterations():
     X, y = _rows()
     kwargs = {"cv": FOLDS, "fit_mode": "fit_reml", "scoring": ("nll",), "error_score": "raise"}
@@ -452,6 +453,7 @@ def test_reml_folds_start_cold_unless_asked_and_disclose_their_iterations():
     assert np.isfinite(warm.mean_scores["nll"])
 
 
+@pytest.mark.usefixtures("no_endpoint_trial")
 def test_a_warm_fold_starts_from_the_first_folds_smoothing(monkeypatch):
     X, y = _rows()
     seen = []
