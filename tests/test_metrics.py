@@ -2271,6 +2271,89 @@ class TestCooksDistance:
         assert np.all(np.isfinite(r))
 
 
+class TestInfluenceMatchesTextbook:
+    """Leverage, standardised residuals and Cook's distance on an unpenalised Poisson fit.
+
+    The reference is the textbook construction from the fitted means and a design
+    the test builds itself: W = diag(mu) (the Poisson log link is canonical, so
+    observed and expected information agree), h = diag of the hat matrix of
+    W^(1/2) D, r_P = (y - mu) / sqrt(mu), r_D the signed deviance residual,
+    standardised residuals r / sqrt(phi (1 - h)) and Cook's distance
+    r_P^2 h / (p phi (1 - h)^2) (Williams, Applied Statistics 36, 1987;
+    McCullagh and Nelder, Generalized Linear Models, 2nd ed., 1989, section 12.7).
+    """
+
+    @pytest.fixture
+    def influence_case(self):
+        rng = np.random.default_rng(20261125)
+        n = 400
+        x = rng.uniform(0.0, 2.0, n)
+        x[0] = 8.0  # one row of high leverage, where the (1 - h) factors matter
+        g = rng.choice(["a", "b", "c"], n)
+        eta = -0.3 + 0.6 * x + np.where(g == "b", 0.4, np.where(g == "c", -0.5, 0.0))
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x": x, "g": g})
+        model = SuperGLM(
+            family="poisson",
+            features={"x": Numeric(), "g": Categorical(base="first")},
+            selection_penalty=0.0,
+        )
+        model.fit(X, y)
+        design = np.column_stack([np.ones(n), x, g == "b", g == "c"]).astype(np.float64)
+        return model.metrics(X, y), y, np.asarray(model.predict(X), dtype=np.float64), design
+
+    @staticmethod
+    def _reference(y, mu, design):
+        from scipy.linalg import qr
+        from scipy.special import xlogy
+
+        root_w = np.sqrt(mu)[:, None] * design
+        q, _ = qr(root_w, mode="economic")
+        h = np.sum(q**2, axis=1)
+        r_p = (y - mu) / np.sqrt(mu)
+        r_d = np.sign(y - mu) * np.sqrt(np.maximum(2.0 * (xlogy(y, y / mu) - (y - mu)), 0.0))
+        # h from a QR of W^(1/2) D has error of order u cond^2 (an implementation
+        # may use the normal equations); every comparison below scales from it.
+        h_tol = 64.0 * UNIT_ROUNDOFF * np.linalg.cond(root_w) ** 2
+        return h, r_p, r_d, h_tol
+
+    def test_leverage_matches_the_hat_matrix_and_sums_to_the_coefficient_count(
+        self, influence_case
+    ):
+        """Halved or otherwise wrong leverage would mislead every influence screen."""
+        metrics, y, mu, design = influence_case
+        h, _, _, h_tol = self._reference(y, mu, design)
+        np.testing.assert_allclose(metrics.leverage, h, rtol=0, atol=h_tol)
+        assert abs(np.sum(metrics.leverage) - design.shape[1]) <= len(y) * h_tol
+        assert h[0] > 0.3, "fixture needs a high-leverage row"
+
+    def test_standardised_residuals_match_their_textbook_definition(self, influence_case):
+        """Standardised residuals 30% too large would flag ordinary rows as outliers."""
+        metrics, y, mu, design = influence_case
+        h, r_p, r_d, h_tol = self._reference(y, mu, design)
+        assert metrics.phi == 1.0
+        # d/dh of r / sqrt(1 - h) is r / (2 (1 - h)^1.5).
+        for actual, r in (
+            (metrics.std_pearson_residuals, r_p),
+            (metrics.std_deviance_residuals, r_d),
+        ):
+            expected = r / np.sqrt(1.0 - h)
+            atol = h_tol * np.max(np.abs(r)) / (1.0 - h.max()) ** 1.5 + 64.0 * UNIT_ROUNDOFF * (
+                np.max(np.abs(expected))
+            )
+            np.testing.assert_allclose(actual, expected, rtol=0, atol=atol)
+
+    def test_cooks_distance_matches_its_textbook_definition(self, influence_case):
+        """A Cook's distance short of one (1 - h) factor halves the most influential row's score."""
+        metrics, y, mu, design = influence_case
+        h, r_p, _, h_tol = self._reference(y, mu, design)
+        p = design.shape[1]
+        expected = r_p**2 * h / (p * (1.0 - h) ** 2)
+        rtol = h_tol * (1.0 / h.min() + 2.0 / (1.0 - h.max())) + 64.0 * UNIT_ROUNDOFF
+        np.testing.assert_allclose(metrics.cooks_distance, expected, rtol=rtol, atol=0)
+        assert int(np.argmax(metrics.cooks_distance)) == int(np.argmax(expected))
+
+
 # ── Active groups ─────────────────────────────────────────────────
 
 
