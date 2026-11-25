@@ -945,3 +945,28 @@ class TestUpperTailPValues:
         result = score_test_zi(_fit_poisson(X, y), X, y)
         assert result.statistic > 100.0
         assert 0.0 < result.p_value == stats.chi2.sf(result.statistic, 1)
+
+    def test_dispersion(self):
+        from scipy import stats
+
+        rng = np.random.default_rng(42)
+        n = 2000
+        X = pd.DataFrame({"x": rng.uniform(0, 5, n)})
+        mu = np.exp(0.5 + 0.3 * X["x"].to_numpy())
+        y = rng.negative_binomial(1.0, 1.0 / (1.0 + mu)).astype(float)
+        result = dispersion_test(_fit_poisson(X, y), X, y)
+        assert result.statistic > 10.0
+        assert 0.0 < result.p_value == stats.t.sf(result.statistic, n - 1)
+
+    def test_vuong(self):
+        from scipy import stats
+
+        rng = np.random.default_rng(42)
+        n = 2000
+        X = pd.DataFrame({"x": rng.uniform(0, 5, n), "z": rng.normal(size=n)})
+        y = rng.poisson(np.exp(0.2 + 0.5 * X["x"])).astype(float)
+        model_x = _fit_poisson_numeric(X[["x"]], y)
+        model_z = _fit_poisson_numeric(X[["z"]], y)
+        result = vuong_test(model_x, model_z, X, y, correction="none")
+        assert result.statistic > 10.0
+        assert 0.0 < result.p_value == 2.0 * stats.norm.sf(result.statistic)

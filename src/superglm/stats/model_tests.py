@@ -563,11 +563,11 @@ def dispersion_test(
     t_stat = alpha_hat / se if se > 0 else 0.0
 
     if alternative == "greater":
-        p_value = float(1.0 - stats.t.cdf(t_stat, df=n - 1))
+        p_value = float(stats.t.sf(t_stat, df=n - 1))
     elif alternative == "less":
         p_value = float(stats.t.cdf(t_stat, df=n - 1))
     else:  # two-sided
-        p_value = float(2.0 * (1.0 - stats.t.cdf(abs(t_stat), df=n - 1)))
+        p_value = float(2.0 * stats.t.sf(abs(t_stat), df=n - 1))
 
     return DispersionTestResult(
         statistic=float(t_stat),
@@ -770,7 +770,7 @@ def vuong_test(
         )
 
     v_stat = float(np.sqrt(likelihood_size) * mean_m / omega)
-    p_value = float(2.0 * (1.0 - stats.norm.cdf(abs(v_stat))))
+    p_value = float(2.0 * stats.norm.sf(abs(v_stat)))
 
     if p_value < 0.05:
         preferred = "model_a" if v_stat > 0 else "model_b"
