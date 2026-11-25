@@ -1134,7 +1134,14 @@ class RankDecomposition:
             return np.zeros((self.width, 0))
         return self.parameter_null_basis.copy()
 
-    def is_estimable(self, contrast: NDArray) -> bool:
+    def is_estimable(self, contrast: NDArray, determined: float = 0.0) -> bool:
+        """Whether ``contrast``'s part in the null space is at most ``factor_rcond`` of its size.
+
+        Both are measured in the equilibrated coordinates, where ``contrast`` is divided by
+        the column scale.  ``determined`` is the size there of a part of the same estimate
+        that lies outside these coefficients and is always determined: it adds to the size
+        the null-space part is compared with, and to nothing else.
+        """
         contrast = np.asarray(contrast, dtype=float)
         if contrast.shape != (self.width,):
             raise ValueError("contrast width does not match decomposition")
@@ -1150,14 +1157,14 @@ class RankDecomposition:
             tolerance = SHARED_RANK_POLICY.factor_rcond * np.linalg.norm(normalized_contrast)
             if np.linalg.norm(normalized_contrast[~scaled_columns]) > tolerance:
                 return False
-            scaled_contrast, _ = _scaled_coordinate_columns(
+            scaled_contrast, exponent = _scaled_coordinate_columns(
                 contrast[scaled_columns, None], self.column_scale[scaled_columns]
             )
             scaled_contrast = scaled_contrast[:, 0]
             projection = scaled_contrast @ self.equilibrated_null_basis[scaled_columns]
-            tolerance = SHARED_RANK_POLICY.factor_rcond * max(
-                float(np.linalg.norm(scaled_contrast)), np.finfo(float).tiny
-            )
+            with np.errstate(over="ignore"):
+                size = np.hypot(np.linalg.norm(scaled_contrast), np.ldexp(determined, -exponent[0]))
+            tolerance = SHARED_RANK_POLICY.factor_rcond * max(float(size), np.finfo(float).tiny)
             return bool(np.linalg.norm(projection) <= tolerance)
         contrast_norm = float(np.linalg.norm(contrast))
         structural_tolerance = SHARED_RANK_POLICY.factor_rcond * max(
@@ -1183,7 +1190,7 @@ class RankDecomposition:
         normalized_null = equilibrated_null[:, retained_null] / null_norms[retained_null]
         projection = scaled_contrast @ normalized_null
         tolerance = SHARED_RANK_POLICY.factor_rcond * max(
-            float(np.linalg.norm(scaled_contrast)),
+            float(np.hypot(np.linalg.norm(scaled_contrast), determined)),
             np.finfo(float).tiny,
         )
         return bool(np.linalg.norm(projection) <= tolerance)
@@ -1357,7 +1364,14 @@ class RankInfo:
             return self.coefficient.pseudo_inverse()
         return face_pseudo_inverse(self.face_coefficient, self.face)
 
-    def is_estimable(self, contrast: NDArray) -> bool:
+    def is_estimable(self, contrast: NDArray, intercept: float = 0.0) -> bool:
+        """Whether the data determine ``intercept * a + contrast @ beta``.
+
+        ``a`` is the intercept beside the centred columns, which every fit determines, so
+        its weight only adds to the size the contrast's undetermined part is compared with
+        (``RankDecomposition.is_estimable``): the centred constant column has scale
+        ``sqrt(sum_w)``.
+        """
         contrast = np.asarray(contrast, dtype=float)
         if contrast.shape != self.mean_x.shape:
             raise ValueError("contrast width does not match fitted coefficient space")
@@ -1366,7 +1380,9 @@ class RankInfo:
         tolerance = SHARED_RANK_POLICY.factor_rcond * max(1.0, float(np.linalg.norm(contrast)))
         if np.linalg.norm(contrast[unselected]) > tolerance:
             return False
-        return self.data.is_estimable(contrast[self.selected_columns])
+        return self.data.is_estimable(
+            contrast[self.selected_columns], abs(intercept) / math.sqrt(self.sum_w)
+        )
 
     def coefficient_estimable(self) -> NDArray:
         result = np.zeros(len(self.mean_x), dtype=bool)

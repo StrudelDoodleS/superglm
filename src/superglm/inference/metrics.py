@@ -362,19 +362,21 @@ def _contrast_estimability(
     groups: list[GroupSlice],
     active_groups: list[GroupSlice],
     width: int,
+    sum_w: float,
 ):
     """``data_rank.is_estimable`` read on a contrast over the full fitted coordinates.
 
     A contrast that weighs an inactive coefficient is not determined, as
     ``_coefficient_estimability`` leaves those coefficients blank.  The reader lives as
     long as the metrics object and is pickled with it: a ``partial`` of a module
-    function, over only the null-space part of ``data_rank``.
+    function, over only the null-space part of ``data_rank`` and the weight total
+    ``sum_w`` it was centred with.
     """
     original_by_name = {group.name: group for group in groups}
     columns = np.empty(sum(group.size for group in active_groups), dtype=np.intp)
     for active_group in active_groups:
         columns[active_group.sl] = np.arange(width)[original_by_name[active_group.name].sl]
-    return partial(_active_contrast_estimable, data_rank.estimability_only(), columns)
+    return partial(_active_contrast_estimable, data_rank.estimability_only(), columns, sum_w=sum_w)
 
 
 def _active_centre(
@@ -399,13 +401,20 @@ def _active_centre(
     return centre
 
 
-def _active_contrast_estimable(data_rank, columns: NDArray, contrast: NDArray) -> bool:
-    """Whether ``data_rank`` determines ``contrast``, whose active coordinates sit at ``columns``."""
+def _active_contrast_estimable(
+    data_rank, columns: NDArray, contrast: NDArray, intercept: float = 0.0, sum_w=None
+) -> bool:
+    """Whether ``data_rank`` determines ``contrast``, whose active coordinates sit at ``columns``.
+
+    ``intercept`` is ``RankInfo.is_estimable``'s; a reader saved without ``sum_w`` decides
+    the contrast alone.
+    """
     outside = np.ones(len(contrast), dtype=bool)
     outside[columns] = False
     if np.any(contrast[outside] != 0.0):
         return False
-    return bool(data_rank.is_estimable(contrast[columns]))
+    determined = 0.0 if sum_w is None else abs(intercept) / math.sqrt(sum_w)
+    return bool(data_rank.is_estimable(contrast[columns], determined))
 
 
 def _requires_wood_inference(model, active_groups: list[GroupSlice]) -> bool:
@@ -1260,7 +1269,7 @@ class ModelMetrics:
                 ),
             )
             self.__dict__["_contrast_estimable"] = _contrast_estimability(
-                data_rank, self._groups, active_groups, len(beta)
+                data_rank, self._groups, active_groups, len(beta), float(np.sum(W))
             )
             # public rows: the decomposition's centre is theirs
             self.__dict__["_intercept_centre"] = _active_centre(
@@ -1321,7 +1330,7 @@ class ModelMetrics:
             partial(_coefficient_estimability, data_rank, self._groups, active_groups, len(beta)),
         )
         self.__dict__["_contrast_estimable"] = _contrast_estimability(
-            data_rank, self._groups, active_groups, len(beta)
+            data_rank, self._groups, active_groups, len(beta), float(np.sum(W))
         )
         # solver rows, whose public columns sit ``_public_intercept_shift`` below them
         self.__dict__["_intercept_centre"] = _active_centre(

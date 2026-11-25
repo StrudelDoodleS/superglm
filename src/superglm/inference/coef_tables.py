@@ -274,8 +274,9 @@ def build_coef_rows(
     intercept_centre : the public column mean, over the fitted coefficients, that the
         decomposition behind ``contrast_estimable`` was centred on.  The reported
         intercept is the centred one, which the fit always determines, less
-        ``intercept_centre' beta``, so that contrast decides it; without it, only the
-        ordered terms' base-level adjustment does.
+        ``intercept_centre' beta``: ``contrast_estimable(contrast, intercept=1.0)``
+        decides the two together.  Without it, only the ordered terms' base-level
+        adjustment is decided.
     """
     from superglm.features.categorical import Categorical
     from superglm.features.factor_smooth import FactorSmooth
@@ -477,9 +478,9 @@ def build_coef_rows(
     def moves(column: int) -> bool:
         return separated is not None and bool(separated[column])
 
-    def _determined(contrast: NDArray) -> bool:
+    def _determined(contrast: NDArray, intercept: float = 0.0) -> bool:
         """Whether the default covariance determines ``contrast @ beta`` (``contrast_determined``)."""
-        return contrast_determined(contrast, coefficient_estimable, contrast_estimable)
+        return contrast_determined(contrast, coefficient_estimable, contrast_estimable, intercept)
 
     def _mask_determines(g_slice: slice) -> Callable[[NDArray], NDArray[np.bool_]]:
         """Which contrasts of the coefficients at ``g_slice`` the default covariance determines."""
@@ -560,14 +561,17 @@ def build_coef_rows(
             return float("nan"), float("nan"), ref_df_val
 
     # Intercept row. On the default path the reported intercept, the centred one less the
-    # centre and plus the ordered terms' base-level effects, is decided by the mask's rule.
+    # centre and plus the ordered terms' base-level effects, is decided by the mask's rule
+    # as that one estimate: the centred intercept's unit weight is part of its size, so a
+    # centre of rounding size beside it decides nothing.
     z, p, ci_lo, ci_hi = _compute_coef_stats(intercept, icpt_se, alpha)
     blank = moves(-1)
     intercept_contrast = full_reference_contrast
     if intercept_centre is not None:
         intercept_contrast = intercept_contrast - np.asarray(intercept_centre, dtype=np.float64)
     undetermined_intercept = not is_sandwich and not _determined(
-        np.where(selected_columns, intercept_contrast, 0.0)
+        np.where(selected_columns, intercept_contrast, 0.0),
+        intercept=0.0 if intercept_centre is None else 1.0,
     )
     withheld = blank or undetermined_intercept
     rows.append(

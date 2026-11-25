@@ -270,18 +270,24 @@ def term_contrasts(rows: NDArray, feature_groups, width: int, selected) -> NDArr
 def contrast_determined(
     contrast: NDArray,
     coefficient_estimable: NDArray,
-    contrast_estimable: Callable[[NDArray], bool] | None,
+    contrast_estimable: Callable[..., bool] | None,
+    intercept: float = 0.0,
 ) -> bool:
     """Whether a covariance determines ``contrast @ beta``, by its coefficient mask's rule.
 
     A contrast whose coefficients the mask ``coefficient_estimable`` all shows is
     determined, as the determined functions form a subspace; any other is decided by
     ``contrast_estimable`` (``RankDecomposition.is_estimable`` of the decomposition the
-    mask came from), and is not without it.
+    mask came from), and is not without it.  ``intercept`` is the weight the same
+    estimate puts on the intercept beside the centred columns (``RankInfo.is_estimable``).
     """
     if np.all(coefficient_estimable[contrast != 0.0]):
         return True
-    return contrast_estimable is not None and bool(contrast_estimable(contrast))
+    if contrast_estimable is None:
+        return False
+    if intercept:
+        return bool(contrast_estimable(contrast, intercept=intercept))
+    return bool(contrast_estimable(contrast))
 
 
 def withhold_undetermined(se: NDArray, determines, contrasts) -> NDArray:

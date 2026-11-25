@@ -912,6 +912,78 @@ def test_an_intercept_a_design_spanning_the_constant_leaves_open_shows_no_error(
         np.testing.assert_allclose(row.se, expected, rtol=1e-9)
 
 
+def _intercept_rows(model, X, y):
+    """The intercept row of the default summary and of the three metrics summaries, the
+    last on the first three quarters of each half of the rows."""
+    weights = np.linspace(0.5, 1.5, len(y))
+    half, kept = len(y) // 2, 3 * len(y) // 8
+    part = np.r_[0:kept, half : half + kept]
+    return [
+        model.summary()._coef_rows[0],
+        model.metrics(X, y).summary()._coef_rows[0],
+        model.metrics(X, y, sample_weight=weights).summary()._coef_rows[0],
+        model.metrics(X.iloc[part].reset_index(drop=True), y[part]).summary()._coef_rows[0],
+    ]
+
+
+def test_an_intercept_is_decided_with_its_own_weight_not_by_what_a_zero_mean_rounds_to() -> None:
+    """Aliased columns that do not span the constant leave the intercept its error (#740).
+
+    ``x`` and ``3 x`` with ``x`` symmetric about zero: the columns are collinear and each
+    sums to zero, so the constant is outside their span and the intercept is the OLS one
+    of ``y`` on ``x``.  The recorded means, about 4e-18 and 9e-18, are what the sum rounds
+    to; b2c29ad87 decided ``-mean' beta`` on its own, relative to that rounding, and
+    blanked the intercept.  The reported intercept is the centred one less that product,
+    one estimate with unit weight on the centred intercept, and is decided as such, on
+    the fit's rows and on a symmetric part of them a metrics reader centres again.
+
+    A spline on three support points aliases its own coefficients; its columns sum to
+    zero by construction, to the rounding of the basis.  The intercept is the mean
+    response, with the one-way layout's error, which b2c29ad87 blanked too.
+
+    ``x + 2**-20`` beside ``3 x``: now ``3 (x + 2**-20) - 3 x`` is a constant, the columns
+    span it, and the intercept stays blank on every summary.
+    """
+    a = np.random.default_rng(0).integers(-(2**50), 2**50, 100) / 2**50
+    x = np.r_[a, -a]
+    y = 2.0 + np.sin(np.arange(200.0))
+    X = pd.DataFrame({"x": x, "z": 3.0 * x})
+    model = SuperGLM(family="gaussian", features={"x": Numeric(), "z": Numeric()}).fit(X, y)
+    design = _design(model)
+    assert np.linalg.matrix_rank(design) == np.linalg.matrix_rank(design[:, 1:]) + 1
+    alone = SuperGLM(family="gaussian", features={"x": Numeric()}).fit(X[["x"]], y)
+    ols = _design(alone)
+    residual = y - ols @ np.linalg.lstsq(ols, y, rcond=None)[0]
+    phi = float(residual @ residual) / (len(y) - ols.shape[1])
+    expected = _intercept_rows(alone, X[["x"]], y)
+    np.testing.assert_allclose(
+        expected[0].se, np.sqrt(phi * np.linalg.inv(ols.T @ ols)[0, 0]), rtol=1e-9
+    )
+    for row, reference in zip(_intercept_rows(model, X, y), expected):
+        assert row.estimable is True
+        np.testing.assert_allclose(row.se, reference.se, rtol=1e-9)
+
+    support = [0.0, 0.7, 1.0]
+    u = np.tile(support, 40)
+    v = 2.0 + u + np.sin(np.arange(120.0))
+    frame = pd.DataFrame({"x": u})
+    spline = SuperGLM(family="gaussian", features={"x": Spline(n_knots=4)}, spline_penalty=0)
+    spline.fit(frame, v)
+    assert not np.all(spline.result.rank_info.coefficient_estimable())
+    within = sum(float(np.sum((v[u == s] - v[u == s].mean()) ** 2)) for s in support)
+    for row in (spline.summary()._coef_rows[0], spline.metrics(frame, v).summary()._coef_rows[0]):
+        assert row.estimable is True
+        np.testing.assert_allclose(row.coef, v.mean(), rtol=1e-9)
+        np.testing.assert_allclose(row.se, np.sqrt(within / (120 - 3) / 120), rtol=1e-9)
+
+    shifted = pd.DataFrame({"x": x + 2.0**-20, "z": 3.0 * x})
+    model = SuperGLM(family="gaussian", features={"x": Numeric(), "z": Numeric()}).fit(shifted, y)
+    design = _design(model)
+    assert np.linalg.matrix_rank(design) == np.linalg.matrix_rank(design[:, 1:])
+    for row in _intercept_rows(model, shifted, y):
+        assert row.se is None and row.ci_low is None and row.estimable is False
+
+
 def test_editor_stale_summary_keeps_the_basis_vocabulary(segmented_model) -> None:
     from superglm.editor.apply import apply_edits_to_model_copy_with_data
     from superglm.editor.session import EditorSession
