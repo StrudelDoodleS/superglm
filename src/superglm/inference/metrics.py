@@ -482,20 +482,22 @@ class ModelMetrics:
     ----------
     model : SuperGLM
         A fitted model.
-    X : pandas or eager Polars DataFrame
-        Feature matrix used for fitting (or evaluation).
+    X : pandas or eager Polars DataFrame, optional
+        Feature matrix used for evaluation. Defaults to the training frame
+        retained on ``model`` when omitted.
     y : array-like
-        Response variable.
+        Observed response values aligned with ``X``.
     sample_weight : array-like, optional
-        Observation weights / sample_weight.
+        Non-negative observation weights aligned with ``X``, interpreted under
+        the model's ``weight_semantics``. Defaults to ones.
     offset : array-like, optional
-        Offset term.
+        Known link-scale offset aligned with ``X``. Defaults to zeros.
 
     Notes
     -----
     The fitted mean and linear predictor are the model's predictions on ``X``,
     the values ``predict`` returns, and the deviance, likelihoods, Pearson
-    statistic and ``residuals()`` are computed from them.  They do not depend
+    statistic and ``residuals()`` are computed from them. They do not depend
     on whether ``X``, ``y``, ``sample_weight`` and ``offset`` are the objects
     the model was fitted on: a discrete fit's own mean belongs to its binned
     design, which ``predict`` does not reproduce.  ``SuperGLM.summary``
@@ -506,18 +508,18 @@ class ModelMetrics:
 
     On the frame a model was fitted on, leverage and effective degrees of
     freedom come from the fit itself, and so do the standardized residuals
-    and Cook's distance built on that leverage.  Equal copies of that frame,
+    and Cook's distance built on that leverage. Equal copies of that frame,
     or a pickled model, are recognised as the training rows only when the
-    model holds level coefficients or keeps a structured or shape-constrained covariance. Otherwise
-    leverage is re-formed on the rows passed, which for a discrete fit can
-    differ slightly from its binned fit.  For a fit whose shape constraints
-    bind, the inverse re-formed for leverage and the degrees of freedom is
-    restricted to the fit's active face: with ``Z`` a basis of the
-    coefficients the binding rows leave free, it is
-    ``Z (Z' (X' W X + S) Z)^+ Z'`` on the rows passed, and with no row
-    binding ``Z = I``, the unconstrained fit's.  The covariance behind
-    standard errors and intervals holds no row: which rows bind is itself
-    estimated.
+    model holds level coefficients or keeps a structured or shape-constrained
+    covariance. Otherwise leverage is re-formed on the rows passed, which for
+    a discrete fit can differ slightly from its binned fit. For a fit whose
+    shape constraints bind, the inverse re-formed for leverage and effective
+    degrees of freedom is restricted to the subspace of coefficients left free
+    by the binding constraints: with ``Z`` a basis of that subspace, it is
+    ``Z (Z' (X' W X + S) Z)^+ Z'`` on the rows passed (and ``Z = I`` when no
+    constraint binds). The covariance behind standard errors and intervals
+    does not freeze binding constraints, because which constraints bind is
+    itself estimated.
     """
 
     def __init__(
@@ -668,9 +670,9 @@ class ModelMetrics:
     def _working_eta_mu(self) -> tuple[NDArray, NDArray]:
         """The predicted eta on these rows and its guarded mu.
 
-        Never the fit's own linear predictor: on a discrete fit that belongs to
-        the binned design, and reading it only for the fit's own objects made
-        ``eta`` depend on object identity (#441).
+        Always computed from ``predict`` rather than the fit's internal linear
+        predictor so discrete fits and identical inputs produce the same
+        ``eta`` regardless of object identity.
         """
         from superglm.distributions import clip_mu
         from superglm.links import interior_eta, stabilize_eta
@@ -697,10 +699,12 @@ class ModelMetrics:
 
     @property
     def n_obs(self) -> int:
+        """Number of physical rows in the evaluation dataset."""
         return len(self._y)
 
     @property
     def effective_df(self) -> float:
+        """Effective degrees of freedom of the fitted model."""
         return self._result.effective_df
 
     @property
@@ -800,6 +804,7 @@ class ModelMetrics:
 
     @cached_property
     def log_likelihood(self) -> float:
+        """Weighted log-likelihood on the evaluation rows."""
         return self._log_likelihood(self._mu, self._held)
 
     @cached_property
@@ -828,6 +833,7 @@ class ModelMetrics:
 
     @cached_property
     def null_deviance(self) -> float:
+        """Weighted deviance of the intercept-only (null) model."""
         return self._weighted_deviance(self._weights, *self._null)
 
     @cached_property
@@ -853,6 +859,7 @@ class ModelMetrics:
 
     @property
     def aic(self) -> float:
+        """Akaike information criterion, ``-2 * log_likelihood + 2 * effective_df``."""
         return -2.0 * self.log_likelihood + 2.0 * self.effective_df
 
     @cached_property
@@ -867,10 +874,12 @@ class ModelMetrics:
 
     @property
     def bic(self) -> float:
+        """Bayesian information criterion using the contract-consistent sample size."""
         return -2.0 * self.log_likelihood + np.log(self._likelihood_size) * self.effective_df
 
     @property
     def aicc(self) -> float:
+        """Small-sample corrected AIC (``inf`` when ``n <= effective_df + 1``)."""
         edf = self.effective_df
         n = self._likelihood_size
         denom = n - edf - 1.0
@@ -899,10 +908,12 @@ class ModelMetrics:
 
     @cached_property
     def pearson_chi2(self) -> float:
+        """Weighted Pearson chi-square statistic on the evaluation rows."""
         return self._pearson_chi2(self._weights)
 
     @cached_property
     def n_active_groups(self) -> int:
+        """Number of selected (active) coefficient groups in the fitted model."""
         return len(
             selected_group_name_set(
                 self._result,
@@ -2099,8 +2110,8 @@ class ModelMetrics:
         The rendered table uses fitted-family covariance (``phi=1`` for known-scale families,
         the fitted ``phi`` otherwise), not the Pearson quasi-likelihood accessors
         :attr:`coefficient_se`, :attr:`intercept_se` or :attr:`feature_se`. The dict-like
-        ``standard_errors`` payload keeps the historical ``coefficient_se`` key for the
-        explicit quasi-likelihood accessor.
+        ``standard_errors`` payload keeps the ``coefficient_se`` key for the explicit
+        quasi-likelihood accessor.
 
         Parameters
         ----------

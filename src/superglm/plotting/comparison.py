@@ -356,7 +356,46 @@ def plot_term_comparison(
     subtitle: str | None = None,
     plotly_style: dict[str, Any] | None = None,
 ):
-    """Public comparison entry point for labeled fitted-model overlays."""
+    """Overlay fitted main-effect curves or levels across multiple models.
+
+    Parameters
+    ----------
+    models : Mapping[str, SuperGLM]
+        Mapping from display label to fitted model. All models must have at
+        least one comparable main-effect term in common.
+    terms : str, sequence of str, or None, default None
+        Term name(s) to compare. ``None`` compares all comparable main-effect
+        terms shared by the models.
+    X : pandas or eager Polars DataFrame
+        Evaluation data defining the shared continuous grid or level domain
+        and the default support overlay.
+    sample_weight : NDArray or None, default None
+        Optional observation weights for the shared support density or level
+        weight bars when ``support_by_label`` is ``None``.
+    support_by_label : Mapping[str, dict] or None, default None
+        Optional per-model support overrides keyed by model label, each
+        containing ``"X"`` and optional ``"sample_weight"``.
+    engine : {"plotly"}, default "plotly"
+        Plotting backend. Only ``"plotly"`` is currently supported.
+    n_points : int, default 200
+        Number of evaluation points for continuous term curves.
+    title : str or None, default None
+        Optional figure title.
+    subtitle : str or None, default None
+        Optional figure subtitle.
+    plotly_style : dict or None, default None
+        Optional Plotly layout and trace styling overrides.
+
+    Returns
+    -------
+    plotly.graph_objects.Figure
+        Interactive comparison figure overlaying the requested terms.
+
+    Raises
+    ------
+    ValueError
+        If no comparable main-effect terms are found or ``engine != "plotly"``.
+    """
     payload = _build_term_comparison_data(
         models=models,
         terms=terms,

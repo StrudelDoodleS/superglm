@@ -13,28 +13,34 @@ from typing import Any
 
 
 class ConvergenceWarning(UserWarning):
-    """A fit stopped before its convergence test passed.
+    """A fit stopped before its convergence test passed, or fell back on curvature.
 
     The fitted model is still returned. ``SuperGLM.fit`` warns when its
     coefficient fit stops unconverged. ``SuperGLM.fit_reml`` warns when
-    smoothing-parameter selection stops unconverged, or its final coefficient
-    fit does, and so do ``estimate_p`` and ``estimate_theta`` with
+    smoothing-parameter selection or its final coefficient fit stops
+    unconverged, as do ``estimate_p`` and ``estimate_theta`` with
     ``fit_mode="reml"`` for the fit they publish; the summary's ``Converged``
     row and ``reml_diagnostics()["converged"]`` then read ``False``.
+
     ``SuperLSS.fit_reml`` warns when its coefficient or smoothing loop stops
     unconverged; ``result_.converged`` then reads ``False`` and the summary's
     ``note`` column says so (``SuperLSS.fit``, with fixed smoothing, reports
-    it there without a warning). ``SuperLSS`` also warns, and keeps the text
-    in ``result_.warnings``, on a fit that may itself have converged: when
-    its final curvature is the nearest semidefinite matrix, or is Fisher
-    information for ``NegativeBinomialLS`` (other families' Fisher fallback
-    is silent, as in 0.40), when its null model did not converge, when
-    an inner fit stops with ``no_ascent_direction``, and when a
-    ``NegativeBinomialLS`` fit has rows whose size is at the Poisson limit
-    and its final curvature is singular in a size direction, whatever the
-    cause (the message gives the row count). The message names the
-    reason and what to change. Silence it with ``warnings.filterwarnings``
-    once the reason is understood.
+    it there without a warning). ``SuperLSS`` also warns, and records the
+    message in ``result_.warnings``, on a fit that may itself have converged
+    when:
+
+    - the final curvature is projected to the nearest positive semidefinite
+      matrix, or falls back to expected Fisher information for
+      ``NegativeBinomialLS`` (other families' Fisher curvature fallbacks do
+      not warn);
+    - the null comparison model did not converge;
+    - an inner fit stops with ``no_ascent_direction``; or
+    - a ``NegativeBinomialLS`` fit has rows at the Poisson size limit and its
+      final curvature is singular in a size direction (the message gives the
+      row count).
+
+    The warning message names the reason and what to change. Silence it with
+    ``warnings.filterwarnings`` once the reason is understood.
     """
 
 

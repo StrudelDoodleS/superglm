@@ -267,12 +267,40 @@ def wood_test_smooth(
     *,
     term_basis: NDArray | None = None,
 ) -> tuple[float, float, float]:
-    """Wood (2013) test of the fitted term in the column space of ``X_j``.
+    """Wood (2013) Wald-like significance test for a smooth term.
 
-    ``X_j @ term_basis`` holds the term's columns after its identifiability
-    constraint. Their order orients the two boundary eigenvectors
-    for the reported statistic. Omitting it uses the historical pivoted-QR
-    orientation. The p-value averages the tails of both signs in either case.
+    Tests ``H0: X_j @ beta_j = 0`` using the fractional-rank approximation of
+    Wood (2013, *Biometrika* 100(1):221–228).
+
+    Parameters
+    ----------
+    beta_j : NDArray, shape (p_j,)
+        Fitted coefficient subvector for the term.
+    X_j : NDArray, shape (n, p_j) or (r, p_j)
+        Term design matrix (or its ``R`` factor) in the coordinates of ``beta_j``.
+    V_b_j : NDArray or BinaryScaledCovariance, shape (p_j, p_j)
+        Bayesian/frequentist covariance submatrix for ``beta_j``.
+    edf1_j : float
+        Effective degrees of freedom of the term (alternative EDF, ``2 * tr(F) - tr(F^2)``).
+    res_df : float, default -1.0
+        Residual degrees of freedom. Use ``<= 0`` for a known scale (chi-square
+        reference distribution) or ``> 0`` for an estimated scale (F reference
+        distribution).
+    term_basis : NDArray or None, default None
+        Optional transformation such that ``X_j @ term_basis`` holds the term's
+        columns after its identifiability constraint; column order orients the
+        boundary eigenvectors for the reported statistic. Omitting it orients
+        from the pivoted QR factorization. The p-value averages both signs in
+        either case.
+
+    Returns
+    -------
+    stat : float
+        Test statistic.
+    p_value : float
+        Upper-tail p-value in ``[0, 1]``.
+    ref_df : float
+        Reference degrees of freedom used for the test.
     """
     from superglm.inference.covariance import BinaryScaledCovariance
 

@@ -611,13 +611,12 @@ _GRID_RECONSTRUCTION_KEYS = frozenset({"x1", "x2", "relativity"})
 
 
 def reconstruct_interaction(ispec, beta: NDArray, n_points: int) -> dict:
-    """Reconstruct an interaction, passing ``n_points`` only if it takes one.
+    """Reconstruct an interaction, passing ``n_points`` only if it accepts one.
 
-    Shared with the rating-table export so that "is this a grid" is answered
-    the same way in both places. Deciding it twice is the shape issue #287
-    took, and a signature pre-filter here would have been a third answer: a
-    custom spec whose ``reconstruct(beta)`` takes no ``n_points`` and still
-    returns a surface is exported as a grid, so it has to be swept as one.
+    Shared with the rating-table export so both decide whether an interaction
+    reconstructs as a grid in the same way. A custom spec whose
+    ``reconstruct(beta)`` takes no ``n_points`` and still returns a surface is
+    exported as a grid and swept as one.
     """
     reconstruct = getattr(ispec, "reconstruct", None)
     if reconstruct is None:
@@ -661,26 +660,12 @@ def orient_grid_surface(name: str, axis1: NDArray, axis2: NDArray, surface: NDAr
 
 
 def _non_grid_builtin_interactions() -> tuple[type, ...]:
-    """The shipped interaction types whose reconstruction is never a surface.
+    """Built-in interaction types whose reconstruction is never a 2D surface.
 
-    A NEGATIVE fast path, and only that: classifying by class is what four
-    review rounds had to undo, so this decides nothing on its own -- anything
-    not listed still goes through the reconstruction contract, which is what
-    the exporter routes on.  What it buys is not reconstructing a term the
-    answer is already known for: ``SplineCategorical.reconstruct`` walks every
-    level and each call walks them again, so on a high-cardinality parent the
-    default diagnostic paid quadratic work to learn the term is a cell table.
-
-    ``test_the_class_fast_path_covers_every_shipped_interaction`` checks that
-    this list and the two grid types PARTITION the interaction classes the
-    module ships, so a new one cannot land unclassified.
-    ``test_the_fast_path_only_skips_work`` then fits a term of EVERY listed
-    type and checks each verdict against the contract with the short-circuit
-    patched away -- so a listed class that later starts returning a surface,
-    which the partition cannot see because membership is still correct, fails
-    there instead of silently making the exporter ship a term the sweep will
-    refuse.  Adding a type to this list means adding a term of it to that
-    fixture; the test asserts the coverage rather than assuming it.
+    This is a negative fast path only: any type not listed goes through the
+    reconstruction contract used by the exporter. It avoids calling
+    ``reconstruct()`` on every level of a high-cardinality non-grid term such
+    as ``SplineCategorical`` just to learn that it is not a surface.
     """
     from superglm.features.factor_smooth import FactorSmooth
     from superglm.features.interaction import (
@@ -702,25 +687,13 @@ def _non_grid_builtin_interactions() -> tuple[type, ...]:
 
 
 def unpositionable_grid_parent(ispec, specs: dict) -> str | None:
-    """The parent of a would-be grid whose observations have no axis position.
+    """Return the parent of a would-be grid whose column has no numeric axis position.
 
-    A grid is a lookup keyed on two NUMERIC axes: a risk is priced by finding
-    the nearest printed value on each.  That only means something if the
-    parent's own column can be placed on that axis.  A spline, polynomial or
-    plain numeric parent can; a spline-mode ``OrderedCategorical`` can, through
-    the level scores ``resolve_interaction_parent_of`` maps it to.  A plain
-    ``Categorical`` cannot -- its column holds labels, and no label has a
-    position among ``0.0, 0.5, 1.0``.
-
-    Shipped grid types never hit this: both have numeric parents by
-    construction, and every categorical-parent type is on the non-grid list.
-    It is reachable through an explicit spec -- ``interactions=`` accepts any
-    object carrying ``parent_names`` and ``name`` -- whose ``reconstruct``
-    returns a surface over a categorical parent.  The exporter used to ship
-    that as a grid whose axis column a reader could not look anything up in,
-    and the sweep then read the label column as float64 and died on
-    ``could not convert string to float``.  Both now decline it here, together,
-    rather than one shipping what the other refuses.
+    A 2D grid lookup is keyed on two numeric axes. Spline, polynomial, plain
+    numeric, and spline-mode ``OrderedCategorical`` parents have numeric axis
+    positions; a plain ``Categorical`` or an unspec'd column does not. Both the
+    exporter and the discretization sweep decline a custom grid-shaped
+    interaction over an unpositionable parent here.
 
     Returns the offending parent's name, or ``None`` when both are positionable.
     """
@@ -1182,9 +1155,9 @@ def discretization_impact(
 
     Both are covered because both are approximations the exported workbook
     carries, and reporting one without the other understates how far the table
-    sits from the model (issue #287). The returned ``metrics`` are joint over
-    everything discretized in the call, which is the error a consumer applying
-    the whole table actually gets.
+    sits from the model. The returned ``metrics`` are joint over everything
+    discretized in the call, which is the error a consumer applying the whole
+    table actually gets.
 
     Under ``weight_semantics="frequency"`` ``sample_weight`` is replication
     mass: bin geometry, bin averages, mean prediction change, and prediction
@@ -1193,8 +1166,8 @@ def discretization_impact(
     geometry or summary metrics. Under ``"prior"`` the weights are precisions:
     they weight deviance and the displayed ``sample_weight`` totals, while bin
     geometry, bin averages, and pure prediction-comparison summaries use
-    physical rows. A Tweedie fit under ``"prior"`` additionally requires them
-    finite and strictly positive.
+    positive-weight physical rows. A Tweedie fit under ``"prior"`` additionally
+    requires them finite and strictly positive.
 
     Parameters
     ----------
@@ -1211,28 +1184,30 @@ def discretization_impact(
     offset : NDArray, optional
         Link-scale offset aligned to ``X``. Used when comparing original and
         discretized predictions for offset-fitted models.
-    n_bins : int
-        Number of bins per feature (default 100).
-    bin_strategy : str
-        Binning strategy: ``"exposure_quantile"`` (the retained public name)
-        places edges at equal geometry-weight mass; ``"uniform"`` uses
-        equal-width bins; ``"winsorized"`` uses geometry-weight quantiles on
-        the interior [p5, p95] with dedicated tail bins; ``"exact"`` chooses
-        the fewest bands that keep every value's band average within
+    n_bins : int, default 100
+        Number of bins per feature (or maximum band count under ``"exact"``).
+    bin_strategy : str, default "exposure_quantile"
+        Binning strategy: ``"exposure_quantile"``, ``"uniform"``,
+        ``"winsorized"``, or ``"exact"``. ``"exposure_quantile"`` places edges
+        at equal geometry-weight mass; ``"uniform"`` uses equal-width bins;
+        ``"winsorized"`` uses geometry-weight quantiles on the interior
+        ``[p5, p95]`` with dedicated tail bins; ``"exact"`` chooses the fewest
+        bands that keep every value's band average within
         ``min(band_se * SE, log(1 + band_max_error))`` of the curve, then the
-        least weighted squared error, with ``n_bins`` as the maximum band count.
-        When that is too few, every tolerance is widened by the least factor
-        that fits and ``band_diagnostics`` reports it.  A spline-by-categorical
-        interaction named in ``features`` is banded WITH its covariate's main
-        effect: one set of bands holds the main effect and each level's total
-        relativity (main effect plus the level's deviation, with its own
-        standard error) within their limits, and the cells are the bands'
-        weighted means of the deviations.  Where the main effect is not named
-        the bands hold the deviations themselves.  With several such
-        interactions on one covariate, every combination of their levels that
-        occurs among the rows of positive weight is held within its limit too.
-        Geometry weight means replication mass under the frequency contract and
-        unit physical-row mass for Tweedie.
+        least weighted squared error, with ``n_bins`` as the maximum band
+        count. When that is too few, every tolerance is widened by the least
+        factor that fits and ``band_diagnostics`` reports it. A
+        spline-by-categorical interaction named in ``features`` is banded with
+        its covariate's main effect: one set of bands holds the main effect
+        and each level's total relativity (main effect plus the level's
+        deviation, with its own standard error) within their limits, and the
+        cells are the bands' weighted means of the deviations. Where the main
+        effect is not named the bands hold the deviations themselves. With
+        several such interactions on one covariate, every combination of their
+        levels that occurs among positive-weight rows is held within its limit
+        too. Geometry weight means replication mass under the frequency
+        contract and unit mass per positive-weight physical row under the
+        prior contract.
     features : list[str], optional
         Subset of names to discretize: spline/polynomial features, and
         continuous-by-continuous interaction names as they appear in
@@ -1240,12 +1215,12 @@ def discretization_impact(
         spline-by-categorical interaction is discretized only when named: its
         rating-table block bins the spline covariate, and the sweep measures
         that table.
-    band_se : float
+    band_se : float, default 1.0
         Under ``"exact"``: the tolerance in pointwise standard errors of the
-        term's log relativity (native centering). Default 1.0.
-    band_max_error : float
+        term's log relativity (native centering).
+    band_max_error : float, default 0.10
         Under ``"exact"``: the largest relative error of a band factor against
-        the curve. Default 0.10.
+        the curve.
 
     Returns
     -------

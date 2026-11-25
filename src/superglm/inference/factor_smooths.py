@@ -170,7 +170,7 @@ def _population_deviations(
     """Each ``sz`` level's deviation from the population curve as predicted, and its covariance.
 
     ``predict(level) - predict(population)`` is ``b(x)' d_t`` with ``d_t =
-    Q_t (beta_t - c)`` (#432, ``FactorSmooth._identified_blocks``): ``Q_t =
+    Q_t (beta_t - c)`` (``FactorSmooth._identified_blocks``): ``Q_t =
     I - P_t`` for a thin or separated level with weight (``P_t`` its
     projector, ``FactorSmooth._free_projectors``), ``0`` for one predicted
     at the population value (``_levels_at_population``),
