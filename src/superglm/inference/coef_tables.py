@@ -6,6 +6,7 @@ from collections.abc import Callable, Hashable
 from typing import Any
 
 import numpy as np
+import scipy.spatial
 from numpy.typing import NDArray
 
 from superglm._weight_units import coefficient_covariance, standard_errors

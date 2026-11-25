@@ -12,6 +12,7 @@ Only orders zero through two exist here; a tail is generally not C3 at a join.
 from __future__ import annotations
 
 import numpy as np
+import scipy.linalg
 from numpy.typing import NDArray
 from scipy import special
 

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 
 import numpy as np
+import numpy.random
 from numba import njit
 from numpy.typing import NDArray
 

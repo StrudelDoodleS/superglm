@@ -819,6 +819,7 @@ def wald_block_statistic(
     tolerance leaves the direction the clusters cannot span a variance of the
     order of that tolerance squared, which is small but not rounding.
     """
+    import scipy.spatial
     from scipy.stats import chi2 as chi2_dist
 
     b = np.asarray(beta_block, dtype=np.float64).ravel()

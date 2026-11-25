@@ -21,6 +21,7 @@ from typing import Any, Literal, cast
 
 import numpy as np
 import pandas as pd
+import scipy.spatial
 from numpy.typing import NDArray
 from scipy import linalg
 

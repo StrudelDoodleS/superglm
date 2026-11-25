@@ -59,8 +59,9 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING, NamedTuple
 
-import numba
 import numpy as np
+import numpy.random
+from numba import njit, types
 from numpy.typing import NDArray
 
 from superglm._blas_threads import narrow_kernel_blas_threads
@@ -123,18 +124,18 @@ def _register_lapack() -> None:
 
 
 _register_lapack()
-_INT = numba.types.CPointer(numba.types.int32)
-_DOUBLE = numba.types.CPointer(numba.types.float64)
-_dgeqrf = numba.types.ExternalFunction(
-    "superglm_dgeqrf", numba.types.void(_INT, _INT, _DOUBLE, _INT, _DOUBLE, _DOUBLE, _INT, _INT)
+_INT = types.CPointer(types.int32)
+_DOUBLE = types.CPointer(types.float64)
+_dgeqrf = types.ExternalFunction(
+    "superglm_dgeqrf", types.void(_INT, _INT, _DOUBLE, _INT, _DOUBLE, _DOUBLE, _INT, _INT)
 )
-_dorgqr = numba.types.ExternalFunction(
+_dorgqr = types.ExternalFunction(
     "superglm_dorgqr",
-    numba.types.void(_INT, _INT, _INT, _DOUBLE, _INT, _DOUBLE, _DOUBLE, _INT, _INT),
+    types.void(_INT, _INT, _INT, _DOUBLE, _INT, _DOUBLE, _DOUBLE, _INT, _INT),
 )
 
 
-@numba.njit(cache=True, fastmath=_KERNEL_MATH)
+@njit(cache=True, fastmath=_KERNEL_MATH)
 def _mm(A, B):  # pragma: no cover - compiled
     """``A @ B`` by fixed-order loops (no BLAS: the result does not depend on a thread count)."""
     m, inner = A.shape
@@ -150,7 +151,7 @@ def _mm(A, B):  # pragma: no cover - compiled
     return out
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _house_qr(G, tau, work, ints):  # pragma: no cover - compiled
     """LAPACK ``dgeqrf`` of the column-major ``G`` (m x p, an ``(p, m)`` C array's transpose).
 
@@ -180,7 +181,7 @@ def _house_qr(G, tau, work, ints):  # pragma: no cover - compiled
     )
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _house_q(G, tau, Q, work, ints):  # pragma: no cover - compiled
     """``Q = H_0 ... H_{r-1} [I_r; 0]`` (m x r) from ``_house_qr``'s reflectors, by LAPACK ``dorgqr``.
 
@@ -212,7 +213,7 @@ def _house_q(G, tau, Q, work, ints):  # pragma: no cover - compiled
     )
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _upper_of(G, R):  # pragma: no cover - compiled
     """Write the ``min(m, p) x p`` upper triangle of ``G`` into ``R`` (p x p), zeros elsewhere."""
     m, p = G.shape
@@ -221,7 +222,7 @@ def _upper_of(G, R):  # pragma: no cover - compiled
             R[i, j] = G[i, j] if (i < m and j >= i) else 0.0
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _stacked_qr(R_acc, R_new):  # pragma: no cover - compiled
     """``QR([R_acc; R_new])`` in place: ``(stacked, tau, work, ints)`` as ``_house_qr`` leaves them."""
     p = R_acc.shape[0]
@@ -240,14 +241,14 @@ def _stacked_qr(R_acc, R_new):  # pragma: no cover - compiled
 
 # The TSQR merge of two pieces of one level, split by row kind so a Fisher
 # pass compiles no middle-factor code (``_house_q`` and its products).
-@numba.njit(cache=True)
+@njit(cache=True)
 def _merge_level(R_acc, R_new):  # pragma: no cover - compiled
     """Fisher rows: ``R_acc`` becomes the triangle of ``QR([R_acc; R_new])``."""
     stacked, _, _, _ = _stacked_qr(R_acc, R_new)
     _upper_of(stacked, R_acc)
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _merge_signed_level(R_acc, M_acc, R_new, M_new):  # pragma: no cover - compiled
     """Signed rows: ``_merge_level`` and ``M = Q_a'M_a Q_a + Q_b'M_b Q_b``."""
     p = R_acc.shape[0]
@@ -267,7 +268,7 @@ def _merge_signed_level(R_acc, M_acc, R_new, M_new):  # pragma: no cover - compi
     _upper_of(stacked, R_acc)
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _leaf_segments(
     rows, weights, error, levels, R_acc, M_acc, E_acc, started, counts, merges, signed
 ):  # pragma: no cover - compiled
@@ -351,7 +352,7 @@ def _leaf_segments(
         start = stop
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _close_level(
     R, level, k, top, tail_norms2, tail_gram, with_gram, tail_root
 ):  # pragma: no cover
@@ -395,7 +396,7 @@ def _close_level(
         _merge_level(tail_root, trailing)
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _fisher_leaf_segments(
     rows,
     weights,
@@ -474,7 +475,7 @@ def _fisher_leaf_segments(
     return -1
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _exact_basis_rows(out, order, lo, hi, data, indices, indptr, natural_map):  # pragma: no cover
     """Rows ``order[lo:hi]`` of ``B @ natural_map`` from ``B``'s CSR arrays, stored order."""
     k = natural_map.shape[1]
@@ -489,7 +490,7 @@ def _exact_basis_rows(out, order, lo, hi, data, indices, indptr, natural_map):  
                 out[i, j] += value * natural_map[column, j]
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _table_basis_rows(out, order, lo, hi, bins, table):  # pragma: no cover - compiled
     """Rows ``order[lo:hi]`` of a discrete term's support table."""
     k = table.shape[1]
@@ -499,7 +500,7 @@ def _table_basis_rows(out, order, lo, hi, bins, table):  # pragma: no cover - co
             out[i, j] = table[b, j]
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _upper_solve(U, B, out):  # pragma: no cover - compiled
     """``out = U^-1 B`` for an upper-triangular ``U`` (k x k) by back substitution."""
     k = U.shape[0]
@@ -511,7 +512,7 @@ def _upper_solve(U, B, out):  # pragma: no cover - compiled
             out[i, c] = s / U[i, i]
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _level_row_forms(U, F, levels, Z, tree_out, cross_out):  # pragma: no cover - compiled
     """Per (row, level) piece ``z``: ``tree_out = ||U_l^-T z||^2`` and ``cross_out = F_l' z``.
 
@@ -538,7 +539,7 @@ def _level_row_forms(U, F, levels, Z, tree_out, cross_out):  # pragma: no cover 
             cross_out[t, c] = s
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _fisher_trials(R_acc, roots, k, Qx, U_out, F_out, Dinv_out, logdets):  # pragma: no cover
     """Per level ``QR([[R_top], [sqrt(P), 0]])``: ``U``, ``F = U^-1 V``, ``D^-1``, ``log|D|``;
     ``Qx += T'T``.  Returns ``-1`` or the first level whose pivot is not positive.
@@ -585,7 +586,7 @@ def _fisher_trials(R_acc, roots, k, Qx, U_out, F_out, Dinv_out, logdets):  # pra
     return -1
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _signed_trials(
     B, signature, roots, k, Qx, U_out, F_out, Dinv_out, logdets, kappa, sigma_extra
 ):  # pragma: no cover - compiled
@@ -1105,7 +1106,7 @@ def _leaf_pass(
     return R_acc, (M_acc if signed else None), (E_acc if signed else None), counts, merges
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _moment_segments(basis, border, weights, levels, D, C, A, zs, xs, ws):  # pragma: no cover
     """Raw moments of several signed weight vectors in one pass over level-ordered rows.
 
@@ -1147,7 +1148,7 @@ def _moment_segments(basis, border, weights, levels, D, C, A, zs, xs, ws):  # pr
                     A[t, i, j] += xi * border[r, j]
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _raw_moment_segments(
     data, indices, indptr, lo, border, weights, levels, G, C, A, zs, xs, ws
 ):  # pragma: no cover - compiled

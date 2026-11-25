@@ -49,6 +49,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import numpy.random
 from numba import njit  # type: ignore[import-untyped]
 
 #: The step in the sinh variable at unit feature spread.

@@ -23,6 +23,8 @@ from __future__ import annotations
 import gc
 import threading
 
+import numpy.random
+from numba import core  # type: ignore[import-untyped]
 from numba.core import event as numba_event  # type: ignore[import-untyped]
 
 _state = threading.local()

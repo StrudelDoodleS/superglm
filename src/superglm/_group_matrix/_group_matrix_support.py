@@ -29,6 +29,7 @@ from __future__ import annotations
 from typing import Final, Literal, cast
 
 import numpy as np
+import numpy.random
 import scipy.sparse as sp
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray

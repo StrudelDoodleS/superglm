@@ -25,6 +25,7 @@ from typing import Any, Literal, NamedTuple
 
 import numpy as np
 import pandas as pd
+import scipy.linalg
 from numpy.typing import NDArray
 from scipy import special
 

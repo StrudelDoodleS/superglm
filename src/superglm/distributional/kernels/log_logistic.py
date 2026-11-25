@@ -3,6 +3,7 @@
 from math import comb
 
 import numpy as np
+import scipy.linalg
 from scipy.special import expit
 
 from superglm.distributional.kernels._common import readonly

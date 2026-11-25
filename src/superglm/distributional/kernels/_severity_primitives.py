@@ -78,6 +78,8 @@ from __future__ import annotations
 
 import math
 
+import numpy.random
+import scipy.linalg
 from numba import njit
 from scipy import special
 
