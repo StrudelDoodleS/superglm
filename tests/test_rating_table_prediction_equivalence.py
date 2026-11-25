@@ -1744,7 +1744,7 @@ def test_a_binomial_model_cannot_be_exported_whatever_its_frame_looks_like():
 
     A level with a 100% event rate puts the MLE at ``mu = 1``, the boundary of
     the log-binomial parameter space.  The fit keeps every trial inside it
-    (``irls_state.mean_space_violation``), so it ends just below the boundary
+    (``FamilyLinkPair.mean_space_violation``), so it ends just below the boundary
     rather than at a "probability" above one that ``clip_mu`` rewrites.
 
     But the refusal is by FAMILY, and the second fixture below is why.  A

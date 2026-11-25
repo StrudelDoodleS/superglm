@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._family_link import pair_of
 from superglm._roundoff import gamma as _gamma
 from superglm.solvers.constrained_qp import (
     QPResult,
@@ -28,8 +29,6 @@ from superglm.solvers.irls_direct._finalise import _finalise_centred
 from superglm.solvers.irls_direct._step import _IRLSDirectStep, _note_svd_fallback
 from superglm.solvers.irls_state import (
     _state_is_finite,
-    link_domain_violation,
-    mean_space_violation,
 )
 
 if TYPE_CHECKING:
@@ -174,9 +173,9 @@ class _IRLSDirectQPStep(_IRLSDirectStep):
         self._budget_hits = 0
         # transient note once; terminal authority is separate
         self._reported_nonconvergence = False
-        # Under a link whose domain is bounded at zero (``link_domain_violation``)
+        # Under a link whose domain is bounded at zero (``FamilyLinkPair.link_domain_violation``)
         # rows at that edge can leave the working QP unbounded.
-        self._zero_bounded = link_domain_violation(link, family) is not None
+        self._zero_bounded = pair_of(family, link).link_domain_violation is not None
 
     def propose(self, fit: _IRLSDirectFit, it: int) -> bool | None:
         """Solve this iteration's working QP; ``True`` when the fit ends at its committed state.
@@ -270,10 +269,7 @@ class _IRLSDirectQPStep(_IRLSDirectStep):
         budget = _qp_iteration_budget(self.A_all)
         if budget <= self._iteration_budget or not _state_is_finite(fit.committed):
             return False
-        for outside in (
-            mean_space_violation(fit.family, fit.link),
-            link_domain_violation(fit.link, fit.family),
-        ):
+        for outside in (fit.pair.mean_space_violation, fit.pair.link_domain_violation):
             if outside is not None and outside(fit.committed.eta_unclipped, fit.weights):
                 return False
         self._iteration_budget = budget

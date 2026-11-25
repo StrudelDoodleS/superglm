@@ -249,9 +249,9 @@ def _bounded_arithmetic(bounded: bool):
 
 def _is_bounded(state: Any) -> bool:
     """Whether a predictor's link declares a domain (``links.declared_eta_domain``)."""
-    from superglm.solvers.irls_state import link_domain_rows
+    from superglm.links import outside_eta_domain
 
-    return link_domain_rows(state.link) is not None
+    return outside_eta_domain(state.link) is not None
 
 
 def _readonly_eta(eta: NDArray, bounded: NDArray[np.bool_] | bool) -> NDArray[np.float64]:
@@ -798,9 +798,9 @@ class DenseDistributionalModel:
         self, column: NDArray[np.float64], parameter_index: int
     ) -> NDArray[np.bool_]:
         """``outside_domain`` for one parameter's predictors ``column``."""
-        from superglm.solvers.irls_state import link_domain_rows
+        from superglm.links import outside_eta_domain
 
-        rows = link_domain_rows(self.layout.predictors[parameter_index].link)
+        rows = outside_eta_domain(self.layout.predictors[parameter_index].link)
         if rows is None:
             return np.zeros(np.shape(column), dtype=bool)
         return np.asarray(rows(column), dtype=bool)

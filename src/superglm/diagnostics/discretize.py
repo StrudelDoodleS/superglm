@@ -1256,9 +1256,8 @@ def discretization_impact(
     from superglm._utils import weighted_row_sum
     from superglm._warn import warn_caller
     from superglm.distributions import clip_mu
-    from superglm.links import is_multiplicative, stabilize_eta
+    from superglm.links import is_multiplicative, outside_eta_domain, stabilize_eta
     from superglm.model import base
-    from superglm.solvers.irls_state import link_domain_rows
 
     plan = base._prediction_plan(model)
     terms_by_name = {term["name"]: term for term in plan["features"]}
@@ -1651,7 +1650,7 @@ def discretization_impact(
             predictions = np.exp(eta_orig + total_delta)
         unusable = ~np.isfinite(predictions) | (predictions == 0.0)
         binned_no_mean = no_mean
-    elif link_domain_rows(link) is not None:
+    elif outside_eta_domain(link) is not None:
         # The binned predictor's means as predict forms them, its domain read on the raw
         # binned predictor before any clip: binning can move a row across ``eta = 0`` either
         # way.  On every row with ``1e-12 <= eta <= 1e12`` this is the stabilized sum below.

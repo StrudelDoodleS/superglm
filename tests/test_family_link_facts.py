@@ -29,6 +29,7 @@ import numpy as np
 import pytest
 
 import superglm.links as links_module
+from superglm._family_link import pair_of
 from superglm._utils import contract_weights
 from superglm._weight_units import _fisher_weight_power_bound
 from superglm.diagnostics.fit_cost import exact_reml_cost_message
@@ -63,31 +64,19 @@ from superglm.links import (
     stabilize_eta,
 )
 from superglm.model.fit_ops import _log_power_null_intercept, _null_curvature_kind
-from superglm.model.shape_ops import _CONVEX_DEVIANCE_LINKS
-from superglm.reml.direct import _PRESOLVE_PAIRS
-from superglm.reml.identified import binomial_log
 from superglm.reml.observed_geometry import (
-    _builtin_fisher_equals_observed,
     classify_binned_reml_curvature,
     classify_reml_curvature,
 )
 from superglm.reml.scale import prepare_reml_scale_data
-from superglm.solvers.clip_rows import clip_can_hold_against, declares_tail_rows
 from superglm.solvers.dispersion import family_default_weight_semantics
-from superglm.solvers.irls_direct._fit import _has_constant_irls_weights
 from superglm.solvers.irls_state import (
     _irls_objective_scale,
-    link_domain_rows,
-    link_domain_violation,
     mean_space_boundary_rows,
     mean_space_clipped_rows,
-    mean_space_violation,
 )
 from superglm.solvers.working_rows import (
-    _log_link_variance_power,
     coefficient_initial_intercept,
-    concave_observed_rows,
-    supports_observed_newton,
 )
 
 # ── The objects ──────────────────────────────────────────────────
@@ -258,7 +247,7 @@ def _scale_profile(family) -> str | None:
 
 
 def _domain_rows(family, link) -> tuple[bool, ...] | None:
-    rows = link_domain_rows(link, family)
+    rows = pair_of(family, link).link_domain_rows
     return None if rows is None else tuple(bool(r) for r in rows(np.array([-1.0, 0.5, 2.0])))
 
 
@@ -295,15 +284,15 @@ LINK_PROBES = {
     "eta_domain": declared_eta_domain,
 }
 PAIR_PROBES = {
-    "constant_fisher_weight": _has_constant_irls_weights,
-    "observed_newton": supports_observed_newton,
-    "observed_rows_concave": concave_observed_rows,
-    "log_link_variance_power": _log_link_variance_power,
-    "presolve_eligible": lambda f, k: (type(f), type(k)) in _PRESOLVE_PAIRS,
-    "fisher_equals_observed": _builtin_fisher_equals_observed,
+    "constant_fisher_weight": lambda f, k: pair_of(f, k).constant_fisher_weight is not None,
+    "observed_newton": lambda f, k: pair_of(f, k).observed_newton,
+    "observed_rows_concave": lambda f, k: pair_of(f, k).observed_rows_concave,
+    "log_link_variance_power": lambda f, k: pair_of(f, k).log_link_variance_power,
+    "presolve_eligible": lambda f, k: pair_of(f, k).presolve_eligible,
+    "fisher_equals_observed": lambda f, k: pair_of(f, k).fisher_equals_observed,
     "reml_curvature": _reml_curvature,
     "binned_reml_curvature": classify_binned_reml_curvature,
-    "deviance_convex_in_eta": lambda f, k: type(k) in _CONVEX_DEVIANCE_LINKS.get(type(f), ()),
+    "deviance_convex_in_eta": lambda f, k: pair_of(f, k).deviance_convex_in_eta,
     "null_curvature_kind": _null_curvature_kind,
     "null_closed_form": lambda f, k: (
         _log_power_null_intercept(_PROBE_Y, _PROBE_W, np.array([0.0, 0.1]), f, k) is not None
@@ -316,9 +305,8 @@ PAIR_PROBES = {
     ),
     "zero_start": _zero_start,
     "weight_power_bound": _fisher_weight_power_bound,
-    "mean_space_bounded_by_link": lambda f, k: mean_space_violation(f, k) is not None,
-    "true_score_mean_space": binomial_log,
-    "link_domain_guarded": lambda f, k: link_domain_violation(k, f) is not None,
+    "mean_space_bounded_by_link": lambda f, k: pair_of(f, k).mean_space_violation is not None,
+    "link_domain_guarded": lambda f, k: pair_of(f, k).link_domain_violation is not None,
     "link_domain_rows": _domain_rows,
     "mean_space_boundary_rows": lambda f, k: mean_space_boundary_rows(
         f, k, np.array([-1e-9, -3.0, 0.5, 0.25]), np.ones(4)
@@ -326,8 +314,8 @@ PAIR_PROBES = {
     "mean_space_clipped_rows": lambda f, k: mean_space_clipped_rows(
         f, k, np.array([-1e-9, -30.0, -1.0]), np.ones(3)
     ),
-    "clip_can_hold_against": clip_can_hold_against,
-    "tail_rows": declares_tail_rows,
+    "clip_can_hold_against": lambda f, k: pair_of(f, k).clip_can_hold_against,
+    "tail_rows": lambda f, k: pair_of(f, k).tail_rows,
     "response_boundaries": response_boundaries,
 }
 
@@ -535,7 +523,6 @@ PAIR_FACTS = {
     "zero_start": _expected_zero_start,
     "weight_power_bound": _expected_weight_power,
     "mean_space_bounded_by_link": lambda f, k: (f.lineage, k.lineage) == ("binomial", "log"),
-    "true_score_mean_space": lambda f, k: (f.lineage, k.lineage) == ("binomial", "log"),
     "link_domain_guarded": lambda f, k: _expected_domain_rows(f, k) is not None,
     "link_domain_rows": _expected_domain_rows,
     "mean_space_boundary_rows": lambda f, k: (

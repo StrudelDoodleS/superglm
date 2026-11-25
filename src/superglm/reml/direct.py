@@ -20,6 +20,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._family_link import pair_of
 from superglm._fit_trace import TraceRun
 from superglm._lambda_box import LambdaBox, bound_pressure, glm_lambda_box
 from superglm._roundoff import NEWTON_EIGENVALUE_FLOOR
@@ -28,16 +29,12 @@ from superglm.diagnostics.separation import (
     validate_solver_separation_mode,
 )
 from superglm.distributions import (
-    Binomial,
     Gamma,
     Gaussian,
-    NegativeBinomial,
-    Poisson,
     Tweedie,
     scale_is_known,
 )
 from superglm.group_matrix import DesignMatrix
-from superglm.links import CloglogLink, LogitLink, LogLink, ProbitLink
 from superglm.reml._leverage_rows import reads_row_supports
 from superglm.reml.convergence import (
     FLAT_DIRECTION_FREEZE_FLOOR,
@@ -152,23 +149,9 @@ _PRESOLVE_MIN_ESTIMATED = 8
 # Nor under a shorter iteration cap: the pre-solve takes up to
 # ``max_reml_iter`` updates itself, which would double a capped budget.
 _PRESOLVE_MIN_REML_ITER = 10
-# Only for these exact family/link types, with no RandomEffect or FactorSmooth
-# term the structured solvers could take: on them the cached-W working model
-# carries the exact loop's curvature (Fisher on a canonical link, observed rows
-# where ``concave_observed_rows`` declares them) and the pre-solve pays.
-# Tweedie power-search candidates and estimated-theta NB2 fits start cold
-# (``model.reml_ops``).
-_PRESOLVE_PAIRS = frozenset(
-    {
-        (Poisson, LogLink),
-        (Binomial, LogitLink),
-        (Binomial, ProbitLink),
-        (Binomial, CloglogLink),
-        (Gamma, LogLink),
-        (Tweedie, LogLink),
-        (NegativeBinomial, LogLink),
-    }
-)
+# Only for a pair that declares it (``FamilyLinkPair.presolve_eligible``), with no
+# RandomEffect or FactorSmooth term the structured solvers could take. Tweedie
+# power-search candidates and estimated-theta NB2 fits start cold (``model.reml_ops``).
 # First-order fits keep the derivative Grams (``m n p^2`` multiply-adds per
 # iteration) until they pass this work, then take the one-pass leverage route
 # (``n p^2``, ``reml_w_correction(leverage_hessian=True)``); Wood (2011, sec.
@@ -400,6 +383,7 @@ def optimize_direct_reml(
         )
 
     scale_known = scale_is_known(distribution)
+    pair = pair_of(distribution, link)
     (
         likelihood_size,
         saturated_log_weight,
@@ -551,7 +535,7 @@ def optimize_direct_reml(
         presolve = (
             not warm_lambdas
             and int(np.count_nonzero(estimated_mask)) >= _PRESOLVE_MIN_ESTIMATED
-            and (type(distribution), type(link)) in _PRESOLVE_PAIRS
+            and pair.presolve_eligible
             and not structured_alternative
             and max_reml_iter >= _PRESOLVE_MIN_REML_ITER
         )
@@ -934,8 +918,9 @@ def optimize_direct_reml(
         # A binomial/identity boundary state is feasible, and is disclosed instead.
         restoration_step = 1.0
         rho_at_boundary = rho_clipped
-        while pirls_result.termination_reason == "mean_space_boundary" and isinstance(
-            link, LogLink
+        while (
+            pirls_result.termination_reason == "mean_space_boundary"
+            and pair.mean_space_violation is not None
         ):
             if not bool(np.any(estimated_mask & (rho_clipped < log_hi))):
                 raise ObservedModeNotConvergedError(
@@ -1199,15 +1184,14 @@ def optimize_direct_reml(
         w_correction_args: tuple = ()
         w_correction_kwargs: dict[str, Any] = {}
         if not discrete:
-            # Binomial/logit on a dense factor takes the leverage route at any
-            # work, with the exact gradient and no W(rho) cross terms
-            # (``gradient_terms_only``), at every iteration and at the stop:
-            # its derivative Grams cost several leverage passes.
+            # A pair that declares it (binomial/logit) takes the leverage route on
+            # a dense factor at any work, with the exact gradient and no W(rho)
+            # cross terms (``gradient_terms_only``), at every iteration and at
+            # the stop.
             leverage_ready = w_correction_order == 1 and len(penalties) >= _LEVERAGE_MIN_PENALTIES
             binomial_logit = bool(
                 leverage_ready
-                and type(distribution) is Binomial
-                and type(link) is LogitLink
+                and pair.leverage_route_always
                 and geometry is None
                 and isinstance(as_hessian_factor(reml_inverse), DenseHessianFactor)
             )

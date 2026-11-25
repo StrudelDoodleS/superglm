@@ -639,6 +639,10 @@ class Tweedie:
         return float(np.sum(logpdf))
 
 
+#: The family classes this module ships. Arithmetic is decided by membership of
+#: the exact type, so a subclass never inherits a closed form.
+SHIPPED_FAMILIES = (Gaussian, Poisson, Binomial, Gamma, NegativeBinomial, Tweedie)
+
 DISTRIBUTION_SHORTCUTS: dict[str, type] = {
     "poisson": Poisson,
     "gaussian": Gaussian,

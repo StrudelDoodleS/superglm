@@ -36,6 +36,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._family_link import pair_of
 from superglm._roundoff import UNIT_ROUNDOFF as _UNIT_ROUNDOFF
 from superglm._roundoff import gamma as _gamma
 from superglm.group_matrix import (
@@ -189,14 +190,6 @@ def laplace_excluded_coefficients(
                 mass[column] = float(np.sum(squares[positive]))
     weak = evaluated & candidates & (mass > 0.0) & (curvature <= bar * mass)
     return np.flatnonzero(weak).astype(np.intp)
-
-
-def binomial_log(distribution: Any, link: Any) -> bool:
-    """Whether the family is binomial with the log link (true-score mean-space regime)."""
-    from superglm.distributions import Binomial
-    from superglm.links import LogLink
-
-    return isinstance(distribution, Binomial) and isinstance(link, LogLink)
 
 
 def separated_directions(
@@ -425,7 +418,7 @@ class IdentifiedLaplace:
         weak = laplace_excluded_coefficients(dm, sample_weight, penalties)
         pivots: NDArray = np.zeros(0, dtype=np.intp)
         separated: tuple = ()
-        if y is not None and binomial_log(distribution, link):
+        if y is not None and pair_of(distribution, link).mean_space_violation is not None:
             pivots, separated = separated_directions(
                 dm,
                 y,

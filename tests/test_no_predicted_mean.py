@@ -1,7 +1,7 @@
 """Every reader of a row with no predicted mean uses one rule.
 
 ``predict`` gives such a row NaN with a warning; the rows are those outside the
-link's domain (``link_domain_rows``). A reader that scores, tests or ranks rows
+link's domain (``links.outside_eta_domain``). A reader that scores, tests or ranks rows
 refuses a row of positive weight with no mean with the named
 ``NoPredictedMeanError`` (``base.require_priced_rows``), and leaves a zero-weight
 one out; a comparison leaves out the rows its full model cannot price and reports

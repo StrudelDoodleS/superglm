@@ -4,9 +4,9 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
+from superglm._family_link import pair_of
 from superglm.group_matrix import CategoricalGroupMatrix, DesignMatrix
 from superglm.model.separated_levels import separated_labels
-from superglm.reml.identified import binomial_log
 
 
 @dataclass(frozen=True)
@@ -67,7 +67,7 @@ class REMLLevelHold:
             held = [j for j, level in enumerate(non_base) if level in labels]
             n_separated = len(held)
             if cross is None and spec._base_level in labels:
-                if binomial_log(model._distribution, model._link):
+                if pair_of(model._distribution, model._link).mean_space_violation is not None:
                     # Its reference direction spans the intercept and every
                     # level. The existing mean-space solve preserves invariance
                     # to offset shifts, including starts lowered from above 1.

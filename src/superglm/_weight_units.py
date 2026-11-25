@@ -73,6 +73,7 @@ def _fisher_weight_power_bound(family, link):
     endpoint or zero (the binary-link density's mode). Unknown links retain
     their original units rather than assuming a bound for a custom derivative.
     """
+    from superglm._family_link import pair_of
     from superglm.distributions import (
         _VARIANCE_FLOOR,
         Gamma,
@@ -82,22 +83,14 @@ def _fisher_weight_power_bound(family, link):
         Tweedie,
         clip_mu,
     )
-    from superglm.links import (
-        SHIPPED_LINKS,
-        IdentityLink,
-        LogLink,
-        SqrtLink,
-        stabilize_eta,
-    )
+    from superglm.links import LogLink, stabilize_eta
     from superglm.solvers.working_rows import fisher_working_weights
 
-    if (type(family) is Gaussian and type(link) is IdentityLink) or (
-        type(family) is Gamma and type(link) is LogLink
-    ):
-        return 0
-    if type(family) is Poisson and type(link) is SqrtLink:
-        return 2
-    if type(link) not in SHIPPED_LINKS:
+    pair = pair_of(family, link)
+    constant = pair.constant_fisher_weight
+    if constant is not None:
+        return math.frexp(constant)[1] - 1
+    if not pair.link_is_shipped:
         return None
     limit = np.finfo(np.float64).max
     eta = stabilize_eta(np.array([-limit, 0.0, limit]), link)

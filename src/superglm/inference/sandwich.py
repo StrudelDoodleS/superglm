@@ -11,6 +11,7 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
+from superglm._family_link import pair_of
 from superglm._parallel import parallel_config, pool_workers
 from superglm._weight_units import scale_penalties
 from superglm.distributions import (
@@ -70,7 +71,6 @@ from superglm.penalties.group_elastic_net import GroupElasticNet
 from superglm.penalties.ridge import Ridge
 from superglm.reml.observed_geometry import (
     ObservedGeometryInfeasibleError,
-    _builtin_fisher_equals_observed,
     _stable_signed_mean_pair,
     classify_reml_curvature,
     compute_observed_information_weights,
@@ -86,7 +86,7 @@ from superglm.solvers.centered_system import (
     grouped_augmented_factor,
     weighted_mean_pair,
 )
-from superglm.solvers.clip_rows import declares_tail_rows, tail_rows
+from superglm.solvers.clip_rows import tail_rows
 from superglm.solvers.dispersion import FREQUENCY_WEIGHTS, model_weight_semantics
 from superglm.solvers.mode_score import linear_predictor
 from superglm.solvers.rank import (
@@ -348,7 +348,7 @@ def _observed_score_and_curvature(
     link_type = type(link)
 
     # ── Canonical built-in pairs (observed == Fisher identically) ──
-    if _builtin_fisher_equals_observed(distribution, link):
+    if pair_of(distribution, link).fisher_equals_observed:
         if dist_type is Gaussian and link_type is IdentityLink:
             return y - mu, ones, True, "fisher"
         if dist_type is Poisson and link_type is LogLink:
@@ -408,7 +408,7 @@ def _observed_score_and_curvature(
                 h_unit = (1.0 - y) * mu / (one_minus * one_minus)
                 return s_unit, h_unit, False, "observed"
 
-    if declares_tail_rows(distribution, link):
+    if pair_of(distribution, link).tail_rows:
         # probit and cloglog: the likelihood's score and observed curvature in eta
         _, s_unit, _, h_unit = tail_rows(link, y, eta)
         return s_unit, h_unit, False, "observed"
@@ -974,7 +974,7 @@ def compute_superglm_sandwich_covariance(
         clip_held = binomial and bool(np.any(((clipped != mu) | (eta != eta_raw)) & pos))
         if not binomial:
             mu = clipped
-        elif declares_tail_rows(model._distribution, model._link):
+        elif pair_of(model._distribution, model._link).tail_rows:
             eta = np.asarray(eta_raw, dtype=np.float64)
             with np.errstate(over="ignore", under="ignore"):
                 mu = np.asarray(model._link.inverse(eta), dtype=np.float64)

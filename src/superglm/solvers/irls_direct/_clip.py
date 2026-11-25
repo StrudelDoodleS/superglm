@@ -8,10 +8,10 @@ from typing import TYPE_CHECKING
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._family_link import pair_of
 from superglm.solvers.clip_rows import (
     ClipRows,
     count_held_against,
-    declares_tail_rows,
     exported_working_rows,
     likelihood_deviance,
     likelihood_working_rows,
@@ -32,7 +32,7 @@ class _IRLSDirectClipOverlay:
     """A binomial fit's rows where the working clip holds one, on every route.
 
     Held (``clip``) when the clip can hold a row against its outcome
-    (``clip_rows.clip_can_hold_against``), else ``None``; it keeps no reference to the fit.
+    (``FamilyLinkPair.clip_can_hold_against``), else ``None``; it keeps no reference to the fit.
     While ``ClipRows`` is ``working`` it does nothing until the loop ends, so a fit ending
     clear of such rows is the solver's own bit for bit; ``moves_to_likelihood`` then counts
     rows held against their outcome, once. With any, a pair declaring tail rows moves to
@@ -46,7 +46,7 @@ class _IRLSDirectClipOverlay:
 
     def __init__(self, family: object, link: object, shared: ClipRows | None) -> None:
         self.rows = ClipRows() if shared is None else shared
-        self.declared = declares_tail_rows(family, link)
+        self.declared = pair_of(family, link).tail_rows
         # rows held against their outcome at the state the working rows' loop ended on
         self.held_against = 0
         # the move to the likelihood's rows came with no iteration left to solve them

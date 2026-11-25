@@ -16,6 +16,7 @@ from superglm import (
     RandomEffect,
     SuperGLM,
 )
+from superglm._family_link import _CONVEX_DEVIANCE_LINKS
 from superglm._roundoff import gamma
 from superglm.constraints import (
     _ROW_STEPS,
@@ -4565,11 +4566,7 @@ def test_intercept_profile_takes_no_trial_the_familys_clamp_moves(monkeypatch):
 
 
 def _convex_pairings():
-    return [
-        (family, link)
-        for family, links in shape_ops._CONVEX_DEVIANCE_LINKS.items()
-        for link in links
-    ]
+    return [(family, link) for family, links in _CONVEX_DEVIANCE_LINKS.items() for link in links]
 
 
 @pytest.mark.parametrize(

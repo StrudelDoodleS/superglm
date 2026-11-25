@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 from scipy import sparse
 
+from superglm._family_link import FamilyLinkPair, pair_of
 from superglm.features.categorical import Categorical
 from superglm.features.spline import Spline
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix, SparseGroupMatrix
@@ -876,7 +877,7 @@ class TestDirectSolverBasic:
             weight_semantics="frequency",
         )
 
-        monkeypatch.setattr(irls_direct, "_has_constant_irls_weights", lambda *_: False)
+        monkeypatch.setattr(FamilyLinkPair, "constant_fisher_weight", None)
         uncached, _ = irls_direct.fit_irls_direct(
             X=dm,
             y=y,
@@ -919,7 +920,7 @@ class TestDirectSolverBasic:
             centered_calls += 1
             return original_centered(*args, **kwargs)
 
-        assert irls_direct._has_constant_irls_weights(Poisson(), SqrtLink())
+        assert pair_of(Poisson(), SqrtLink()).constant_fisher_weight is not None
         monkeypatch.setattr(irls_direct, "build_centered_system", counting_centered_system)
         cached, _ = irls_direct.fit_irls_direct(
             X=dm,
@@ -937,7 +938,7 @@ class TestDirectSolverBasic:
         )
         cached_centered_calls = centered_calls
 
-        monkeypatch.setattr(irls_direct, "_has_constant_irls_weights", lambda *_: False)
+        monkeypatch.setattr(FamilyLinkPair, "constant_fisher_weight", None)
         uncached, _ = irls_direct.fit_irls_direct(
             X=dm,
             y=y,
@@ -961,7 +962,6 @@ class TestDirectSolverBasic:
         assert cached.deviance == pytest.approx(uncached.deviance, abs=1e-12)
 
     def test_poisson_sqrt_constant_weight_cache_is_exact_type_gated(self):
-        import superglm.solvers.irls_direct._fit as irls_direct
         from superglm.distributions import Poisson
         from superglm.links import SqrtLink
 
@@ -971,8 +971,8 @@ class TestDirectSolverBasic:
         class DerivedSqrtLink(SqrtLink):
             pass
 
-        assert not irls_direct._has_constant_irls_weights(DerivedPoisson(), SqrtLink())
-        assert not irls_direct._has_constant_irls_weights(Poisson(), DerivedSqrtLink())
+        assert pair_of(DerivedPoisson(), SqrtLink()).constant_fisher_weight is None
+        assert pair_of(Poisson(), DerivedSqrtLink()).constant_fisher_weight is None
 
     def test_sqrt_null_shortcut_skips_only_unused_terminal_working_rows(self, monkeypatch):
         import superglm.solvers.irls_direct._fit as irls_direct
@@ -1068,7 +1068,7 @@ class TestDirectSolverBasic:
             centered_calls += 1
             return original_centered(*args, **kwargs)
 
-        assert not irls_direct._has_constant_irls_weights(family, link)
+        assert pair_of(family, link).constant_fisher_weight is None
         monkeypatch.setattr(irls_direct, "build_centered_system", counting_centered_system)
         actual, _ = irls_direct.fit_irls_direct(
             X=dm,
@@ -1084,7 +1084,7 @@ class TestDirectSolverBasic:
         )
         assert centered_calls > 1
 
-        monkeypatch.setattr(irls_direct, "_has_constant_irls_weights", lambda *_: False)
+        monkeypatch.setattr(FamilyLinkPair, "constant_fisher_weight", None)
         reference, _ = irls_direct.fit_irls_direct(
             X=dm,
             y=y,
@@ -1601,11 +1601,7 @@ class TestDirectSolverBasic:
             ProbitLink,
             SqrtLink,
         )
-        from superglm.solvers.irls_state import (
-            _evaluate_irls_state,
-            _select_irls_trial,
-            link_domain_violation,
-        )
+        from superglm.solvers.irls_state import _evaluate_irls_state, _select_irls_trial
 
         n = 41
         x = np.linspace(0.0, 1.0, n)
@@ -1622,7 +1618,7 @@ class TestDirectSolverBasic:
             )
 
         committed, proposal = state(0.0), state(-3.0)
-        outside = link_domain_violation(InverseLink())
+        outside = pair_of(None, InverseLink()).link_domain_violation
         assert outside is not None
         assert not outside(committed.eta_unclipped, weights)
         assert outside(proposal.eta_unclipped, weights)
@@ -1650,7 +1646,7 @@ class TestDirectSolverBasic:
         assert outside(state(-1.5).eta_unclipped, weights)
         assert not outside(state(-0.75).eta_unclipped, weights)
 
-        assert link_domain_violation(InverseSquaredLink()) is not None
+        assert pair_of(None, InverseSquaredLink()).link_domain_violation is not None
         for link in (
             LogLink(),
             IdentityLink(),
@@ -1661,7 +1657,7 @@ class TestDirectSolverBasic:
             SqrtLink(),
             NegativeBinomialLink(theta=1.0),
         ):
-            assert link_domain_violation(link) is None
+            assert pair_of(None, link).link_domain_violation is None
 
     def test_inverse_link_default_start_is_raised_inside_the_domain(self):
         """A negative offset that puts the default start at eta <= 0 has its intercept raised.
@@ -1738,18 +1734,17 @@ class TestDirectSolverBasic:
             Tweedie,
         )
         from superglm.links import IdentityLink
-        from superglm.solvers.irls_state import link_domain_violation
 
         for family in (Poisson(), Gamma(), Tweedie(p=1.5), NegativeBinomial(theta=2.0)):
-            outside = link_domain_violation(IdentityLink(), family)
+            outside = pair_of(family, IdentityLink()).link_domain_violation
             assert outside is not None
             assert outside(np.array([0.5, 0.0]), np.array([1.0, 1.0]))
             assert not outside(np.array([0.5, -1.0]), np.array([1.0, 0.0]))
-        outside = link_domain_violation(IdentityLink(), Binomial())
+        outside = pair_of(Binomial(), IdentityLink()).link_domain_violation
         assert outside(np.array([0.5, 1.0]), np.array([1.0, 1.0]))
         assert not outside(np.array([0.5, 1.5]), np.array([1.0, 0.0]))
-        assert link_domain_violation(IdentityLink(), Gaussian()) is None
-        assert link_domain_violation(IdentityLink()) is None
+        assert pair_of(Gaussian(), IdentityLink()).link_domain_violation is None
+        assert pair_of(None, IdentityLink()).link_domain_violation is None
 
     def test_an_identity_subclass_keeps_the_domain_of_its_own_inverse(self):
         """The domain is ``inverse(eta) > 0``, not ``eta > 0``, for a link that shifts it.
@@ -1763,7 +1758,6 @@ class TestDirectSolverBasic:
         from superglm.distributions import Poisson
         from superglm.links import IdentityLink
         from superglm.solvers.irls_direct import fit_irls_direct
-        from superglm.solvers.irls_state import link_domain_violation
 
         class ShiftedIdentity(IdentityLink):
             def link(self, mu):
@@ -1772,7 +1766,7 @@ class TestDirectSolverBasic:
             def inverse(self, eta):
                 return eta + 1.0
 
-        outside = link_domain_violation(ShiftedIdentity(), Poisson())
+        outside = pair_of(Poisson(), ShiftedIdentity()).link_domain_violation
         assert not outside(np.array([-0.5]), np.ones(1))
         assert outside(np.array([-1.0]), np.ones(1))
 

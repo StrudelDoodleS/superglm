@@ -122,6 +122,33 @@ def declared_eta_domain(link: object) -> tuple[float, float] | None:
     return float(low), float(high)
 
 
+def outside_eta_domain(link: object) -> Callable[[NDArray], NDArray] | None:
+    """The rows whose linear predictor leaves the domain ``link`` declares, or ``None``.
+
+    The inverse and inverse-squared links, and every power link of negative
+    power ``p`` (``mu = eta**(1/p)``; ``PowerLink(-1)`` and ``PowerLink(-2)``
+    are those two again), map only ``0 < eta < inf`` to a positive mean.
+    ``stabilize_eta`` clips a non-positive ``eta`` to ``1e-12``, so a
+    row that crosses zero gets a mean of ``1e12`` whose Gamma or inverse
+    Gaussian deviance grows only like ``log mu``: a line search reading that
+    clipped deviance accepts the crossing, and the row is then pinned at the
+    clip with a Fisher weight ``mu^2 = 1e24`` from which no later step moves
+    it.  R's ``glm.fit`` and ``glm2`` halve a step whose linear predictor or
+    mean is invalid for the family (``valideta``, ``validmu``; Marschner
+    2011, R Journal 3(2), "inner loop 2").  The set ``{beta : X beta +
+    offset > 0}`` is convex, so halving from a state inside it finds a step
+    inside it.
+    """
+    domain = declared_eta_domain(link)
+    if domain is None:
+        return None
+    low, high = domain
+    # An open interval: a NaN predictor is outside it, and so is an overflowed one.
+    return lambda eta_unclipped: (
+        ~((np.asarray(eta_unclipped) > low) & (np.asarray(eta_unclipped) < high))
+    )
+
+
 def interior_eta(link: object) -> float:
     """A linear predictor inside ``link``'s declared domain (``1.0`` for ``(0, inf)``).
 

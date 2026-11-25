@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from superglm._family_link import pair_of
 from superglm.solvers.constrained_qp import _homogeneous_feasible_start
 from superglm.solvers.irls_direct._qp import _QP_FEASIBILITY_TOL
 from superglm.solvers.irls_state import (
@@ -19,8 +20,6 @@ from superglm.solvers.irls_state import (
     _stable_penalized_deviance_delta,
     _state_is_finite,
     interior_start_intercept,
-    link_domain_violation,
-    mean_space_violation,
 )
 from superglm.solvers.working_rows import coefficient_initial_intercept
 
@@ -44,15 +43,16 @@ def trial_refusal(
 ) -> StateInvalid | None:
     """The line search's refusal of a trial that leaves what the committed state is inside, else ``other``.
 
-    The family's mean space (``mean_space_violation``) and the link's own
-    domain (``link_domain_violation``) are each convex, so halving from a state
+    The family's mean space (``FamilyLinkPair.mean_space_violation``) and the link's own
+    domain (``FamilyLinkPair.link_domain_violation``) are each convex, so halving from a state
     inside one finds a trial inside it (Nocedal & Wright 2006, section 3.1,
     backtracking with a feasibility test).  A committed state outside one has
     no such guarantee, and that domain is not tested.  ``other`` is the
     route's own refusal, the feasible set or finite observed rows.
     """
     refusal = other
-    for outside in (mean_space_violation(family, link), link_domain_violation(link, family)):
+    pair = pair_of(family, link)
+    for outside in (pair.mean_space_violation, pair.link_domain_violation):
         if outside is not None and not outside(committed.eta_unclipped, weights):
             refusal = _refuses(outside, weights, refusal)
     return refusal
@@ -274,7 +274,7 @@ class _IRLSDirectTrialSearch:
             # this proposal is committed, convexity of A beta >= b and the
             # invalid-state predicate above preserve feasibility on every
             # subsequent accepted line-search segment.
-            outside_link_domain = link_domain_violation(link, family)
+            outside_link_domain = pair_of(family, link).link_domain_violation
             if outside_link_domain is not None and outside_link_domain(
                 proposal.eta_unclipped, weights
             ):

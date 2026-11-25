@@ -21,6 +21,7 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
+from superglm._family_link import pair_of
 from superglm._fit_trace import TraceRun
 from superglm._lambda_box import LambdaBox, bound_pressure, glm_lambda_box
 from superglm._roundoff import NEWTON_EIGENVALUE_FLOOR
@@ -116,7 +117,6 @@ from superglm.solvers.irls_direct import (
     _structured_solver_errors,
     fit_irls_direct,
 )
-from superglm.solvers.irls_state import link_domain_violation
 from superglm.solvers.mode_score import (
     centred_matvec,
     centred_warm_start,
@@ -693,7 +693,7 @@ def optimize_discrete_reml_cached_w(
     # A trial whose unclipped predictor leaves the link's domain has no REML
     # objective (it would be scored on clipped means) and is refused. No trial
     # state warm-starts a solve.
-    domain_violation = link_domain_violation(link, distribution)
+    domain_violation = pair_of(distribution, link).link_domain_violation
     _n_domain_refused_trials = 0
     # score-test stops refused because a concave shoulder was live
     _n_concave_stop_refusals = 0
