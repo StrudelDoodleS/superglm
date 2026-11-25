@@ -609,6 +609,73 @@ def test_structured_fits_decide_each_level_on_their_own_data(term) -> None:
             np.testing.assert_allclose(rows[label].se, expected[label], rtol=1e-9)
 
 
+def _whole_term_rows(summary):
+    return {r.name: r for r in summary._coef_rows if r.subgroup_type and r.name in ("a", "b")}
+
+
+@pytest.mark.parametrize("basis", list(_TWIN_BASES))
+def test_twin_ordered_terms_carry_no_whole_term_test(basis) -> None:
+    """Twin ordered terms: neither whole-term test is formed on any default summary (#740).
+
+    The piecewise row's chi-square tests ``beta_term = 0``, and the spline row's Wood test
+    the term's fitted function ``X_term beta_term``; moving the effect between the twins
+    leaves the fit, so the coefficients (and those functions) raise the design's rank when
+    appended.  At a80058a35 the default summary showed piecewise ``a`` chi2 17,782 (p = 0)
+    and the spline twins Wood p 0.092 and 0.059.
+    """
+    model, X, y = _twin_fit(["a", "b"], None, basis=_TWIN_BASES[basis])
+    for name in ("a", "b"):
+        group = next(g for g in model._groups if g.name == name)
+        design = _design(model)[:, 1 + group.start : 1 + group.end]
+        function = np.zeros((len(design), len(model.result.beta)))
+        function[:, group.sl] = design
+        assert _rank_gain(model, np.eye(len(model.result.beta))[group.sl]) > 0
+        assert _rank_gain(model, function) > 0
+    other = X.iloc[:120].reset_index(drop=True), y[:120] + 0.5
+    for summary in (
+        model.summary(),
+        model.metrics(X, y).summary(),
+        model.metrics(*other).summary(),
+    ):
+        rows = _whole_term_rows(summary)
+        assert set(rows) == {"a", "b"}
+        for row in rows.values():
+            assert row.wald_chi2 is None and row.wald_p is None and row.ref_df is None, row.name
+            assert row.estimable is False, row.name
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("basis", list(_TWIN_BASES))
+def test_a_single_ordered_term_keeps_its_whole_term_test(basis) -> None:
+    """Control (pins): one unaliased ordered term keeps its whole-term test on both summaries.
+
+    The piecewise row is the Wald chi-square ``b' V^-1 b`` of its unpenalized block, ``V``
+    the Gaussian ``phi (X'X)^-1`` block; the spline row is Wood's test, at the figures
+    a80058a35 gave (tolerances for the REML fit's convergence, not the test).
+    """
+    model, X, y = _twin_fit(["a"], None, basis=_TWIN_BASES[basis])
+    if basis == "piecewise":
+        design = _design(model)
+        coef, *_ = np.linalg.lstsq(design, y, rcond=None)
+        residual = y - design @ coef
+        phi = float(residual @ residual) / (len(y) - design.shape[1])
+        V = phi * np.linalg.inv(design.T @ design)[1:, 1:]
+        b = coef[1:]
+        expected = (float(b @ np.linalg.solve(V, b)), 2.0)
+    for summary in (model.summary(), model.metrics(X, y).summary()):
+        row = _whole_term_rows(summary)["a"]
+        assert row.estimable is True
+        if basis == "piecewise":
+            np.testing.assert_allclose([row.wald_chi2, row.ref_df], expected, rtol=1e-9)
+        else:
+            np.testing.assert_allclose(
+                [row.wald_chi2, row.ref_df], [85640.68738570434, 4.973720572547127], rtol=1e-6
+            )
+            np.testing.assert_allclose(
+                np.log(row.wald_p), np.log(1.0034931805512945e-209), rtol=1e-4
+            )
+
+
 def test_editor_stale_summary_keeps_the_basis_vocabulary(segmented_model) -> None:
     from superglm.editor.apply import apply_edits_to_model_copy_with_data
     from superglm.editor.session import EditorSession

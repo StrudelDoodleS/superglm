@@ -488,6 +488,22 @@ def build_coef_rows(
 
         return lambda contrasts: np.array([determined(c) for c in contrasts], dtype=bool)
 
+    def _function_determined(term_groups: list[GroupSlice], design: NDArray) -> bool:
+        """Whether the default covariance determines ``design @ beta`` of ``term_groups``' blocks.
+
+        Wood's test is of that fitted function: each row of ``design`` (columns in the
+        blocks' order) is one of its contrasts, and every one must be ``_determined``.
+        """
+        columns = np.concatenate([np.arange(g.start, g.end) for g in term_groups])
+        if np.all(coefficient_estimable[columns]):
+            return True
+        contrast = np.zeros(len(beta))
+        for row in design:
+            contrast[columns] = row
+            if not _determined(contrast):
+                return False
+        return True
+
     def _block_determines(start: int) -> Callable[[NDArray], NDArray[np.bool_]] | None:
         """``determines`` of a robust covariance for contrasts of the block at ``start``, or none."""
         covariance = sandwich_covariance
@@ -794,6 +810,7 @@ def build_coef_rows(
                 )
                 curve_se_min = float("nan")
                 curve_se_max = float("nan")
+                test_undetermined = False
                 beta_active = (
                     np.concatenate([beta[fg.sl] for fg, _ in active_pairs])
                     if active_pairs
@@ -814,18 +831,24 @@ def build_coef_rows(
                         edf1_j = float(np.sum(edf1[active_indices]))
                         X_j = R_a[:, active_indices]
                         res_df = _wood_residual_df(edf)
+                        test_undetermined = not _function_determined(
+                            [fg for fg, _ in active_pairs], X_j
+                        )
 
-                        try:
-                            stat, p_val, ref_df = _wood_test(
-                                [fg for fg, _ in active_pairs],
-                                beta_active,
-                                X_j,
-                                V_b_j,
-                                edf1_j,
-                                res_df,
-                            )
-                        except np.linalg.LinAlgError:
-                            pass
+                        if test_undetermined:
+                            stat = p_val = ref_df = None
+                        else:
+                            try:
+                                stat, p_val, ref_df = _wood_test(
+                                    [fg for fg, _ in active_pairs],
+                                    beta_active,
+                                    X_j,
+                                    V_b_j,
+                                    edf1_j,
+                                    res_df,
+                                )
+                            except np.linalg.LinAlgError:
+                                pass
                     curve_se_min, curve_se_max = _curve_se_range(g.feature_name)
 
                 _, s_lam, s_kind, s_knot_strat, s_bnd, s_penalty = _spline_enrichment(
@@ -846,6 +869,7 @@ def build_coef_rows(
                         curve_se_min=curve_se_min,
                         curve_se_max=curve_se_max,
                         subgroup_type="ordered_spline",
+                        estimable=not test_undetermined,
                         edf=feature_edf,
                         smoothing_lambda=s_lam,
                         spline_kind=s_kind,
@@ -875,6 +899,7 @@ def build_coef_rows(
                 ref_df = None if is_sandwich else float(main_group.size)
                 V_b_main: NDArray | None = None
                 main_determines = None
+                test_undetermined = False
                 if smooth_active:
                     ag = next(
                         (a for a in active_groups if a.name == main_group.name),
@@ -887,9 +912,14 @@ def build_coef_rows(
                             if is_sandwich
                             else _mask_determines(main_group.sl)
                         )
-                        stat, p_val, ref_df = _block_wald_for(
-                            b_main, V_b_main, main_group.sl, main_group.name
-                        )
+                        # The chi-square tests beta_main = 0: each coefficient is a contrast.
+                        test_undetermined = not np.all(main_determines(np.eye(main_group.size)))
+                        if test_undetermined:
+                            stat = p_val = ref_df = None
+                        else:
+                            stat, p_val, ref_df = _block_wald_for(
+                                b_main, V_b_main, main_group.sl, main_group.name
+                            )
                 rows.append(
                     _CoefRow(
                         name=feature_label,
@@ -906,6 +936,7 @@ def build_coef_rows(
                             if inner_kind == "piecewise"
                             else "ordered_polynomial"
                         ),
+                        estimable=not test_undetermined,
                         edf=feature_edf,
                     )
                 )
