@@ -24,7 +24,7 @@ from scipy.special import expit, log_ndtr
 from scipy.stats import norm
 
 from superglm import Categorical, Numeric, Spline, SuperGLM
-from superglm.links import LogitLink
+from superglm.links import LogitLink, ProbitLink
 
 # ── the likelihood in closed form in eta ───────────────────────────
 
@@ -514,6 +514,44 @@ def test_a_stop_the_clip_decided_is_not_reported_as_converged():
     assert newton_decrement > 1.0  # the control: this state is far from the root
     assert not model.result.converged
     assert any("clip" in str(item.message) for item in caught)
+
+
+class _ObservedCurvatureProbit(ProbitLink):
+    """A probit with no tail rows of its own, whose REML criterion reads observed information."""
+
+    def reml_curvature(self, counterpart):
+        return "observed"
+
+
+def test_a_stop_the_clip_decided_is_disclosed_by_a_fit_on_observed_curvature():
+    """``fit_reml`` under such a link returns its fit, not converged, and names the clip's stop.
+
+    One event at an offset of -9 is held against its outcome at every
+    smoothing parameter (the control: its fitted predictor is below the
+    probit of the 1e-7 mean floor, by SciPy).  The search differentiates
+    through the coefficient mode, so it stops where no mode is certified;
+    the unfixed search raised ``ObservedModeNotConvergedError`` there, where
+    it returned a fit before the clip's stop had a name.
+    """
+    from superglm.solvers.mode_score import linear_predictor
+
+    x = np.linspace(0.0, 1.0, 100)
+    y = ((np.arange(100) * 7) % 10 < 3.0 + 4.0 * x).astype(float)
+    frame = pd.DataFrame({"x": np.r_[x, 0.5]})
+    response, offset = np.r_[y, 1.0], np.r_[np.zeros(100), -9.0]
+    model = SuperGLM(
+        family="binomial", link=_ObservedCurvatureProbit(), features={"x": Spline(n_knots=5)}
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit_reml(frame, response, offset=offset)
+    solver = model._solver_pirls_result()
+    eta = np.asarray(linear_predictor(model._dm, solver, model._fit_offset), dtype=float)
+    assert eta[-1] < norm.ppf(1e-7)  # the control: the event is held against its outcome
+    assert not model.result.converged
+    assert solver.termination_reason == "clip_held" and solver.clip_held_rows == 1
+    assert np.all(np.isfinite(solver.beta)) and math.isfinite(model.result.deviance)
+    assert any("clip_held" in str(item.message) for item in caught)
 
 
 def test_default_standard_error_when_every_row_sits_in_a_tail():
