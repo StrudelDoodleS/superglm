@@ -1911,6 +1911,9 @@ class TestREMLInteraction:
         )
         model.fit_reml(X, y, max_reml_iter=30)
 
+        # The outer search must report convergence; a search stopped after one step
+        # still returns positive lambdas and finite predictions.
+        assert model.reml_diagnostics()["converged"] is True
         assert model._reml_lambdas is not None
         # Main spline + interaction per-level groups should all have REML lambdas
         assert len(model._reml_lambdas) >= 2  # at least main + 1 interaction level
