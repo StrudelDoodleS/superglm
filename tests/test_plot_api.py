@@ -1110,9 +1110,115 @@ class TestPlotlyMainEffects:
 # drawn artists back and compare them with those closed forms, label by label.
 # exp has relative condition number |arg|, so a drawn value agrees with the
 # closed form to a few roundings of that size.
+#
+# The charts come from an unpenalised Poisson fit, so eta and se have a
+# reference that shares no code with superglm: statsmodels' GLM on a design
+# built here, with the age basis from SciPy's B-splines on the same interior
+# knots. Each test first checks term_inference against that reference, label
+# by label, and then the drawn artists against term_inference to rounding, so
+# a wrong term_inference fails as surely as a wrong chart.
 
 _UNIT_ROUNDOFF = 2.0**-53
 _Z_95 = 1.959963984540054  # scipy.stats.norm.ppf(0.975)
+_AGE_KNOTS = (30.0, 45.0, 60.0, 75.0)
+# superglm's IRLS stops once the relative deviance change is below this.
+_FIT_TOL = 1e-12
+
+
+@pytest.fixture
+def unpenalised_model(sample_data):
+    X, y, sample_weight = sample_data
+    model = SuperGLM(
+        selection_penalty=0.0,
+        spline_penalty=0.0,
+        tol=_FIT_TOL,
+        features={
+            "age": Spline(kind="bs", knots=_AGE_KNOTS, penalty="none"),
+            "region": Categorical(base="first"),
+            "density": Numeric(),
+        },
+    )
+    model.fit(X, y, sample_weight=sample_weight)
+    return model
+
+
+@pytest.fixture
+def reference(sample_data):
+    """eta and se of each term of ``unpenalised_model`` from statsmodels' Poisson GLM."""
+    sm = pytest.importorskip("statsmodels.api")
+    from scipy.interpolate import BSpline
+
+    X, y, sample_weight = sample_data
+    # Clamped cubic knots outside the data: on the data's range they span the same
+    # cubic splines with these interior knots as superglm's basis does. One column
+    # goes to the intercept.
+    knots = np.r_[[15.0] * 4, _AGE_KNOTS, [90.0] * 4]
+
+    def age_basis(x):
+        return BSpline.design_matrix(np.asarray(x, dtype=np.float64), knots, 3).toarray()[:, 1:]
+
+    basis = age_basis(X["age"])
+    region = X["region"].to_numpy()
+    design = np.column_stack(
+        [np.ones(len(X)), basis, region == "B", region == "C", X["density"]]
+    ).astype(np.float64)
+    fit = sm.GLM(y, design, family=sm.families.Poisson(), var_weights=sample_weight).fit(
+        tol=1e-14, maxiter=100
+    )
+    beta, cov = fit.params, fit.cov_params()
+    se = np.sqrt(np.diag(cov))
+    spline = slice(1, 1 + basis.shape[1])
+    i_b = spline.stop
+    # superglm's native constraint: the age curve sums to zero over the training rows.
+    centre = basis.mean(axis=0)
+
+    def age(x):
+        contrast = age_basis(x) - centre
+        return contrast @ beta[spline], np.sqrt(
+            np.einsum("ij,jk,ik->i", contrast, cov[spline, spline], contrast)
+        )
+
+    # A fit stopped at relative deviance change tol lies within about
+    # sqrt(tol * deviance) of the optimum in the Fisher-information norm (the
+    # deviance is quadratic there), so any contrast is off by that many of its
+    # own standard errors, and each row's weight mu_i, and so the covariance,
+    # moves by that times the largest se of a row's eta. statsmodels stops at
+    # 1e-14, inside superglm's bound; the factor 8 covers both and the step
+    # still to come at the stop.
+    drift = 8.0 * np.sqrt(_FIT_TOL * fit.deviance)
+    row_se = np.sqrt(np.einsum("ij,jk,ik->i", design, cov, design))
+    return {
+        "age": age,
+        "region": {"A": (0.0, 0.0), "B": (beta[i_b], se[i_b]), "C": (beta[i_b + 1], se[i_b + 1])},
+        "density": (np.array([beta[-1]]), np.array([se[-1]])),
+        "drift": drift,
+        "se_rtol": drift * float(row_se.max()),
+    }
+
+
+def _assert_matches_reference(eta, se, ref_eta, ref_se, reference):
+    """term_inference's eta and se equal the reference to the two fits' convergence."""
+    ref_eta = np.asarray(ref_eta, dtype=np.float64)
+    ref_se = np.asarray(ref_se, dtype=np.float64)
+    # Each eta is held to its own standard error's share of the drift; the base
+    # level's eta and se are exactly zero on both sides.
+    excess = np.abs(np.asarray(eta, dtype=np.float64) - ref_eta) - reference["drift"] * ref_se
+    worst = int(np.argmax(excess))
+    assert excess[worst] <= 0.0, (
+        f"eta[{worst}] = {eta[worst]!r} against the reference's {ref_eta[worst]!r} "
+        f"(se {ref_se[worst]:.6g}, allowed {reference['drift'] * ref_se[worst]:.3g})"
+    )
+    np.testing.assert_allclose(se, ref_se, rtol=reference["se_rtol"], atol=0)
+
+
+def _assert_levels_match_reference(ti, reference):
+    """Each level's eta and se, read by its label, equal the reference's for that label."""
+    eta, se = _eta_se(ti)
+    by_label = {str(level): k for k, level in enumerate(ti.levels)}
+    assert sorted(by_label) == sorted(reference["region"])
+    for level, (ref_eta, ref_se) in reference["region"].items():
+        k = by_label[level]
+        _assert_matches_reference(eta[k : k + 1], se[k : k + 1], [ref_eta], [ref_se], reference)
 
 
 def _assert_exp_close(actual, arg):
@@ -1161,16 +1267,19 @@ def _band_edges(ax, label, x):
 
 
 class TestDrawnValuesMatchFit:
-    def test_matplotlib_spline_panel_draws_fitted_curve_and_both_bands(self, fitted_model):
+    def test_matplotlib_spline_panel_draws_fitted_curve_and_both_bands(
+        self, unpenalised_model, reference
+    ):
         """The spline curve and its two bands are exp(eta), exp(eta -/+ z se) and exp(eta -/+ c se);
         a band drawn at zero width or at the wrong level would pass a presence check."""
         import matplotlib
 
         matplotlib.use("Agg")
 
-        ti = fitted_model.term_inference("age", simultaneous=True)
+        ti = unpenalised_model.term_inference("age", simultaneous=True)
         x = np.asarray(ti.x, dtype=np.float64)
         eta, se = _eta_se(ti)
+        _assert_matches_reference(eta, se, *reference["age"](x), reference)
         c = float(ti.critical_value_simultaneous)
         # max_i |Z_i| >= |Z_1| bounds c below by z; the union bound over the
         # grid's points bounds it above (Bonferroni).
@@ -1178,7 +1287,7 @@ class TestDrawnValuesMatchFit:
 
         assert _Z_95 < c <= norm.ppf(1.0 - 0.025 / len(x))
 
-        ax = fitted_model.plot("age", ci="both").axes[0]
+        ax = unpenalised_model.plot("age", ci="both").axes[0]
         line = _line_by_label(ax, "Relativity")
         np.testing.assert_array_equal(line.get_xdata(), x)
         _assert_exp_close(line.get_ydata(), eta)
@@ -1190,18 +1299,21 @@ class TestDrawnValuesMatchFit:
         _assert_exp_close(lower, eta - c * se)
         _assert_exp_close(upper, eta + c * se)
 
-    def test_matplotlib_numeric_panel_draws_per_unit_relativity_and_interval(self, fitted_model):
+    def test_matplotlib_numeric_panel_draws_per_unit_relativity_and_interval(
+        self, unpenalised_model, reference
+    ):
         """A numeric term's flat line and band sit at exp(beta) and exp(beta -/+ z se);
         a rescaled per-unit factor would pass a figure-type check."""
         import matplotlib
 
         matplotlib.use("Agg")
 
-        ti = fitted_model.term_inference("density")
+        ti = unpenalised_model.term_inference("density")
         eta, se = _eta_se(ti)
         assert eta.shape == (1,)
+        _assert_matches_reference(eta, se, *reference["density"], reference)
 
-        ax = fitted_model.plot("density").axes[0]
+        ax = unpenalised_model.plot("density").axes[0]
         line_y = np.asarray(_line_by_label(ax, "Relativity").get_ydata(), dtype=np.float64)
         _assert_exp_close(line_y, np.full(line_y.shape, eta[0]))
 
@@ -1211,19 +1323,22 @@ class TestDrawnValuesMatchFit:
         _assert_exp_close(band_y.min(), eta - _Z_95 * se)
         _assert_exp_close(band_y.max(), eta + _Z_95 * se)
 
-    def test_matplotlib_categorical_panel_puts_each_level_over_its_label(self, fitted_model):
+    def test_matplotlib_categorical_panel_puts_each_level_over_its_label(
+        self, unpenalised_model, reference
+    ):
         """Each level's point and error bar stand over that level's tick label;
         drawing one level's relativity over another's label would pass a figure-type check."""
         import matplotlib
 
         matplotlib.use("Agg")
 
-        ti = fitted_model.term_inference("region")
+        ti = unpenalised_model.term_inference("region")
         eta, se = _eta_se(ti)
         levels = [str(level) for level in ti.levels]
         assert len(set(np.round(eta, 6))) == len(levels), "fixture needs distinct level effects"
+        _assert_levels_match_reference(ti, reference)
 
-        ax = fitted_model.plot("region").axes[0]
+        ax = unpenalised_model.plot("region").axes[0]
         tick_x = {
             tick.get_text(): float(pos) for pos, tick in zip(ax.get_xticks(), ax.get_xticklabels())
         }
@@ -1243,14 +1358,15 @@ class TestDrawnValuesMatchFit:
             _assert_exp_close(seg[:, 1].max(), eta[k] + _Z_95 * se[k])
 
     @pytest.mark.skipif(not PLOTLY_AVAILABLE, reason="plotly not installed")
-    def test_plotly_explorer_draws_spline_curve_and_both_bands(self, fitted_model):
+    def test_plotly_explorer_draws_spline_curve_and_both_bands(self, unpenalised_model, reference):
         """The explorer's spline curve and filled bands trace exp(eta), exp(eta -/+ z se) and
         exp(eta -/+ c se); a widened or collapsed band edge would pass a trace-name check."""
-        ti = fitted_model.term_inference("age", simultaneous=True)
+        ti = unpenalised_model.term_inference("age", simultaneous=True)
         x = np.asarray(ti.x, dtype=np.float64)
         eta, se = _eta_se(ti)
+        _assert_matches_reference(eta, se, *reference["age"](x), reference)
         c = float(ti.critical_value_simultaneous)
-        fig = fitted_model.plot(engine="plotly", ci="both")
+        fig = unpenalised_model.plot(engine="plotly", ci="both")
 
         (curve,) = [
             t
@@ -1267,15 +1383,18 @@ class TestDrawnValuesMatchFit:
             _assert_exp_close(band.y, np.concatenate([eta + crit * se, (eta - crit * se)[::-1]]))
 
     @pytest.mark.skipif(not PLOTLY_AVAILABLE, reason="plotly not installed")
-    def test_plotly_explorer_draws_each_level_and_slope_with_its_interval(self, fitted_model):
+    def test_plotly_explorer_draws_each_level_and_slope_with_its_interval(
+        self, unpenalised_model, reference
+    ):
         """Each categorical marker and the numeric bar carry their own exp(eta) and interval
         lengths; a reversed level trace would pass a trace-name check."""
-        fig = fitted_model.plot(engine="plotly")
+        fig = unpenalised_model.plot(engine="plotly")
         relativity = [t for t in fig.data if t.name == "Relativity"]
 
-        ti = fitted_model.term_inference("region")
+        ti = unpenalised_model.term_inference("region")
         eta, se = _eta_se(ti)
         levels = [str(level) for level in ti.levels]
+        _assert_levels_match_reference(ti, reference)
         # The explorer clips error bars at max(5 x the largest relativity, 10);
         # the comparison below needs every interval inside that cap.
         assert np.max(np.exp(eta + _Z_95 * se)) < max(5.0 * np.max(np.exp(eta)), 10.0)
@@ -1291,8 +1410,9 @@ class TestDrawnValuesMatchFit:
                 [markers.error_y.arrayminus[i]], [eta[k]], [eta[k] - _Z_95 * se[k]]
             )
 
-        ti = fitted_model.term_inference("density")
+        ti = unpenalised_model.term_inference("density")
         eta, se = _eta_se(ti)
+        _assert_matches_reference(eta, se, *reference["density"], reference)
         (bar,) = [t for t in relativity if list(t.x) == ["per unit"]]
         _assert_exp_close(bar.y, eta)
         _assert_exp_difference_close(bar.error_y.array, eta + _Z_95 * se, eta)
