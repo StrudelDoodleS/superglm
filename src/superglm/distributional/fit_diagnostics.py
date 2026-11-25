@@ -738,6 +738,8 @@ def _analyze_authority(context: _LSSDiagnosticContext) -> tuple[DiagnosticFindin
         or not context.terminal_fit.converged
         or not smoothing.converged
         or smoothing.matched_certified
+        # The exact face alone is reported by the smoothing findings, not as a failed check.
+        or smoothing.certified_on_exact_face
     ):
         return ()
     source_mismatches = sum(
@@ -1950,7 +1952,9 @@ def _fit_status(context: _LSSDiagnosticContext) -> str:
         (context.fitted_result.converged, context.terminal_fit.converged, smoothing.converged)
     ):
         return "not_converged"
-    return "converged_certified" if smoothing.matched_certified else "converged_uncertified"
+    if smoothing.matched_certified:
+        return "converged_certified"
+    return "converged_exact_face" if smoothing.certified_on_exact_face else "converged_uncertified"
 
 
 def diagnose_distributional_fit(

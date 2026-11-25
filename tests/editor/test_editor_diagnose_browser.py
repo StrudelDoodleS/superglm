@@ -7,7 +7,7 @@ import warnings
 
 import pytest
 from sklearn.model_selection import KFold
-from tests._lss_editor_fixtures import curved_lognormal_case
+from tests._lss_editor_fixtures import curved_lognormal_case, lognormal_case
 
 from superglm import LogNormalLS, SuperLSS, cat, cross_validate, s
 
@@ -130,3 +130,59 @@ def test_a_folded_section_stays_as_it_was_left_when_another_fit_opens(open_lss_e
         assert (
             frame.locator('[data-diagnose-fold="search"]').get_attribute("aria-expanded") == "false"
         )
+
+
+def _three_fits_on_an_exact_face():
+    """The case whose ``power`` smooth has no finite optimum, beside a fold stopped at its second round.
+
+    The fit on all rows and the first and third folds are that fit: it converged
+    with ``power`` on its exact face and passed every other check. Only the
+    stopped fold is named in the line across the fits.
+    """
+    case = lognormal_case()
+    assert case.model.diagnose().fit_status == "converged_exact_face"
+    stopped = _a_fold_that_did_not_converge()["cv"].estimators[1]
+    cv = cross_validate(
+        case.model,
+        case.X,
+        case.y,
+        cv=KFold(3, shuffle=True, random_state=0),
+        fit_mode="fit_reml",
+        return_estimators=True,
+        error_score="raise",
+    )
+    return {
+        "case": case,
+        "cv": dataclasses.replace(cv, estimators=[case.model, stopped, case.model]),
+    }
+
+
+def test_fits_on_an_exact_face_read_as_converged_and_the_search_path_stays_on_screen(
+    open_lss_editor_page,
+):
+    viewport = {"width": 1100, "height": 720}
+    with open_lss_editor_page(**_three_fits_on_an_exact_face(), viewport=viewport) as (
+        page,
+        _session,
+    ):
+        page.locator("#diagnoseTab").click()
+        frame = page.locator("#reportFrame")
+        frame.locator(".diagnose-chart").wait_for()
+        converged = frame.locator('.diagnose-fits tr[data-status="converged"]')
+        assert converged.count() == 3
+        assert all("looser stop" not in text for text in converged.all_inner_texts())
+        # The line across the fits names only the fold that did not converge.
+        summary = frame.locator(".diagnose-head").first
+        assert "1 of 4 fits did not converge" in summary.inner_text()
+        assert "smoothed as far as its penalty allows" in summary.inner_text()
+        assert "looser stop" not in summary.inner_text()
+        assert summary.locator("[data-diagnose-fit]").all_inner_texts() == ["Fold 2"]
+        seen = page.evaluate(
+            """() => ({
+                height: window.innerHeight,
+                chart: document.querySelector('.diagnose-chart').getBoundingClientRect().bottom,
+                scrolled: document.querySelector('#reportPanel').scrollTop,
+            })"""
+        )
+        assert seen["chart"] <= seen["height"]
+        assert seen["scrolled"] == 0

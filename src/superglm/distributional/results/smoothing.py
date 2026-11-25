@@ -299,6 +299,20 @@ class DistributionalEFSResult:
 
     @property
     def matched_certified(self) -> bool:
+        return self.terminal_fit.coefficient_face is None and self._certified_beside_face()
+
+    @property
+    def certified_on_exact_face(self) -> bool:
+        """Whether the fit ended on an exact face and passed every other check of certification.
+
+        Such a fit is converged at a boundary optimum. It is never
+        ``matched_certified``, which requires a stop off every bound.
+        """
+
+        return self.terminal_fit.coefficient_face is not None and self._certified_beside_face()
+
+    def _certified_beside_face(self) -> bool:
+        """Every check of ``matched_certified`` except that no term ended on an exact face."""
         face = self.terminal_fit.coefficient_face
         face_names = () if face is None else face.component_names
         direction_evidence = tuple(
@@ -325,7 +339,6 @@ class DistributionalEFSResult:
             self.converged
             and self.convergence_reason != "practical_plateau"
             and self.coefficient_converged
-            and face is None
             and self.terminal_evidence_fresh
             and not self.unresolved_upper_bound
             and not any(

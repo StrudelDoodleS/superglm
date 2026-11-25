@@ -1140,6 +1140,31 @@ def test_exact_faced_spline_reports_suppressed_penalized_subspace_and_retained_n
     assert "feature" in caveat and "useless" in caveat
 
 
+def test_a_fit_converged_on_an_exact_face_reports_that_status_and_no_failed_check(
+    face_model,
+) -> None:
+    smoothing = face_model.smoothing
+    assert smoothing is not None and smoothing.certified_on_exact_face
+    assert not smoothing.matched_certified
+
+    report = diagnose_distributional_fit(face_model)
+
+    assert report.fit_status == "converged_exact_face"
+    assert "fit.termination_uncertified" not in {item.code for item in report.findings}
+    assert "smoothing.penalized_subspace_suppressed" in {item.code for item in report.findings}
+
+    # A second reason not to certify keeps the looser stop and its finding.
+    fallback = diagnose_distributional_fit(_with_curvature_fallbacks(face_model, {0: 1}))
+    assert fallback.fit_status == "converged_uncertified"
+    assert "fit.termination_uncertified" in {item.code for item in fallback.findings}
+    context = _LSSDiagnosticContext.from_model(face_model)
+    stopped = replace(
+        context,
+        smoothing=replace(smoothing, converged=False, convergence_reason="max_iterations"),
+    )
+    assert _fit_status(stopped) == "not_converged"
+
+
 def test_fully_penalized_exact_face_omits_retained_null_space_caveat(face_model) -> None:
     report = diagnose_distributional_fit(face_model)
 
