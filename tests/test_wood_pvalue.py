@@ -621,6 +621,48 @@ class TestWoodTestSmooth:
         # Stat should be close to Wald when rank = full
         np.testing.assert_allclose(stat, wald, rtol=0.5)
 
+    @pytest.mark.parametrize(("p_g", "rank"), [(5, 5), (10, 5), (8, 3)])
+    def test_integer_rank_statistic_is_the_rank_r_wald_statistic(self, p_g, rank):
+        """At integer edf the statistic is Wood's rank-r Wald statistic f' (R V R')_r^- f with
+        f = R beta, R from the QR of the term's design and (.)_r^- the pseudo-inverse of the
+        r leading eigenpairs, and at full rank beta' V^-1 beta (Wood, Biometrika 100, 2013,
+        section 3); the p-value is its chi-squared tail on r degrees of freedom."""
+        from scipy import stats
+
+        rng = np.random.default_rng(42)
+        X_j = rng.standard_normal((200, p_g))
+        beta_j = rng.standard_normal(p_g) * 0.5
+        # A penalty with spread eigenvalues separates the spectrum of R V R', so the
+        # rank-r truncation is well determined.
+        V_b_j = np.linalg.inv(X_j.T @ X_j + np.diag(np.geomspace(1e-2, 1e3, p_g)))
+
+        R = np.linalg.qr(X_j, mode="r")
+        V_f = R @ V_b_j @ R.T
+        values, vectors = np.linalg.eigh(V_f)
+        lead = np.argsort(values)[::-1][:rank]
+        f = R @ beta_j
+        projected = vectors[:, lead].T @ f
+        expected = float(np.sum(projected**2 / values[lead]))
+        if rank == p_g:
+            assert expected == pytest.approx(
+                float(beta_j @ np.linalg.solve(V_b_j, beta_j)), rel=1e-10
+            )
+        # Eigenvalues of V_f err by u ||V_f||, and the retained eigenvectors by u ||V_f||
+        # over their separation from the rest of the spectrum (Davis-Kahan), which moves
+        # T by up to ||f||^2 / lambda_r times that; a few hundred roundings cover both.
+        u = np.finfo(float).eps / 2
+        ordered = values[np.argsort(values)[::-1]]
+        separation = ordered[rank - 1] - (ordered[rank] if rank < p_g else 0.0)
+        drift = np.linalg.norm(V_f, 2) * (1.0 / ordered[rank - 1] + 1.0 / separation)
+        rtol = 256.0 * p_g * u * drift * (1.0 + float(f @ f) / ordered[rank - 1] / expected)
+
+        stat, p_val, ref_df = wood_test_smooth(beta_j, X_j, V_b_j, edf1_j=float(rank))
+        assert ref_df == rank
+        assert stat == pytest.approx(expected, rel=rtol)
+        # A statistic error of rtol moves the tail by pdf(T) T rtol.
+        p_tol = stats.chi2.pdf(expected, rank) * expected * rtol + 64.0 * np.finfo(float).eps
+        assert p_val == pytest.approx(stats.chi2.sf(expected, rank), rel=0, abs=p_tol)
+
     def test_reduced_edf_smaller_stat(self):
         """With edf1 < p_g, the test stat should generally be smaller."""
         rng = np.random.default_rng(42)
