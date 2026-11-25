@@ -110,6 +110,10 @@ class _SplineBase:
         native continuation. ``"error"`` raises on out-of-range values.
     """
 
+    # The weights its build learns from (``_predictor_compiler._Build.weight``).
+    # Knots and centring follow the model geometry.
+    _build_weight = "geometry"
+
     # ── Basis capability metadata (override in subclasses) ────────
     _penalty_semantics: str = "difference"
     _max_penalty_order: int | None = None  # None = K-dependent (phase 2)

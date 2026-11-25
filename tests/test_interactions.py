@@ -2853,7 +2853,7 @@ def test_a_failed_design_assembly_releases_the_pool(interaction_data, monkeypatc
     import threading
 
     import superglm._blas_threads as blas
-    import superglm.dm_builder as builder
+    import superglm._predictor_compiler as builder
     from superglm._parallel import parallel_config
 
     X, y, w = interaction_data

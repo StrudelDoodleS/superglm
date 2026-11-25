@@ -731,23 +731,6 @@ def add_interaction(
 # ═══════════════════════════════════════════════════════════════════
 
 
-def _priced_group_dimension(
-    info: GroupInfo, n_cols: int, group_pricing: str
-) -> tuple[int, int | None]:
-    """``(p_g, penalty_dim)``: what the penalty prices a group at, and its stamp.
-
-    ``info.penalty_width`` is the width the term spans when its spec withholds columns the
-    design cannot identify. ``"rank"`` (default) prices at the emitted, identifiable width with
-    stamp ``None``, calibrating the ``sqrt(p_g)`` weight to the group's identifiable df (Yuan &
-    Lin 2006; Meier, van de Geer & Buhlmann 2008; Breheny & Huang 2015, sec. 2.1).
-    ``"spanned"`` prices at the spanned width, so pruning a dead column is a pure
-    reparametrisation. The group-lasso weight and the Breheny-Huang df allocation both read it.
-    """
-    if info.penalty_width is None or group_pricing == "rank":
-        return int(n_cols), None
-    return int(info.penalty_width), int(info.penalty_width)
-
-
 def _validate_group_pricing(group_pricing: str) -> None:
     if group_pricing not in ("rank", "spanned"):
         raise ValueError(f"group_pricing must be 'rank' or 'spanned', got {group_pricing!r}")
@@ -808,6 +791,19 @@ def _in_term_coordinates(info: GroupInfo) -> GroupInfo:
             declared, basis=np.eye(len(turn))[:, : declared.basis.shape[1]], roots=tuple(term_roots)
         ),
     )
+
+
+def _term_roots(info: GroupInfo) -> tuple[GroupInfo, dict[str, NDArray] | None]:
+    """``info`` in the term coordinates its declared null basis gives, and each penalty's root.
+
+    A block without a declared null basis keeps its coordinates and has no roots.
+    """
+    if info.null_coordinates is None:
+        return info, None
+    info = _in_term_coordinates(info)
+    keys = [key for key, _ in info.penalty_components] if info.penalty_components else [""]
+    roots = cast(NullCoordinates, info.null_coordinates).roots
+    return info, dict(zip(keys, roots, strict=True))
 
 
 def _fixed_qp_lambdas(info: GroupInfo, group_name: str, lambda2: float | dict) -> float | dict:
@@ -1052,16 +1048,7 @@ def _process_info(
     in_term = term_coordinates and (
         info.null_coordinates is not None or info.penalty_in_term_coordinates
     )
-    term_roots = None
-    if in_term and info.null_coordinates is not None:
-        info = _in_term_coordinates(info)
-        term_roots = dict(
-            zip(
-                (key for key, _ in info.penalty_components) if info.penalty_components else [""],
-                cast(NullCoordinates, info.null_coordinates).roots,
-                strict=True,
-            )
-        )
+    info, term_roots = _term_roots(info) if in_term else (info, None)
     # R_inv_local: SSP transform in post-identifiability space (projected -> solver).
     # Used to compose constraints that are already in post-identifiability space.
     if info.spline_cat_mask is not None and (
@@ -1176,7 +1163,7 @@ def build_design_matrix(
     ``group_pricing`` decides the width the selection penalty and df ledger
     price a group at when its spec emits fewer columns than the term spans:
     ``"rank"`` (default) the emitted width, ``"spanned"`` the spanned width
-    (``_priced_group_dimension``).
+    (``_predictor_compiler._priced_group_dimension``).
 
     ``weight_semantics`` decides what ``sample_weight`` says about a row, and
     reaches the build in two places: which weights a strict-positivity check
@@ -1234,9 +1221,7 @@ def build_design_matrix(
         X,
         sample_weight,
         geometry_weight=geometry_weight,
-        polynomial_weight=sample_weight,
-        categorical_reporting_weight=sample_weight,
-        ordered_reporting_weight=sample_weight,
+        reporting_weight=sample_weight,
         specs=specs,
         feature_order=feature_order,
         interaction_specs=interaction_specs,

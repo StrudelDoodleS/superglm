@@ -337,6 +337,10 @@ class Categorical:
         shape rule needs ordered levels; use ``OrderedCategorical`` for one.
     """
 
+    # The weights its build learns from (``_predictor_compiler._Build.weight``).
+    # The base and level reporting follow the reporting weights.
+    _build_weight = "reporting"
+
     # Class-level defaults for the level-universe state.  Unpickling bypasses
     # `__init__`, so a spec pickled before this state existed needs these names to
     # exist; a class attribute does that without a `__setstate__` to keep in step.
