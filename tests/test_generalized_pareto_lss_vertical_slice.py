@@ -499,10 +499,17 @@ def test_a_shape_whose_optimum_lies_just_beyond_the_wall_is_disclosed(inner_tol)
     assert len(_wall_messages(model)) == 1
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("heavy, wall", [(1.5, "upper wall 1"), (-0.3, "lower wall 0")])
 def test_a_pressed_group_whose_direction_the_rank_decision_drops_is_disclosed(heavy, wall):
-    # under REML the pressed group, coded 1 beside an interior group coded 0.7, runs so close to
-    # the wall that the terminal rank decision drops its direction
+    """Pin the disclosure of a pressed group whose direction the terminal rank decision drops.
+
+    The group, coded 1 beside an interior group coded 0.7, has no finite optimum: every
+    coefficient fit carries it further into the link's tail, until the curvature along its
+    direction is lost. At ``inner_tol=1e-12`` the search's second fit is already there, so
+    the fit it stops on has dropped the direction however few rounds it takes. Mutation
+    check: without the dropped direction's score, neither case warns.
+    """
     rng = np.random.default_rng(8)
     pressed = np.expm1(-heavy * np.log(rng.random(1_000))) / heavy
     interior = np.expm1(-0.3 * np.log(rng.random(1_000))) / 0.3
@@ -515,7 +522,7 @@ def test_a_pressed_group_whose_direction_the_rank_decision_drops_is_disclosed(he
         ),
     )
     with pytest.warns(ConvergenceWarning, match=wall):
-        model.fit_reml(frame, np.concatenate([pressed, interior]))
+        model.fit_reml(frame, np.concatenate([pressed, interior]), inner_tol=1.0e-12)
     assert model.result_.rank < len(model.result_.coefficients)
     (message,) = _wall_messages(model)
     assert "1000 of 2000 rows" in message and "the data put the shape" in message
