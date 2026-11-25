@@ -61,6 +61,7 @@ class BoundPredictor:
 
     @property
     def name(self) -> str:
+        """Name of the distribution parameter targeted by this predictor."""
         return self._template.name
 
     @property

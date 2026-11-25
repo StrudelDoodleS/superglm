@@ -243,10 +243,11 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
     ----------
     parametrisation : {"mean", "location"}, default="mean"
         Choose the first modeled parameter. Use ``family.mean(...)`` for
-        ``E[Y]`` or, in location form, ``family.location(...)`` for
-        ``E[log Y]``. Declare ``family.scale(...)`` in either form; scale is
-        the standard deviation of the log response. Changing forms changes
-        which quantity the first additive predictor describes.
+        ``E[Y]`` (Mean) or, in location form, ``family.location(...)`` for
+        ``E[log Y]``. Declare ``family.scale(...)`` in either form; ``scale``
+        is ``sigma`` (standard deviation of the log response, labelled CV in
+        model output, with exact ``CV = sqrt(exp(sigma**2) - 1)``). Changing
+        forms changes which quantity the first additive predictor describes.
     scale_floor : float, default=0.01
         Nonnegative lower bound on scale. Its default link is
         ``log(scale - scale_floor)``.

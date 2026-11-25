@@ -47,10 +47,11 @@ def response_row_count(y: NDArray) -> int:
 
 
 def scalar_response_row_count(y: NDArray) -> int:
-    """Shape-only scalar guard for adapters whose prepared plan owns the values.
+    """Validate that ``y`` is a non-empty 1-D vector and return its length.
 
-    Scalar plan operations that previously relied on ``response_row_count``
-    for validation must use this companion when adopting the row-first helper.
+    Used by scalar family plans that own their prepared response values and
+    only need a 1-D shape check rather than the general row-first check in
+    :func:`response_row_count`.
     """
     shape = np.shape(y)
     if len(shape) != 1 or shape[0] == 0:

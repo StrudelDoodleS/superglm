@@ -81,7 +81,14 @@ class LomaxLSS(
     ScalePredictor,
     ShapePredictor,
 ):
-    """Lomax(scale, shape) on y >= 0; both predictors use positive log links."""
+    """Lomax (Pareto Type II) severity model on ``y >= 0`` with scale and shape predictors.
+
+    Declare ``family.scale(...)`` and ``family.shape(...)``. Both use log
+    links; ``scale`` stretches the response proportionally and ``shape`` is the
+    tail exponent (larger ``shape`` means a lighter tail). The mean
+    ``scale / (shape - 1)`` is finite for ``shape > 1`` and the variance is
+    finite for ``shape > 2``.
+    """
 
     spec: ClassVar[DeclaredScalarSpec] = _SPEC
 

@@ -665,22 +665,15 @@ def _curvature_disclosures(
     likelihood_plan: FamilyLikelihoodPlan,
     layout: StackedLayout | None = None,
 ) -> tuple[str, ...]:
-    """The warnings a finished fit records in ``result_.warnings`` instead of refusing.
+    """Build the diagnostic warnings recorded in ``result_.warnings`` for a finished fit.
 
-    Every fallback the fit used to refuse is disclosed, with the family's own
-    diagnosis of repeated curvature failure when it has one. A projected
-    (nearest semidefinite) curvature always used to refuse: after the retry no
-    expected information was usable. A Fisher fallback was accepted silently
-    before fits stopped refusing, and still is, except for a family that
-    declares ``diagnoses_any_curvature_fallback``: one that gained expected
-    information after fits stopped refusing, so every fallback of it used to
-    refuse and is disclosed whether or not its diagnosis fires. A
-    :class:`LimitRowDisclosingFamily` also reports its rows at a limit,
-    converged or not, when the fit's terminal rank decision leaves one of that
-    parameter's coefficients not estimable (see ``_limit_row_disclosure``), and
-    a :class:`WallDisclosingFamily` names the rows the fit pressed against a
-    wall of a bounded link (see ``_wall_disclosure``); a failed disclosure never
-    fails the finished fit.
+    Discloses nearest-semidefinite curvature fallbacks, Fisher fallbacks on
+    families with ``diagnoses_any_curvature_fallback``, and any family-specific
+    repeated-curvature diagnosis on complete observations. Also appends
+    limit-row disclosures for :class:`LimitRowDisclosingFamily` when a
+    parameter has non-estimable coefficients (see ``_limit_row_disclosure``),
+    and bounded-link wall disclosures for :class:`WallDisclosingFamily` (see
+    ``_wall_disclosure``). A failed disclosure never fails the finished fit.
     """
     telemetry = solver_result.terminal_curvature
     messages: list[str] = []

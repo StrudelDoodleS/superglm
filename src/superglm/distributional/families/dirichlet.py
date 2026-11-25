@@ -104,13 +104,26 @@ class DirichletLikelihoodPlan:
 
 @dataclass(frozen=True)
 class DirichletLSS:
-    """Positive interior compositions with one positive alpha per named component.
+    """Dirichlet model for positive interior compositions with one concentration per component.
 
-    Rows within 8 gamma_(K+1) of unit mass denote the mathematical
-    normalization of their supplied shares. Materially nonunit rows are
-    rejected. Frequency weights repeat the entire joint density once per row;
-    only unit prior weights are defined. Log-alpha effects change both mean
-    composition and concentration.
+    Declare one predictor per component with ``family.alpha(component, ...)``.
+    Each concentration parameter ``alpha_j`` uses a log link, and log-alpha
+    effects shift both the mean composition ``alpha / sum(alpha)`` (returned by
+    ``predict``) and overall concentration.
+
+    Parameters
+    ----------
+    components : tuple of str
+        Ordered tuple of at least two unique component labels, matching the
+        columns of the composition response.
+
+    Notes
+    -----
+    Rows whose component shares sum within ``8 * gamma_(K + 1)`` of 1 (where
+    ``K = len(components)`` and ``gamma_n = n*u / (1 - n*u)`` with
+    ``u = 2**-53``) are normalised onto the simplex; materially non-unit rows
+    are rejected. Frequency weights replicate the joint density per row; only
+    unit prior weights are supported.
     """
 
     components: tuple[str, ...]

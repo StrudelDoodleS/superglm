@@ -223,8 +223,9 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
     The current shape domain gives every row nonnegative, unbounded support
     and a finite mean. Negative shapes require response-dependent support
     and are not supported. ``predict`` returns the mean excess,
-    ``scale / (1 - shape)``. A fit whose shape reaches a wall says so in
-    ``result_.warnings``. The threshold is not a fitted parameter.
+    ``scale / (1 - shape)``. A fit whose shape reaches ``shape_lower`` or
+    ``shape_upper`` records a warning in ``result_.warnings``. The threshold
+    is not a fitted parameter.
     """
 
     # Its curvature directions take stacked (m, n, K) directions on one state evaluation.

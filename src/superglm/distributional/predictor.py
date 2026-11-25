@@ -163,15 +163,15 @@ def _warn_unapplied_fit_rules(
 
 @dataclass(frozen=True)
 class Predictor:
-    """Immutable configuration for one natural-parameter predictor.
+    """Immutable configuration for one distribution parameter's linear predictor.
 
-    Feature specifications remain caller-owned configuration objects here.
-    ``compile_predictor_design`` deep-clones their complete graph before any
-    build-time mutation occurs.
+    Normally built via family helpers (such as ``family.location(...)``) or
+    :func:`~superglm.bind_predictor`. Feature specifications are deep-copied
+    before fitting so caller-owned specs are not mutated.
 
-    ``offset`` normalizes to a tuple of column names and independently owned,
-    read-only row arrays (indexed Series retain their labels). These are fixed
-    link-scale additions with coefficient one, separate from estimated terms.
+    ``offset`` normalises to a tuple of column names and read-only row arrays
+    (indexed Series retain their labels), applied as fixed link-scale additions
+    with coefficient one.
     """
 
     name: str
@@ -441,7 +441,7 @@ def _centering_target(spec: Any) -> Any:
 
 
 def _record_selected_sz_levels(compiled: CompiledPredictorDesign, weights: NDArray) -> None:
-    """Record each ``select=True`` sz term's weightless levels, as SuperGLM's fit does (#457).
+    """Record each ``select=True`` sz term's weightless levels, matching SuperGLM's fit.
 
     A level without weight has no data term beside its penalized line, so it
     is predicted at the population curve (``FactorSmooth._record_unidentified_levels``,
