@@ -2,16 +2,25 @@
 
 The fixture is mgcv 1.9-3, run as a black box, on superglm's own design, penalty components,
 REML lambdas and scale for the books case ``fam_gamma_log_exact`` (freMTPL2 severity, 21,070
-training rows, 614 coefficients, 27 smoothing parameters) at master 5f28e8e80:
+training rows, 614 coefficients, 27 smoothing parameters) at the fit's REML stop:
 ``gam(y ~ X, paraPen = ..., family = Gamma(log), method = "REML", scale = phi)``, so both
 engines solve one penalised problem.  mgcv reports all 614 coefficients and drops none.  Master
 blanked 398 of them and 10 summary rows, every ``VehBrand`` level among them, because the data
 alone leave them undetermined (``VehAge``'s sparse upper tail); the penalised Hessian is
-positive definite (Cholesky, scaled condition 576), which the fit's own record certifies
+positive definite (Cholesky, scaled condition 1.1e5), which the fit's own record certifies
 (``state_ops.standard_error_mask``).
 
-The original main-spline solver-to-B-spline maps accompany the fixture, so a refit can be
-compared in the coordinates mgcv actually fitted. Both freMTPL2 parquet files are required.
+The refit is the book's own REML fit, which reproduces the exported lambdas.  The fixture's
+solver coordinates are whitened at those lambdas, so it belongs to one REML stop, and REML does
+not place a suppressed term's lambda to the comparison's 1e-6: ``VehAge:VehBrand[B14]`` stops at
+7.1e4 with its score under 1e-4 (#604), at 1.5e8 under ``reml_tol=1e-12``, and stopped at 488
+while a score of ``1e-7 (1 + |V|)`` = 0.018 was held, where one of its variances was 25% larger.
+A change to where the search stops rebuilds the fixture at the new stop (mgcv on the exported
+design and penalties); it does not loosen the comparison.  The main splines now hold their exact
+null space in their own coordinates, so the solver-to-B-spline maps of the coordinates mgcv
+fitted, at the fixture's lambdas, accompany it (``mgcv_gamma_severity_spline_maps.json``), and
+the refit is compared in those coordinates.  Anchored to the freMTPL2 book: it skips without
+both parquet files and fails under ``SUPERGLM_REQUIRE_DATA=1``.
 """
 
 from __future__ import annotations
@@ -56,12 +65,17 @@ def test_every_severity_book_coefficient_has_mgcvs_bayesian_standard_error() -> 
     """All 614 standard errors are printed and are mgcv's ``Vp`` ones.
 
     ``SE^2 / phi`` against mgcv's ``Vp / phi`` at the fixture's stated tolerance, 1e-6
-    (measured 2.9e-12: both engines stop PIRLS at a tolerance, so it is set 100 times looser
-    than the coefficients' 2.4e-9); the coefficients to 1e-6 of the largest and the EDF to
-    1e-8.  The raw standard errors are also the dense inverse's of ``[1 X]' W [1 X] + S`` built
-    from the design and penalty (``kappa u`` about 6e-14; rtol 1e-9).  On master 398
-    coefficients and the 10 ``VehBrand`` rows were blank before #681. A rotation changes
-    a spline coefficient's own SE. Its original linear contrast and variance are invariant.
+    (measured 1.2e-7 under the SkylakeX and Haswell OpenBLAS kernels, whose REML stop differs
+    from the fixture's by 1.2e-9 in ``VehAge:VehBrand[B14]``'s lambda; the tree that built the
+    fixture reproduced it to 5.0e-12; both engines stop PIRLS at a tolerance, so it is set 100
+    times looser than the coefficients' 2.4e-9); the coefficients to 1e-6 of the largest and
+    the EDF to 1e-8.  The raw standard errors are also the dense inverse's of
+    ``[1 X]' W [1 X] + S`` built from the design and penalty (``kappa u`` about 1e-11; rtol
+    1e-9).  On master 398 coefficients and the 10 ``VehBrand`` rows were blank
+    before #681.  A rotation changes a spline coefficient's own SE; its original linear
+    contrast and variance are invariant, so the main splines are compared after mapping to
+    the fixture's coordinates.  The maps belong to the fixture's lambdas: those of master's
+    earlier stop leave the main splines' ``SE^2`` 1.1e-4 from mgcv's.
     """
     fixture = json.loads(_FIXTURE.read_text(encoding="utf-8"))
     books = _books()

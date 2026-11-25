@@ -6,6 +6,7 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass
 
+import scipy.spatial
 from scipy.optimize import brentq, minimize_scalar
 
 from superglm._warn import warn_caller as warn_caller
@@ -281,6 +282,8 @@ def _infeasible_beyond(recorded, root: float, bound: float) -> bool:
 
 def profile_plot(values, x_hat, nll_hat, *, scale, alpha, interval, label, ax=None):
     """Likelihood-ratio statistic against the parameter, with the cutoff and the interval."""
+    import html
+
     import matplotlib.pyplot as plt
     from scipy.stats import chi2
 

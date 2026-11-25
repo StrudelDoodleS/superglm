@@ -328,6 +328,8 @@ def plot_reml_debug_trajectory(
     if not run.reml_rows:
         raise ValueError(f"Run {run.run_id} has no REML rows to plot")
 
+    import html
+
     import matplotlib.pyplot as plt
 
     iterations = [int(row["iteration"]) for row in run.reml_rows]

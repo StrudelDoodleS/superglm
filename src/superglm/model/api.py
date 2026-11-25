@@ -363,7 +363,8 @@ class SuperGLM:
         (``mark_kindless_saved_on_scop``).  A capped level an older build recorded
         separated is cleared where the fit enforced the cap, and a summary cached beside
         a separated level is dropped (``release_capped_separation_records``,
-        ``release_separated_level_summaries``).
+        ``release_separated_level_summaries``), as is one cached beside an ordered piecewise
+        term (``release_ordered_piecewise_summaries``).
         """
         self.__dict__.update(state)
         restore_legacy_edited_statistics(self)
@@ -372,6 +373,7 @@ class SuperGLM:
         from superglm.model.retired_state import (
             mark_retired_linear_state,
             release_capped_separation_records,
+            release_ordered_piecewise_summaries,
             release_retired_tweedie_state,
             release_saved_mask_summaries,
             release_separated_level_summaries,
@@ -384,6 +386,7 @@ class SuperGLM:
         release_saved_mask_summaries(self)
         release_capped_separation_records(self)
         release_separated_level_summaries(self)
+        release_ordered_piecewise_summaries(self)
         from superglm.features._spline_build import mark_kindless_saved_on_scop
 
         mark_kindless_saved_on_scop(self)
@@ -799,8 +802,10 @@ class SuperGLM:
             gradient, or from the preceding uncapped Newton step on the same
             free terms when no trial verifies this one. The discrete engine reads
             it from two successive steps on the same terms at a settled working
-            model. A direction whose gradient and relative row
-            curvature are both negligible is frozen where it stands, as
+            model. The score test also respects an absolute upper limit of
+            1e-4 nats per log lambda at default fidelity. A tighter tolerance
+            reduces this limit proportionally. A direction below that limit
+            with negligible relative row curvature is frozen where it stands, as
             recorded in ``reml_diagnostics()`` under
             ``profile["reml_freeze_decision"]``. A tolerance tighter than the
             line search can resolve ends as

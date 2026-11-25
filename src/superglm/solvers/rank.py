@@ -1188,6 +1188,23 @@ class RankDecomposition:
         )
         return bool(np.linalg.norm(projection) <= tolerance)
 
+    def estimability_only(self) -> RankDecomposition:
+        """This decomposition without its factor and solution bases.
+
+        ``is_estimable`` and ``coefficient_estimable`` read only the column scale and the
+        null-space bases, ``p x (p - rank)``; a reader that keeps the decisions past the
+        solves keeps this, not the ``rank x rank`` factor or ``p x rank`` bases.
+        """
+        return replace(
+            self,
+            cholesky_factor=None,
+            solution_basis=None,
+            estimable_functional_basis=None,
+            factor_rhs_left_basis=None,
+            factor_rhs_triangular=None,
+            equilibrated_solution_basis=None,
+        )
+
     def coefficient_estimable(self) -> NDArray:
         """Return all unit-coordinate estimability decisions in one projection."""
         scaled_columns = self.column_scale > 0.0

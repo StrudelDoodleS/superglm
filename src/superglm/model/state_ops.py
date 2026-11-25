@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import partial
 from typing import cast
 
 import numpy as np
@@ -23,6 +24,7 @@ from superglm.solvers._structured.balance_tree import (
 )
 from superglm.solvers._structured.geometry import (
     centered_operator_coefficient_estimable,
+    centered_operator_contrast_estimability,
 )
 from superglm.solvers._structured.operators import (
     CenteredBlockOperator,
@@ -638,6 +640,38 @@ def standard_error_mask(model, penalized, data_mask) -> NDArray:
 def rank_standard_error_mask(model, rank_info) -> NDArray:
     """``standard_error_mask`` of a dense fit read from its own rank record."""
     return standard_error_mask(model, rank_info.augmented, rank_info.coefficient_estimable)
+
+
+def fit_contrast_estimable(model, inference: dict):
+    """``is_estimable`` of the decomposition ``inference``'s coefficient mask was read from,
+    over the fitted coefficients, or ``None`` for a fit without one.
+
+    A dense fit's is its rank record's (``RankDecomposition.is_estimable``); a structured
+    fit's is its compact data geometry's (``_structured_contrast_estimable``).
+    """
+    if inference.get("structured_covariance"):
+        return partial(_structured_contrast_estimable, inference, retained_linear_state(model))
+    rank_info = model._solver_pirls_result().rank_info
+    return None if rank_info is None else rank_info.is_estimable
+
+
+def _structured_contrast_estimable(inference: dict, state, contrast: NDArray) -> bool:
+    """Whether a structured fit's data determine ``contrast``, by its coefficient mask's rule.
+
+    The mask's geometry (``fit_inference_info``) is formed again on the first contrast a
+    reader asks about, and kept in ``inference``, the fit's inference record: it lives and
+    is dropped with that record.
+    """
+    decision = inference.get("contrast_estimability")
+    if decision is None:
+        factor = state.profiled_factor
+        decision = (
+            factor.border_estimability()
+            if isinstance(factor, ProfiledSumToZeroTreeFactor)
+            else centered_operator_contrast_estimability(state.centered_data_operator)
+        )
+        inference["contrast_estimability"] = decision
+    return decision.is_estimable(contrast)
 
 
 def refit_shows_every_standard_error(model, penalized=None) -> bool:

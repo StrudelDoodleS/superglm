@@ -41,10 +41,14 @@ from superglm.links import stabilize_eta
 from superglm.reml.convergence import (
     FLAT_DIRECTION_FREEZE_FLOOR,
     classify_dead_feasible_exit,
+    coefficient_walk_guard_stopped,
     concave_live_directions,
+    dead_search_score_bar,
     direction_penalty_ranks,
     evaluate_reml_candidate,
     fixed_freeze_record,
+    flat_score_bar,
+    flat_tail_trial,
     freeze_flat_directions,
     freeze_record,
     mask_frozen_stop_gradient,
@@ -57,7 +61,7 @@ from superglm.reml.convergence import (
     revalidate_stop,
     trial_counts_as_precision_evidence,
 )
-from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
+from superglm.reml.gradient import isolated_penalties, reml_direct_gradient, reml_direct_hessian
 from superglm.reml.identified import IdentifiedLaplace, dense_hessian
 from superglm.reml.objective import (
     REMLObjectiveEvaluation,
@@ -597,6 +601,10 @@ def optimize_discrete_reml_cached_w(
     working_newton = reml_curvature == "observed"
     group_names = [pc.name for pc in penalties]
     m = len(group_names)
+    # Rebuilding the working basis preserves the partition into term blocks.
+    isolated = isolated_penalties(penalties)
+    allow_tail_trial = True
+    penalty_fit = np.full(m, np.nan)
     shared_tensor_pairs = _shared_tensor_penalty_pairs(penalties, dm.group_matrices)
     shared_tensor_groups = _shared_tensor_group_names(penalties, dm.group_matrices)
     _t_reml_start = _time.perf_counter()
@@ -1165,6 +1173,7 @@ def optimize_discrete_reml_cached_w(
             phi_hat=phi_hat,
             inverse_phi=inverse_phi,
             tensor_pair_evaluations=cand_tensor_pair_evals,
+            penalty_fit_out=penalty_fit,
         )
         # Decide whether these lambdas are terminal before any new Newton step.
         proj_grad_d = project_reml_gradient(
@@ -1265,6 +1274,7 @@ def optimize_discrete_reml_cached_w(
             objective=obj,
             tolerance=_tol,
             step_bound=shoulder_step,
+            guard_stopped=coefficient_walk_guard_stopped(pirls_result),
         )
         frozen_d = freeze_decision.frozen
         # Concave shoulders take the trust-region boundary step below, not
@@ -1290,10 +1300,13 @@ def optimize_discrete_reml_cached_w(
                 # Do not let a deliberately loose tolerance bypass the
                 # two-evaluation convergence contract.
                 continue
-            if not (obj_change < _tol * score_scale_d):
+            if not (obj_change < _tol * score_scale_d) or np.any(
+                mask_frozen_stop_gradient(proj_grad_d, frozen_d, objective=obj, tolerance=_tol)
+            ):
                 # One working-model update per iteration, so an all-frozen
                 # verdict can come at a nonstationary mode; exit only once the
-                # objective arm agrees the mode has stabilized.
+                # objective arm agrees the mode has stabilized and no term is
+                # held on the looser bar of a guard-stopped coefficient fit.
                 continue
             converged = True
             termination_reason = "active_set_stationary"
@@ -1405,6 +1418,10 @@ def optimize_discrete_reml_cached_w(
             and newton_step_resolved(hess_sub_d, grad_sub_d, bar=step_bar)
         ):
             if profile is not None:
+                if np.any(frozen_d & estimated_mask):
+                    # The current gradient and Hessian just reproduced the
+                    # held set that the preceding accepted step used.
+                    profile["reml_freeze_revalidated"] = True
                 profile["reml_newton_step_stop"] = {
                     "iter": poi_iter + 1,
                     "step_left": max_delta_raw,
@@ -1419,7 +1436,7 @@ def optimize_discrete_reml_cached_w(
             break
         # A shoulder's trust-region move shifts the working weights like any step.
         previous_step = max(max_delta_raw, max_delta)
-        previous_idx = active_idx_d.copy()
+        previous_idx = None
         _t_newton += _time.perf_counter() - _t0
         _n_newton_steps += 1
 
@@ -1443,8 +1460,31 @@ def optimize_discrete_reml_cached_w(
         # resolution, leaving the decision to the gradient. Otherwise strict.
         resolution = _tol * score_scale_d
         unresolvable_step = -float(grad @ delta) <= resolution
-        for _ls in range(local_max_halving):
-            rho_trial = np.clip(rho + step * delta, log_lo, log_hi)
+        tail_delta = (
+            flat_tail_trial(
+                delta,
+                proj_grad_d,
+                grad,
+                penalty_fit,
+                isolated,
+                freeze_decision,
+                bar=flat_score_bar(_tol),
+                step_cap=max_newton_step,
+            )
+            if allow_tail_trial
+            and _tol <= 1e-9
+            and not use_tensor_linesearch
+            and not shoulder_d.any()
+            else None
+        )
+        if tail_delta is not None:
+            allow_tail_trial = False
+        for _ls in range(local_max_halving + int(tail_delta is not None)):
+            taking_tail = tail_delta is not None and _ls == 0
+            if tail_delta is not None and _ls == 1:
+                step = 1.0  # The unmodified Newton proposal still gets its full trial.
+            direction = tail_delta if tail_delta is not None and taking_tail else delta
+            rho_trial = np.clip(rho + step * direction, log_lo, log_hi)
             if use_tensor_linesearch and bool(np.all(np.abs(rho_trial - rho_clipped) <= 1e-12)):
                 # Every moving coordinate is pinned at a bound; a shorter
                 # step moves even less. Nothing feasible was tried.
@@ -1631,10 +1671,20 @@ def optimize_discrete_reml_cached_w(
             # The cached trial solve is an exact solve of the profiled
             # working-model system, so the trial's own mode is stationary
             # by construction; a finite rejected objective is evidence.
-            if trial_counts_as_precision_evidence(trial_pirls.converged, trial_obj):
+            if (
+                not taking_tail
+                and np.any(rho_trial != rho_clipped)
+                and trial_counts_as_precision_evidence(trial_pirls.converged, trial_obj)
+            ):
                 evaluated_feasible_trial = True
 
-            if trial_obj < obj or (unresolvable_step and trial_obj <= obj + resolution):
+            if trial_obj < obj or (
+                not taking_tail and unresolvable_step and trial_obj <= obj + resolution
+            ):
+                if taking_tail:
+                    allow_tail_trial = True
+                elif not shoulder_d.any() and step == 1.0:
+                    previous_idx = active_idx_d.copy()
                 rho = rho_trial
                 warm_beta = beta_trial.copy()
                 warm_intercept = intercept_trial
@@ -1698,15 +1748,25 @@ def optimize_discrete_reml_cached_w(
             if tensor_log_ratio is not None:
                 _prev_tensor_v = tensor_log_ratio
 
-        if use_tensor_linesearch and not accepted and had_feasible_trial:
-            # A dead line search on the shared-tensor path exits as the exact
-            # engine's does (``classify_dead_feasible_exit`` on the current
-            # active set), but only once the working model is settled
-            # (``candidate_mode_stationary``): before that, the next update can
-            # move the gradient at unchanged rho. The generic path iterates on,
-            # and no exit is granted at the first iteration.
+        if not accepted and had_feasible_trial:
+            # A rejected step cannot supply a contraction rate. On the generic
+            # path, a settled working objective and a small PD Newton step can
+            # instead ask the shared precision test about a scored rejection.
             _n_dead_line_searches += 1
-            if poi_iter > 0 and candidate_mode_stationary:
+            if (
+                poi_iter > 0
+                and candidate_mode_stationary
+                and (
+                    use_tensor_linesearch
+                    or (
+                        evaluated_feasible_trial
+                        and not shoulder_d.any()
+                        and obj_change < resolution
+                        and max_delta_raw <= step_bar
+                        and newton_step_resolved(hess_sub_d, grad_sub_d, bar=step_bar)
+                    )
+                )
+            ):
                 active_grad_norm = (
                     float(np.max(np.abs(np.where(frozen_d, 0.0, proj_grad_d))))
                     if proj_grad_d.size
@@ -1739,7 +1799,7 @@ def optimize_discrete_reml_cached_w(
                     profile["reml_dead_line_search"] = {
                         "iter": poi_iter + 1,
                         "active_gradient_norm": active_grad_norm,
-                        "bar": float(max(FLAT_DIRECTION_FREEZE_FLOOR, _tol) * score_scale_d),
+                        "bar": dead_search_score_bar(obj, _tol),
                         "predicted_decrease": predicted_decrease,
                         "decrease_bar": float(_tol * score_scale_d),
                         "evaluated_trial": bool(evidence),

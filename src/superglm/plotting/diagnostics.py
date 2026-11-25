@@ -7,12 +7,15 @@ Tweedie, Binomial, and Gaussian families.
 
 from __future__ import annotations
 
+import html
 import warnings
 from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
-import numba
 import numpy as np
+import numpy.random
+import scipy.spatial
+from numba import njit
 from scipy import stats
 
 from superglm._utils import bin_rows, occurrence_rows, score_bins
@@ -38,7 +41,7 @@ if TYPE_CHECKING:
 # ── LOWESS smoother (Numba-accelerated) ───────────────────────────
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _lowess_core(x_s, y_s, k, n_steps):
     """Numba-accelerated LOWESS with tricube kernel and sliding window."""
     n = len(x_s)

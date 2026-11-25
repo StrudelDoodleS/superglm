@@ -16,6 +16,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import numpy.random
 from numba import njit
 
 import superglm.distributional.kernels._incomplete_beta as beta

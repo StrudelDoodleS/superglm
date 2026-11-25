@@ -546,6 +546,8 @@ def _normalized_gini(y_obs, y_pred, sample_weight=None) -> float:
 
 def _make_ax(ax: Axes | None):
     """Return (ax, fig_or_None). If ax is None, create a new figure."""
+    import html
+
     import matplotlib.pyplot as plt
 
     if ax is not None:

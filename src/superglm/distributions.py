@@ -10,6 +10,7 @@ import warnings
 from typing import Protocol, runtime_checkable
 
 import numpy as np
+import scipy.linalg
 from numpy.typing import NDArray
 from scipy.special import betaln, gammaln
 

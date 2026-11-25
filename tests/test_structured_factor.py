@@ -823,6 +823,51 @@ def test_centered_estimability_certification_failure_uses_bounded_dense_fallback
     )
 
 
+def test_centered_contrast_estimability_agrees_with_the_centered_design(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Contrasts of border columns: the compact rule and its dense fallback, against the design.
+
+    The first two border columns differ by a column the levels span, so neither is
+    estimable alone and only their sum is.  The compact geometry's decisions
+    (``BorderNullSpace``) and the dense fallback's agree with the centered public design's
+    own decomposition, and on single columns with the coefficient mask.
+    """
+    import superglm.solvers._structured.geometry as structured_geometry
+
+    rng = np.random.default_rng(5)
+    local_factors = rng.normal(size=(5, 6, 2))
+    structured = np.zeros((30, 10))
+    for level, factor in enumerate(local_factors):
+        structured[6 * level : 6 * (level + 1), 2 * level : 2 * (level + 1)] = factor
+    shared, other = rng.normal(size=(2, 30))
+    alias = structured @ rng.normal(size=10)
+    operator, public_design = _independent_centered_operator(
+        local_factors, np.column_stack((shared + alias, shared, other))
+    )
+    reference = decompose_factor(public_design - np.mean(public_design, axis=0))
+    contrasts = np.zeros((5, 13))
+    contrasts[[0, 1, 2, 3, 4], [0, 1, 0, 0, 2]] = 1.0
+    contrasts[2, 1], contrasts[3, 1] = 1.0, -1.0
+    expected = [reference.is_estimable(contrast) for contrast in contrasts]
+    assert expected == [False, False, True, False, True]
+
+    compact = structured_geometry.centered_operator_contrast_estimability(operator)
+    assert [compact.is_estimable(contrast) for contrast in contrasts] == expected
+    mask = centered_operator_coefficient_estimable(operator)
+    unit = np.eye(13)
+    assert [compact.is_estimable(unit[j]) for j in range(3)] == list(mask[:3])
+
+    def fail_numerically(_operator):
+        raise np.linalg.LinAlgError("non-convergence")
+
+    monkeypatch.setattr(
+        structured_geometry, "_independent_block_centered_geometry", fail_numerically
+    )
+    dense = structured_geometry.centered_operator_contrast_estimability(operator)
+    assert [dense.is_estimable(contrast) for contrast in contrasts] == expected
+
+
 def test_centered_estimability_certification_failure_raises_over_workspace_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

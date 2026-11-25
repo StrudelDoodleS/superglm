@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
+import scipy.linalg
 from numpy.typing import NDArray
 
 from superglm._group_matrix._lookup_tables import release_lookup_plan

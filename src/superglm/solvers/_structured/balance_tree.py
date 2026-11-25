@@ -70,13 +70,14 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cached_property, lru_cache
 from typing import TYPE_CHECKING
 
-import numba
 import numpy as np
+import numpy.random
 import scipy.linalg
+from numba import njit
 from numpy.typing import NDArray
 
 from superglm._blas_threads import narrow_kernel_blas_threads
@@ -310,7 +311,7 @@ def balance_tree(n_levels: int) -> BalanceTree:
 _REFLECTOR_FLOOR = _TINY / _UNIT
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _norm(A, lo, hi, c):  # pragma: no cover - compiled
     """Scaled 2-norm of ``A[lo:hi, c]`` (no overflow or underflow of the squares)."""
     scale = 0.0
@@ -327,7 +328,7 @@ def _norm(A, lo, hi, c):  # pragma: no cover - compiled
     return scale * math.sqrt(total)
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _reflect(A, row, c, columns, v):  # pragma: no cover - compiled
     """Householder reflector zeroing ``A[row + 1:, c]``, applied to ``columns``.  Returns
     ``tau``: ``0.0`` exactly when the column is already zero (no reflection); otherwise
@@ -364,7 +365,7 @@ def _reflect(A, row, c, columns, v):  # pragma: no cover - compiled
     return tau
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _reflect_signed(A, row, c, columns, v, M):  # pragma: no cover - compiled
     """``_reflect``, then ``M <- H M H`` with ``H = I - tau v v'`` on rows/columns ``row..m``.
 
@@ -395,7 +396,7 @@ def _reflect_signed(A, row, c, columns, v, M):  # pragma: no cover - compiled
     return tau
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _mm(A, B):  # pragma: no cover - compiled
     """``A @ B`` by fixed-order loops (no BLAS: the result does not depend on a thread count)."""
     m, inner = A.shape
@@ -411,7 +412,7 @@ def _mm(A, B):  # pragma: no cover - compiled
     return out
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _others(n, used):  # pragma: no cover - compiled
     count = 0
     for c in range(n):
@@ -426,7 +427,7 @@ def _others(n, used):  # pragma: no cover - compiled
     return out
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _leaf_exports(R_acc, roots, k, w_pos, Es, Ex, Qx):  # pragma: no cover - compiled
     """Fisher leaves: ``QR([[R_l[:k]], [sqrt(P_l), 0]])``; ``[E^s | E^x]`` and ``Qx += T'T``.
 
@@ -463,7 +464,7 @@ def _leaf_exports(R_acc, roots, k, w_pos, Es, Ex, Qx):  # pragma: no cover - com
                     Qx[w_pos[a], w_pos[b]] += ta * A[r, k + b]
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _decide(Es, child, h, k, sqrt_tau, node_scale, deferred, Es_internal):  # pragma: no cover
     """First pass: the deferral decisions from the ``[z | s]`` columns alone.
 
@@ -518,7 +519,7 @@ def _decide(Es, child, h, k, sqrt_tau, node_scale, deferred, Es_internal):  # pr
                 Es_internal[node, i, j] = A[rank + i, k + j] if j >= i else 0.0
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _stack(node, child, h, k, root, deferred, carry_pos, E_leaf, E_int, rows_per, n_ext):
     """The merge's stacked matrix ``[z_e | s | ext]``, deferred ``z`` columns moved to ext.
 
@@ -554,7 +555,7 @@ def _stack(node, child, h, k, root, deferred, carry_pos, E_leaf, E_int, rows_per
     return A, rank
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _fisher_sweep(E_leaf, child, h, k, deferred, carry_pos, E_int, Rzz, Rzx, rank_out, Qx):
     """Second pass, Fisher rows: every merge with every column, the decisions fixed.
 
@@ -596,7 +597,7 @@ def _fisher_sweep(E_leaf, child, h, k, deferred, carry_pos, E_int, Rzz, Rzx, ran
                     Qx[a, b] += ta * A[r, offset + b]
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _signed_leaf_exports(B, signature, roots, k, w_pos, R_out, M_out):  # pragma: no cover
     """Signed leaves: ``QR([[B_l], [sqrt(P_l), 0]])`` with its middle factor ``Q'JQ``.
 
@@ -635,7 +636,7 @@ def _signed_leaf_exports(B, signature, roots, k, w_pos, R_out, M_out):  # pragma
                 M_out[level, position[i], position[j]] = 0.5 * (M[i, j] + M[j, i])
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _signed_sweep(
     R_leaf,
     M_leaf,
@@ -784,7 +785,7 @@ def _signed_sweep(
     return -1
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _down_sweep(
     child, h, k, rank, Rzz, Rzx, deferred, carry_pos, S, sigma, Zx, z0, G_all, Y_all, Psi
 ):  # pragma: no cover - compiled
@@ -886,7 +887,7 @@ def _leaf_column_norms2(leaf) -> NDArray:
     return a2
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _node_column_norms(child, h, level_a2):  # pragma: no cover - compiled
     """Squared node-coordinate column norms ``sum_side h^2 sum_{l in side} a_l^2`` (bottom-up)."""
     n_int = child.shape[0]
@@ -907,7 +908,7 @@ def _node_column_norms(child, h, level_a2):  # pragma: no cover - compiled
 # ------------------------------------------------------ inference kernels --
 # Fixed-order recursions over the tree with the node transfer A_c = I - h_c G_v
 # and the whitened innovation map h_c y_v (module docstring).
-@numba.njit(cache=True)
+@njit(cache=True)
 def _transfer(G, factor, k):  # pragma: no cover - compiled
     A = np.eye(k)
     for i in range(k):
@@ -916,7 +917,7 @@ def _transfer(G, factor, k):  # pragma: no cover - compiled
     return A
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _up_vectors(child, h, G_all, Y_all, U_leaf):  # pragma: no cover - compiled
     """Innovation weights ``w_v = sum_c h_c y_v' pi_c`` of level vectors ``U_leaf`` ``(K, k, m)``.
 
@@ -938,7 +939,7 @@ def _up_vectors(child, h, G_all, Y_all, U_leaf):  # pragma: no cover - compiled
     return w
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _down_vectors(child, h, G_all, Y_all, w):  # pragma: no cover - compiled
     """Level values ``t_l = sum_{v in anc(l)} T_lv w_v`` of innovation weights ``w`` ``(n_int, k, m)``."""
     n_int, k, m = w.shape
@@ -957,7 +958,7 @@ def _down_vectors(child, h, G_all, Y_all, w):  # pragma: no cover - compiled
     return t_leaf, t_node
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _operator_aggregates(child, h, G_all, Y_all, D_leaf, Xi_leaf):  # pragma: no cover - compiled
     """``Lambda_v = sum_c h_c A_c' Omega_c``, ``X_vv = y_v' (sum_c h_c^2 Omega_c) y_v`` and
     ``X_vx = y_v' sum_c h_c Xi_c`` of a level-space operator.
@@ -995,7 +996,7 @@ def _operator_aggregates(child, h, G_all, Y_all, D_leaf, Xi_leaf):  # pragma: no
     return Lam, Xvv, Xvx
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _descendant_sums(child, h, G_all, Y_all, Lam, w):  # pragma: no cover - compiled
     """``sum_{a in desc(v)} X_va w_a = sum_c h_c y_v' mu_c`` with ``mu_v = Lambda_v y_v w_v +
     sum_d A_d' mu_d`` aggregated upward."""
@@ -1016,7 +1017,7 @@ def _descendant_sums(child, h, G_all, Y_all, Lam, w):  # pragma: no cover - comp
     return out
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _path_quadratics(child, h, G_all, Y_all, Psi_node, Lam, Xvv, Xvx):  # pragma: no cover
     """At every level, ``Q_l = sum_{a, b in anc(l)} T_lb X_ba T_la'`` and ``rho_l = sum_b T_lb X_bx``.
 
@@ -1053,7 +1054,7 @@ def _path_quadratics(child, h, G_all, Y_all, Psi_node, Lam, Xvv, Xvx):  # pragma
     return Q_leaf, r_leaf
 
 
-@numba.njit(cache=True)
+@njit(cache=True)
 def _leaf_path_row_forms(
     levels, B, leaf_parent, leaf_side, node_parent, node_side, h, Rzz, Rzx, rank, deferred, out
 ):  # pragma: no cover - compiled
@@ -2410,21 +2411,38 @@ class SumToZeroTreeFactor:
         )
         return SumToZeroTreeFactor(system, data)
 
+    def border_estimability(self):
+        """``coefficient_estimable``'s rule on contrasts of the border slopes, as
+        ``geometry.BorderNullSpace``: the same verified null space's border rows.
+        """
+        from superglm.solvers._structured.geometry import BorderNullSpace
+
+        null, root = self._data_factor()._verified_data_null()
+        border = self.small_indices[1:]
+        return BorderNullSpace(border, root[border], null[border])
+
     def _verified_data_estimable(self) -> NDArray:
-        """Data estimability on this (unpenalized) tree: its certified nulls, confirmed on the rows.
+        """Data estimability on this (unpenalized) tree (``_verified_data_null``)."""
+        null, _ = self._verified_data_null()
+        return np.linalg.norm(null, axis=1) <= SHARED_RANK_POLICY.factor_rcond
+
+    def _verified_data_null(self) -> tuple[NDArray, NDArray]:
+        """This (unpenalized) tree's certified nulls, confirmed on the rows, and their scale.
 
         A direction the border certificate cannot place is a candidate, not a
         null, so each candidate is measured on the data: the per-level residual
         ``R_l [beta_l; alpha; b]`` on the candidates' span, equilibrated to unit
         public columns. Singular values at most ``factor_rcond`` give the null
-        directions; a coordinate the null basis touches above ``factor_rcond``
-        is not estimable (``geometry._coefficient_estimable_from_null_basis``).
+        directions, an orthonormal basis in those equilibrated coordinates
+        (the second entry, each coordinate's scale); a coordinate the null basis
+        touches above ``factor_rcond`` is not estimable
+        (``geometry._coefficient_estimable_from_null_basis``).
         """
         width = self.shape[0]
         N_x = self._null_x
         t = N_x.shape[1]
         if not t:
-            return np.ones(width, dtype=bool)
+            return np.zeros((width, 0)), np.ones(width)
         K, k = self.n_levels, self.block_size
         q = len(self._border_x)
         coordinates = self._coordinates(True)
@@ -2450,8 +2468,7 @@ class SumToZeroTreeFactor:
         stacked = np.concatenate([rows.reshape(-1, t), tail])
         residual = scipy.linalg.solve_triangular(Rq, stacked.T, trans="T").T
         singular, right = np.linalg.svd(residual, full_matrices=False)[1:]
-        null = Q @ right[singular <= SHARED_RANK_POLICY.factor_rcond].T
-        return np.linalg.norm(null, axis=1) <= SHARED_RANK_POLICY.factor_rcond
+        return Q @ right[singular <= SHARED_RANK_POLICY.factor_rcond].T, root
 
     def _paths(self) -> tuple[NDArray, NDArray, NDArray, NDArray]:
         """``(leaf_parent, leaf_side, node_parent, node_side)`` of the balance tree."""
@@ -3085,6 +3102,11 @@ class ProfiledSumToZeroTreeFactor(_ProfiledLeafFactor):
     def coefficient_estimable(self) -> NDArray:
         """The slopes' estimability (``SumToZeroTreeFactor.coefficient_estimable``)."""
         return self.augmented_factor.coefficient_estimable()[1:]
+
+    def border_estimability(self):
+        """The slopes' ``SumToZeroTreeFactor.border_estimability``."""
+        border = self.augmented_factor.border_estimability()
+        return replace(border, indices=border.indices - 1)
 
     def raw_level_inverse_block(self, level: int) -> NDArray:
         return self.augmented_factor.raw_level_inverse_block(level)

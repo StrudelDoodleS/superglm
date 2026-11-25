@@ -176,6 +176,7 @@ def piecewise_display_term(ti, n_points: int = 200):
     """
     from dataclasses import replace
 
+    import scipy.spatial
     from scipy.stats import norm
 
     from superglm.inference._term_types import _safe_exp
@@ -467,6 +468,8 @@ def _make_continuous_figure(
 
     Returns (fig, ax_main, ax_density_or_None).
     """
+    import html
+
     import matplotlib.pyplot as plt
 
     if figsize is None:

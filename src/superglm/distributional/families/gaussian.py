@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal
 
 import numpy as np
+import scipy.linalg
 from numpy.typing import NDArray
 from scipy import special
 

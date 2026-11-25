@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import numpy.random
 from numba import njit
 from numba.extending import overload, register_jitable
 

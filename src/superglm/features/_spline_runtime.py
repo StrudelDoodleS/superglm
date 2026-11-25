@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, cast
 
 import numpy as np
+import scipy.linalg
 from numpy.typing import NDArray
 from scipy.interpolate import BSpline as BSpl
 

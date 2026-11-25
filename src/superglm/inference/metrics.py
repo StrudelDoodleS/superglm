@@ -9,6 +9,8 @@ from functools import cache, cached_property, partial
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
+import scipy.linalg
+import scipy.spatial
 from numpy.typing import NDArray
 from scipy.special import gammaln
 
@@ -55,6 +57,7 @@ from superglm.model.state_ops import (
     _rank_active_state,
     _rank_augmented_covariance,
     _solver_space_working_weights,
+    fit_contrast_estimable,
     rank_standard_error_mask,
     refit_shows_every_standard_error,
     saved_standard_error_note,
@@ -350,6 +353,35 @@ def _coefficient_estimability(
         original = original_by_name[active_group.name]
         estimable[original.sl] = active_estimable[active_group.sl]
     return estimable
+
+
+def _contrast_estimability(
+    data_rank,
+    groups: list[GroupSlice],
+    active_groups: list[GroupSlice],
+    width: int,
+):
+    """``data_rank.is_estimable`` read on a contrast over the full fitted coordinates.
+
+    A contrast that weighs an inactive coefficient is not determined, as
+    ``_coefficient_estimability`` leaves those coefficients blank.  The reader lives as
+    long as the metrics object and is pickled with it: a ``partial`` of a module
+    function, over only the null-space part of ``data_rank``.
+    """
+    original_by_name = {group.name: group for group in groups}
+    columns = np.empty(sum(group.size for group in active_groups), dtype=np.intp)
+    for active_group in active_groups:
+        columns[active_group.sl] = np.arange(width)[original_by_name[active_group.name].sl]
+    return partial(_active_contrast_estimable, data_rank.estimability_only(), columns)
+
+
+def _active_contrast_estimable(data_rank, columns: NDArray, contrast: NDArray) -> bool:
+    """Whether ``data_rank`` determines ``contrast``, whose active coordinates sit at ``columns``."""
+    outside = np.ones(len(contrast), dtype=bool)
+    outside[columns] = False
+    if np.any(contrast[outside] != 0.0):
+        return False
+    return bool(data_rank.is_estimable(contrast[columns]))
 
 
 def _requires_wood_inference(model, active_groups: list[GroupSlice]) -> bool:
@@ -1181,6 +1213,11 @@ class ModelMetrics:
                     shift=getattr(augmented, "intercept_shift", None),
                 )
             compact_estimable = fit_inference.get("coefficient_estimable")
+            self.__dict__["_contrast_estimable"] = (
+                fit_contrast_estimable(self._model, fit_inference)
+                if compact_estimable is not None
+                else getattr(rank_info, "is_estimable", None)
+            )
             if compact_estimable is not None:
                 self.__dict__["_coefficient_estimable"] = compact_estimable
             elif "_coefficient_estimable" not in self.__dict__:
@@ -1229,6 +1266,9 @@ class ModelMetrics:
                     _coefficient_estimability, data_rank, self._groups, active_groups, len(beta)
                 ),
             )
+            self.__dict__["_contrast_estimable"] = _contrast_estimability(
+                data_rank, self._groups, active_groups, len(beta)
+            )
             augmented = _profiled_augmented_covariance(
                 centered_data_gram,
                 S_active,
@@ -1247,6 +1287,7 @@ class ModelMetrics:
             self.__dict__["_coefficient_estimable"] = rank_standard_error_mask(
                 self._model, rank_info
             )
+            self.__dict__["_contrast_estimable"] = rank_info.is_estimable
             return X_a, W, inverse, augmented, active_groups
 
         _, active_groups = _selected_group_state(
@@ -1280,6 +1321,9 @@ class ModelMetrics:
         self._decide_standard_errors(
             profile_rank,
             partial(_coefficient_estimability, data_rank, self._groups, active_groups, len(beta)),
+        )
+        self.__dict__["_contrast_estimable"] = _contrast_estimability(
+            data_rank, self._groups, active_groups, len(beta)
         )
         augmented = _profiled_augmented_covariance(
             centered_data_gram,
@@ -1577,6 +1621,14 @@ class ModelMetrics:
         return np.ldexp(standardized, exponent // 2)
 
     # ── Coefficient standard errors ──────────────────────────────
+
+    @property
+    def _current_contrast_estimable(self):
+        """``RankDecomposition.is_estimable`` of the decomposition the coefficient mask
+        was read from, over the fitted coefficients, or ``None``.
+        """
+        _ = self._active_info
+        return self.__dict__.get("_contrast_estimable")
 
     @cached_property
     def _current_coefficient_estimable(self) -> NDArray:
@@ -1968,6 +2020,7 @@ class ModelMetrics:
             precomputed_design_moments=precomputed_moments,
             test_bases=term_test_bases(self._model) if wood_inference else None,
             coefficient_estimable_override=self._current_coefficient_estimable,
+            contrast_estimable=self._current_contrast_estimable,
             selected_group_names=selected_names,
             group_matrices=(
                 self._dm.group_matrices if self._uses_fit_design and self._dm is not None else None

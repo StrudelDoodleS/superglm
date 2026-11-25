@@ -210,6 +210,7 @@ class LogitLink:
         return np.log(mu_safe / (1 - mu_safe))
 
     def inverse(self, eta: NDArray) -> NDArray:
+        import scipy.linalg
         from scipy.special import expit
 
         return expit(eta)
@@ -220,6 +221,7 @@ class LogitLink:
 
     @staticmethod
     def _probability_and_complement(eta: NDArray) -> tuple[NDArray, NDArray]:
+        import scipy.linalg
         from scipy.special import expit
 
         p = expit(eta)
@@ -256,12 +258,14 @@ class ProbitLink:
     """
 
     def link(self, mu: NDArray) -> NDArray:
+        import scipy.spatial
         from scipy.stats import norm
 
         mu_safe = np.clip(mu, 1e-15, 1 - 1e-15)
         return norm.ppf(mu_safe)
 
     def inverse(self, eta: NDArray) -> NDArray:
+        import scipy.linalg
         from scipy.special import ndtr
 
         # ``scipy.stats.norm.cdf`` is ``ndtr`` behind argument checks that
@@ -269,6 +273,7 @@ class ProbitLink:
         return ndtr(_as_float64(eta))
 
     def deriv(self, mu: NDArray) -> NDArray:
+        import scipy.spatial
         from scipy.stats import norm
 
         mu_safe = np.clip(mu, 1e-15, 1 - 1e-15)
