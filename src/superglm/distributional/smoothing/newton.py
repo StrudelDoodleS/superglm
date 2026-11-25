@@ -694,9 +694,7 @@ def run_newton_endgame(
     upper_bounds: Mapping[str, float] | None = None,
     budget: int | None = None,
     cap_tolerance: float | None = None,
-    endpoint_trial: Callable[
-        [tuple[str, ...], Mapping[str, float], tuple[str, ...]], tuple[str, ...]
-    ]
+    endpoint_trial: Callable[[EndgameState, Mapping[str, float], tuple[str, ...]], tuple[str, ...]]
     | None = None,
 ) -> NewtonEndgameOutcome:
     """Damped Newton on the exact LAML gradient from an accepted smoothing state.
@@ -722,8 +720,8 @@ def run_newton_endgame(
     an iteration (on a tail ``V + c exp(-rho)`` the gradient and the curvature are
     equal and opposite), and a bound-constrained Newton method reaches a bound by
     landing on it (Mishchenko, Holmgren and Ronnegard, arXiv 0711.2619, section
-    4.3). ``endpoint_trial(flat_tail, log_steps, names)`` names the flat-tail
-    components to land on their upper bounds beside the step ``log_steps``, each
+    4.3). ``endpoint_trial(state, log_steps, names)`` names the flat-tail components
+    to land on their upper bounds beside the step ``log_steps`` from ``state``, each
     once in a search. That candidate is tried before the line search, and before a
     converged point is returned, and is kept when the objective is no worse. What
     follows judges the bound: the next iteration's exact gradient takes a component
@@ -835,7 +833,7 @@ def run_newton_endgame(
         if endpoint_trial is None or remaining <= 0:
             return ()
         steps = dict(zip(names, log_steps.tolist(), strict=True))
-        return endpoint_trial(current.evidence.flat_tail, steps, names)
+        return endpoint_trial(current, steps, names)
 
     def landed_evidence(
         trial_lambdas: Mapping[str, float],

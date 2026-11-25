@@ -94,6 +94,7 @@ from superglm.distributional.smoothing.proposals import (
     _ordered_steps,
     _scaled_proposal,
     endpoint_trial_names,
+    resolved_flat_tails,
 )
 from superglm.distributional.solver.chunks import ChunkSize
 from superglm.distributional.solver.solver import _DenseObservedReuseSession, fit_dense_fixed_lambda
@@ -511,16 +512,31 @@ def fit_distributional_efs(
         )
 
     def _endpoint_names(
-        flat_tail: tuple[str, ...], log_steps: Mapping[str, float], names: tuple[str, ...]
+        state: EndgameState, log_steps: Mapping[str, float], names: tuple[str, ...]
     ) -> tuple[str, ...]:
-        """The components to try at their bounds beside ``log_steps``, each once in a search.
+        """The components to try at their bounds beside the step ``log_steps`` from ``state``.
 
-        The accelerator extrapolates the same fixed-point map, so an accelerated
-        search makes no endpoint trial.
+        Each is tried once in a search. The accelerator extrapolates the same
+        fixed-point map, so an accelerated search makes no endpoint trial. A
+        practical plateau reads the objective, so ``"efs"`` and ``"efs+finish"``
+        with one make no trial for a fall within the score bar, unless the step
+        itself puts a tail on its bound (``resolved_flat_tails``). A strict stop,
+        and the hand-off of the other searches, read the step, which a flat tail
+        never shrinks: there every tail is tried.
         """
         if accelerator is not None:
             return ()
-        chosen = endpoint_trial_names(flat_tail, log_steps, names, endpoint_tried)
+        flat_tail = state.evidence.flat_tail
+        plateau = outer_config.practical_convergence and outer_config.outer in ("efs", "efs+finish")
+        resolution = outer_config.score_bar(state.objective) if plateau else -math.inf
+        # The steps ``_scaled_proposal`` assigns the bound to.
+        arriving = [
+            name
+            for name in flat_tail
+            if log_steps[name] >= math.log(outer_config.upper(name)) - math.log(state.lambdas[name])
+        ]
+        tails = resolved_flat_tails(flat_tail, endpoint_tried, resolution, arriving)
+        chosen = endpoint_trial_names(tails, log_steps, names, endpoint_tried)
         endpoint_tried.update(chosen)
         return chosen
 
@@ -1500,9 +1516,7 @@ def fit_distributional_efs(
             missing=0.0,
         )
 
-        endpoint_names = _endpoint_names(
-            terminal_evidence.flat_tail, plain_update.log_steps, estimated_names
-        )
+        endpoint_names = _endpoint_names(_endgame_state(), plain_update.log_steps, estimated_names)
         accepted_evidence: _FreshRawEvidence | None = None
         if endpoint_names:
             with measure_phase(phase_recorder, "efs_update_backtracking"):

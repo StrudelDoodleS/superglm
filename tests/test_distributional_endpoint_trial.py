@@ -16,7 +16,9 @@ from superglm.distributional.results.iteration import DistributionalEFSConfig
 from superglm.distributional.smoothing.proposals import (
     _endpoint_proposal,
     endpoint_trial_names,
+    flat_tail_fall,
     flat_tail_names,
+    resolved_flat_tails,
 )
 from superglm.features import CubicRegressionSpline, Spline
 from superglm.reml.convergence import flat_tail_certified
@@ -136,6 +138,73 @@ def test_a_flat_component_is_taken_to_its_bound_once_and_judged_where_the_others
     assert model.result_.total_effective_df == pytest.approx(
         reference.result_.total_effective_df, rel=1.0e-6
     )
+
+
+@pytest.mark.parametrize("outer", ["efs", "efs+finish"])
+def test_no_trial_is_made_for_a_fall_the_tolerance_does_not_resolve(outer: _Outer) -> None:
+    """A bound is tried for a gain the search resolves, and where no plateau can end the search.
+
+    ``z``'s working problem can fall 0.15 on the way to its bound, with V near 288.
+    At ``reml_tol=1e-2`` the score bar is 2.9, so the search makes no trial, puts
+    nothing on a face, and ends within that bar of the fit that tried. At
+    ``reml_tol=1e-4`` the bar is 0.029 and the trial is made. A search without
+    the practical plateau stops on the step alone, and ``"efs+newton"`` hands
+    over on it; a flat tail never shrinks its step, so both try at either
+    tolerance. Mutation checks: without the test of the fall the first fit tries
+    too; applied to every search, the last two do not.
+    """
+    tried_model, tried = _fit(outer, reml_tol=1.0e-4)
+    assert len(_trials(tried)) == 1
+    assert tried_model.exact_face_components_ == (_Z,)
+
+    model, smoothing = _fit(outer, reml_tol=1.0e-2)
+    assert _trials(smoothing) == []
+    assert smoothing.converged is True
+    assert model.exact_face_components_ == ()
+    assert smoothing.lambdas[_Z] < smoothing.config.upper(_Z)
+    assert not any(_face_event(row) for row in smoothing.history)
+    forgone = smoothing.objective - tried.objective
+    assert 0.0 <= forgone <= smoothing.config.score_bar(smoothing.objective)
+
+    _, strict = _fit(outer, reml_tol=1.0e-2, practical_reml=False)
+    assert len(_trials(strict)) == 1
+    _, handed = _fit("efs+newton", reml_tol=1.0e-2)
+    assert len(_trials(handed)) == 1
+
+
+@pytest.mark.parametrize("outer", ["efs", "efs+finish"])
+def test_a_flat_tail_its_own_step_puts_on_its_bound_is_tried_there(outer: _Outer) -> None:
+    """A walk that reaches the bound ends as a trial: the cap is held and assessed once.
+
+    ``z`` starts a factor of four short of its bound, where the fall left to it
+    is a thousandth of the score bar, so its first step is an ordinary one. Its
+    second would put it on the bound, and is made as a trial, which holds the
+    cap off the face until ``x`` stops. Mutation checks: without the test of
+    the fall the trial is the first round; without the trial of an arriving
+    tail none is made, and the face is promoted the round after the landing.
+    """
+    bound = _fit(outer, max_reml_iter=1)[1].config.upper(_Z)
+    model, smoothing = _fit(outer, lambdas={_X: 0.2, _Z: bound / 4.0})
+    history = smoothing.history
+
+    (trial,) = _trials(smoothing)
+    walked = history[:trial]
+    assert walked and all(row.accepted and row.step_source == "efs" for row in walked)
+    assert all(row.lambdas_after[_Z] < bound for row in walked)
+    row = history[trial]
+    assert (row.step_source, row.endpoint_components, row.accepted) == ("endpoint", (_Z,), True)
+    assert row.lambdas_after[_Z] == bound
+    # The bound was within the walk's stride.
+    assert row.accepted_log_steps[_Z] < walked[-1].accepted_log_steps[_Z]
+    (promoted,) = (i for i, item in enumerate(history) if item.activated_face_components)
+    between = history[trial + 1 : promoted]
+    assert between and not any(_face_event(item) for item in between)
+    assert all(item.accepted_log_steps[_Z] == 0.0 for item in between)
+
+    assert smoothing.converged is True
+    assert model.exact_face_components_ == (_Z,)
+    assert history[-1].revalidated_face_components == (_Z,)
+    assert smoothing.unresolved_upper_bound == ()
 
 
 def test_a_plateau_earned_in_the_last_round_keeps_its_terminal_checks() -> None:
@@ -994,6 +1063,52 @@ def test_a_flat_tail_is_alone_on_its_block_and_short_of_its_bound() -> None:
     capped, inverse, update = _block(np.diag([0.2, 0.1]) * bound, lam=bound, beta=(1e-7, 1e-7))
     assert flat_tail_certified(2.0 - bound * update.trace_terms["a"], 2.0e-14 * bound)[0]
     assert flat_tail_names((capped,), alone, update, inverse, config) == ()
+
+
+def test_a_flat_tail_is_named_with_the_most_its_working_problem_falls() -> None:
+    """The fall of the working criterion to zero variance is at most ``(-log(1 - E) - B) / 2``.
+
+    With curvature d and working value z in each direction of an identity
+    penalty, the criterion is
+    ``sum(d lambda z^2 / (d + lambda) + log(1 + d / lambda)) / 2`` and tends to
+    ``sum(d z^2) / 2``. One direction with no fitted quadratic form meets the
+    bound; two directions with one fall short of it and still fall. Mutation
+    checks: without B the second block's bound is not the stated one; with
+    ``E / 2`` for the logarithm the first block falls further than its bound.
+    """
+    config = DistributionalEFSConfig()
+    for diagonal, beta, met in (([0.25], (0.0,), True), ([0.12, 0.07], (0.1, 0.1), False)):
+        d, b = np.array(diagonal), np.array(beta)
+        component, inverse, update = _block(np.diag(d), beta=b)
+        blocks = (("a", slice(0, len(d))),)
+        assert flat_tail_names((component,), blocks, update, inverse, config) == ("a",)
+        bound = flat_tail_fall(component, update)
+        z = (d + 1.0) * b / d  # the penalised solution is d z / (d + lambda) at lambda = 1
+        fall = 0.5 * float(np.sum(d * z**2 / (d + 1.0) + np.log1p(d)) - np.sum(d * z**2))
+        edf, quadratic = float(np.sum(d / (d + 1.0))), float(b @ b)
+        assert bound == pytest.approx(0.5 * (-math.log1p(-edf) - quadratic), rel=1e-12)
+        assert 0.0 < fall <= bound * (1.0 + 1e-12)
+        assert (fall == pytest.approx(bound, rel=1e-12)) is met
+
+
+def test_flat_tails_are_judged_by_the_fall_they_can_bring_together() -> None:
+    """One trial takes every untried tail, so they are resolved as one, and go as one.
+
+    A tail the step itself puts on its bound owes its face an assessment, so
+    the set is tried whatever it can gain. Mutation checks: judged one by one,
+    the pair is not named; counting a tried tail's fall, or its arrival, the one
+    left is named; naming the arriving tail alone leaves the other to walk.
+    """
+    tails = {"a": 0.4, "b": 0.4}
+    assert resolved_flat_tails(tails, set(), 0.6) == ("a", "b")
+    assert resolved_flat_tails({"a": 0.4}, set(), 0.6) == ()
+    assert resolved_flat_tails(tails, {"b"}, 0.6) == ()
+    assert resolved_flat_tails(tails, {"b"}, 0.3) == ("a",)
+    assert resolved_flat_tails(tails, set(), 0.8) == ()
+    assert resolved_flat_tails(tails, set(), 0.8, arriving=("b",)) == ("a", "b")
+    assert resolved_flat_tails(tails, {"b"}, 0.8, arriving=("b",)) == ()
+    assert resolved_flat_tails(tails, set(), -math.inf) == ("a", "b")
+    assert resolved_flat_tails({}, set(), -math.inf, arriving=("a",)) == ()
 
 
 def test_the_trial_waits_for_the_other_components_and_lands_on_each_ones_own_bound() -> None:

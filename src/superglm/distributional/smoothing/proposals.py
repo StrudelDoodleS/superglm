@@ -191,8 +191,46 @@ def flat_tail_names(
     return tuple(names)
 
 
+def flat_tail_fall(component: EFSComponentState, update: EFSUpdateResult) -> float:
+    """The most a flat tail's working problem falls on the way to its upper bound.
+
+    With E and B as ``flat_tail_names`` forms them: in S's eigen-directions E
+    is a sum of e_i = d_i / (lambda + d_i) and B a sum of B_i >= 0, and the
+    working criterion stands (-sum log(1 - e_i) - sum B_i / (1 - e_i)) / 2 above
+    its value at zero variance. That is at most (-log(1 - E) - B) / 2, since
+    -log(1 - x) is superadditive and no 1 - e_i exceeds one, and the
+    certificate keeps it positive.
+    """
+    name, lam = component.name, component.lambda_value
+    edf = component.rank - lam * update.trace_terms[name]
+    return 0.5 * (-math.log1p(-edf) - lam * update.quadratic_forms[name])
+
+
+def resolved_flat_tails(
+    flat_tail: Mapping[str, float],
+    latched: Collection[str],
+    resolution: float,
+    arriving: Collection[str] = (),
+) -> tuple[str, ...]:
+    """The untried flat tails, where a trial of them is worth its face assessment.
+
+    ``flat_tail`` gives each component's largest fall on the way to its bound
+    (``flat_tail_fall``). One trial takes them all, so they are judged as one:
+    a set worth its trial takes its small members along, which would otherwise
+    reach their bounds later, one face at a time. A fall within ``resolution``
+    is no reason for a trial, whose bounds each cost a face assessment: mgcv's
+    Fellner--Schall iteration likewise counts a REML change under its
+    ``efs.tol`` as negligible (the ``gam.control`` help page). Nor is it one to
+    hold a tail back that the step itself puts on its bound (``arriving``): the
+    assessment is then owed, and the trial holds that bound until the others stop.
+    """
+    untried = {name: fall for name, fall in flat_tail.items() if name not in latched}
+    owed = not untried.keys().isdisjoint(arriving)
+    return tuple(untried) if owed or sum(untried.values()) > resolution else ()
+
+
 def endpoint_trial_names(
-    flat_tail: tuple[str, ...],
+    flat_tail: Collection[str],
     log_steps: Mapping[str, float],
     estimated_names: tuple[str, ...],
     latched: Collection[str],

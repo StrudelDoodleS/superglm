@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.results.iteration import DistributionalEFSConfig
@@ -16,7 +16,7 @@ from superglm.distributional.smoothing.objective import (
 )
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.distributional.smoothing.penalty_geometry import _PenaltyEvaluationMemo
-from superglm.distributional.smoothing.proposals import flat_tail_names
+from superglm.distributional.smoothing.proposals import flat_tail_fall, flat_tail_names
 from superglm.reml.efs_update import EFSComponentState, EFSUpdateResult, wood_fasiolo_update
 
 
@@ -31,8 +31,9 @@ class _FreshRawEvidence:
     working_infinity: tuple[str, ...]
     unresolved_upper_bound: tuple[str, ...]
     cap_held: tuple[str, ...] = ()
-    # Components an endpoint trial may take to their upper bounds (``flat_tail_names``).
-    flat_tail: tuple[str, ...] = ()
+    # Components an endpoint trial may take to their upper bounds (``flat_tail_names``),
+    # each with the most its working problem falls on the way (``flat_tail_fall``).
+    flat_tail: Mapping[str, float] = field(default_factory=dict)
 
 
 def _fresh_raw_evidence(
@@ -140,6 +141,7 @@ def _fresh_raw_evidence(
         if rank is not None and rank.rank == rank.width
         else ()
     )
+    by_name = {component.name: component for component in components}
     return _FreshRawEvidence(
         components=components,
         estimated_names=estimated_names,
@@ -148,7 +150,7 @@ def _fresh_raw_evidence(
         working_infinity=working_infinity,
         unresolved_upper_bound=unresolved_upper_bound,
         cap_held=cap_held,
-        flat_tail=flat_tail,
+        flat_tail={name: flat_tail_fall(by_name[name], update) for name in flat_tail},
     )
 
 
