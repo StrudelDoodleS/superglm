@@ -24,11 +24,25 @@ from superglm.solvers.dispersion import FREQUENCY_WEIGHTS, PRIOR_WEIGHTS
 
 
 class PriorWeightLatticeWarning(UserWarning):
-    """A counting response or binomial weight lacks an exact probability law."""
+    """Warned when responses or weights lack an exact discrete probability law.
+
+    Emitted for non-integral Poisson or negative-binomial responses under
+    ``weight_semantics="frequency"``, and for non-unit ``sample_weight`` on
+    binary ``Binomial`` fits under ``weight_semantics="prior"``. Reported
+    log-likelihood, AIC, and BIC are then quasi-likelihood values rather than
+    exact probabilities; for fixed-parameter fits, coefficients and deviance
+    are unaffected.
+    """
 
 
 class FractionalFrequencyWeightWarning(UserWarning):
-    """A replication count that is not a whole number of observations."""
+    """Warned when ``sample_weight`` has non-integral values under ``weight_semantics="frequency"``.
+
+    Replication counts must be whole numbers for exact likelihoods and
+    ``sum(w) - edf`` residual degrees of freedom; fractional values produce
+    quasi-likelihood criteria. Use ``weight_semantics="prior"`` for precisions
+    or exposures.
+    """
 
 
 #: Absolute slack when testing a weight for unity.  Values sit near 1 here, so

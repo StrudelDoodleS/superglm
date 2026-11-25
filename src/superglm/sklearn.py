@@ -670,14 +670,16 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         Unspecified columns default to numeric.
     feature_names : list of str or None
         Column names for ndarray input.  Ignored for native DataFrames.
-    n_knots : int or list of int
-        Interior knots for spline features.
-    degree : int
-        B-spline degree (default 3).
-    categorical_base : str
-        Base level strategy (``"most_exposed"`` or ``"first"``).
+    n_knots : int or list of int, default 10
+        Interior knots for spline features. A list gives one count per entry in
+        ``spline_features``, in order.
+    degree : int, default 3
+        B-spline degree for ``spline_features``.
+    categorical_base : str, default "most_exposed"
+        Base-level strategy (``"most_exposed"``, ``"first"``, or a level name).
+        Falls back to ``"first"`` when ``sample_weight`` is not provided.
     offset : str, int, list, or None
-        Offset column(s) by name or index.
+        Offset column(s) by name or index, summed and excluded from features.
     weight_semantics : {"prior", "frequency"}
         What ``sample_weight`` says about a row. ``"prior"`` (default) reads it
         as a precision, ``Var(Y_i) = phi V(mu_i) / w_i``; ``"frequency"`` reads
@@ -733,15 +735,14 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         self.smoothing = smoothing
 
     def __setstate__(self, state: dict) -> None:
-        """Restore an estimator pickled before ``weight_semantics`` existed.
+        """Restore a pickled estimator, backfilling fields added in newer versions.
 
-        sklearn reads every constructor parameter off the instance, so a
-        missing attribute breaks ``get_params`` and ``clone`` as well as
-        refitting. The backfill is the contract the estimator was originally
-        fitted under -- the pre-change family rule -- not the new default, so a
-        restored wrapper keeps reproducing what it recorded. An estimator
-        pickled before ``terms`` existed restores it as ``None``, and one
-        pickled before ``smoothing`` existed as ``"fixed"``, the fit it ran.
+        scikit-learn reads every constructor parameter off the instance, so
+        missing attributes break ``get_params``, ``clone``, and refitting.
+        Missing ``terms`` restores as ``None``, missing ``smoothing`` as
+        ``"fixed"``, and missing ``weight_semantics`` to the legacy
+        family-specific default so restored estimators reproduce their saved
+        contract.
         """
         self.__dict__.update(state)
         self.__dict__.setdefault("terms", None)
@@ -765,6 +766,7 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         y: NDArray,
         sample_weight: NDArray | None = None,
     ) -> SuperGLMRegressor:
+        """Fit the regression model to ``X`` and ``y`` and return ``self``."""
         _validate_regressor_family(self.family)
         _fit_common(self, X, y, sample_weight, family=self.family)
 
@@ -787,6 +789,7 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         return self
 
     def predict(self, X) -> NDArray:
+        """Predict response means for ``X``."""
         X_frame, feature_cols, offset_array = _prepare_predict(self, X)
         return self._model.predict(
             _select_feature_frame(X_frame, feature_cols),
@@ -815,6 +818,7 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         return float(r2_score(np.asarray(y)[kept], mu[kept], sample_weight=weights))
 
     def diagnostics(self) -> dict[str, Any]:
+        """Return per-group diagnostic statistics from the fitted model."""
         check_is_fitted(self)
         return self._model.diagnostics()
 
@@ -833,6 +837,7 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         )
 
     def reconstruct_feature(self, name: str) -> dict[str, Any]:
+        """Reconstruct a fitted feature's effect on its original scale."""
         check_is_fitted(self)
         return self._model.reconstruct_feature(name)
 
@@ -858,30 +863,38 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         Explicit automatic or positive selection strength auto-upgrades to
         ``"group_lasso"``.
     selection_penalty : float, {"auto"}, or None
-        See ``SuperGLMRegressor``.
+        Group penalty strength. ``None`` and zero disable feature selection;
+        ``"auto"`` calibrates the strength from the fit data.
     spline_penalty : float, dict[str, float] or None
-        See ``SuperGLMRegressor``.
+        How strongly each spline is smoothed (default 0.1). A float sets every
+        term; a dict sets terms by name and leaves unnamed terms unsmoothed.
     features : dict[str, FeatureSpec] or None
-        Native-style feature specs.  Mutually exclusive with shorthand
-        wrapper arguments.  See ``SuperGLMRegressor`` for details.
+        Explicit feature specs. Mutually exclusive with shorthand wrapper
+        arguments (``spline_features``, ``categorical_features``,
+        ``numeric_features``, and non-default ``n_knots``/``degree``/
+        ``categorical_base``).
     spline_features : list of str or int, or None
-        Columns to treat as spline features.
+        Columns to treat as P-spline features (by name or index).
     categorical_features : list of str or int, or None
-        Columns to treat as categorical.
+        Columns to treat as categorical (by name or index). Required for
+        ndarray input if any columns are categorical.
     numeric_features : list of str or int, or None
-        Columns to treat as numeric.
+        Columns to treat as numeric (by name or index). Unspecified columns
+        default to numeric in ndarray mode.
     feature_names : list of str or None
-        Column names for ndarray input.
-    n_knots : int or list of int
-        Interior knots for spline features.
-    degree : int
-        B-spline degree.
-    categorical_base : str
-        Base level strategy.
+        Column names for ndarray input. Ignored for native DataFrames.
+    n_knots : int or list of int, default 10
+        Interior knots for ``spline_features``. A list gives one count per
+        spline column, in order.
+    degree : int, default 3
+        B-spline degree for ``spline_features``.
+    categorical_base : str, default "most_exposed"
+        Base-level strategy (``"most_exposed"``, ``"first"``, or a level name).
+        Falls back to ``"first"`` when ``sample_weight`` is not provided.
     offset : str, int, list, or None
-        Offset column(s).
-    threshold : float
-        Classification threshold for ``predict()`` (default 0.5).
+        Offset column(s) by name or index, summed and excluded from features.
+    threshold : float, default 0.5
+        Classification probability threshold for ``predict()``.
     weight_semantics : {"prior", "frequency"}
         What ``sample_weight`` says about a row. ``"prior"`` (default) reads it
         as a precision, ``Var(Y_i) = phi V(mu_i) / w_i``; ``"frequency"`` reads
@@ -937,15 +950,14 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         self.smoothing = smoothing
 
     def __setstate__(self, state: dict) -> None:
-        """Restore an estimator pickled before ``weight_semantics`` existed.
+        """Restore a pickled estimator, backfilling fields added in newer versions.
 
-        sklearn reads every constructor parameter off the instance, so a
-        missing attribute breaks ``get_params`` and ``clone`` as well as
-        refitting. The backfill is the contract the estimator was originally
-        fitted under -- the pre-change family rule -- not the new default, so a
-        restored wrapper keeps reproducing what it recorded. An estimator
-        pickled before ``terms`` existed restores it as ``None``, and one
-        pickled before ``smoothing`` existed as ``"fixed"``, the fit it ran.
+        scikit-learn reads every constructor parameter off the instance, so
+        missing attributes break ``get_params``, ``clone``, and refitting.
+        Missing ``terms`` restores as ``None``, missing ``smoothing`` as
+        ``"fixed"``, and missing ``weight_semantics`` to the legacy
+        family-specific default so restored estimators reproduce their saved
+        contract.
         """
         self.__dict__.update(state)
         self.__dict__.setdefault("terms", None)
@@ -969,6 +981,11 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         y: NDArray,
         sample_weight: NDArray | None = None,
     ) -> SuperGLMClassifier:
+        """Fit the binary binomial classifier to ``X`` and ``y`` and return ``self``.
+
+        Raises ``ValueError`` if ``y`` is not binary in ``{0, 1}`` or contains
+        only one class.
+        """
         from superglm.distributions import Binomial, validate_response
 
         y = np.asarray(y, dtype=np.float64)
@@ -1006,6 +1023,7 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         )
 
     def diagnostics(self) -> dict[str, Any]:
+        """Return per-group diagnostic statistics from the fitted model."""
         check_is_fitted(self)
         return self._model.diagnostics()
 

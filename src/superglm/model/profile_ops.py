@@ -23,10 +23,14 @@ logger = logging.getLogger(__name__)
 
 
 class PublicationModeError(RuntimeError):
-    """The publication refit could not certify a penalized coefficient mode.
+    """Raised when the final REML refit at a profiled ``p`` or ``theta`` fails to converge.
 
-    A ``RuntimeError`` subclass, so broad handlers still catch it; the
-    certification failure that caused it is chained as ``__cause__``.
+    Emitted by :meth:`~superglm.SuperGLM.estimate_p` or
+    :meth:`~superglm.SuperGLM.estimate_theta` when the final REML refit at the
+    selected parameter cannot verify a converged penalised optimum. The
+    underlying solver failure is chained as ``__cause__``, and the message
+    lists alternatives such as publishing with ``fit_mode="fit"`` or narrowing
+    the search bounds.
     """
 
 

@@ -58,9 +58,10 @@ if TYPE_CHECKING:
 class SuperGLM:
     """Penalised generalised linear model with splines, group penalties, and REML.
 
-    Supports Poisson, Gaussian, Gamma, NB2, Tweedie, and Binomial families with group
-    lasso, sparse group lasso, or ridge penalties.  Smoothing parameters can
-    be estimated via REML (``fit_reml``) or cross-validation (``cross_validate``).
+    Supports Poisson, Gaussian, Gamma, NB2, Tweedie, and Binomial families with
+    group lasso, group elastic net, sparse group lasso, or ridge penalties.
+    Smoothing parameters can be estimated via REML (``fit_reml``) or
+    cross-validation (``cross_validate``).
     """
 
     _specs: dict[Hashable, FeatureSpec]
@@ -147,8 +148,9 @@ class SuperGLM:
             Restrict the selection penalty to specific feature or group names.
             ``None`` (default) applies to all penalizable groups.
         features : mapping[hashable, FeatureSpec], optional
-            Explicit feature specifications mapping hashable column labels to feature
-            objects (``Spline``, ``Categorical``, ``Numeric``, ``Polynomial``).
+            Explicit feature specifications mapping hashable column labels to
+            feature objects (``Spline``, ``Categorical``, ``OrderedCategorical``,
+            ``Numeric``, ``Polynomial``, ``Piecewise``, ``RandomEffect``).
             Mutually exclusive with *splines* and *terms*. A list of term
             declarations belongs in *terms*; ``features=`` refuses one with a
             ``TypeError``.
@@ -157,12 +159,14 @@ class SuperGLM:
             treated as splines and all other columns are inferred as categorical
             or numeric. Use explicit ``features={"age": Spline(...)}`` for new
             code. Mutually exclusive with *features*.
-        n_knots : int or list[int]
-            Number of interior knots for auto-detect splines.
-        degree : int
-            B-spline degree for auto-detect splines.
-        categorical_base : str
-            Base level strategy for auto-detected categoricals.
+        n_knots : int or list[int], default 10
+            Number of interior knots for auto-detected ``splines=``. A list gives
+            one knot count per column in ``splines``, in order.
+        degree : int, default 3
+            B-spline degree for auto-detected ``splines=``.
+        categorical_base : str, default "most_exposed"
+            Base-level strategy for auto-detected categoricals: ``"most_exposed"``,
+            ``"first"``, or an explicit level name.
         interactions : list[tuple[str, str] or interaction spec], optional
             Pairs of feature names to interact, or explicit interaction
             specifications such as ``FactorSmooth``. Tuple interaction types
@@ -183,11 +187,12 @@ class SuperGLM:
             non-default *n_knots*, *degree* or *categorical_base* raises
             ``ValueError``; set those options on each term instead, as in
             ``s("age", n_knots=8)``.
-        active_set : bool
-            Use active-set cycling in the BCD solver.
-        direct_solve : {"auto", "gram", "qr", "structured"}
-            Strategy for the direct IRLS solver (lambda1=0).
-            ``"auto"`` (default) uses compact structured elimination for large
+        active_set : bool, default False
+            Use active-set cycling in the block coordinate descent solver during
+            penalised feature-selection fits (nonzero ``selection_penalty``).
+        direct_solve : {"auto", "gram", "qr", "structured"}, default "auto"
+            Strategy for the direct IRLS solver (``selection_penalty`` disabled).
+            ``"auto"`` uses compact structured elimination for large
             random-effect and factor-smooth (``basis="fs"`` or ``"sz"``)
             terms and the Gram solver otherwise; the choice reads only the
             terms, their sizes and the grouping columns' nesting, and
@@ -199,10 +204,13 @@ class SuperGLM:
             iteration, for smaller datasets. ``"structured"`` forces
             structured elimination for an eligible random-effect, FS or SZ
             block, and raises for any other model.
-        discrete : bool
-            Use discretized basis matrices for large-*n* REML (fREML-style).
-        n_bins : int or dict[str, int]
-            Number of discretization bins per feature when ``discrete=True``.
+        discrete : bool, default False
+            Use discretized spline basis matrices for large-*n* fits and REML
+            (fREML-style).
+        n_bins : int or dict[str, int], default 256
+            Number of discretization bins per continuous feature when
+            ``discrete=True``. A dict overrides specific features; unnamed
+            features default to 256.
         tol : float
             Convergence tolerance for IRLS / PIRLS.  Default ``1e-6``.
             Can also be set per-call via ``fit(tol=...)`` or
@@ -649,7 +657,16 @@ class SuperGLM:
             offset. To make a raw-count mean scale with exposure, pass
             ``offset=np.log(exposure)``. For a per-exposure response, pass exposure as
             ``sample_weight`` without adding it again to the linear predictor.
-        record_diagnostics : bool
+        tol : float, optional
+            Convergence tolerance for IRLS / PIRLS, overriding constructor ``tol``
+            for this call.
+        max_iter : int, optional
+            Maximum IRLS / PIRLS iterations, overriding constructor ``max_iter``
+            for this call.
+        convergence : {"deviance", "coefficients"}, optional
+            Convergence criterion, overriding constructor ``convergence`` for this
+            call. ``"coefficients"`` is experimental and emits a ``UserWarning``.
+        record_diagnostics : bool, default False
             If True, record per-iteration IRLS diagnostics (W range,
             mu/eta range, step halvings, worst-observation indices) on
             ``result.iteration_log``.  Useful for debugging convergence.
@@ -776,81 +793,66 @@ class SuperGLM:
             as well as the dispersion. Weights affect fitting but do not enter
             the linear predictor or automatically scale the conditional mean.
         offset : array-like, optional
-            Offset term.
+            Offset added to the linear predictor (not supplied by
+            ``sample_weight``).
         max_reml_iter : int, optional
-            Maximum REML outer iterations. Unset, it is 20. A fit that
-            reaches the cap is returned with a ``ConvergenceWarning``,
-            ``reml_diagnostics()["converged"]`` reads ``False`` and the
-            summary says why. A cold exact fit with at least eight smoothing
+            Maximum REML outer iterations (default 20). A fit that reaches the
+            cap is returned with a ``ConvergenceWarning``,
+            ``reml_diagnostics()["converged"]`` is ``False``, and ``summary()``
+            states why. A cold exact fit with at least eight smoothing
             parameters and no ``RandomEffect`` or ``FactorSmooth`` term may
-            first run up to this many cached-W updates (a pre-solve);
+            first run up to this many fast approximate pre-solve updates;
             ``reml_diagnostics()["n_reml_iter"]`` counts the exact loop and
             ``["n_presolve_iter"]`` the pre-solve.
         reml_tol : float, optional
-            Stopping tolerance for the smoothing-parameter optimizer. Unset,
-            it is 1e-9 for both Newton engines (exact and discrete); the
-            discrete engine floors an explicit value at 1e-12, and
-            candidate-grade fits (``interaction_mode="fast_candidate"`` and
-            ``estimate_p``'s power-search candidates) use 1e-6. The engines
-            stop when the projected log-lambda gradient and the objective
-            change both fall below ``reml_tol * (1 + |objective|)`` over the
-            active directions, or when Newton's step on those directions is at
-            most ``min(1e-3, 1e6 * reml_tol)`` in log lambda on an unmodified
-            positive definite Hessian
-            (``termination_reason="newton_step_tolerance"``), with the distance
-            left, the step over one minus its contraction rate, within that bar.
-            The exact engine takes the step and reads the rate from the next
-            gradient, or from the preceding uncapped Newton step on the same
-            free terms when no trial verifies this one. The discrete engine reads
-            it from two successive steps on the same terms at a settled working
-            model. The score test also respects an absolute upper limit of
-            1e-4 nats per log lambda at default fidelity. A tighter tolerance
-            reduces this limit proportionally. A direction below that limit
-            with negligible relative row curvature is frozen where it stands, as
-            recorded in ``reml_diagnostics()`` under
-            ``profile["reml_freeze_decision"]``. A tolerance tighter than the
-            line search can resolve ends as
+            Stopping tolerance for smoothing-parameter selection. Defaults to
+            ``1e-9`` (``1e-6`` for ``interaction_mode="fast_candidate"`` and
+            ``estimate_p`` search candidates; explicit values on the discrete
+            path are floored at ``1e-12``). The optimizer stops when both the
+            log-lambda gradient and objective change drop below
+            ``reml_tol * (1 + |objective|)`` on active terms, or when the
+            Newton step and estimated remaining distance drop below
+            ``min(1e-3, 1e6 * reml_tol)`` in log-lambda
+            (``termination_reason="newton_step_tolerance"``). Near-flat
+            directions with gradient below ``1e-4`` nats per log-lambda (scaled
+            proportionally for tighter tolerances) and negligible curvature are
+            frozen in place and recorded under
+            ``reml_diagnostics()["profile"]["reml_freeze_decision"]``. Stopping
+            at line-search precision reports
             ``termination_reason="converged_at_precision"`` with
-            ``converged=True``; ``line_search_failed`` with
-            ``converged=False`` is reserved for undetermined stalls. Looser
-            values (``1e-6``) are faster, but leave standard errors less
-            determined well before predictions move.
+            ``converged=True``; ``"line_search_failed"`` with
+            ``converged=False`` indicates an unresolved stall. Looser values
+            (such as ``1e-6``) run faster but leave standard errors less
+            settled before predictions change.
         pirls_tol : float, optional
-            Inner PIRLS/IRLS convergence tolerance. Defaults to
-            constructor ``tol`` (1e-6). Pass explicitly to override.
+            Inner PIRLS/IRLS convergence tolerance. Defaults to constructor
+            ``tol`` (1e-6).
         max_pirls_iter : int, optional
             Maximum inner PIRLS iterations per REML step. Defaults to
             constructor ``max_iter`` (100).
         lambda2_init : float or mapping, optional
-            Where the smoothing-parameter search starts. A mapping keyed by
-            smoothing component (or group) name, such as an earlier fit's
-            ``reml_diagnostics()["lambdas"]``, is a warm start: each named
-            component begins there, so a refit on similar data (a
-            cross-validation fold, a later year) takes fewer outer
-            iterations. Values must be finite and positive; unnamed and
-            fixed-policy components start as usual. A term whose components
-            are only partly named starts cold, and an unknown key is ignored,
-            each with a ``UserWarning``. Coefficients are not carried over,
-            and where the criterion is flat a different start can stop at a
-            different point of the flat region. A float, or leaving it unset,
-            keeps the engines' own start.
-        interaction_mode : {"full", "fast_candidate"}
-            ``"full"`` runs ordinary REML. ``"fast_candidate"`` caps REML
-            outer updates for interaction models and then runs the normal final
-            refit, intended for screening candidate interactions before a full
-            final model fit.
+            Starting smoothing parameters. A mapping keyed by smoothing
+            component or group name (such as an earlier fit's
+            ``reml_diagnostics()["lambdas"]``) warm-starts each named component
+            so refits on similar data take fewer outer iterations. Values must
+            be finite and positive; unnamed and fixed-policy components start as
+            usual. Partially named terms start cold and unknown keys are
+            ignored, each with a ``UserWarning``. Coefficients are not carried
+            over, and in a flat objective region a different start can stop at
+            a different point. A float or ``None`` uses the default start.
+        interaction_mode : {"full", "fast_candidate"}, default "full"
+            ``"full"`` runs standard REML. ``"fast_candidate"`` caps outer
+            updates at 5 with looser tolerance for screening candidate
+            interactions before running the normal final refit.
         runtime_validation : optional
-            Deprecated and ignored. It controlled a post-fit check that
-            re-scored the training rows; the check has been retired, so any
-            value only raises a ``FutureWarning``. Remove the argument.
-        verbose : bool
-            Print progress.
-        w_correction_order : int
-            Order of the W(rho) implicit-differentiation correction.
-            1 gives the exact objective and gradient with a modified-Newton
-            outer Hessian (default, fast). 2 also includes the available exact
-            d²W/dη² Hessian cross-terms from Wood (2011, Appendix C). Only
-            affects the exact REML path.
+            Deprecated and ignored. Emits a ``FutureWarning`` when passed.
+        verbose : bool, default False
+            If True, print per-iteration REML progress.
+        w_correction_order : {1, 2}, default 1
+            Order of the implicit-differentiation working-weight correction on
+            the exact REML path. ``1`` gives the exact objective and gradient
+            with a modified-Newton Hessian (faster); ``2`` adds the exact
+            d²W/dη² Hessian cross-terms (Wood 2011, Appendix C).
 
         Returns
         -------
@@ -1384,9 +1386,9 @@ class SuperGLM:
             A ``ValueError`` naming the rows of positive weight that
             :meth:`predict` gives no mean (NaN), such as rows past an inverse
             link's ``eta = 0``: no deviance or likelihood exists for them. Give
-            those rows weight zero or leave them out; a zero-weight row is
-            scored as before, its residuals and Cook's distance read NaN, and
-            ``eta`` reports its raw linear predictor.
+            those rows weight zero or leave them out; zero-weight rows are
+            excluded from loss metrics, their residuals and Cook's distance read
+            NaN, and ``eta`` reports their raw linear predictor.
         """
         with self._parallel_scope():
             return explain_ops.metrics(self, X, y, sample_weight, offset)
@@ -1449,18 +1451,25 @@ class SuperGLM:
 
         Parameters
         ----------
-        centering : {"native", "mean"}
-            ``"native"`` (default) returns the canonical fitted term
-            contribution under the model's identifiability constraint.
-            ``"mean"`` is a reporting convenience that shifts so the
-            geometric mean of relativities = 1 — useful for cross-feature
-            comparison but not the fitted term decomposition.  It is a change
-            of identifiability constraint, so ``se_log_relativity`` changes
-            with it: it becomes the error of the centered contrast.
+        with_se : bool, default False
+            If True, include link-scale standard errors (``se_log_relativity``)
+            where available. Withheld with a ``UserWarning`` for post-fit
+            shape-repaired terms or after editor coefficient edits.
+        centering : {"native", "mean"}, default "native"
+            ``"native"`` returns the canonical fitted term contribution under
+            the model's identifiability constraint. ``"mean"`` shifts each term
+            so the geometric mean of its relativities is 1 — a reporting
+            convenience, not the fitted term decomposition. Because this changes
+            the identifiability contrast, ``se_log_relativity`` changes with it.
         covariance : SandwichCovariance, optional
             Fit-bound robust covariance returned by
             :meth:`sandwich_covariance`. When supplied with ``with_se=True``,
             replaces the default model-based covariance for standard errors.
+
+        Returns
+        -------
+        dict[str, pd.DataFrame]
+            Mapping from term name to its relativity table.
         """
         with self._parallel_scope():
             return TermResults(
@@ -1506,19 +1515,38 @@ class SuperGLM:
 
         Parameters
         ----------
-        centering : {"native", "mean"}
-            ``"native"`` (default) returns the canonical fitted term
-            contribution under the model's identifiability constraint.
-            ``"mean"`` is a reporting convenience that shifts so the
-            geometric mean of relativities = 1.  It is a change of
-            identifiability constraint, so the standard errors and intervals
-            change with it: they become those of the centered contrast, and
-            the level the fit pinned stops carrying a zero-width interval.
+        name : hashable
+            Registered feature or interaction label (or its string text).
+        with_se : bool, default True
+            If True, compute pointwise standard errors and confidence intervals.
+        simultaneous : bool, default False
+            If True, also compute simultaneous confidence bands by posterior
+            simulation for smooth terms.
+        n_points : int, default 200
+            Evaluation grid size for continuous curves.
+        alpha : float, default 0.05
+            Significance level for ``1 - alpha`` confidence intervals and bands.
+        n_sim : int, default 10_000
+            Number of posterior draws for simultaneous confidence bands.
+        seed : int, default 42
+            Random seed for simultaneous confidence bands.
+        centering : {"native", "mean"}, default "native"
+            ``"native"`` returns the canonical fitted term contribution under
+            the model's identifiability constraint. ``"mean"`` shifts so the
+            geometric mean of relativities is 1; standard errors and intervals
+            then describe the centred contrast and the reference level no longer
+            has zero width.
         covariance : SandwichCovariance, optional
             Fit-bound robust covariance returned by
             :meth:`sandwich_covariance`. When supplied, replaces the default
             model-based covariance for pointwise SEs, intervals, and
             simultaneous bands.
+
+        Returns
+        -------
+        TermInference or InteractionInference
+            Fitted effect values, optional standard errors and intervals, and
+            term metadata.
         """
         with self._parallel_scope():
             return explain_ops.term_inference(
@@ -1575,35 +1603,37 @@ class SuperGLM:
             and ``offset`` before calling this method.
         offset : array-like, optional
             Offset added to the linear predictor.
-        fit_mode : {"fit", "reml", "inherit"}
+        fit_mode : {"fit", "reml", "inherit"}, default "fit"
             Fitting regime for the published final fit, and by default for each
-            candidate ``p`` evaluation too.
+            candidate ``p`` evaluation. ``"inherit"`` uses REML if this model
+            was last fitted with :meth:`fit_reml`, and ordinary :meth:`fit`
+            otherwise.
         search_fit_mode : {"fit", "reml", "inherit"}, optional
             Fitting regime for the candidate ``p`` evaluations alone, when it
-            should differ from the regime the final fit is published under. The
-            default ``None`` searches under ``fit_mode``.
+            should differ from ``fit_mode``. ``None`` (default) searches under
+            ``fit_mode``.
 
             ``fit_mode="reml", search_fit_mode="fit"`` selects ``p`` under
             ordinary ML and then publishes one REML fit at the selected ``p``,
-            the cost of one smoothing-parameter search rather than one per
-            candidate. Selecting ``p`` under a different objective than the
-            one that publishes it is an approximation, so check it on your
-            own data. Either way the published refit runs at the publication
-            tolerance and re-profiles dispersion against its own mean. A
-            coupled REML search warns when its optimum is pinned against the
-            certifiable-region boundary; a decoupled refit may fail at the selected ``p`` with a
-            ``superglm.PublicationModeError`` naming the ways out, and its
-            likelihood-ratio intervals describe the ``search_fit_mode``
-            profile.
-        p_bounds : tuple of float
-            Search interval for ``p``, strictly inside ``(1, 2)``. An estimate on
-            a bound is warned about and recorded in ``result.warnings``: a
+            paying for one smoothing-parameter search rather than one per
+            candidate. Because ``p`` is chosen under a different objective than
+            the published fit, verify it on your data. Either way the published
+            refit runs at the publication tolerance and re-profiles dispersion
+            against its own mean. A coupled REML search warns if its optimum
+            sits against a boundary beyond which REML cannot verify a converged
+            penalised optimum; a decoupled REML refit raises
+            :class:`~superglm.PublicationModeError` if that happens at the
+            selected ``p``, and its likelihood-ratio intervals describe the
+            ``search_fit_mode`` profile.
+        p_bounds : tuple of float, default (1.05, 1.95)
+            Search interval for ``p``, strictly inside ``(1, 2)``. An estimate
+            on a bound is warned about and recorded in ``result.warnings``: a
             maximum as ``p -> 1`` can be an artefact of rounded responses. Near
             ``p = 1`` the dispersion profile is multimodal and its global search
             grows like ``1 / (p - 1)``; a power whose search would exceed its
             bound (``superglm.NearPoissonDispersionError``) is skipped as
             infeasible and recorded.
-        xatol : float
+        xatol : float, default 1e-3
             Absolute resolution of the Brent search in ``p``.
         ci_alpha : float, optional
             Significance level for an explicitly requested likelihood-ratio
@@ -1614,16 +1644,22 @@ class SuperGLM:
             converge, the interval is still computed, and the cause is warned
             and recorded in ``result.warnings``.
         max_reml_iter : int, optional
-            Outer-iteration budget for the REML *publication* refit alone;
-            candidate search fits keep their own budget. Requires
-            ``fit_mode="reml"`` -- a pure-ML publication has no REML
-            iteration to budget and refuses the parameter. The default
-            ``None`` resolves as ``fit_reml``'s does, to 20.
+            Outer-iteration budget (integer ``>= 1``) for the REML publication
+            refit alone; candidate search fits keep their own budget. Requires
+            ``fit_mode="reml"`` or ``"inherit"`` resolving to REML; raises
+            ``ValueError`` under an ordinary ML publication. Defaults to the
+            same budget as :meth:`fit_reml` (20).
         progress_callback : callable, optional
             Called as ``progress_callback(phase, payload)``: ``"profiling"``
             with ``{"profile_trace": [row]}`` for each feasible search
             candidate, then ``"best_found"`` and ``"final_refit"`` with
             ``{"profile_estimate": ...}``.
+
+        Returns
+        -------
+        TweedieProfileResult
+            Profiled ``p_hat``, dispersion ``phi_hat``, profile curve, and
+            warnings.
         """
         with fit_record(self, "estimate_p", locals()):
             from superglm.diagnostics.separation import disclosure_scope
@@ -1674,13 +1710,14 @@ class SuperGLM:
             Observation weights, read under the model's ``weight_semantics``.
         offset : array-like, optional
             Offset added to the linear predictor.
-        fit_mode : {"fit", "reml", "inherit"}
-            Fitting regime for the published final fit. The alternation itself
-            uses ordinary fits.
-        theta_bounds : tuple of float
+        fit_mode : {"fit", "reml", "inherit"}, default "fit"
+            Fitting regime for the published final fit. ``"inherit"`` uses REML
+            if this model was last fitted with :meth:`fit_reml`, and ordinary
+            :meth:`fit` otherwise. The alternation itself uses ordinary fits.
+        theta_bounds : tuple of float, default (1e-8, 1e8)
             Search range for theta. An estimate on a bound warns with
             ``NBThetaBoundWarning`` and reports ``converged=False``.
-        xatol : float
+        xatol : float, default 1e-2
             The alternation stops once theta moves by at most this fraction of
             itself between successive mean fits.
         ci_alpha : float, optional
@@ -1694,11 +1731,16 @@ class SuperGLM:
             Outer-iteration budget for the REML publication refit. Requires
             ``fit_mode="reml"`` or ``"inherit"`` resolving to REML. The theta
             alternation uses its own ordinary fits. Defaults to the same
-            budget as ``fit_reml()``.
+            budget as ``fit_reml()`` (20).
         progress_callback : callable, optional
             Called as ``progress_callback(phase, payload)``: ``"profiling"``
             with ``{"profile_trace": [row]}`` for each alternation step, then
             ``"best_found"`` and ``"final_refit"`` with ``{"profile_estimate": ...}``.
+
+        Returns
+        -------
+        NBProfileResult
+            Profiled ``theta_hat``, profile log-likelihood, and warnings.
         """
         with fit_record(self, "estimate_theta", locals()):
             from superglm.diagnostics.separation import disclosure_scope
@@ -1765,8 +1807,9 @@ class SuperGLM:
             ``"global"`` shows model-wide fitted effects (default).
             ``"local"`` is reserved for per-row explanations (not yet
             implemented).
-        ci : {None, False, "pointwise", "simultaneous", "both"}
-            Confidence interval style.  ``None`` or ``False`` disables bands.
+        ci : {None, False, True, "pointwise", "simultaneous", "both"}, default "pointwise"
+            Confidence interval style. ``None`` or ``False`` disables bands;
+            ``True`` is equivalent to ``"pointwise"``.
         X : pandas or eager Polars DataFrame, optional
             Training data for density overlays.
         sample_weight : array-like, optional
@@ -2151,27 +2194,33 @@ class SuperGLM:
     ) -> SuperGLM:
         """Repair post-fit shape-constrained spline terms after fitting.
 
-        This is a manual, post-fit repair step. It finds all spline features
-        configured with ``Constraint.postfit.*``, applies the corresponding
-        weighted shape projection to the fitted curve, and projects the
-        repaired curve back to spline coefficients. Where no curve with the
-        shape fits better than dropping the term, the term is published flat
-        (its curve zero) and a ``RuntimeWarning`` says so.
+        Manual post-fit repair step. Finds every spline feature (and spline-mode
+        ``OrderedCategorical``) configured with ``Constraint.postfit.*``,
+        applies the corresponding weighted shape projection to the fitted curve,
+        and projects the repaired curve back to spline coefficients. Where no
+        curve with the required shape fits better than dropping the term, the
+        term is published flat (zero curve) with a ``RuntimeWarning``.
 
         Idempotent: calling twice does not re-repair already-repaired features.
+        Requires ``retain_fit_state=True`` and the same training data used for
+        the fit.
 
         Parameters
         ----------
         X : pandas or eager Polars DataFrame
-            Training data (used to compute density-based grid weights).
+            Training data matching the fit, used to validate the fit guard and
+            compute density-based grid weights.
         sample_weight : array-like, optional
-            Fitting weights used to weight the post-fit projection, read
-            under the model's declared ``weight_semantics``: replication counts
-            under ``"frequency"``, precisions under ``"prior"``.
+            Fitting weights used to weight the post-fit projection and refresh
+            fit statistics, read under the model's declared
+            ``weight_semantics``: replication counts under ``"frequency"``,
+            precisions under ``"prior"``. Must match the weights used to fit.
         offset : array-like, optional
-            Offset term (unused, reserved for deviance computation).
-        n_grid : int
-            Grid resolution for the shape repair (default 500).
+            Fitting offset, validated against the fit and used to evaluate the
+            penalised objective and refresh fit statistics. Must match the
+            offset used to fit.
+        n_grid : int, default 500
+            Grid resolution for the shape repair.
 
         Returns
         -------
@@ -2242,30 +2291,42 @@ class SuperGLM:
 
         Parameters
         ----------
-        X, y : training rows and response
-            Used for refit mode and as the identity anchor for same-object
-            holdout fallback.
-        sample_weight, offset : array-like, optional
-            Training/refit weights and offset.
-        mode : {"refit", "holdout"}
-            ``"refit"`` calls ``drop1()`` and adds delta IC columns.
-            ``"holdout"`` zeros each term on a validation set (no refit).
-        X_val, y_val : optional
-            Validation data for ``mode="holdout"``.
+        X : pandas or eager Polars DataFrame
+            Training features, used for refit mode and as the identity anchor
+            for same-object holdout fallback.
+        y : array-like
+            Training response vector.
+        sample_weight : array-like, optional
+            Training or refit observation weights.
+        offset : array-like, optional
+            Training or refit linear-predictor offset.
+        mode : {"refit", "holdout"}, default "refit"
+            ``"refit"`` calls :meth:`drop1` and adds delta AIC/BIC columns.
+            ``"holdout"`` zeroes each term on a validation set without refitting.
+        X_val : pandas or eager Polars DataFrame, optional
+            Validation features for ``mode="holdout"``.
+        y_val : array-like, optional
+            Validation response vector for ``mode="holdout"``.
         sample_weight_val, offset_val : array-like, optional
-            Validation-specific geometry for holdout mode. Training vectors
-            are reused only when ``X_val is X`` and ``y_val is y``; separate
-            validation objects require ``sample_weight_val`` when
-            ``sample_weight`` is supplied and require ``offset_val`` for an
+            Validation weights and offset for ``mode="holdout"``. Training
+            vectors are reused only when ``X_val is X`` and ``y_val is y``;
+            separate validation objects require ``sample_weight_val`` when
+            ``sample_weight`` is supplied and ``offset_val`` for an
             offset-fitted model.
 
-        In holdout mode a validation row of positive weight that the full
-        model gives no predicted mean (:meth:`predict` gives it NaN) is left
-        out of every comparison, with a warning naming it.  A term whose
-        removal leaves further such rows has ``delta_deviance`` NaN, and a
-        ``rows_without_mean`` column counts those rows, with a warning saying
-        why: without them the delta would leave out the rows that removing
-        the term prices worst.
+        Returns
+        -------
+        pd.DataFrame
+            Per-term drop diagnostics (delta deviance, AIC/BIC, or holdout loss).
+
+        Notes
+        -----
+        In holdout mode, a validation row of positive weight that the full
+        model gives no predicted mean (:meth:`predict` returns NaN) is excluded
+        from every comparison with a warning naming it. A term whose removal
+        produces further rows without a predicted mean has ``delta_deviance``
+        set to NaN and ``rows_without_mean`` counting those rows, with a
+        warning explaining why.
         """
         with self._parallel_scope():
             return explain_ops.term_drop_diagnostics(
@@ -2301,15 +2362,16 @@ class SuperGLM:
     ) -> DiscretizationResult:
         """Analyse the impact of discretizing this fit's smooth terms.
 
-        Spline and polynomial main effects into bins, and a
-        continuous-by-continuous interaction onto the grid its rating-table
-        block is sampled on.
+        Discretizes spline and polynomial main effects into bins, and
+        continuous-by-continuous interactions onto the grid used by their
+        rating-table blocks.
 
-        A row with no predicted mean reads NaN in that prediction array. A
-        row of positive weight the fitted terms give none is left out of the
-        comparison, with a warning naming it; one only the binned terms leave
-        with none makes the comparison unavailable: its metrics are NaN and
-        ``metrics["rows_without_binned_mean"]`` counts those rows."""
+        Rows with no predicted mean read NaN in the prediction arrays. Positive-
+        weight rows that the fitted model cannot price are excluded from the
+        comparison with a warning; if only the discretized predictor leaves
+        rows without a mean, metrics are NaN and
+        ``metrics["rows_without_binned_mean"]`` counts those rows.
+        """
         with self._parallel_scope():
             return explain_ops.discretization_impact(self, X, y, sample_weight, **kwargs)
 
