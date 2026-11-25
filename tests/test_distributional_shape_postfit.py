@@ -1148,6 +1148,29 @@ def test_the_intercept_search_leaves_a_plateau_with_no_end_at_its_first_step():
     assert len(reads) <= 200
 
 
+@pytest.mark.parametrize("last_bit", ["rises", "falls"])
+def test_a_plateau_entered_inside_brents_window_is_published_at_the_windows_end(last_bit):
+    # A likelihood that saturates inside Brent's first window is level from there to the
+    # window's end and on, with no minimum beyond. Brent's result is one of the plateau's
+    # points, chosen by its last bits, which differ by BLAS kernel; the window's end is the
+    # same on every build. It reads as Brent's result does (their values within the rounding
+    # each carries, and below the start as well), so the search holds it, and with nothing
+    # lower for 2**20 units publishes it. Forced: a slope down to -2 units and level below;
+    # past -3 the plateau is one bit higher, or one bit lower.
+    from superglm.distributional.shape_repair import _derivative_free_minimum
+
+    level, rounding = 90.0, 1e-12
+    bit = np.spacing(level) * (1.0 if last_bit == "rises" else -1.0)
+
+    def objective(t: float) -> float:
+        if t < -2.0:
+            return level if t > -3.0 else level + bit
+        return level + 5.0 * (t + 2.0)
+
+    best = _derivative_free_minimum(objective, 0.0, 1.0, rounding=rounding)
+    assert best == pytest.approx(-4.0, abs=1e-6)
+
+
 def _shift_taken(log_likelihoods, derivatives=None) -> float:
     """The intercept shift ``_profiled_merit`` takes for a lone parameter on the identity link
     whose rows have log-likelihoods ``log_likelihoods(t)`` at the shift ``t``. With
@@ -1220,6 +1243,33 @@ def test_a_later_plateau_is_read_by_the_rounding_of_its_own_sums():
         return [big, -big, -80.0 - (t + 400.0) ** 2 / 1000.0]
 
     assert _shift_taken(log_likelihoods) == pytest.approx(-400.0, abs=1e-2)
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("case", ["sol", "end_below_the_held", "end_reads_as_low"])
+def test_a_trial_whose_sum_is_uncertain_does_not_displace_a_lower_point_already_found(case):
+    """Pins the shift origin/master publishes, about -1, on Sol's case from #748 and two more.
+
+    The objective is 80 + (t + 1)**2, and between 3 and 5 units rows of 2**55 and -2**55
+    cancel, so the sum there carries a rounding of 96. Brent's first window finds the minimum
+    at -1 (80, against 81 at the held intercept); its upper end (105) is level with that only
+    by its own rounding. At 7c917b063 the walk took that end for its lowest point and Brent's
+    result for one of a plateau's points: the search returned 4, which is not below the held
+    intercept by the two sums' rounding, and the held intercept was published. With the held
+    intercept at 300 the end is below it and was published, at 105. Where the uncertain
+    stretch reads two last places above the minimum, the held intercept was published too.
+    """
+    lowest, held = 80.0, 300.0 if case == "end_below_the_held" else 81.0
+
+    def log_likelihoods(t: float) -> list[float]:
+        value = held if t == 0.0 else lowest + (t + 1.0) ** 2
+        if not 3.0 < t < 5.0:
+            return [0.0, 0.0, -value]
+        if case == "end_reads_as_low":
+            value = lowest + 2.0 * np.spacing(lowest)
+        return [2.0**55, -(2.0**55), -value]
+
+    assert _shift_taken(log_likelihoods) == pytest.approx(-1.0, abs=1e-6)
 
 
 def test_a_probe_whose_likelihood_overflows_is_a_wall_of_the_intercept_search():

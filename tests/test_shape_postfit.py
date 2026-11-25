@@ -4862,6 +4862,34 @@ def test_the_derivative_free_intercept_reads_a_later_plateau_by_its_own_rounding
     assert found[0] == pytest.approx(-400.0, abs=1e-2)
 
 
+@pytest.mark.pins_behaviour
+def test_the_derivative_free_intercept_keeps_a_lower_shift_beside_an_uncertain_one():
+    """Pins the shift origin/master returns, about -1, on Sol's case from #748 in SuperGLM's
+    search. The deviance is 80 + (shift + 1)**2, and between 3 and 5 units its means carry a
+    rounding of 96. Brent's first window finds the minimum at -1 (80); its upper end (105) is
+    level with that only by its own rounding. At 7c917b063 the walk took that end for its
+    lowest point, and the search returned it: a deviance of 105, above the start's 81.
+    """
+
+    def evaluate(shift, compared):
+        assert compared
+        return shape_ops._InterceptState(
+            deviance=80.0 + (shift + 1.0) ** 2,
+            mean_rounding=96.0 if 3.0 < shift < 5.0 else 0.0,
+            deviance_rounding=0.0,
+            score=0.0,
+            score_scale=1.0,
+            score_rounding=0.0,
+            information=1.0,
+        )
+
+    # Two rows one unit apart: the search's unit is one shift.
+    found = shape_ops._derivative_free_intercept(np.array([0.0, 1.0]), evaluate)
+
+    assert found is not None
+    assert found[0] == pytest.approx(-1.0, abs=1e-6)
+
+
 def test_intercept_profile_beside_a_pole_compares_deviances_to_their_means_rounding():
     """A row whose mean sits next to its pole makes the residual's rounding bound vast, about
     2e5 here against a deviance of 0.104: a search comparing deviances to that bound takes any
