@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 from superglm._roundoff import gamma
-from superglm._utils import _default_weights, _ensure_array, score_bins
+from superglm._utils import score_bins
 
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
@@ -492,9 +492,13 @@ def _gini_coefficients(
     y_obs, y_pred, sample_weight=None, *, exposure=None, totals=None, score_orders=None
 ) -> tuple[float, float, float]:
     """Pair concordance; Lorenz may supply its same-operand totals and orders."""
-    y_obs = _ensure_array(y_obs)
-    y_pred = _ensure_array(y_pred)
-    weights = _default_weights(sample_weight, len(y_obs))
+    y_obs = np.asarray(y_obs, dtype=np.float64)
+    y_pred = np.asarray(y_pred, dtype=np.float64)
+    weights = (
+        np.ones(len(y_obs), dtype=np.float64)
+        if sample_weight is None
+        else np.asarray(sample_weight, dtype=np.float64)
+    )
     if y_obs.size == 0 or not np.any(weights > 0):
         return 0.0, 0.0, 0.0
     if totals is None:
@@ -539,7 +543,7 @@ def _normalized_gini(y_obs, y_pred, sample_weight=None) -> float:
     # Unlike lorenz_curve, this scorer entry has no validated boundary, and a
     # NaN target or weight would otherwise collapse to a plausible zero score.
     operands = (y_obs,) if sample_weight is None else (y_obs, sample_weight)
-    if not all(np.all(np.isfinite(_ensure_array(value))) for value in operands):
+    if not all(np.all(np.isfinite(np.asarray(value, dtype=np.float64))) for value in operands):
         raise ValueError("Gini coefficients must be finite")
     return _gini_coefficients(y_obs, y_pred, sample_weight)[2]
 
