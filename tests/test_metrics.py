@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import pytest
-from scipy.special import gammaln
+from scipy.special import gammaln, xlogy
 from scipy.stats import poisson
 
 from superglm import ConvergenceWarning, ModelMetrics, SuperGLM, generate_tweedie_cpg
@@ -2391,6 +2391,47 @@ class TestSummary:
             "response_working_quantile_residuals": "per-row",
             "leverage_standardized_residuals_cooks_distance": ("compressed weighted-cell deletion"),
         }
+
+    def test_summary_header_prints_the_likelihood_and_information_criteria(self, poisson_data):
+        """The header numbers beside Log-Likelihood, Deviance, AIC, AICc and BIC equal
+        their definitions at the printed precision, in text and HTML; a value printed in
+        another's slot would pass a label check."""
+        import re
+
+        X, y, _ = poisson_data
+        model = SuperGLM(
+            family="poisson",
+            selection_penalty=0.0,
+            features={"x1": Numeric(), "x2": Numeric()},
+        ).fit(X, y)
+        summary = model.metrics(X, y).summary()
+        mu = np.asarray(model.predict(X), dtype=np.float64)
+        n, k = len(y), 3  # unpenalised: intercept and two slopes
+        ll = float(np.sum(poisson.logpmf(y, mu)))
+        aic = -2.0 * ll + 2.0 * k
+        expected = {
+            "Log-Likelihood": ll,
+            "Deviance": float(2.0 * np.sum(xlogy(y, y / mu) - (y - mu))),
+            "AIC": aic,
+            "AICc": aic + 2.0 * k * (k + 1) / (n - k - 1),
+            "BIC": -2.0 * ll + k * np.log(n),
+        }
+
+        def assert_printed(label, token):
+            decimals = len(token.split(".")[1]) if "." in token else 0
+            # Half a unit in the last printed place, plus the value's own rounding.
+            bound = 0.5 * 10.0**-decimals * (1.0 + 1e-9)
+            assert abs(float(token) - expected[label]) <= bound, (label, token, expected[label])
+
+        text = str(summary)
+        html = summary._repr_html_()
+        for label in expected:
+            (token,) = re.findall(rf"(?<![A-Za-z]){re.escape(label)}:\s+(-?\d+(?:\.\d+)?)", text)
+            assert_printed(label, token)
+            (cell,) = re.findall(
+                rf">{re.escape(label)}:</td>\s*<td[^>]*>(-?\d+(?:\.\d+)?)</td>", html
+            )
+            assert_printed(label, cell)
 
     def test_summary_returns_model_summary(self, metrics_obj):
         """summary() returns a ModelSummary object."""
