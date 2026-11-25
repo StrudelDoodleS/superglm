@@ -113,7 +113,7 @@ class _IRLSDirectTrialSearch:
     counting, when it leaves what the committed state keeps:
 
     - the family's mean space and the link's own domain, while the committed
-      state is inside them (#425's guard, #498): this unit's predicates;
+      state is inside them (this unit's predicates);
     - a constrained fit's feasible set ``A beta >= b``, the feasibility
       contract's predicate (``_IRLSDirectQPStep.feasible``);
     - finite observed rows, on a fit taking Newton steps

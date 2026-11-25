@@ -90,7 +90,7 @@ def _population_curve_map(
     *,
     center: bool,
 ) -> tuple[NDArray, NDArray] | None:
-    """``(M, V_f)``: a main-effect curve's map and covariance on its ``sz`` population curve (#432).
+    """``(M, V_f)``: a main-effect curve's map and covariance on its ``sz`` population curve.
 
     The reported curve is ``f(x) = M(x) gamma + sum_terms b(x)' C theta``
     (``factor_smooth.with_population_curve``; ``C`` each term's

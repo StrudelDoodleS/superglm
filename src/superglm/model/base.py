@@ -228,7 +228,7 @@ def _score_unidentified_factor_smooth(
     population: bool,
     features: dict[str, dict[str, Any]],
 ) -> tuple[NDArray[np.floating], tuple]:
-    """An ``sz`` term with levels left out of its population, as predicted (#432, ``_score_identified``).
+    """An ``sz`` term with levels left out of its population, as predicted (``_score_identified``).
 
     ``features`` are the prediction plan's main-effect terms by name.  The term that
     folds its group's redundant main effect (an ``OrderedCategorical``) reads its
@@ -441,8 +441,8 @@ def _predict_eta(
 
     ``fitted`` scores every term at the fit's own coefficients (screening's working
     score, random-effect reporting, discretization deltas); ``predict`` instead
-    treats ``sz`` levels the data identify only in part (#432,
-    ``FactorSmooth._identified_blocks``) and warns of them unless ``warn`` is false.
+    treats ``sz`` levels the data identify only in part
+    (``FactorSmooth._identified_blocks``) and warns of them unless ``warn`` is false.
     """
     if random_effects not in ("conditional", "population"):
         raise ValueError(

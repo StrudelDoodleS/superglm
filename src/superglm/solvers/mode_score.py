@@ -662,11 +662,10 @@ def two_product(a, b):
     so Veltkamp's split and the partial products neither over- nor underflow
     whatever the exponents (Ogita, Rump & Oishi 2005, Algorithms 3.2 and 3.3).
     ``ldexp`` restores the exponents, exactly unless the product leaves the
-    normal range.  ``e`` is at most ``u |p|``, so once ``|p| < 2^-969`` it
+    normal range. ``e`` is at most ``u |p|``, so once ``|p| < 2^-969`` it
     leaves the normal range: the exact product's tail then lies under
-    ``2^-1074``, no float64 holds it, and ``e`` loses at most ``2^-1075``, a
-    float64 limit rather than a rounding of this algorithm (Codex's and
-    Claude's reviews of #453).
+    ``2^-1074``, no float64 holds it, and ``e`` loses at most ``2^-1075``
+    (the binary64 underflow floor, not a rounding error of this algorithm).
     """
     left, left_exponent = np.frexp(np.asarray(a, dtype=np.float64))
     right, right_exponent = np.frexp(np.asarray(b, dtype=np.float64))
@@ -762,27 +761,24 @@ class CompensatedSum:
     |S| + gamma_(k-1)^2 sum |addends|`` of their exact sum ``S`` (their
     Proposition 4.5), whatever the addends cancel.
 
-    Two rows keep a fallback.
-    - A row whose running total overflows where the sum does not (``1e308 +
-      1e308 - 1e308``; Codex's review of #453) takes the plain sum of its
-      addends, the start added last.
-    - A row a term's expansion makes non-finite (a product past the binary64
-      range, whose pieces are ``inf`` and ``-inf``; Sol's review of #453)
-      takes the original, un-expanded predictor: ``start + (remainder + sum
-      t)``, each term's plain contribution in the order added, as a fit
-      evaluates it.  It keeps the signed overflow, which a link then clips as
-      before.
+    Two row conditions keep a fallback:
+
+    - A row whose running total overflows where the true sum does not (for
+      example, ``1e308 + 1e308 - 1e308``) takes the plain sum of its addends,
+      adding ``start`` last.
+    - A row whose term expansion produces non-finite pieces (a product past
+      the binary64 range yielding ``inf`` and ``-inf``) falls back to the
+      unexpanded predictor ``start + (remainder + sum t)`` in addition order,
+      preserving signed overflow for downstream link clipping.
+
     Every other row keeps the compensated value bit for bit.
 
-    The sum holds two rows-long arrays, its running total and error, and its
-    addends' sources, never their pieces: each addend is expanded and added
-    ``_CHUNK`` rows at a time, as ``centred_matvec`` forms its products
-    (Claude's review of #453).  Every operation is elementwise and the rows
-    independent, so ``value`` replays the addends on just the rows whose
-    fallback it needs, recomputing a recomputable source once, and every row
-    reads what a whole-array evaluation gives, bit for bit.  A replay, and a
-    subtraction, re-score terms the sum already scored, so they raise no
-    floating-point warning.
+    The sum holds two row-length arrays (running total and error) plus its
+    addends' sources, expanding and accumulating each addend ``_CHUNK`` rows
+    at a time as ``centred_matvec`` does. Because every operation is
+    elementwise and rows are independent, ``value`` replays addends only on
+    rows needing a fallback (recomputing each callable source at most once)
+    without re-emitting floating-point warnings.
     """
 
     __slots__ = ("addends", "error", "remainder", "start", "total")
@@ -1012,11 +1008,9 @@ def corrected_two_pass_pair(chunks, weights: NDArray, sum_w: float, width: int):
     length plus two, Higham 2002 §4.3), so ``x - anchor`` is exact where
     ``x`` and the anchor lie within a factor two (Sterbenz) and otherwise
     rounds at ``u |x - anchor|``, the centred row's own scale, and ``lo``
-    carries ``gamma_k sum |w| |x - anchor| / |sum w|``.  The seed row enters
-    only through pass one's rounding, which pass two absorbs: a row far from
-    the mean with zero or negligible weight no longer sets the remainder's
-    scale (it did as the anchor: Sol's ``x = [0, 1e16 - 2, 1e16, 1e16 + 2]``
-    at ``w = [0, -0.1, 1, 1]`` read a centred Gram of 3.6 for 1.0526).  Zero
+    carries ``gamma_k sum |w| |x - anchor| / |sum w|``. Because the seed row
+    enters only through pass one's rounding (which pass two absorbs), a remote
+    row with zero or tiny weight cannot inflate the remainder's scale. Zero
     weights enter neither sum, and a column constant on its weighted rows
     gives ``anchor = x_ref`` and ``lo = 0`` exactly.
     """
@@ -2127,24 +2121,24 @@ def truncated_direction_ratio(
     different rows by different amounts are judged apart: a direction two
     nearly collinear columns leave moves every row by ~1e-9, a light cut its
     own rows by ~1.  A turned direction's support is the rows it moves beyond
-    the basis's error.  ``angle`` bounds ``sin theta``, so a computed ``d``
+    the basis's error. ``angle`` bounds ``sin theta``, so a computed ``d``
     lies within ``angle ||d||_2`` of the true subspace (read in the basis's
-    own coordinates; the equilibrated ones the angle holds in are #431's),
-    and row ``i``'s movement within ``l1_i angle ||d||_2`` of the true one,
-    ``l1_i`` the row's own ``sum_j |x_ij - mean_j|`` (``row_abs_sums``).  The
-    movement is formed as ``(X V) t``, so its rounding is ``gamma_{p+2} l1_i
-    (max |V|) |t|`` through the turn ``t``.  The error is ``4 l1_i (angle
-    ||d||_2 + gamma_{p+2} (max |V|) |t|)``.
+    own coordinates rather than equilibrated coordinates), and row ``i``'s
+    movement within ``l1_i angle ||d||_2`` of the true one, ``l1_i`` the row's
+    own ``sum_j |x_ij - mean_j|`` (``row_abs_sums``). The movement is formed
+    as ``(X V) t``, so its rounding is ``gamma_{p+2} l1_i (max |V|) |t|``
+    through the turn ``t``. The error is ``4 l1_i (angle ||d||_2 +
+    gamma_{p+2} (max |V|) |t|)``.
 
-    - **Structural.**  A direction that moves no row beyond its error is
-      aliasing: none of its rows moves resolvably.  Unless that test is
+    - **Structural.** A direction that moves no row beyond its error is
+      aliasing: none of its rows moves resolvably. Unless that test is
       vacuous: a row moves at most ``l1_i ||d||_inf``, so once the error per
       unit of ``l1_i`` reaches ``||d||_inf`` no movement can be told from the
       error, and the claim is refused with a record (``unresolved_basis``)
       naming the rows the direction moves beyond their rounding, if any.
       Below that, an empty support can still hide a real movement within the
-      basis's error (a light set beside a wide column at a moderate angle);
-      telling it from an alias is left to #431.
+      basis's error (a light set beside a wide column at a moderate angle),
+      which is not separated from aliasing here.
     - **Not hidden.**  A direction whose rows' scores, each weighted by how far
       it moves the row, sum above ``bar`` times every row's score at its
       largest movement, ``sum |m_i s_i| > bar max |m_i| sum |s|``, is seen by

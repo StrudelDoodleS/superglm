@@ -1921,20 +1921,17 @@ def ssp_penalty_matrix(coordinate_map: NDArray, omega: NDArray) -> NDArray:
     """``C' Omega C``, formed as the Gram ``(B C)'(B C)`` of a transported root ``B'B = Omega``.
 
     ``penalty_factor`` decides the penalty's rank from the formed matrix, so
-    the formation has to keep the construction's null space.  The congruence
-    ``C' Omega C`` rounds within ``gamma_k |C|'|Omega||C|`` (Higham 2002,
-    *Accuracy and Stability of Numerical Algorithms*, eq. 3.13), which
-    cancellation in ``C`` (a basis whitened on clustered data) makes far
-    larger than the result: an exact null of ``Omega`` came out as a scaled
-    eigenvalue of ``1.2e-14`` against a cut of ``8.9e-16``, and a data-null
-    direction counted as identified (#434; that block's componentwise bound
-    was ``6.7e-11``).  The Gram of a root with ``r = rank(Omega)`` rows has
-    rank at most ``r`` exactly, and it rounds within ``gamma_r |BC|'|BC|``,
-    at most ``gamma_r sqrt(S_ii S_jj)`` (Higham eq. 3.5 and Cauchy-Schwarz:
-    a sum of squares keeps its relative accuracy), the scaled model
-    ``penalty_factor`` cuts on.  ``B`` is ``penalty_factor``'s root of the
-    raw ``Omega`` (formed without a congruence), so its rank is decided on
-    ``Omega``'s own Jacobi equilibration, as every penalty root is.
+    the formation must preserve the construction's null space. Direct
+    congruence ``C' Omega C`` rounds within ``gamma_k |C|'|Omega||C|`` (Higham
+    2002, *Accuracy and Stability of Numerical Algorithms*, eq. 3.13), which
+    cancellation in ``C`` (a basis whitened on clustered data) can inflate far
+    above the result and lift an exact null of ``Omega`` past the rank cutoff.
+    The Gram of a root with ``r = rank(Omega)`` rows has rank at most ``r``
+    exactly and rounds within ``gamma_r |BC|'|BC| <= gamma_r sqrt(S_ii S_jj)``
+    (Higham eq. 3.5 and Cauchy-Schwarz: a sum of squares keeps its relative
+    accuracy), matching the scaled model ``penalty_factor`` cuts on. ``B`` is
+    ``penalty_factor``'s root of the raw ``Omega``, so its rank is decided on
+    ``Omega``'s own Jacobi equilibration.
 
     Entries above ``2**512`` would overflow the root's sums and squares, so
     such an ``Omega`` is rooted as ``2**-2k Omega`` against ``2**-m C`` and the
@@ -1981,12 +1978,9 @@ def build_penalty_matrix(
 ) -> NDArray:
     """Build the block-diagonal penalty matrix ``S`` in solver coordinates.
 
-    This is the shared penalty-assembly contract used by REML objective and
-    optimizer code.  It was lifted out of ``solvers.irls_direct`` so REML
-    modules no longer need to reach through a solver-private helper.
-
+    Shared penalty-assembly routine used by REML objective and optimizer code.
     When ``reml_penalties`` is supplied, its components are authoritative for
-    every group index they represent.  The SCOP group fallback below covers
+    every group index they represent. The SCOP group fallback below covers
     only SCOP groups omitted from that component list.
     """
     S = np.zeros((p, p))
@@ -2784,14 +2778,14 @@ def compute_total_penalty_rank(
 
 
 def _matrix_penalty_rank(penalty_matrix: NDArray) -> int:
-    """Numerical rank fallback for an already assembled PSD penalty: its root's.
+    """Numerical rank fallback for an already assembled PSD penalty, via its root.
 
-    The root is ``penalty_factor``'s, cut block by block on the Jacobi
-    equilibration at its eigensolver resolution ``n_b eps ||A_b||_2``, as
-    every factor route's penalty root is.  A cut at ``eps ||S||_2`` of the
-    whole matrix sat on the rounding of an exact null once the penalty is
-    formed as the Gram of its root (``ssp_penalty_matrix``, #434): the count
-    then changed between ``lambda e^(+-1e-5)``.
+    Computes ``penalty_factor(symmetric)``, cut block by block on Jacobi
+    equilibration at the eigensolver resolution ``n_b eps ||A_b||_2`` (matching
+    every factor route's penalty root). Cutting at ``eps ||S||_2`` on the whole
+    matrix sits on the rounding floor of an exact null in a Gram-formed penalty
+    (``ssp_penalty_matrix``) and makes the rank sensitive to tiny perturbations
+    in ``lambda``.
     """
     from superglm.solvers.centered_system import penalty_factor
     from superglm.solvers.rank import decompose_factor

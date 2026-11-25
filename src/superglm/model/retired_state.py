@@ -119,13 +119,12 @@ def release_separated_level_summaries(model) -> None:
 
 
 def release_undetermined_row_summaries(model) -> None:
-    """``SuperGLM.__setstate__``'s part for a summary cached before it blanked undetermined rows.
+    """Clear a cached summary on unpickle when the saved estimability mask has blanked entries.
 
-    Such a summary can hold an error and a test the fit does not determine: on an ordered
-    term's slope change or curvature (#737), level or base-level intercept (#740), or in its
-    dictionary for a coefficient the mask blanks (#740).  Every such row reads a coefficient
-    its mask blanks, so it is dropped beside a blank in the saved mask, and the next
-    ``summary()`` is formed from the same fit.
+    A cached summary saved with undetermined rows (such as an ordered term's
+    slope change, curvature, level, or base-level intercept, or a blanked
+    coefficient entry) is dropped whenever ``coefficient_estimable`` has any
+    ``False`` entry so the next ``summary()`` call rebuilds it from the fit.
     """
     if not model.__dict__.get("_summary_cache"):
         return

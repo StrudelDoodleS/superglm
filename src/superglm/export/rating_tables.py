@@ -1008,44 +1008,18 @@ def _require_usable_relativities_export(
 
 
 def _require_usable_offset_multipliers(multiplier: NDArray) -> None:
-    """The factors a per-unit offset row asks for, checked before it hides them.
+    """Validate per-row ``exp(offset)`` multipliers before a per-unit block hides them.
 
-    Every other offset shape emits its multipliers AS relativities, so
-    ``_require_usable_relativities_export`` inspects the exact numbers a
-    consumer will multiply by.  A per-unit row does not: it emits the RELATION
-    -- ``Relativity`` 1.0, or the per-unit rate -- and leaves the consumer to
-    compute ``exp(offset)`` itself.  The values that guard exists to refuse are
-    then never in the workbook to be refused, so they have to be checked here,
-    on the vector, before this block replaces it with one row.
+    Unlike discrete or binned offset blocks, a per-unit row emits only the
+    formula (relativity ``1.0`` or the per-unit rate), so the consumer computes
+    ``exp(offset)`` per row and ``_require_usable_relativities_export`` never
+    sees those factors. Checking the total linear predictor is also insufficient
+    because large offset and term contributions can cancel in the sum while the
+    offset factor itself overflows or underflows.
 
-    The saturation gate does not cover it either.  It reads the TOTAL
-    predictor, and cancellation is exactly what a big offset invites: measured
-    on a two-factor fit whose levels absorb 400 each, the predictor stayed
-    inside 0.47 to 0.80, the base relativity was healthy, both categorical
-    blocks sat inside the band -- and 182 of 800 rows still needed a factor of
-    ``inf``.  The workbook published.  That is the same cancellation argument
-    ``_require_usable_relativities_export`` makes for checking per block rather
-    than on the product, applied to the one block whose values it cannot see.
-
-    PER ROW, and unweighted -- which is stricter than the guard it borrows its
-    band from, not merely differently placed.  That one reads what a block
-    EMITS, and every other offset shape emits an aggregate: a level's
-    representative multiplier, or a bin's weighted average.  A per-unit row
-    emits no aggregate at all, because the consumer rates each row from its own
-    column value, so the vector is the only honest thing to check.  The
-    consequence is that ``offset_kind`` now selects strictness as well as
-    shape: one pathological row, even at zero weight, is invisible to
-    ``"binned"`` and ``"discrete"`` and fatal here.  That is the intended
-    reading -- the consumer really does rate that row -- but it is a second
-    axis, and it should not have to be re-derived from the code.
-
-    The endpoints are inclusive because the band is shared, and NOT because the
-    rationale for inclusivity transfers.  There, ``exp(+/-500)`` is a
-    ``_safe_exp`` clip stand-in, so a value sitting exactly on the endpoint is
-    the stand-in being refused.  ``exp(offset)`` is a plain ``np.exp`` and is
-    never a stand-in, so exactly ``exp(+/-500)`` is refused here only because
-    one band with one comparison is worth more than a boundary case argued two
-    ways.  Deliberate, not inherited by accident.
+    Every row is checked unweighted against the shared ``(exp(-500), exp(500))``
+    band (endpoints excluded to match ``_require_usable_relativities_export``),
+    so a single unusable row raises even if its weight is zero.
     """
     from superglm.inference._term_types import _MAX_LOG_REL
 

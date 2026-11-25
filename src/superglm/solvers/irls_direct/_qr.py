@@ -44,7 +44,7 @@ def _centred_rows(X: NDArray, system: CenteredSystem) -> NDArray:
     """``X`` centred about the system's exact centre pair, ``(X - hi) - lo``.
 
     Centring about the rounded ``mean_x`` alone would leave ``sqrt(W) d`` per
-    row in the QR's data block, ``d`` that rounding (issue #430).
+    row in the QR's data block, where ``d`` is that rounding error.
     """
     centre, centre_lo = system.centre_pair()
     rows = X - centre

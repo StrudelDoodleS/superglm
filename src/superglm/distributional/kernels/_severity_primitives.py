@@ -60,7 +60,7 @@ quantities that a primitive resolves:
   takes the run-time order: below order 3 it reads only ``r`` and ``g``,
   directly from ``x = -3`` and from the continued fraction below.
 
-Error form, for exact float64 inputs ``x_i`` (issue #564, stage 1):
+Error form, for exact float64 inputs ``x_i``:
 ``|err| <= c u (sum_i |x_i df/dx_i| + |f|)``, the input and output rounding of
 a backward-stable evaluation, finite at the roots of ``gdev`` (``y = m``) and
 ``gnorm`` (``a`` near 6.45).  Below ``a = 10`` the direct ``gnorm`` and

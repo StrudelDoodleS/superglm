@@ -125,18 +125,14 @@ def metrics(model, X, y, sample_weight=None, offset=None):
     """Compute comprehensive diagnostics for the fitted model.
 
     Every statistic of the fitted mean is computed from the model's
-    predictions on ``X``, the values ``predict`` returns.  The fit's own mean,
-    likelihood and null statistics are not reused, even for the fit's own
-    objects.  On a discrete fit they belong to the binned design, and on any
-    fit they come from a different evaluation than ``predict``, so reusing
-    them for identical objects only made the result depend on object identity
-    and on whether the model had been saved (#441).  What the fit's own
-    objects still keep, when the fit's data guard confirms they are unchanged,
-    is the cached result object and the fit geometry that leverage reads.
-    The weight-contract check and custom-family prior-weight report already
-    given by the fit are not repeated for those guarded objects. Prediction
-    disclosures about separated or partly identified levels are suppressed
-    on every dataset, including holdout rows.
+    predictions on ``X`` (the values ``predict`` returns) rather than reusing
+    the fit's internal mean, likelihood, or null statistics, so results do not
+    depend on object identity or whether the model was pickled (and discrete
+    fits evaluate on the exact prediction path). When the fit's data guard
+    confirms the training objects are unchanged, the cached ``ModelMetrics``
+    instance and fit geometry used by leverage are reused, and the fit-time
+    weight-contract check is not repeated. Prediction disclosures about
+    separated or partly identified levels are suppressed on every dataset.
     """
     from superglm.inference.metrics import ModelMetrics
 

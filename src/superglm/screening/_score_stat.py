@@ -60,10 +60,10 @@ where ``lambda = alpha tr(V_eff)``, ``alpha = 1e-10 / tr(S)``. Over ``||E||_F = 
 differential is maximised at ``c ||G||_F``, so one rounding of the operand
 (``c = eps ||V_eff||_F``) moves edf by about ``eps ||V_eff||_F ||G||_F``, a
 first-order sensitivity rather than a bound. It spans twelve orders across designs
-and is large exactly when a level's rows put the constant in the span of its own
-spline columns (issue #279). It does not cover a pair whose ``V_eff`` and ``S``
-share a null space, which the pencil discards. No published forward-error bound
-exists for ``tr((A + lambda S)^-1 A)`` under perturbation of ``A``.
+and is large when a level's rows put the constant in the span of its own spline
+columns. It does not cover a pair whose ``V_eff`` and ``S`` share a null space,
+which the pencil discards. No published forward-error bound exists for
+``tr((A + lambda S)^-1 A)`` under perturbation of ``A``.
 """
 
 from __future__ import annotations
@@ -405,12 +405,12 @@ def penalized_score_statistic_ladder(
     (:mod:`superglm.screening._pair_factor`); ``penalty_root`` is a factor of the tensor
     penalty (``rootS' rootS = S_ti``, from
     :func:`superglm.screening._overlap.tensor_penalty_root`) or ``None`` for an
-    unpenalized block. Neither is a ``(k, k)`` Gram: a Gram's spectrum is its factor's
-    squared (issue #257), and a Gram-passing caller gets a ``TypeError``. Penalties are
-    rooted by one policy, :func:`superglm.screening._factor_kernels._penalty_root`, as on
-    the structured path (issue #323). A budget outside the bracket clamps to the nearest
-    edge and one inside bisects; both read the same pencil, so equal lambdas report equal
-    ``edf`` and ``statistic`` bit-for-bit.
+    unpenalized block. Neither is a ``(k, k)`` Gram (whose spectrum is squared;
+    passing a Gram raises ``TypeError``). Penalties are rooted by one policy,
+    :func:`superglm.screening._factor_kernels._penalty_root`, matching the
+    structured path. A budget outside the bracket clamps to the nearest edge
+    and one inside bisects; both read the same pencil, so equal lambdas report
+    equal ``edf`` and ``statistic`` bit-for-bit.
     """
     root = None if penalty_root is None else np.asarray(penalty_root, dtype=np.float64)
     if root is None or root.size == 0:

@@ -142,126 +142,40 @@ def _eigensolver_relative_bar(order: int) -> float:
     computed eigenvalues of a symmetric ``A`` by ``|w_i - w_i_exact| <= p(n)
     eps ||A||_2`` with ``p(n)`` "a modestly growing function of n", and states
     in the same section that "large eigenvalues ... are computed to high
-    relative accuracy and small ones may not be".  The bound is *absolute* and
+    relative accuracy and small ones may not be". The bound is *absolute* and
     scaled by ``||A||_2``, so nothing below it is a property of the matrix.
-    ``p(n) = n`` is taken here; the guide's own code fragment displays the
-    bound with ``p(n) = 1``, which is an illustration of the bound and not a
-    rank cut.
+    We take ``p(n) = n`` (matching ``numpy.linalg.matrix_rank``, MATLAB's
+    ``rank``, *Numerical Recipes*, 3rd ed., p. 795, SuiteSparseQR's
+    ``20 (m + n) eps * max_j ||A(:,j)||_2`` in Foster & Davis, *ACM TOMS*
+    40(1) Art. 7, 2013, LAPACK ``?PSTRF``'s ``n u max_k A(k,k)``, and
+    ``screening/_structured.py``'s ``_penalty_root``).
 
-    **Every established rank tolerance carries such a factor, and this
-    module's Gram cut was the only one without it.**  ``numpy.linalg.matrix_rank``
-    documents ``S.max() * max(M, N) * eps`` and attributes it to MATLAB's
-    ``rank`` and to *Numerical Recipes*, 3rd ed. (Cambridge 2007), p. 795;
-    the same edition's alternative is ``eps/2 * sqrt(m + n + 1) * S.max()``,
-    described there as based on expected round-off (p. 71).  SuiteSparseQR's
-    documented default is ``20 (m + n) eps * max_j ||A(:,j)||_2`` -- Foster &
-    Davis, "Algorithm 933", *ACM TOMS* 40(1) Art. 7 (2013).  LAPACK's own
-    ``?PSTRF`` -- Cholesky with complete pivoting, which is the closest
-    published analogue of what this module does to a semidefinite Gram --
-    documents its ``TOL`` argument as "If TOL < 0, then N*U*MAX( A(K,K) ) will
-    be used", i.e. ``n u max_k A(k,k)``.  All four are ``p(dimension) * eps *
-    scale`` with ``p`` growing at least linearly; ``p == 1`` is not among
-    them.  ``screening/_structured.py``'s ``_penalty_root`` already uses
-    ``n eps ||S||_2`` in this tree, and cites the same section for it.
+    The two rcond fields pin one statistical boundary in two coordinate
+    systems (``factor_rcond = sqrt(eps)`` on singular values corresponds to
+    ``gram_rcond = eps`` on eigenvalues since ``lambda = sigma^2``), but the
+    eigensolver noise floor scales as ``p(n) eps`` times the top magnitude in
+    the current coordinates: on a factor ``sqrt(eps) sigma_max`` sits well
+    above ``p(n) eps sigma_max``, whereas on a Gram ``eps lambda_max`` sits
+    below ``p(n) eps lambda_max`` (the classical normal-equations precision
+    loss ``kappa_2(A'A) = kappa_2(A)^2``; Golub & Van Loan, *Matrix
+    Computations*, 4th ed., ch. 5).
 
-    **Why the Gram route needs this floor and the factor route does not.**
-    The two rcond fields pin ONE statistical boundary in two coordinate
-    systems -- ``factor_rcond = sqrt(eps)`` on singular values is
-    ``gram_rcond = eps`` on eigenvalues, because ``lambda = sigma^2``, and
-    ``test_shared_rank_policy_matches_normal_equation_boundary`` holds them
-    there.  Squaring maps the *boundary* exactly and does *not* map the *noise
-    floor*, because the floor is ``p(n) eps`` times the largest value in
-    whichever coordinates you are in:
+    Beneath the floor, an eigenvalue's sign is round-off (Goulart, Nakatsukasa
+    & Rontsis, arXiv:1908.01606). Cutting at ``p(n) eps ||A||_2`` makes the
+    rank decision sign-independent: both signs drop inside the bar, and the
+    PSD projection ``max(w, 0)`` (Higham, *Linear Algebra Appl.* 103:103-118,
+    1988; Goulart et al., Lemma 2.1) applies only to genuinely resolved
+    negative eigenvalues. Dropping inside the bar for Hessians (avoiding
+    ``1 / w`` noise in covariances) and retaining ``|w|`` inside the same bar
+    for penalties (``screening/_structured._penalty_root``, avoiding free
+    filter factors) are both conservative, sign-independent readings of the
+    same resolution floor ``n eps ||A||_2``.
 
-        factor:  cut sqrt(eps) sigma_max,  floor p(n) eps sigma_max
-                 -> the cut sits 1/(p(n) sqrt(eps)) ~ 6.7e+07/p(n) ABOVE it
-        gram:    cut eps lambda_max,       floor p(n) eps lambda_max
-                 -> the cut sits at 1/p(n) of it, i.e. BENEATH it
-
-    So the same policy that is resolved with seven orders to spare on the
-    factor is beneath resolution on the Gram, and the gap is exactly ``p(n)``.
-    That is not a tolerance that was chosen badly; it is the price of forming
-    ``X'X``, and it is the same price -- half the digits -- that makes the
-    normal equations a documented hazard for the least-squares problem itself
-    -- ``kappa_2(A'A) = kappa_2(A)^2``, the standard argument for preferring QR
-    over the normal equations, Golub & Van Loan, *Matrix Computations*, 4th
-    ed. (JHU Press 2013), ch. 5, "Orthogonalization and Least Squares".
-
-    **What the floor fixes is the sign, which is the part that is not data.**
-    Beneath the floor, an eigenvalue's sign is round-off.  Goulart,
-    Nakatsukasa & Rontsis, "Accuracy of approximate projection to the
-    semidefinite cone", arXiv:1908.01606, say so in the published form -- that
-    "approximations to the small eigenvalues may have the wrong signs", so the
-    computed spectrum "may not contain the correct number of positive
-    eigenvalues" -- and their main result is that this costs the PROJECTION
-    almost nothing (their bound is gap-INDEPENDENT, Thm. 2.1).  It is the
-    *count* that is undetermined, not the matrix.  This module publishes the
-    count, and inverts on it, which is the one use their result does not
-    cover: a retained direction enters ``pseudo_inverse`` as ``1 / w``.
-
-    **The floor is also what makes the PSD clip legitimate rather than a
-    decision.**  ``max(w, 0)`` is the projection onto the semidefinite cone --
-    Higham, *Linear Algebra Appl.* 103:103-118 (1988) for the Frobenius case,
-    Goulart et al. Lemma 2.1 for every unitarily invariant norm -- and it is
-    the right thing to do to a RESOLVED negative eigenvalue.  Applied beneath
-    the floor it was deciding the rank, because a negative round-off residue
-    was clipped to exactly ``0.0`` and always dropped while a positive one of
-    the same magnitude was compared against ``eps max|w|`` and could be kept.
-    With the cut AT the floor the clip can no longer decide anything: inside
-    the bar both signs drop, and outside it the clip only ever meets a
-    genuinely negative eigenvalue, which is precisely Higham's case.  The
-    asymmetry is removed by raising the cut, not by rewriting the comparison.
-
-    **This reconciles the two modules that answered the question oppositely --
-    and they still retain and drop oppositely.**  Issue #356 records that
-    ``screening/_structured.py``'s ``_penalty_root`` *keeps* an in-bar
-    eigenvalue at its magnitude where this module *dropped* it on the sign, with
-    nothing reconciling the two.  The shared rule is not the outcome, it is
-    the question: inside the bar, choose the answer that is a function of the
-    data rather than of the rounding, on the same bar ``n eps ||A||_2``.  The
-    outcomes differ because the objects do.  There, dropping a direction from
-    a *penalty* makes it *free* -- filter factor one, the maximum -- so keeping it
-    at ``|w|`` is the conservative reading.  Here, keeping a direction in a
-    *Hessian* puts ``1/w`` into a covariance, so dropping it is.  Both are
-    sign-independent, which is the property the issue is about; neither is a
-    coin flip; and the module that is wrong in a given direction is now the
-    one whose object says so, rather than whichever one the caller reached.
-
-    **Measured, on the fixture the issue was filed from.**  Seven
-    ``OPENBLAS_CORETYPE`` microkernels at one thread, on
-    ``TestRankGateSeesCollinearityNotScale``'s correlation matrix and on the
-    same matrix with the residue reflected through its own eigenvector
-    (``H - 2 w0 v v'``, which is what a different BLAS produces) -- fourteen
-    configurations.  Against the OLD cut the residue runs **0.10x to 2.93x**,
-    straddling it: rank reads 6 on one configuration and 5 on thirteen, and
-    ``||pseudo_inverse||_2`` reads **1.817e+15** on that one against 1.0 on
-    the rest.  Against this bar the same residue runs **0.017x to 0.488x** and
-    never approaches it, so the direction drops on all fourteen -- worst
-    reading 0.488x, min 0.017x.  One number moved
-    from a 1.8e+15 spread to no spread at all.
-
-    **The module already believed this bar, in another field, to the bit.**
-    ``certification_band * gram_rcond`` is ``32 eps``, which is
-    ``_eigensolver_relative_bar(32)`` EXACTLY -- not approximately, the same
-    float -- and ``_certification_required`` compares a condition number to
-    ``warning_condition / sqrt(certification_band) = 1/sqrt(32 eps) =
-    1.186328e+07``, which is ``1/sqrt(bar)`` at order 32 to six figures.  So
-    the certification band was always a resolution bar with ``p(n)`` frozen at
-    32, applied to the condition number instead of to the cut.  Version 3 does
-    not introduce the quantity; it makes the *cut* use it, and track the actual
-    order rather than assume 32.  The two agree at width 32 by construction,
-    the cut is finer below it and coarser above.
-
-    **What it does not fix, stated because the opposite would be easy to
-    assume.**  This does not bound the pseudo-inverse.  A retained direction
-    may sit just above the bar, giving ``||pinv||_2 ~ 1/(n eps lambda_max)``,
-    and the policy boundary ITSELF admits ``1/(eps lambda_max)`` on both
-    routes by construction -- that is what retaining a ``sigma =
-    sqrt(eps) sigma_max`` direction means.  A large covariance after this
-    change is a conditioning fact about the data.  Before it, it was a fact
-    about the machine.  Only the second is this module's to fix, and callers
-    that need the first refused rather than reported are what
-    ``needs_factor_certification`` is for.
+    ``certification_band * gram_rcond = 32 eps`` equals this bar at order 32;
+    this function tracks the actual matrix order. It does not bound the
+    pseudo-inverse norm of a genuinely ill-conditioned direction sitting above
+    the bar — callers requiring certification of the retained subspace consult
+    :func:`needs_factor_certification`.
     """
     return float(max(order, 1)) * _EPS
 
@@ -400,14 +314,11 @@ def _tsqr_leaf(
 
 
 def _leaf_qr(block: NDArray) -> NDArray:
-    """``R`` of ``block``, as ``np.linalg.qr(block, mode="r")``, by SciPy's ``dgeqrf`` without the GIL.
+    """Compute ``R`` of ``block`` via SciPy's ``dgeqrf`` without holding the GIL.
 
-    ``np.linalg.qr`` holds the GIL while LAPACK runs, so the pooled TSQR's
-    leaves ran one at a time: 64 leaves of 1,734 x 178 took 0.44 s on eight
-    worker threads and 0.43 s on one, where this call took 0.068 s and
-    0.36 s.  It is the same Householder QR (``dgeqrf``, the routine NumPy
-    calls) from SciPy's LAPACK, so ``R`` rounds as that build rounds, the
-    same at every worker count, with the same backward error bound.
+    Calls the same LAPACK Householder QR (``dgeqrf``) as ``np.linalg.qr(..., mode="r")``,
+    allowing pooled TSQR leaves to execute concurrently across worker threads with
+    identical rounding and backward error bounds at every worker count.
     """
     function = _lapack_nogil("dgeqrf", 8)
     rows, width = block.shape
@@ -793,42 +704,14 @@ def needs_factor_certification(
 ) -> bool:
     """Whether Gram geometry lies inside a band requiring factor certification.
 
-    A certificate governs the retained subspace as well as the integer rank.
-    Normal equations can erase a factor-scale direction at the numerical
+    A certificate governs the retained subspace as well as the integer rank:
+    normal equations can erase a factor-scale direction at the numerical
     boundary, or retain a different direction while reporting the same rank.
-
-    **This shape -- a rank plus a flag saying whether to believe it -- is the
-    published state of the art, not a local invention.**  Foster & Davis,
-    "Algorithm 933", *ACM TOMS* 40(1) Art. 7 (2013), say of the routine they
-    are improving on that it "returns an estimate for the numerical rank that
-    is usually, but not always, correct", and their own contribution is
-    described as reliable "in the sense that ... the numerical rank is
-    accurately determined when a warning flag indicates that the numerical
-    rank should be correct" -- the guarantee is *conditional* on the flag.  The
-    mechanism is singular-value bounds "used to warn the user if the
-    calculated numerical rank may be incorrect".  So the right answer to an
-    ambiguous rank is a verdict, not a better threshold, and version 3's cut
-    at :func:`_eigensolver_relative_bar` is what makes the verdict honest
-    rather than what replaces it.
-
-    **And a verdict only helps where it is read.**  Issue #356 is that call
-    sites take :func:`decompose_gram` directly and never ask.  The
-    load-bearing pair was ``inference/covariance.py``, where the pseudo-inverse
-    IS the published covariance matrix: on the fixture in that issue this
-    predicate is ``True`` on both arms of a round-off coin flip, correctly,
-    and nothing downstream consulted it.  That pair now reads the verdict and
-    falls back to the observation factor, so the published covariance is no
-    longer taken from a Gram that cannot certify its own retained subspace.
-    Version 3 is what made the verdict honest; reading it is a separate
-    change and is not carried by this field.
-
-    Twenty-one direct call sites remain, across nine modules -- seven in
-    ``solvers/_structured/geometry.py``, five in the retired SCOP geometry, two
-    each in ``reml/observed_geometry.py`` and ``reml/objective.py``, and one
-    each in ``solvers/irls_direct.py``, ``solvers/constrained_qp.py``,
-    ``reml/discrete.py``, ``model/state_ops.py`` and ``inference/metrics.py``.
-    Each is its own question about whether the quantity it feeds is published
-    or internal, and they are tracked on #356 rather than converted wholesale.
+    Pairing a numerical rank with an explicit reliability flag follows Foster &
+    Davis, "Algorithm 933", *ACM TOMS* 40(1) Art. 7 (2013), where the cut at
+    :func:`_eigensolver_relative_bar` flags resolution-limited Grams so callers
+    computing published covariances (such as ``inference/covariance.py``) can
+    fall back to the observation factor.
     """
     return _certification_required(
         method=decomposition.method,
@@ -1565,47 +1448,24 @@ def _null_basis(
 
 
 def _earliest_representatives(null_vectors: NDArray, rank: int) -> NDArray | None:
-    """Earliest independent representatives, read off a null basis already in hand.
+    """Earliest independent representatives, read off a null basis in ``O(k^2 m)``.
 
-    Index-order greedy selection keeps column ``j`` unless it is a combination
-    of the columns before it -- equivalently, unless some null vector has its
-    LAST nonzero at ``j``.  Eliminating the null basis from the right-hand end
-    pivots on precisely those positions, so the pivots are the rejected columns
-    and the complement is the greedy selection, not an approximation of it.
+    Index-order greedy selection keeps column ``j`` unless it is a linear
+    combination of earlier columns — equivalently, unless some null vector has
+    its last nonzero at ``j``. Eliminating the null basis from the right in
+    ``O(k^2 m)`` (nullity ``k``, width ``m``) yields the exact greedy selection
+    without the ``O(m^4)`` cost of prefix eigendecompositions.
 
-    Deciding the same question by testing each prefix's spectrum costs one
-    eigendecomposition per candidate, which is ``O(m**4)`` across the sweep and
-    is why a rank-deficient block used to cost hundreds of times a full-rank one
-    of the same width.  This is ``O(k**2 m)`` in the NULLITY ``k``, so a block
-    that is a few columns short of full rank is nearly free.
+    Reachability is tested by basis-free null-space leverage
+    ``||P_S e_j||^2 = (N N')_jj > eps`` (matching ``sqrt(eps)`` on the
+    component scale) rather than individual basis components, so the choice is
+    invariant to orthogonal rotations ``N Q`` of the null basis. Each rejected
+    column ``c`` is deflated via a Householder reflection mapping ``Q[:, c]``
+    onto the first axis and dropping it, keeping rows orthonormal and
+    basis-invariant.
 
-    "Still reaches column ``j``" is decided by the null space's LEVERAGE there,
-    ``||P_S e_j||**2``, not by any single vector's component.  Those vectors come
-    out of an eigendecomposition of a singular system, so a component that is
-    mathematically zero arrives as noise many orders above machine epsilon --
-    measured at 1e-12 against a 1e-14 absolute threshold on an 8-column block,
-    which pivoted on dust and returned a rank-deficient selection.  ``sqrt(eps)``
-    is the floor below which a unit-norm null direction carries no information
-    here, and leverage is the basis-free way to ask the question.
-
-    It has to be basis-free.  A null SPACE has no canonical basis, and reading
-    ``max |N[i, j]|`` instead makes the answer depend on the one ``eigh`` chose:
-    for leverage ``s**2`` that maximum lies anywhere in ``[s / sqrt(k), s]``
-    depending on the rotation, so any ``s`` in ``(sqrt(eps), sqrt(k) sqrt(eps))``
-    is dust for one basis and a dependency for another.  That is not
-    hypothetical -- the component form moved on 455 of 4000 subspaces built
-    inside that band, and carried ``_conditioned_representatives`` with it on
-    21 of them.  Leverage cannot move: ``(N Q)(N Q).T = N N.T``.
-
-    The deflation is basis-free for the same reason.  Rejecting column ``c``
-    leaves ``{v in S : v_c = 0}``, a property of the subspace and the column, so
-    a Householder maps ``Q[:, c]`` onto the first axis and that axis is dropped.
-    Rows stay orthonormal, so the next leverage is read straight off the column
-    norms and the cost stays ``O(k**2 m)``.
-
-    Returns ``None`` when the scan cannot reject all ``k`` columns.  The caller
-    then keeps whatever exact path it already had rather than proceeding on a
-    selection this could not certify.
+    Returns ``None`` when fewer than ``k`` columns can be rejected, allowing
+    the caller to retain its fallback path.
     """
     floor = float(np.sqrt(np.finfo(float).eps)) ** 2
 
@@ -1677,64 +1537,21 @@ _PIVOT_THRESHOLD = 0.5
 
 
 def _leverage_pivot_representatives(null_vectors: NDArray, rank: int) -> NDArray | None:
-    """Representatives chosen for conditioning, from a quantity the basis cannot move.
+    """Choose conditioned representatives using basis-invariant null-space leverage.
 
-    A null SPACE has no canonical basis.  ``eigh`` and ``svd`` return an
-    arbitrary orthonormal one, and ``N @ Q`` spans the same subspace for any
-    orthogonal ``Q``, so any rule reading individual components of ``N`` is
-    reading a coordinate that the eigensolver was free to choose.  The rule this
-    replaces did exactly that -- it pivoted on ``max |N[i, j]|`` -- and it moved
-    under rotation on 58 of 400 random 6x2 subspaces, rising to 224 of 400 at
-    12x4, with the achieved amplification moving too (6.7803 against 2.0732 on
-    one subspace).
+    Because ``eigh`` and ``svd`` return an arbitrary orthonormal basis ``N`` of
+    the null space, rejecting columns by null-space leverage ``diag(N @ N.T)``
+    (which satisfies ``(N Q)(N Q).T = N N.T``) makes selection invariant to
+    orthogonal basis rotations. Each rejected column ``c`` is deflated with a
+    Householder reflection onto ``{v in S : v_c = 0}``, keeping every step
+    basis-invariant, orthonormal, and ``O(k^2 m)`` in the nullity ``k``.
 
-    ``_earliest_representatives`` did not move on those 400, and that was NOT
-    because its question is basis-free.  "The last column any null direction
-    still reaches" is a property of the row space, but the ``sqrt(eps)`` floor
-    it used to answer that question with was not: it read a single component,
-    and for leverage ``s**2`` the largest component ranges over
-    ``[s / sqrt(k), s]`` across bases.  Subspaces constructed inside the
-    resulting band moved it on 455 of 4000.  The uniform sweep simply never
-    produced one -- so it decides on leverage now too, and the two selectors
-    share this criterion rather than one of them being safe by nature.
-
-    So the criterion here is the null-space LEVERAGE of each column,
-    ``diag(N @ N.T)``, which is invariant by construction: ``(N Q)(N Q).T =
-    N Q Q.T N.T = N N.T``.  It is the share of the unit vector ``e_j`` that lies
-    in the null space -- 1 when column ``j`` is entirely redundant, 0 when it is
-    untouched by any alias -- and rejecting the column with the most of it is
-    the classical alias-detection choice.
-
-    The DEFLATION has to be invariant too, or the second step reintroduces what
-    the first avoided.  Rejecting column ``c`` leaves ``{v in S : v_c = 0}``,
-    which is a property of the subspace and the column, so it is taken as one:
-    a Householder reflection maps ``Q[:, c]`` onto the first axis and the
-    remaining rows are dropped, leaving an orthonormal basis of exactly that
-    subspace.  Row norms therefore stay 1 throughout and the leverage of the
-    next step is read straight off the column norms.
-
-    ``_PIVOT_THRESHOLD`` keeps its meaning from the rule this replaces -- it is
-    applied to ``sqrt(leverage)``, which is the scale the components were on --
-    and so does the reason it is not 1: index order is worth keeping where
-    conditioning does not pay for it, and an exact alias splits its leverage
-    evenly across the columns it ties, so the tie still falls to the latest.
-
-    Invariance cost nothing here.  On the 287 blocks of a 400-block sweep where
-    the earliest rule failed its certificate, this rule and the component rule
-    it replaces return selections of IDENTICAL amplification on all 287 --
-    better on none, worse on none.  Both take the median from 1.7952e+07 down
-    to 2.0000 and the maximum from 7.077e+15 down to 8.555.  The component rule
-    was sound in intent and unsound only in its input.
-
-    Both also leave 2 of those 287 above ``_achievable_amplification``, so that
-    is a property of greedy selection rather than of either criterion: the
-    bound is what a largest-volume subset achieves, and neither rule searches
-    for one.  ``_conditioned_representatives`` returns the better of this and
-    the earliest selection, so the result is never worse than index order alone
-    -- verified over the same 287, worst ratio exactly 1.000000.
-
-    Cost is unchanged at ``O(k**2 m)`` in the nullity ``k``: the Householder is
-    ``O(k m)`` per step, exactly what the elimination it replaces cost.
+    ``_PIVOT_THRESHOLD`` is applied on the ``sqrt(leverage)`` scale: among
+    columns carrying at least that fraction of the maximum available leverage,
+    the latest column is rejected, preserving index order when conditioning
+    does not require breaking it and resolving exact alias ties to the latest
+    column. ``_conditioned_representatives`` compares this selection against
+    the earliest selection so the result is never worse than index order.
     """
 
     def largest_share(leverage: NDArray) -> int | None:
@@ -2020,33 +1837,20 @@ def _conditioned_representatives(
     above the cutoff that decided the rank, and it is still the worst basis for
     its own span.
 
-    So the convention is kept, and certified -- but the certificate TRIGGERS the
-    search and does not decide it.  ``_selection_amplification`` is a bound:
-    ``sigma_min(X[:, keep]) >= sigma_rank(X) * sigma_min(N_R)`` puts a floor
-    under one end of a ratio whose other end, ``sigma_max`` of the selected
-    block, also moves with the selection.  So a smaller amplification improves a
-    worst case and says nothing per instance, and on anisotropic factors the two
-    orderings genuinely disagree: over 9,654 rank-deficient 3x4 blocks where
-    this routine switched, 24 switched to a block whose actual condition was
-    WORSE, by up to 1.34x.
-
-    The decision is therefore made on the thing that matters downstream -- the
-    condition of the principal block that will be factorised and solved --
-    whenever the caller can supply it.  ``block_condition`` takes a candidate
-    selection and returns that condition; the alternative is taken only if it is
-    strictly better.  Callers that cannot supply one fall back to the bound,
-    which is the old behaviour and is documented as weaker.
-
-    The amplification is still the right trigger: it is cheap, it costs
-    ``O(k**3)`` in the NULLITY against the ``O(m**3)`` eigendecomposition this
-    path has already paid, and being a bound is exactly what makes it a safe
-    screen -- it cannot miss a block that is genuinely badly conditioned.
+    So the convention is kept and screened by ``_selection_amplification``
+    (which costs ``O(k^3)`` in the nullity and bounds
+    ``sigma_min(X[:, keep]) >= sigma_rank(X) * sigma_min(N_R)``). Because
+    ``sigma_max`` also varies with the column choice, the amplification bound
+    triggers the alternative search rather than deciding it: when the caller
+    supplies ``block_condition``, the alternative selection is taken only if
+    its actual principal-block condition number is strictly smaller. Callers
+    without ``block_condition`` fall back to comparing the amplification bound.
 
     ``maximum_condition`` is the absolute backstop after that relative choice.
     Picking the better of two representative blocks does not make either one
     usable: where the retained subspace itself sits near the rank boundary,
     both may be catastrophically conditioned even though Cholesky accepts
-    them.  In that case ``None`` tells the caller to keep the spectral
+    them. In that case ``None`` tells the caller to keep the spectral
     decomposition rather than replace it with an unstable coefficient basis.
     A maximum requires ``block_condition`` because the null-space
     amplification alone cannot certify an individual principal block.

@@ -1205,8 +1205,8 @@ def _refresh_centered_data_rhs(*, dm, W, z_off, data):
     Every column takes its transpose product less ``mean_x`` times the sum of
     ``W (z - mean_z)``, which is zero to its rounding; a ``DenseGroupMatrix``
     column, whose entries its type does not bound, is centred row by row about
-    the system's exact centre pair (``centre_pair``) instead, so a column's
-    offset never multiplies that rounding (issue #430).
+    the system's exact centre pair (``centre_pair``) instead, so a large column
+    offset never multiplies that rounding.
     """
     sum_w, mean_x, data_gram, mean_hi, mean_lo = data
     mean_z = float(np.dot(W, z_off) / sum_w)

@@ -17,21 +17,20 @@ from superglm.screening._factor_kernels import _penalty_spectrum
 
 
 def tensor_penalty_root(S1: NDArray, S2: NDArray) -> NDArray:
-    """``rootS`` with ``rootS' rootS`` the tensor penalty, from the margins.
+    """``rootS`` with ``rootS' rootS`` the tensor penalty, assembled from the margins.
 
-    ``kron(S1, I) + kron(I, S2)`` is a Kronecker sum, so with ``S1 = Qa diag(a) Qa'`` and
-    ``S2 = Qb diag(b) Qb'`` its eigenvectors are ``kron(Qa, Qb)`` and its eigenvalues
-    ``a_p + b_q`` in C-order ``p * k_b + q``. The root is assembled from the two margin
-    spectra, not computed: ``eigh`` is accurate to ``n eps ||S||_2`` absolutely, so
-    rooting the assembly resolves an exactly-null direction only to the assembled
-    dimension's round-off, which the ladder's high edge multiplies by ``1e10``. On
-    ``moderate_pair`` (207 wide, margin 9) this puts the dense high-edge ``edf`` 8.26e-07
-    from the stacked-QR arbiter against 4.99e-13.
+    ``kron(S1, I) + kron(I, S2)`` is a Kronecker sum, so with
+    ``S1 = Qa diag(a) Qa'`` and ``S2 = Qb diag(b) Qb'`` its eigenvectors are
+    ``kron(Qa, Qb)`` and its eigenvalues ``a_p + b_q`` in C-order
+    ``p * k_b + q``. Assembling the root from the marginal spectra avoids
+    resolving exact null directions at the assembled dimension's ``eigh``
+    round-off ``n eps ||S||_2``, which large smoothing parameters amplify.
 
-    Each margin is rooted by :func:`superglm.screening._factor_kernels._penalty_root`'s
-    policy, as on the structured path (issue #323). The dense path does not inherit the
-    structured path's refusal on a material drop; a dropped direction is reported free.
-    A margin without a penalty passes a zero block of its own width.
+    Each margin is rooted by
+    :func:`superglm.screening._factor_kernels._penalty_root`'s policy, matching
+    the structured path. Unlike the structured path, the dense path reports a
+    dropped direction as free rather than refusing. A margin without a penalty
+    passes a zero block of its own width.
     """
     a, Qa, _, _ = _penalty_spectrum(np.asarray(S1, dtype=np.float64))
     b, Qb, _, _ = _penalty_spectrum(np.asarray(S2, dtype=np.float64))

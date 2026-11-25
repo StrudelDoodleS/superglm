@@ -71,15 +71,13 @@ def contract_weights(
 
 
 def weighted_row_sum(weights, row_term: Callable[..., NDArray], *rows) -> float:
-    """Return ``sum(w * row_term(*rows))`` with each row of weight exactly 0 an exact 0.
+    """Return ``sum(w * row_term(*rows))`` with every zero-weight row contributing an exact 0.
 
-    A zero-weight row is not in the fit, so its term is never evaluated: a
-    Gaussian identity mean or response past ``sqrt(DBL_MAX)`` there made its
-    unit deviance ``inf``, and ``0 * inf`` turned the whole sum into NaN, which
-    rejected every trial step (issue #369).  With no zero weight this is the
-    unchanged expression.  With one, every other row keeps its product in its
-    position and the zero rows hold ``+0.0``, which is what ``0 * t`` gave for a
-    finite ``t >= 0``, so the sum differs from the old one only where that was NaN.
+    Zero-weight rows are excluded before calling ``row_term`` so an infinite
+    unit deviance on an unused row (for example, a Gaussian identity mean or
+    response past ``sqrt(DBL_MAX)``) cannot produce ``0 * inf = NaN`` and poison
+    the sum. Nonzero rows keep their positions and exact products while zero
+    rows hold ``+0.0``.
     """
     mass = np.asarray(weights, dtype=np.float64)
     carried = mass != 0.0

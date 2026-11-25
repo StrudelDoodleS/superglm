@@ -1,89 +1,39 @@
 """One triangular factor of a candidate pair's weighted joint design.
 
-The dense screening path used to hand :mod:`superglm.screening._score_stat`
-five assembled moment matrices -- ``U``, ``V``, the overlap ``C``/``M`` and a
-nuisance score.  A Gram's spectrum is its design's SQUARED, so on a pair with
-a starved level the deciding direction falls under the noise floor of the
-operator it is read from and no arrangement of the arithmetic downstream can
-put it back (issue #257; the measurement is in :mod:`._score_stat`).  This
-module builds a factor instead: ONE upper triangular ``R`` such that
+Builds one upper-triangular ``R`` such that
 
     [ X_o | X_T | yhat ] = Q R ,        Q' Q = I
 
-with ``X_o`` the overlap span the pair's own mains already fit, ``X_T`` the
-candidate tensor block, and ``yhat`` the working response that reproduces the
-pair's score.  Frisch-Waugh-Lovell then reads the two quantities the ladder
-needs off ``R``'s trailing blocks, with no difference of two Grams anywhere:
+with ``X_o`` the overlap span already fitted by the pair's main effects,
+``X_T`` the candidate tensor block, and ``yhat`` the working response that
+reproduces the pair's score. Working in factor space keeps singular values
+unsquared (condition number ``sqrt(cond)`` instead of ``cond``) so starved
+directions remain above float64 round-off. Frisch-Waugh-Lovell then reads the
+profiled curvature and score directly off ``R``'s trailing blocks without
+subtracting two Grams:
 
     V_eff = R_eff' R_eff ,     U_eff = R_eff' z_t
 
-where ``R_eff`` is ``R``'s tensor-by-tensor block and ``z_t`` the response
-column beside it.  ``R_eff``'s spectrum is ``V_eff``'s square root, which is
-the whole content of #257's ``sqrt(cond) = 1.67e+10 against 2.78e+20``.
-(That slice is the whole story only while the overlap has full rank;
-:func:`_profiled_factor` states what a rank-deficient one adds back, and
-:func:`_pair_scale` takes its block rather than re-slicing so the two cannot
-part company.)
+(For a rank-deficient overlap, :func:`_profiled_factor` stacks back the
+unspanned overlap directions, and :func:`_pair_scale` takes that block directly
+so the two never disagree.)
 
-**THE DESIGN HERE IS THE CELL DESIGN, NOT THE ROW DESIGN, AND THAT IS EXACT
-RATHER THAN AN APPROXIMATION.**  Both margins are constant within a joint
-cell, so a cell's rows contribute ``W_cell`` to every curvature entry and
-``S_cell`` to every score entry -- the sufficient-statistic identity
-:mod:`superglm.screening._pair_moments` states and pins.  Weighting cell
-``(i, j)``'s single design row by ``sqrt(W_cell[i, j])`` and giving it the
-working response ``S_cell[i, j] / sqrt(W_cell[i, j])`` reproduces the row
-design's Gram and its score exactly:
+The reduction operates on the exact cell design rather than individual rows:
+both margins are constant within each joint cell, so weighting cell ``(i, j)``
+by ``sqrt(W_cell[i, j])`` with working response
+``S_cell[i, j] / sqrt(W_cell[i, j])`` (zero where ``W_cell == 0``) reproduces
+the row-level Gram and score identically.
 
-    sum_ij  sqrt(w) x_ij  * (s_ij / sqrt(w))  =  sum_ij s_ij x_ij .
+The reduction is chunked and sequential rather than a binary tree: each outer
+support chunk feeds roughly ``w`` new rows into the ``(w, w)`` accumulator so
+temporary storage stays ``O(w^2)`` rather than scaling with the outer support
+size. The dominant cost is ``O(n_outer * k_inner * w^2)``, so the narrower
+margin is reduced inside (making the inner factor ``min(k_a, k_b)``).
 
-``W_cell == 0`` forces ``S_cell == 0`` and the response is 0 there.  That is
-not a convention: ``screening_ops`` builds working weights as ``weights *
-dmu_deta**2 / var_mu`` from weights validated finite and non-negative, and
-``working_score`` carries the same ``weights * dmu_deta`` factor, so a cell
-whose weight sums to zero had every row's weight zero and every row's score
-exactly zero.  Both cell tables are sums of non-negative-weighted terms, so
-nothing cancels into a false zero.
-
-**WHY THE REDUCTION IS CHUNKED AND SEQUENTIAL RATHER THAN A BINARY TREE.**
-:func:`superglm.screening._structured._reduce_row_factors` exists to keep a
-LEVEL COUNT out of a matrix dimension, because on the structured path ``L``
-reaches fifty thousand and stacking the whole batch makes the temporary
-``L``-sized.  Its objection does not transfer here and the shape of the
-operands is why.  That reducer pads every block up to ``(w, w)``; the blocks
-here are ``(k_inner + 2, w)`` with ``w`` of order ``k_a * k_b``, so padding
-would allocate ``n_outer * w**2`` doubles where the whole point is to stay at
-the ``(k, k)`` the dense path already allocates.  What answers the objection
-is that the outer count is a SUPPORT size bounded by a chunk width chosen
-here, not a level count arriving from the data: the chunk is sized so each
-merge sees about ``w`` new rows, which caps the temporary at the shape of the
-accumulator itself.
-
-**COST CLASS, AND THE MULTIPLIER MEASURED FOR IT.**  The dominant term is
-``O(n_outer * k_inner * w**2)`` against the moment route's ``O(n_outer *
-k**2)``, so the reduction costs a factor of the INNER margin's width.  The
-builder therefore reduces the NARROWER margin inside and loops over the other,
-which makes that factor ``min(k_a, k_b)``.  Against the moment route at
-``16e7f810``, as 18-rep interleaved A/B/B/A medians taken in a dedicated
-exclusive phase with all seven thread pools pinned to one, the ladder phase
-costs 0.95x, 3.10x, 3.94x and 4.09x at tensor widths 35, 133, 1043 and 1349
-(``ps(8)`` on 6, 20 and 150 levels, then ``ps(20)`` on 72), and 1.10x, 1.67x,
-2.31x and 4.17x end to end through ``screen_interactions``.  The budget gates
-in :mod:`superglm.model.screening_ops` are DIMENSIONAL (``k**3 <=
-_CUBIC_BUDGET_FACTOR * max_cells``), so which pairs are admitted is unchanged;
-what those multipliers move is the ~1.5 s per-pair target the constants were
-fitted to, and re-fitting them is a separate decision taken with a machine to
-itself.
-
-Column order out is ``[ 1 | inner menu | outer menu | tensor | yhat ]``.  The
-overlap's internal order is the FACTOR's and differs from
-the test oracle ``pair_overlap_moments`` in ``tests/_overlap_oracle.py``, whose
-order is ``[1 | A | B]``:
-the overlap is only ever consumed as a SPAN, so nothing downstream can see it,
-but a reader who slices ``overlap_width`` assuming the old layout will get the
-wrong columns.  The TENSOR order is C-order ``p * k_b + q`` -- unchanged, and
-load-bearing, because the test oracle ``tensor_penalty(S_a, S_b)`` in
-``tests/_overlap_oracle.py`` is aligned to it with no
-permutation in between.
+Column order out is ``[ 1 | inner menu | outer menu | tensor | yhat ]``. The
+overlap is consumed only as a span (its internal column order may differ from
+``[1 | A | B]``). The tensor columns are always returned in C-order
+``p * k_b + q``, matching the penalty alignment.
 """
 
 from __future__ import annotations
@@ -181,34 +131,23 @@ def pair_design_factor(
 ) -> PairFactor:
     """Reduce a gridded pair's weighted joint design to one triangular factor.
 
-    Serves ``ti``, ``spline_cat`` and ``cat_cat`` -- every kind whose margins
-    both grid, and whose moments the dense route used to assemble (the test oracles
-    ``pair_score_curvature`` and ``pair_overlap_moments`` in ``tests/_screening_oracle.py``
-    and ``tests/_overlap_oracle.py`` still do).  ``B_a`` is ``(n_a, k_a)``, ``B_b``
-    is ``(n_b, k_b)``, and the cell tables are ``(n_a, n_b)``.
+    Serves ``ti``, ``spline_cat``, and ``cat_cat`` pairs whose margins both
+    grid. ``B_a`` has shape ``(n_a, k_a)``, ``B_b`` has shape ``(n_b, k_b)``,
+    and the cell tables ``S_cell`` and ``W_cell`` have shape ``(n_a, n_b)``.
 
-    **THE REDUCTION IS ONE ORTHOGONAL TRANSFORMATION PER OUTER SUPPORT POINT,
-    AND THE ALGEBRA IS WHY IT IS AFFORDABLE.**  Write the augmented margins
-    ``a_i = [1, B_a[i]]`` and ``t_j = [1, B_b[j]]``.  The joint design row of
-    cell ``(i, j)`` is ``sqrt(W[i, j]) * kron(a_i, t_j)``, because the
-    Kronecker product of the two AUGMENTED margins IS the joint span: its
-    first column is the intercept, its ``[1, k_b]`` block is ``B_b``, its
-    ``p * (1 + k_b)`` columns are ``B_a``, and what is left is the tensor.
-    For fixed ``i`` every such row is ``t_j`` mapped through the same
-    ``kron(a_i', I)``, so with ``Z_i`` the ``(n_b, k_b + 2)`` matrix of rows
-    ``[sqrt(W[i, j]) t_j , yhat_ij]`` and ``Z_i = Q_i R_i``,
+    With augmented margins ``a_i = [1, B_a[i]]`` and ``t_j = [1, B_b[j]]``, the
+    joint design row for cell ``(i, j)`` is ``sqrt(W[i, j]) * kron(a_i, t_j)``.
+    For fixed outer point ``i``, factoring ``Z_i = [sqrt(W[i, :]) t, yhat[i, :]]``
+    into ``Q_i R_i`` yields
 
         rows(i) = Q_i [ kron(a_i', R_i[:, :1+k_b]) | R_i[:, -1] ] ,
 
-    so ``R_i`` -- ``k_b + 2`` rows, whatever the inner support -- stands in for
-    the whole of level ``i`` exactly.  ``Q_i`` is never formed.
+    so ``R_i`` (``k_b + 2`` rows, regardless of inner support size) stands in
+    for outer point ``i`` exactly without forming ``Q_i``.
 
-    Which margin is reduced inside is chosen by width, so the emitted blocks
-    are as short as the pair allows; when that puts ``B_a`` inside, the tensor
-    columns come out transposed and are permuted back before the factor is
-    returned, because the test oracle ``tensor_penalty`` (in
-    ``tests/_overlap_oracle.py``) is aligned to ``p * k_b + q`` and nothing
-    downstream permutes.
+    The narrower margin is reduced inside to minimize block height; when that
+    places ``B_a`` inside, the tensor columns are permuted back to C-order
+    ``p * k_b + q`` before returning.
     """
     B_a = np.asarray(B_a, dtype=np.float64)
     B_b = np.asarray(B_b, dtype=np.float64)
@@ -624,38 +563,13 @@ def numeric_numeric_factor(
 
 
 def _pair_scale(profiled: NDArray) -> float:
-    """``tr(V_eff)`` from the factor: ``||R_eff||_F**2``, never a difference.
+    """``tr(V_eff)`` from the profiled factor: ``||R_eff||_F**2``, never a difference.
 
-    **IT TAKES :func:`_profiled_factor`'S BLOCK RATHER THAN THE
-    :class:`PairFactor`, AND THAT SIGNATURE IS THE POINT.**  It used to slice
-    ``joint[q:q+k, q:q+k]`` itself, which is the same block only while the
-    overlap has full rank; where it does not, :func:`_profiled_factor` returns
-    the slice STACKED with ``outside' R_ot`` and the two functions in this
-    module then disagreed about what ``V_eff`` is, with the ladder scoring one
-    and bracketing on the other.  Passing the block in makes the disagreement
-    unrepresentable.
-
-    Measured on the mixed suite's ``band x power`` pair -- an
-    ``OrderedCategorical`` margin whose 7-column inner menu sits on 5 levels,
-    so the overlap is 17 wide with singular values 9.8658e-15 .. 6.8369e+01 and
-    three of its directions fall outside :func:`._factor_kernels.
-    _factor_rank_floor`'s cut of 4.2005e-06, giving ``R_eff`` 66 rows where the
-    slice has 63::
-
-        tr(V - C' pinv(M) C)   538.7617246636    the moment route's own V_eff
-        ||R_aug||_F**2         538.7617246636    what the ladder scores
-        ||slice||_F**2         441.4506031909    18.06% low
-
-    That number reaches two published fields.  It is
-    :func:`~superglm.screening._score_stat.penalized_score_statistic_ladder`'s
-    bracket, ``tr(V_eff) / tr(S)``, so a rung CLAMPED to an edge publishes
-    ``lambda0`` 18% off what the moment route published; and it is
-    :func:`~superglm.screening._score_stat._pair_pencil`'s balance, which is
-    accuracy only.  On this fixture every rung searches, so the published move
-    is at 1e-7 of a degree of freedom -- the slice-only bracket reads
-    ``edf(lo)`` 35.999999895 and ``edf(hi)`` 0.999999344 where the block's
-    reads 35.999999872 and 0.999999169 -- and it is the clamped rung on such a
-    pair that the slice-only form got wrong outright.
+    Takes :func:`_profiled_factor`'s block directly rather than re-slicing
+    :class:`PairFactor` so that when the overlap is rank deficient (and
+    ``_profiled_factor`` stacks back ``outside' R_ot``), the ladder bracket
+    ``tr(V_eff) / tr(S)`` and the pencil balance measure the exact same
+    ``V_eff`` that the ladder scores.
     """
     return float(np.sum(np.asarray(profiled, dtype=np.float64) ** 2))
 
@@ -707,46 +621,23 @@ def _profiled_rank_scale(factor: PairFactor) -> float:
 def _profiled_factor(factor: PairFactor) -> tuple[NDArray, NDArray]:
     """``(R_eff, z_t)``: the tensor block residualized on the overlap, and its score.
 
-    Frisch-Waugh-Lovell on a triangular factor is a slice.  ``[X_o | X_T |
-    yhat] = Q R`` puts ``X_T``'s component orthogonal to ``X_o`` in ``R``'s
-    ``(tensor, tensor)`` block and the response's in the column beside it, so
-    ``R_eff' R_eff`` is ``V - C' M^-1 C`` and ``R_eff' z_t`` is
-    ``U - C' M^-1 u_m`` -- both without forming ``M``, inverting it, or
-    subtracting anything.
+    When ``X_o`` has full rank, Frisch-Waugh-Lovell on ``[X_o | X_T | yhat] = Q R``
+    is the trailing slice: ``R_eff' R_eff = V - C' M^-1 C`` and
+    ``R_eff' z_t = U - C' M^-1 u_m`` without forming or inverting ``M``.
 
-    **A RANK-DEFICIENT OVERLAP MAKES THAT SLICE WRONG ON ITS OWN, AND THE
-    REGIME IS REACHABLE RATHER THAN EXOTIC.**  The reduction is unpivoted, so a
-    column of ``X_o`` that its predecessors already span leaves a zero pivot,
-    and the direction ``Q`` puts there is an arbitrary unit vector orthogonal
-    to what came before -- NOT in ``range(X_o)``.  Residualizing on the whole
-    leading block then removes a component the overlap never explained, and the
-    profiled block loses curvature the pair genuinely carries.  An
-    ``OrderedCategorical`` margin reaches this by construction: its inner
-    spline menu can be wider than its level count, so the menu is rank
-    deficient before the pair is even formed.  Measured on the mixed suite's
-    ``band x power`` pair -- a 7-column menu on 5 levels, whose overlap is rank
-    14 of 17 -- taking the slice alone reports a statistic of 13.28 where the
-    exact design carries 22.31, and ``z`` moves from 10.07 to 5.67.
-
-    So the directions the overlap does NOT span are returned to the profiled
-    block, which is what the moment route's pseudo-inverse did implicitly:
-    with ``P`` the projector onto ``range(R_o)``,
+    When ``X_o`` is rank deficient (for example, an ``OrderedCategorical`` whose
+    inner spline menu is wider than its level count), the unpivoted QR places
+    arbitrary orthogonal directions in the zero-pivot rows of ``Q_o``.
+    Residualizing on the whole leading block would drop curvature not spanned
+    by ``X_o``. With ``P`` the projector onto ``range(R_o)`` (rank decided on
+    ``R_o`` via :func:`._factor_kernels._factor_rank_floor`), the unspanned
+    components are restored via
 
         X_T - P_{X_o} X_T = Q_o (I - P) R_ot + Q_T R_eff ,
 
-    so ``[(I - P) R_ot ; R_eff]`` is the residualized tensor block and
-    ``[(I - P) z_o ; z_t]`` its response.  A full-rank overlap makes ``I - P``
-    exactly zero and the returned factor is the bare slice, bit for bit.  The
-    rank is decided on ``R_o`` -- a factor formed by reduction, where nothing
-    has cancelled -- at :func:`._factor_kernels._factor_rank_floor`, the same cut
-    every other rank decision here takes.  The moment route took the same
-    decision and did not state it: ``cho_factor`` or, on refusal,
-    ``numpy.linalg.pinv``'s shape-derived default ``rcond``.
-
-    **THE RETURNED BLOCK IS THE ONLY ``V_eff`` IN THIS MODULE.**  Its Frobenius
-    mass IS ``tr(V_eff)``, and :func:`_pair_scale` is handed it rather than
-    re-slicing ``joint`` for itself: on the fixture above the two differ by
-    18.06%, and the smaller one used to set the ladder's bracket.
+    yielding ``[(I - P) R_ot ; R_eff]`` and ``[(I - P) z_o ; z_t]`` (reducing
+    to the bare slice when ``X_o`` has full rank). The returned block is the
+    single source of ``V_eff`` passed to :func:`_pair_scale`.
     """
     q, k = int(factor.overlap_width), int(factor.tensor_width)
     R_eff = factor.joint[q : q + k, q : q + k]
