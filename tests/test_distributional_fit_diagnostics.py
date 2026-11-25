@@ -1166,9 +1166,14 @@ def test_a_fit_converged_on_an_exact_face_reports_that_status_and_no_failed_chec
     assert _fit_status(stopped) == "not_converged"
 
 
+@pytest.mark.pins_behaviour
 def test_a_terminal_direction_toward_finite_smoothing_does_not_certify_the_face(
     face_model,
 ) -> None:
+    """Pin that a face whose terminal direction points toward finite smoothing stays
+    uncertified with ``fit.termination_uncertified`` instead of being promoted to
+    ``converged_exact_face``.
+    """
     smoothing = face_model.smoothing
     assert smoothing is not None
     ((name, endpoint),) = smoothing.terminal_endpoint_directions.items()
