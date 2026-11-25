@@ -284,45 +284,6 @@ class GroupInfo:
                 comp_sum, self.penalty_matrix, atol=1e-12
             ):
                 raise ValueError("penalty_components sum does not match penalty_matrix")
-        if self.structured_kind == "factor_smooth":
-            required = (
-                self.factor_smooth_codes,
-                self.factor_smooth_n_levels,
-                self.factor_smooth_block_size,
-                self.factor_smooth_transform,
-                self.factor_smooth_levels,
-                self.repeated_penalty_components,
-            )
-            if any(value is None for value in required):
-                raise ValueError("factor_smooth GroupInfo is missing compact geometry")
-            exact = self.factor_smooth_basis is not None
-            discrete = (
-                self.factor_smooth_basis_unique is not None
-                and self.factor_smooth_bin_idx is not None
-            )
-            if exact == discrete:
-                raise ValueError(
-                    "factor_smooth GroupInfo requires exactly one exact or discrete basis"
-                )
-            n_levels = int(self.factor_smooth_n_levels)
-            block_size = int(self.factor_smooth_block_size)
-            coefficient_levels = (
-                n_levels if self.factor_smooth_factor_basis == "fs" else n_levels - 1
-            )
-            if self.n_cols != coefficient_levels * block_size:
-                raise ValueError(
-                    "factor_smooth n_cols does not match its factor basis, "
-                    "level count, and block size"
-                )
-            transform = np.asarray(self.factor_smooth_transform)
-            if transform.shape[1] != block_size:
-                raise ValueError("factor_smooth_transform has the wrong output width")
-            for suffix, component in self.repeated_penalty_components:
-                if component.shape != (block_size, block_size):
-                    raise ValueError(
-                        f"repeated penalty component {suffix!r} has shape "
-                        f"{component.shape}, expected {(block_size, block_size)}"
-                    )
 
 
 # ── Group bookkeeping for the solver ────────────────────────────
