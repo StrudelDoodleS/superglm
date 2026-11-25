@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 from types import ModuleType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 from numpy.typing import NDArray
@@ -35,6 +35,7 @@ from superglm.solvers.mode_score import linear_predictor
 if TYPE_CHECKING:
     from superglm._frame import EagerFrame, FrameLike
     from superglm.editor.session import EditableTerm
+    from superglm.solvers.clip_rows import HeldRows
     from superglm.types import GroupSlice
 
 
@@ -204,7 +205,7 @@ def apply_edits_to_model_copy_with_data(
             sample_weight=sample_weight,
             offset=offset,
         )
-        if not scored:
+        if scored is None:
             reason = "This model has no fit statistics. Supply both X and y to score the model."
     except NoPredictedMeanError as error:
         reason = (
@@ -672,6 +673,16 @@ def _invalidate_model_caches(model) -> None:
     model._fit_stats = None
 
 
+class ScoredRows(NamedTuple):
+    """What ``_refresh_fit_statistics`` scored, for a caller that forms the statistics itself."""
+
+    #: The scored rows' unclipped predictor where the model reads the rows the working
+    #: clip holds from the likelihood (``clip_rows.rescored_held_rows``), else ``None``.
+    likelihood_eta: NDArray | None = None
+    #: The null model's held rows there (``fit_ops._null_state``), else ``None``.
+    null_held: HeldRows | None = None
+
+
 def _refresh_fit_statistics(
     model,
     *,
@@ -682,17 +693,18 @@ def _refresh_fit_statistics(
     use_fitted_design: bool = False,
     frame: EagerFrame | None = None,
     statistics: bool = True,
-) -> bool:
+) -> ScoredRows | None:
     """Refresh fitted means and statistics; ``frame`` is the caller's adapter of ``X``.
 
-    ``statistics=False`` leaves ``_fit_stats`` empty, for a caller that forms them itself.
-    Returns whether scoring rows were available and deviance was computed.
-
-    A row of positive weight with no mean (NaN, as ``predict`` gives it) is
-    refused with ``NoPredictedMeanError`` before anything is refreshed; a
-    zero-weight one adds nothing to the statistics.
+    ``statistics=False`` leaves ``_fit_stats`` empty for a caller that forms them from the
+    ``ScoredRows`` returned; ``None`` when no rows were scored. A positive-weight row with no
+    mean (NaN, as ``predict`` gives it) is refused with ``NoPredictedMeanError`` before
+    anything is refreshed; a zero-weight one adds nothing. Rows the working clip holds are
+    read as a fit ending on these coefficients reads them (``clip_rows.rescored_held_rows``):
+    from the likelihood where one is held against its outcome, else at the clipped mean.
     """
     from superglm.model.base import (
+        predict_eta_raw_exact,
         predict_priced,
         require_priced_rows,
         response_mean,
@@ -700,10 +712,11 @@ def _refresh_fit_statistics(
     )
     from superglm.model.fit_ops import (
         _compute_fit_stats,
-        _compute_null_mu,
+        _null_state,
         _required_fit_columns,
     )
     from superglm.model.input_validation import validate_fit_input
+    from superglm.solvers.clip_rows import clip_may_hold, record_rescored, rescored_held_rows
 
     if (X is None) != (y is None):
         raise EditorValueError("Explicit scoring data requires both X and y.")
@@ -719,7 +732,7 @@ def _refresh_fit_statistics(
         require_unchanged_fit_data(model, X_ref, y_ref, frame=None if X is None else frame)
     if y_ref is None:
         model._fit_stats = None
-        return False
+        return None
 
     explicit_scoring_data = X is not None or y is not None
     validation_weight = sample_weight
@@ -802,6 +815,7 @@ def _refresh_fit_statistics(
         and model._dm.n == y_arr.size
         and (X_ref is retained_X_ref or X_ref is None)
     )
+    eta_raw = None
     if X_ref is not None and not can_use_fitted_design:
         # The check below names any row without a mean, so predict's warning would repeat it.
         mu = predict_priced(model, X_ref, offset_arr)
@@ -809,10 +823,11 @@ def _refresh_fit_statistics(
         solver_result = (
             model._solver_pirls_result() if model._solver_result is not None else model.result
         )
-        mu = response_mean(model, linear_predictor(model._dm, solver_result, offset_arr))
+        eta_raw = linear_predictor(model._dm, solver_result, offset_arr)
+        mu = response_mean(model, eta_raw)
     else:
         model._fit_stats = None
-        return False
+        return None
 
     mu = np.asarray(mu, dtype=np.float64).ravel()
     if mu.size != y_arr.size:
@@ -831,23 +846,30 @@ def _refresh_fit_statistics(
         weights, model.result, response=y_arr, offset=offset_arr, mean=mu
     )
     unit_weights = np.ldexp(weights, exponent) if exponent else weights
-    null_mu = _compute_null_mu(
+    held = None
+    if clip_may_hold(model._distribution, model._link, mu):
+        # A mean at the clip: the test needs the predictor the clip moved.
+        if eta_raw is None:
+            assert X_ref is not None  # the mean is predict's
+            eta_raw = np.asarray(
+                predict_eta_raw_exact(model, X_ref, offset_arr, warn=False), dtype=np.float64
+            )
+        held = rescored_held_rows(model._distribution, model._link, y_arr, weights, eta_raw)
+    null_mu, null_held = _null_state(
         y_arr,
         unit_weights,
         offset_arr,
         model._distribution,
         model._link,
         weight_semantics=model_weight_semantics(model),
+        likelihood_rows=held is not None,
     )
+    deviance = weighted_row_sum(unit_weights, model._distribution.deviance_unit, y_arr, mu)
+    if held is not None:
+        deviance += held.deviance_gap(unit_weights)
     if exponent:
-        deviance = float(
-            np.ldexp(
-                weighted_row_sum(unit_weights, model._distribution.deviance_unit, y_arr, mu),
-                -exponent,
-            )
-        )
-    else:
-        deviance = weighted_row_sum(weights, model._distribution.deviance_unit, y_arr, mu)
+        deviance = float(np.ldexp(deviance, -exponent))
+    scored = ScoredRows(None if held is None else eta_raw, null_held)
     model._fit_stats = (
         _compute_fit_stats(
             y_arr,
@@ -860,6 +882,8 @@ def _refresh_fit_statistics(
             null_mu=null_mu,
             weight_semantics=model_weight_semantics(model),
             solver_result=model.result,
+            likelihood_eta=scored.likelihood_eta,
+            null_held=null_held,
         )
         if statistics
         else None
@@ -868,6 +892,7 @@ def _refresh_fit_statistics(
         result = getattr(model, result_name, None)
         if result is not None:
             result.deviance = deviance
+            record_rescored(result, held is not None)
     model._fit_mu = mu
     model._fit_null_mu = null_mu
     if X is not None:
@@ -895,7 +920,7 @@ def _refresh_fit_statistics(
             y_arr,
             columns=tuple(model._feature_order),
         )
-    return True
+    return scored
 
 
 def _stamp_stale_inference(model, edited_terms: list[str]) -> None:

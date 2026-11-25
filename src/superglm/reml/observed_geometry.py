@@ -95,6 +95,7 @@ from superglm.solvers.centered_system import (
     grouped_augmented_factor,
     serves_initial_data,
 )
+from superglm.solvers.clip_rows import likelihood_observed_curvature, on_likelihood_rows
 from superglm.solvers.hessian_factor import HessianFactor
 from superglm.solvers.mode_score import (
     centre_offset_mean,
@@ -651,13 +652,18 @@ def stopped_on_iteration_budget(result: Any, link: Any = None) -> bool:
     halving keeps every binomial mean inside (0, 1), so the state is finite.
     The log link's search restores an interior mode instead
     (``optimize_direct_reml``); its final refit publishes the boundary as the
-    identity link's does (``finalize_reml_fit``). Every other termination
-    reason is something the mode score cannot judge and keeps its own
-    handling.
+    identity link's does (``finalize_reml_fit``). ``"clip_held"`` is one of
+    the loop's own exits renamed for a row the working clip holds against its
+    outcome (``solvers.clip_rows``): a finite state, disclosed the same way.
+    Every other termination reason is something the mode score cannot judge
+    and keeps its own handling.
     """
-    return result.termination_reason in ("max_iter", "step_rejected", "score_stagnated") or (
-        result.termination_reason == "mean_space_boundary" and isinstance(link, IdentityLink)
-    )
+    return result.termination_reason in (
+        "max_iter",
+        "step_rejected",
+        "score_stagnated",
+        "clip_held",
+    ) or (result.termination_reason == "mean_space_boundary" and isinstance(link, IdentityLink))
 
 
 class ObservedGeometryInfeasibleError(ValueError):
@@ -1072,7 +1078,8 @@ def build_observed_reml_geometry(
     if not np.isfinite(result.intercept):
         raise ObservedGeometryInfeasibleError("result.intercept must be finite")
 
-    eta = stabilize_eta(linear_predictor(dm, result, offset_arr), link)
+    eta_unclipped = linear_predictor(dm, result, offset_arr)
+    eta = stabilize_eta(eta_unclipped, link)
     mu = link.inverse(eta)
     # A binomial/log mode certified on the model's own score
     # (``mean_space_true_mode``) is read at the unclipped mean; only its
@@ -1092,6 +1099,22 @@ def build_observed_reml_geometry(
         sample_weight,
         derivative_order=derivative_order,
     )
+    if on_likelihood_rows(result):
+        # A binomial fit on the likelihood's rows converged on them where the
+        # working clip holds a row (``solvers.clip_rows``): the criterion's
+        # Hessian and its derivatives read the same rows.
+        observed_w, weight_derivative, weight_second_derivative = _validate_observed_bundle(
+            likelihood_observed_curvature(
+                distribution,
+                link,
+                y,
+                sample_weight,
+                eta_unclipped,
+                eta,
+                mu,
+                (observed_w, weight_derivative, weight_second_derivative),
+            )
+        )
     nonnegative = bool(np.all(observed_w >= 0.0))
     sum_w = (
         float(np.sum(observed_w, dtype=np.float64))

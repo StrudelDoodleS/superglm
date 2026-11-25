@@ -83,6 +83,7 @@ from superglm.solvers._structured.state import (
     StructuredLinearSystemState,
     centred_data_operator,
 )
+from superglm.solvers.clip_rows import clip_rows_after, on_likelihood_rows
 from superglm.solvers.dispersion import (
     DEVIANCE_FORM,
     REML_PROFILE,
@@ -474,6 +475,7 @@ def maybe_qp_passthrough_refit(
         trace_purpose="reml_qp_final",
         separation="record",
         weight_semantics=model_weight_semantics(model),
+        _published=True,
     )
     return qp_output[0]
 
@@ -759,6 +761,8 @@ def finalize_reml_fit(
         trace_purpose="reml_final",
         separation="record",
         weight_semantics=model_weight_semantics(model),
+        _published=True,
+        _clip_rows=clip_rows_after(best.pirls_result),
         _laplace_excluded=tuple(int(index) for index in identified.weak),
         _mode_bar=terminal_bar,
         compute_rank_info=not discard_rank_info and deferred_rank_info is None,
@@ -1141,8 +1145,8 @@ def finalize_reml_fit(
     profile["converged"] = converged
     model._reml_profile = profile
 
-    eta = linear_predictor(model._dm, model._result, offset)
-    eta = stabilize_eta(eta, model._link)
+    eta_unclipped = linear_predictor(model._dm, model._result, offset)
+    eta = stabilize_eta(eta_unclipped, model._link)
     mu = clip_mu(model._link.inverse(eta), model._distribution)
 
     model._fit_stats = compute_fit_stats(
@@ -1154,6 +1158,7 @@ def finalize_reml_fit(
         model._link,
         likelihood_scale(model._result).phi,
         weight_semantics=model_weight_semantics(model),
+        likelihood_eta=eta_unclipped if on_likelihood_rows(model._result) else None,
     )
     model._solver_result = corrected
 

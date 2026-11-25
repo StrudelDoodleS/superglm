@@ -247,6 +247,7 @@ def build_coef_rows(
     rules_enforced: bool = True,
     sandwich_covariance: Any | None = None,
     contrast_estimable: Callable[[NDArray], bool] | None = None,
+    information_underflowed: bool | None = None,
     intercept_centre: NDArray | None = None,
 ) -> list[_CoefRow]:
     """Build coefficient table rows for summary output.
@@ -271,6 +272,9 @@ def build_coef_rows(
         (``RankInfo.is_estimable``, which also answers for a term's fitted function); the
         fit's own rank record's when the mask is.  A contrast whose coefficients the mask
         all shows is determined without it; without it, any other is not.
+    information_underflowed : whether float64 holds none of the likelihood's information
+        on the rows the covariance was formed from (``PIRLSResult.information_underflowed``,
+        the fit's own when omitted): the intercept then shows no error, as no coefficient does.
     intercept_centre : the public column mean, over the fitted coefficients, that the
         decomposition behind ``contrast_estimable`` was centred on.  The reported
         intercept is the centred one, which the fit always determines, less
@@ -467,6 +471,10 @@ def build_coef_rows(
     # The reported intercept is at each ordered term's base level: blank where the fit
     # does not determine that contrast, not only the unadjusted intercept.
     if is_sandwich and not sandwich_covariance.determines(augmented_reference_contrast)[0]:
+        icpt_se = float("nan")
+    if information_underflowed is None:
+        information_underflowed = bool(getattr(result, "information_underflowed", False))
+    if information_underflowed:
         icpt_se = float("nan")
 
     rows: list[_CoefRow] = []

@@ -39,6 +39,7 @@ from superglm.reml.scale import (
 from superglm.solvers._structured.operators import (
     CompactSymmetricOperator,
 )
+from superglm.solvers.clip_rows import likelihood_information, on_likelihood_rows
 from superglm.solvers.dispersion import dispersion_likelihood_size, validate_weight_semantics
 from superglm.solvers.irls_state import mean_space_log_likelihood_rows
 from superglm.solvers.mode_score import linear_predictor
@@ -164,7 +165,8 @@ def reml_laml_objective(
         and (S_override is not None or reml_penalties is not None)
     )
     if XtWX is None and not retained_geometry_complete:
-        eta = stabilize_eta(linear_predictor(dm, result, offset_arr), link)
+        eta_unclipped = linear_predictor(dm, result, offset_arr)
+        eta = stabilize_eta(eta_unclipped, link)
         mu = clip_mu(link.inverse(eta), distribution)
         W = fisher_working_weights(
             distribution=distribution,
@@ -173,6 +175,9 @@ def reml_laml_objective(
             eta=eta,
             sample_weight=sample_weight,
         )
+        if on_likelihood_rows(result):
+            # the rows the fit converged on where the working clip holds one
+            W = likelihood_information(distribution, link, eta_unclipped, eta, mu, sample_weight, W)
         moments = dm.execution_plan.moments(W, include_xtw=True)
         XtWX = moments.gram
         XtW1 = moments.xtw
@@ -424,6 +429,11 @@ def reml_laml_objective(
 
     if isinstance(distribution, Poisson) and (XtWX is not None or retained_geometry_complete):
         # Up to additive constants, Poisson negative log-likelihood is deviance / 2.
+        nll = 0.5 * result.deviance
+    elif on_likelihood_rows(result):
+        # A binomial state read on the likelihood's own rows where the working
+        # clip holds one (``solvers.clip_rows``): its deviance is ``-2 log L``
+        # at the unclipped predictor, which the clipped mean below is not.
         nll = 0.5 * result.deviance
     else:
         if mu is None:

@@ -3694,14 +3694,18 @@ class TestModeCertifiesAtTheRoundOffFloor:
         assert model._reml_profile["reml_observed_mode_residual_accepted_max"] == 1.0e-3
 
     def test_only_budget_exhaustion_defers_to_the_certificate(self):
-        """A stop short of the bar defers; every other reason names something the score cannot judge."""
+        """A stop short of the bar defers; every other reason names something the score cannot judge.
+
+        ``clip_held`` is one of the loop's own exits renamed where the working
+        clip holds a row against its outcome, so it defers as they do.
+        """
         from superglm.reml.observed_geometry import stopped_on_iteration_budget
         from superglm.solvers.pirls import PIRLS_TERMINATION_REASONS
 
         def ended(reason):
             return stopped_on_iteration_budget(SimpleNamespace(termination_reason=reason))
 
-        deferring = {"max_iter", "step_rejected", "score_stagnated"}
+        deferring = {"max_iter", "step_rejected", "score_stagnated", "clip_held"}
         assert deferring <= PIRLS_TERMINATION_REASONS
         for reason in deferring:
             assert ended(reason), reason

@@ -162,18 +162,20 @@ def test_pearson_preserves_representable_contribution(spec, case):
 
 
 @pytest.mark.parametrize("eta_value", (-20.0, 20.0))
-def test_binomial_weight_preserves_the_clipped_mean_geometry(eta_value):
+def test_binomial_weight_past_the_mean_floor_is_the_likelihoods_information(eta_value):
+    """A retained logit row whose mean passes ``clip_mu``'s floor weighs ``w p (1 - p)`` at its predictor.
+
+    The clipped row's ``w p'^2 / (mu (1 - mu))`` at the floored mean is the
+    clip's weight, ``2e-9`` of the likelihood's information there (#734).
+    """
     family, link = Binomial(), LogitLink()
     eta = np.array([eta_value])
-    mu = clip_mu(link.inverse(eta), family)
     weights = np.array([1e-300])
     actual = _rebuild(family, link, eta, weights)[0]
     with localcontext() as context:
         context.prec = 180
-        raw_mean = _d(link.inverse(eta)[0])
-        derivative = raw_mean * (1 - raw_mean)
-        expected = _d(weights[0]) * derivative**2 / (_d(mu[0]) * (1 - _d(mu[0])))
-        _assert_bounded(actual, expected)
+        event = 1 / (1 + (-_d(eta_value)).exp())
+        _assert_bounded(actual, _d(weights[0]) * event * (1 - event))
 
 
 def test_pearson_can_scale_a_residual_that_overflows_before_weighting():

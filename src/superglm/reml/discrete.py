@@ -106,6 +106,7 @@ from superglm.solvers._structured.selection import (
     record_auto_backend_decision,
     resolve_structured_backend,
 )
+from superglm.solvers.clip_rows import ClipRows, likelihood_deviance
 from superglm.solvers.dispersion import lazy_likelihood_size
 from superglm.solvers.hessian_factor import as_hessian_factor
 from superglm.solvers.irls_direct import (
@@ -664,6 +665,10 @@ def optimize_discrete_reml_cached_w(
     # warm_intercept (``mode_score.centred_warm_start``)
     warm_centred: tuple[float, NDArray] | None = None
     warm_deviance: float | None = None
+    # Once a binomial solve ends on a row the working clip holds against its
+    # outcome, later solves and trials read the likelihood's rows there
+    # (``solvers.clip_rows``).
+    clip_rows = ClipRows()
     max_newton_step = 5.0
     max_halving = 25
     _tol = max(float(reml_tol), 1e-12)
@@ -780,6 +785,7 @@ def optimize_discrete_reml_cached_w(
         trace_purpose="reml_bootstrap",
         separation="record",
         weight_semantics=weight_semantics,
+        _clip_rows=clip_rows,
     )
     _t_pirls += _time.perf_counter() - _pirls_start
     dm = dm_boot
@@ -1000,6 +1006,7 @@ def optimize_discrete_reml_cached_w(
             trace_purpose="reml_candidate",
             separation="record",
             weight_semantics=weight_semantics,
+            _clip_rows=clip_rows,
         )
         _t_pirls += _time.perf_counter() - _t0
         # The candidate is one working-model update; its convergence flag says
@@ -1606,6 +1613,17 @@ def optimize_discrete_reml_cached_w(
             eta_trial = stabilize_eta(eta_unclipped_trial, link)
             mu_trial = clip_mu(link.inverse(eta_trial), distribution)
             dev_trial = weighted_row_sum(sample_weight, distribution.deviance_unit, y, mu_trial)
+            if clip_rows.state == "likelihood":
+                dev_trial = likelihood_deviance(
+                    distribution,
+                    link,
+                    y,
+                    sample_weight,
+                    eta_unclipped_trial,
+                    eta_trial,
+                    mu_trial,
+                    dev_trial,
+                )
             trial_pirls = PIRLSResult(
                 beta=beta_trial,
                 intercept=intercept_trial,
@@ -1618,6 +1636,7 @@ def optimize_discrete_reml_cached_w(
                 reml_hessian_rank=hessian_rank_trial,
                 centred_intercept=centred_intercept_trial,
                 state_center=cand_centre,
+                clip_rows=clip_rows.state,
             )
             trial_tensor_pair_evals = evaluate_tensor_pair_logdet_summaries(
                 tensor_pair_summaries, trial_lambdas
@@ -1958,6 +1977,7 @@ def optimize_discrete_reml_cached_w(
         weight_semantics=weight_semantics,
         cache_out=final_cache,
         compute_rank_info=False,
+        _clip_rows=clip_rows,
     )
     final_dense = dense_hessian(final_cache)
     _t_pirls += _time.perf_counter() - _t0

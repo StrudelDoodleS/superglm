@@ -50,18 +50,25 @@ def _solver_space_working_weights(model) -> NDArray:
     """Working weights computed against the solver-space fit state."""
     from superglm.distributions import clip_mu
     from superglm.links import stabilize_eta
+    from superglm.solvers.clip_rows import likelihood_information
     from superglm.solvers.mode_score import linear_predictor
 
     solver = model._solver_pirls_result()
     # the fitted mode's own eta, from its centred state when it carries one
-    eta = stabilize_eta(linear_predictor(model._dm, solver, model._fit_offset), model._link)
+    eta_unclipped = linear_predictor(model._dm, solver, model._fit_offset)
+    eta = stabilize_eta(eta_unclipped, model._link)
     mu = clip_mu(model._link.inverse(eta), model._distribution)
-    return fisher_working_weights(
+    sample_weight = solver_weights(model._fit_weights, solver)
+    weights = fisher_working_weights(
         distribution=model._distribution,
         link=model._link,
         mu=mu,
         eta=eta,
-        sample_weight=solver_weights(model._fit_weights, solver),
+        sample_weight=sample_weight,
+    )
+    # a binomial row the working clip holds reads the likelihood's information
+    return likelihood_information(
+        model._distribution, model._link, eta_unclipped, eta, mu, sample_weight, weights
     )
 
 
@@ -620,8 +627,13 @@ def standard_error_mask(model, penalized, data_mask) -> NDArray:
     penalty then determines what the data alone leave open, and ``sqrt(phi diag V)`` is each
     coefficient's posterior standard deviation.  Otherwise those the data alone determine,
     ``data_mask()``; a record saved before fits recorded this rule keeps that mask whatever its
-    rank (``RankInfo.standard_error_mask``).
+    rank (``RankInfo.standard_error_mask``).  None where float64 holds none of the
+    likelihood's information on the fit's rows (``PIRLSResult.information_underflowed``):
+    the data identify no coefficient there, the intercept included.
     """
+    solver = model._solver_pirls_result()
+    if getattr(solver, "information_underflowed", False):
+        return np.zeros(len(solver.beta), dtype=bool)
     record = _fit_record(model)
     if getattr(record, "standard_error_mask", "data") == "penalized" and penalized_fit_certified(
         model, penalized

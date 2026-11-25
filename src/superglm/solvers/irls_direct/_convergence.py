@@ -40,6 +40,11 @@ class _IRLSDirectConvergence:
         self._mode_ratios: list[float] = []
         self.last_mode_residual: ModeResidual | None = None
 
+    def restart(self) -> None:
+        """Forget the mode score's history: the fit's rows changed (``_IRLSDirectClipOverlay``)."""
+        self._mode_ratios.clear()
+        self.last_mode_residual = None
+
     def judge(self, fit: _IRLSDirectFit, it: int) -> None:
         """Iteration ``it``'s verdict on the retained state, in the order above."""
         self._criterion(fit, it)

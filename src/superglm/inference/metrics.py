@@ -79,6 +79,12 @@ from superglm.solvers.centered_system import (
     penalty_factor,
     weighted_mean_pair,
 )
+from superglm.solvers.clip_rows import (
+    HeldRows,
+    exported_information,
+    held_likelihood_rows,
+    on_likelihood_rows,
+)
 from superglm.solvers.dispersion import likelihood_scale_method, scale_method
 from superglm.solvers.mode_score import corrected_two_pass_pair
 from superglm.solvers.rank import (
@@ -492,7 +498,10 @@ class ModelMetrics:
     on whether ``X``, ``y``, ``sample_weight`` and ``offset`` are the objects
     the model was fitted on: a discrete fit's own mean belongs to its binned
     design, which ``predict`` does not reproduce.  ``SuperGLM.summary``
-    reports the fit's own statistics instead.
+    reports the fit's own statistics instead.  One exception: a binomial fit
+    that converged on the likelihood in the linear predictor, because the
+    solver's clip held a row against its outcome, reads every row past that
+    clip from the likelihood there, where ``predict`` floors the mean at 1e-7.
 
     On the frame a model was fitted on, leverage and effective degrees of
     freedom come from the fit itself, and so do the standardized residuals
@@ -756,52 +765,69 @@ class ModelMetrics:
         )
 
     @cached_property
-    def deviance(self) -> float:
-        """Weighted residual deviance on this object's evaluation rows."""
-        return weighted_row_sum(self._weights, self._family.deviance_unit, self._y, self._mu)
+    def _held(self) -> HeldRows | None:
+        """These rows the working clip holds, for a fit on the likelihood's rows; else ``None``.
 
-    @cached_property
-    def log_likelihood(self) -> float:
-        return unit_log_likelihood(
+        Such a fit converged on the likelihood in the unclipped predictor
+        (``solvers.clip_rows``), so its deviance, likelihoods, Pearson statistic
+        and residuals read the held rows there, not at ``predict``'s floored mean.
+        """
+        if not on_likelihood_rows(self._result):
+            return None
+        return held_likelihood_rows(self._family, self._link, self._y, self._raw_eta)
+
+    def _weighted_deviance(self, weights: NDArray, mu: NDArray, held: HeldRows | None) -> float:
+        total = weighted_row_sum(weights, self._family.deviance_unit, self._y, mu)
+        return total if held is None else total + held.deviance_gap(weights)
+
+    def _log_likelihood(self, mu: NDArray, held: HeldRows | None) -> float:
+        value = unit_log_likelihood(
             self._family,
             self._y,
-            self._mu,
+            mu,
             self._weights,
             self._result,
             weight_semantics=self._weight_semantics,
             report_contract=not self._contract_checked,
         )
+        return value if held is None else value - 0.5 * held.deviance_gap(self._weights)
 
     @cached_property
-    def _null_mu(self) -> NDArray:
-        """Authoritative offset-aware intercept-only null prediction."""
-        from superglm.model.fit_ops import _compute_null_mu
+    def deviance(self) -> float:
+        """Weighted residual deviance on this object's evaluation rows."""
+        return self._weighted_deviance(self._weights, self._mu, self._held)
 
-        return _compute_null_mu(
+    @cached_property
+    def log_likelihood(self) -> float:
+        return self._log_likelihood(self._mu, self._held)
+
+    @cached_property
+    def _null(self) -> tuple[NDArray, HeldRows | None]:
+        """Authoritative offset-aware intercept-only null prediction, and its held rows."""
+        from superglm.model.fit_ops import _null_state
+
+        return _null_state(
             self._y,
             self._geometry_prior_weights,
             self._offset,
             self._family,
             self._link,
             weight_semantics=self._weight_semantics,
+            likelihood_rows=on_likelihood_rows(self._result),
         )
+
+    @property
+    def _null_mu(self) -> NDArray:
+        return self._null[0]
 
     @cached_property
     def null_log_likelihood(self) -> float:
         """Log-likelihood at the intercept-only (null) model."""
-        return unit_log_likelihood(
-            self._family,
-            self._y,
-            self._null_mu,
-            self._weights,
-            self._result,
-            weight_semantics=self._weight_semantics,
-            report_contract=not self._contract_checked,
-        )
+        return self._log_likelihood(*self._null)
 
     @cached_property
     def null_deviance(self) -> float:
-        return weighted_row_sum(self._weights, self._family.deviance_unit, self._y, self._null_mu)
+        return self._weighted_deviance(self._weights, *self._null)
 
     @cached_property
     def explained_deviance(self) -> float:
@@ -810,12 +836,8 @@ class ModelMetrics:
 
         if self._geometry_weight_exponent:
             return _explained_deviance(
-                weighted_row_sum(
-                    self._geometry_prior_weights, self._family.deviance_unit, self._y, self._mu
-                ),
-                weighted_row_sum(
-                    self._geometry_prior_weights, self._family.deviance_unit, self._y, self._null_mu
-                ),
+                self._weighted_deviance(self._geometry_prior_weights, self._mu, self._held),
+                self._weighted_deviance(self._geometry_prior_weights, *self._null),
                 self._y,
                 self._null_mu,
                 self._geometry_prior_weights,
@@ -863,15 +885,20 @@ class ModelMetrics:
             gammaln(p_total + 1) - gammaln(n_active + 1) - gammaln(p_total - n_active + 1)
         )
 
-    @cached_property
-    def pearson_chi2(self) -> float:
-        return pearson_chi2(
+    def _pearson_chi2(self, weights: NDArray) -> float:
+        total = pearson_chi2(
             distribution=self._family,
             y=self._y,
             mu=self._mu,
-            sample_weight=self._weights,
+            sample_weight=weights,
             variance_floor=0.0,
         )
+        held = self._held
+        return total if held is None else total + held.pearson_gap(weights)
+
+    @cached_property
+    def pearson_chi2(self) -> float:
+        return self._pearson_chi2(self._weights)
 
     @cached_property
     def n_active_groups(self) -> int:
@@ -922,26 +949,30 @@ class ModelMetrics:
         """
         y, mu, w = self._y, self._mu, self._weights
         family = self._family
+        # a fit on the likelihood's rows reads its held rows there (``_held``)
+        held = self._held
 
         if kind == "deviance":
-            d = family.deviance_unit(y, mu)
+            sign, d = self._signed_deviance_units
             if self._geometry_weight_exponent:
-                residual = np.sign(y - mu) * np.sqrt(self._geometry_prior_weights * d)
+                residual = sign * np.sqrt(self._geometry_prior_weights * d)
                 return np.ldexp(residual, -(self._geometry_weight_exponent // 2))
-            return np.sign(y - mu) * np.sqrt(w * d)
+            return sign * np.sqrt(w * d)
 
         if kind == "pearson":
             V = family.variance(mu)
-            return np.sqrt(w) * (y - mu) / np.sqrt(V)
+            residual = np.sqrt(w) * (y - mu) / np.sqrt(V)
+            return residual if held is None else held.patched(residual, held.pearson(w))
 
         if kind == "response":
-            return y - mu
+            return y - mu if held is None else held.patched(y - mu, held.residual)
 
         if kind == "working":
             # At the working predictor: a row with no mean reads NaN through ``mu``, and its
             # raw predictor is outside the derivative's domain.
             dmu_deta = self._link.deriv_inverse(self._working_eta_mu[0])
-            return (y - mu) / dmu_deta
+            residual = (y - mu) / dmu_deta
+            return residual if held is None else held.patched(residual, held.working_residual)
 
         if kind == "quantile":
             return self._quantile_residuals(seed=seed)
@@ -950,6 +981,16 @@ class ModelMetrics:
             f"Unknown residual type '{kind}'. "
             "Use 'deviance', 'pearson', 'response', 'working', or 'quantile'."
         )
+
+    @property
+    def _signed_deviance_units(self) -> tuple[NDArray, NDArray]:
+        """Per row, the sign of ``y - mu`` and the unit deviance."""
+        sign = np.sign(self._y - self._mu)
+        d = self._family.deviance_unit(self._y, self._mu)
+        held = self._held
+        if held is None:
+            return sign, d
+        return held.patched(sign, np.sign(held.residual)), held.patched(d, held.deviance)
 
     def _quantile_residuals(self, seed: int | None = 42) -> NDArray:
         """Randomized quantile residuals (Dunn & Smyth 1996).
@@ -1003,8 +1044,11 @@ class ModelMetrics:
             # PIT of it exists. Splitting [0, 1] at 1 - mu keeps the transform exactly uniform,
             # at the cost of inverting the unit-weight marginal (warned at fit time by
             # PriorWeightLatticeWarning).
-            a = np.where(y == 0, 0.0, 1.0 - mu)
-            b = np.where(y == 0, 1.0 - mu, 1.0)
+            non_event = 1.0 - mu
+            if self._held is not None:
+                non_event = self._held.patched(non_event, self._held.complement)
+            a = np.where(y == 0, 0.0, non_event)
+            b = np.where(y == 0, non_event, 1.0)
             u = rng.uniform(a, b)
         elif isinstance(self._family, Poisson):
             count = np.round(w * y) if prior else np.round(y)
@@ -1165,15 +1209,25 @@ class ModelMetrics:
         rank_info = getattr(self._result, "rank_info", None)
         if self._fit_geometry_matches and self._dm is not None:
             W = self._fit_working_weights
+            underflowed = bool(getattr(self._result, "information_underflowed", False))
         else:
             eta, mu = self._working_eta_mu
+            prior = self._geometry_prior_weights
             W = fisher_working_weights(
                 distribution=self._family,
                 link=self._link,
                 mu=mu,
                 eta=eta,
-                sample_weight=self._geometry_prior_weights,
+                sample_weight=prior,
             )
+            # A binomial row the working clip holds reads the likelihood's information, as the
+            # fit's own rows do (``_solver_space_working_weights``): the same rows give the same
+            # standard errors and leverage, whichever frame holds them.  An unpriced row is its
+            # stand-in, which the clip does not hold.
+            raw = np.where(self._unpriced, eta, self._raw_eta)
+            W, underflowed = exported_information(self._family, self._link, raw, eta, mu, prior, W)
+        # rows that hold none of the likelihood's information show no standard error
+        self.__dict__["_information_underflowed"] = underflowed
 
         uses_fitted_rank = self._working_weights_match_fit(W)
         # The training rows of a constrained fit, by identity or by content,
@@ -1629,10 +1683,13 @@ class ModelMetrics:
     def _unit_standardized_residuals(self, kind):
         weights = self._geometry_prior_weights
         if kind == "deviance":
-            magnitude = np.sqrt(weights * self._family.deviance_unit(self._y, self._mu))
-            r = np.sign(self._y - self._mu) * magnitude
+            sign, d = self._signed_deviance_units
+            magnitude = np.sqrt(weights * d)
+            r = sign * magnitude
         else:
             r = np.sqrt(weights) * (self._y - self._mu) / np.sqrt(self._family.variance(self._mu))
+            if self._held is not None:
+                r = self._held.patched(r, self._held.pearson(weights))
         dispersion = solver_dispersion(self._result)
         exponent = -self._geometry_weight_exponent
         if self._result.solver_phi is not None:
@@ -1651,6 +1708,14 @@ class ModelMetrics:
         return self.__dict__.get("_contrast_estimable")
 
     @property
+    def _current_information_underflowed(self) -> bool:
+        """Whether float64 holds none of the likelihood's information on these rows
+        (``clip_rows.information_underflowed``): no coefficient is then determined.
+        """
+        _ = self._active_info
+        return bool(self.__dict__.get("_information_underflowed", False))
+
+    @property
     def _current_intercept_centre(self) -> NDArray | None:
         """The public column mean that decomposition was centred on (``build_coef_rows``)."""
         _ = self._active_info
@@ -1659,7 +1724,8 @@ class ModelMetrics:
     @cached_property
     def _current_coefficient_estimable(self) -> NDArray:
         """Coefficient estimability under this diagnostic design and weights."""
-        _ = self._active_info
+        if self._current_information_underflowed:
+            return np.zeros(len(self._result.beta), dtype=bool)
         cached = self.__dict__.get("_coefficient_estimable")
         if cached is not None:
             return cached
@@ -1681,13 +1747,7 @@ class ModelMetrics:
             weight_semantics=self._weight_semantics,
         )
         if self._geometry_weight_exponent:
-            pearson = pearson_chi2(
-                distribution=self._family,
-                y=self._y,
-                mu=self._mu,
-                sample_weight=self._geometry_prior_weights,
-                variance_floor=0.0,
-            )
+            pearson = self._pearson_chi2(self._geometry_prior_weights)
         else:
             pearson = self.pearson_chi2
         return max(float(pearson) / residual_df, 0.0)
@@ -1811,6 +1871,8 @@ class ModelMetrics:
     def _intercept_standard_error(self, *, scaled: bool) -> float:
         separated = self._separated_coefficients
         if separated is not None and separated[-1]:
+            return np.nan
+        if self._current_information_underflowed:
             return np.nan
         _, _, _, XtWX_inv_aug, _ = self._active_info
         icpt_var = float(XtWX_inv_aug[0, 0])
@@ -2053,6 +2115,7 @@ class ModelMetrics:
             test_bases=term_test_bases(self._model) if wood_inference else None,
             coefficient_estimable_override=self._current_coefficient_estimable,
             contrast_estimable=self._current_contrast_estimable,
+            information_underflowed=self._current_information_underflowed,
             intercept_centre=self._current_intercept_centre,
             selected_group_names=selected_names,
             group_matrices=(
