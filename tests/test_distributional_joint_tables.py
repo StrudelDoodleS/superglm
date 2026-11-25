@@ -644,6 +644,7 @@ class _NaturalTweedie(TweedieLSS):
     """The same law through the natural route: compiled rows serve only the exact family."""
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize(
     ("family_type", "zero_weights", "shard_rows"),
     (
@@ -661,7 +662,10 @@ def test_a_fit_reads_the_same_numbers_through_every_route(
     trial and the covariance passes. The search reaches the same EDF and predictions, whatever name
     rounding gives its stop on a flat direction; at one set of smoothing parameters, which leaves
     no such direction to drift along, EDF, predictions and covariance agree to a generous multiple
-    of rounding on the book's scale.
+    of rounding on the book's scale. Those are the search's, with a penalty it left on its upper
+    limit brought well inside it: at the limit (1e10) the penalty's range is determined only to
+    rounding times the limit, and the routes agree to 2e-12 to 3e-9 in EDF by platform, against
+    4e-15 inside it.
 
     Mutation checks: every joint block scaled by 1.5, one row kernel's channel dropped, a block
     off by 1e-7, and a route that stops being taken, which the dispatch counts catch.
@@ -716,7 +720,11 @@ def test_a_fit_reads_the_same_numbers_through_every_route(
 
     routed = build().fit_reml(frame, y, sample_weight=weights)
     searched = dict(counts)
-    lambdas = dict(routed._model.fit_state.smoothing.lambdas)
+    smoothing = routed._model.fit_state.smoothing
+    lambdas = {
+        name: min(value, 1e-4 * smoothing.config.upper(name))
+        for name, value in smoothing.lambdas.items()
+    }
     fixed = build().fit(frame, y, sample_weight=weights, lambdas=lambdas)
     for seen in (searched, {key: counts[key] - searched[key] for key in counts}):
         if family_type is TweedieLSS:
