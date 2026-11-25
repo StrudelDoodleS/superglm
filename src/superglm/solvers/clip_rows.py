@@ -181,6 +181,25 @@ def held_against_outcome(y: NDArray, weights: NDArray, low: NDArray, high: NDArr
     return ((low & (y > 0.0)) | (high & (y < 1.0))) & (weights > 0.0)
 
 
+def _logit_tail_rows(eta: NDArray) -> tuple[NDArray, NDArray, NDArray]:
+    """``p = expit(eta)``, ``q = expit(-eta)`` and the Fisher information ``p q``.
+
+    ``expit`` rounds a tail probability to 0 once its own exponential
+    overflows, near ``|eta| = 709``, while ``p q`` stays a float64 subnormal to
+    about 745.  There the information is ``exp(-log(1 + e^-eta) - log(1 +
+    e^eta))``, which ``logaddexp`` forms without overflow.
+    """
+    from scipy.special import expit
+
+    p, q = expit(eta), expit(-eta)
+    information = p * q
+    rounded = information == 0.0
+    if np.any(rounded):
+        tail = eta[rounded]
+        information[rounded] = np.exp(-np.logaddexp(0.0, tail) - np.logaddexp(0.0, -tail))
+    return p, q, information
+
+
 def tail_rows(link: object, y: NDArray, eta: NDArray) -> tuple[NDArray, NDArray, NDArray, NDArray]:
     """Per row of unit weight: log-likelihood, score, Fisher information and observed information.
 
@@ -205,7 +224,7 @@ def tail_rows(link: object, y: NDArray, eta: NDArray) -> tuple[NDArray, NDArray,
     read only as an iteration's metric.  A predictor whose likelihood float64
     cannot hold gives a non-finite row.
     """
-    from scipy.special import expit, log_ndtr
+    from scipy.special import log_ndtr
 
     from superglm.solvers.working_rows import _cloglog_observed_rows, _probit_observed_rows
 
@@ -214,9 +233,8 @@ def tail_rows(link: object, y: NDArray, eta: NDArray) -> tuple[NDArray, NDArray,
     unit = np.ones_like(eta)
     with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
         if type(link) is LogitLink:
-            p, q = expit(eta), expit(-eta)
+            p, q, information = _logit_tail_rows(eta)
             log_likelihood = -(y * np.logaddexp(0.0, -eta) + (1.0 - y) * np.logaddexp(0.0, eta))
-            information = p * q
             return log_likelihood, y * q - (1.0 - y) * p, information, information
         if type(link) is ProbitLink:
             observed, score = _probit_observed_rows(y=y, eta=eta, sample_weight=unit)
@@ -554,10 +572,7 @@ def tail_observed_curvature(
     eta = np.asarray(eta, dtype=np.float64)
     with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
         if type(link) is LogitLink:
-            from scipy.special import expit
-
-            p, q = expit(eta), expit(-eta)
-            information = p * q
+            p, q, information = _logit_tail_rows(eta)
             return information, information * (q - p), information * (1.0 - 6.0 * information)
         if type(link) is ProbitLink:
             event = _probit_event_curvature(eta)

@@ -48,7 +48,8 @@ def _score_information_rows(link: str, y, eta):
     with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
         if link == "logit":
             p, q = expit(eta), expit(-eta)
-            return y * q - (1.0 - y) * p, p * q
+            # expit's exponential overflows near |eta| = 709; p q is a subnormal to 745
+            return y * q - (1.0 - y) * p, np.exp(-np.logaddexp(0.0, eta) - np.logaddexp(0.0, -eta))
         if link == "probit":
             log_phi = -0.5 * eta * eta - 0.5 * math.log(2.0 * math.pi)
             mills_event = np.exp(log_phi - log_ndtr(eta))  # phi / Phi
@@ -577,6 +578,10 @@ _ALL_HELD_AGAINST = {
         "logit", np.tile([1.0, 0.0], 10), np.tile([-35.0, 35.0], 10)
     ),
     "probit_5_pairs_at_6": lambda: _Case("probit", np.tile([1.0, 0.0], 5), np.tile([-6.0, 6.0], 5)),
+    # p (1 - p) is a subnormal here, which expit alone rounds to 0
+    "logit_50_pairs_at_720": lambda: _Case(
+        "logit", np.tile([1.0, 0.0], 50), np.tile([-720.0, 720.0], 50)
+    ),
 }
 
 
