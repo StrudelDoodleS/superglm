@@ -651,3 +651,43 @@ def test_mixed_extreme_symmetric_average_matches_exact_entrywise_oracle() -> Non
     with np.errstate(over="raise", invalid="raise"):
         actual = _symmetric_part(values)
     np.testing.assert_array_equal(actual, expected)
+
+
+def test_deficient_factor_publishes_estimable_functionals_that_rebuild_its_gram() -> None:
+    """The factor route's estimable functions E pair with ``retained_values`` r to give
+    E diag(r) E' = F'F, and the null direction annihilates them; SuperLSS projectors and
+    standard errors read E, so a zero or misscaled E would pass every rank check."""
+    rng = np.random.default_rng(20261125)
+    factor = rng.standard_normal((20, 6))
+    factor[:, 2] *= 1e3
+    factor[:, 3] *= 1e-2
+    factor[:, 5] = factor[:, 0] + factor[:, 1]  # the one exact null direction
+    null_direction = np.array([1.0, 1.0, 0.0, 0.0, 0.0, -1.0]) / np.sqrt(3.0)
+
+    decomposition = decompose_factor(factor)
+    assert decomposition.rank == 5
+    E = np.asarray(decomposition.estimable_functional_basis, dtype=np.float64)
+    r = np.asarray(decomposition.retained_values, dtype=np.float64)
+    assert E.shape == (6, 5) and r.shape == (5,)
+
+    # A backward-stable SVD of the column-equilibrated factor F S^-1 (Golub and Van
+    # Loan, Matrix Computations, 4th ed., chapter 8) rebuilds each Gram entry to a few
+    # m u of s_i s_j ||F S^-1||^2, m the row count. Its retained right subspace is
+    # accurate to m u ||F S^-1|| over the smallest retained singular value (Wedin's
+    # sin-theta theorem), which bounds how far E leaves the null direction's complement.
+    scale = np.linalg.norm(factor, axis=0)
+    equilibrated_norm = np.linalg.norm(factor / scale, 2)
+    m = factor.shape[0]
+    unit_roundoff = np.finfo(np.float64).eps / 2
+    tolerance = 32.0 * m * unit_roundoff * equilibrated_norm**2 * np.outer(scale, scale)
+    gram = factor.T @ factor
+    assert np.all(np.abs(E @ np.diag(r) @ E.T - gram) <= tolerance)
+    null_tolerance = (
+        32.0
+        * m
+        * unit_roundoff
+        * equilibrated_norm
+        / np.sqrt(r.min())
+        * np.linalg.norm(scale * null_direction)
+    )
+    assert np.all(np.abs(null_direction @ E) <= null_tolerance)
