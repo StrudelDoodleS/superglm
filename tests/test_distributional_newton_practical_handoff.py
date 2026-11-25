@@ -240,6 +240,81 @@ def test_a_finish_that_stalled_leaves_the_fit_at_its_plateau(monkeypatch, kind):
     assert np.all(np.isfinite(corrected))
 
 
+def _refuse_fellner_schall_steps_after(monkeypatch, rounds):
+    """The objective refuses every Fellner-Schall step once ``rounds`` of them are accepted."""
+    within, accepted = loop._within_ceiling, []
+
+    def refuse_later_steps(*args):
+        if len(accepted) < rounds and within(*args):
+            accepted.append(args)
+            return True
+        return False
+
+    monkeypatch.setattr(loop, "_within_ceiling", refuse_later_steps)
+
+
+def test_a_step_the_objective_rejects_at_every_length_goes_to_the_finish(monkeypatch):
+    """A rejected Fellner-Schall round is no stop under the default search: the exact gradient decides.
+
+    The objective is made to refuse every step after the second round, so the third
+    is rejected at all nine lengths, short of any plateau. The finish runs from
+    there and reaches the stationary point the unforced fit reaches. Mutation
+    check: with the rejected round's verdict returned, the fit reports
+    ``objective_rejected`` and does not converge.
+    """
+    reference, frame, response = _two_smooth_gaussian()
+    reference.fit_reml(frame, response)
+    calls = _spy_on_the_endgame(monkeypatch)
+    _refuse_fellner_schall_steps_after(monkeypatch, 2)
+    model, _, _ = _two_smooth_gaussian()
+    model.fit_reml(frame, response)
+
+    smoothing = model._require_fitted().smoothing
+    rounds = [row for row in smoothing.history if row.stage == "efs"]
+    assert [row.accepted for row in rounds] == [True, True, False]
+    assert rounds[-1].backtracks == smoothing.config.max_backtracks
+    (call,) = calls
+    assert call["budget"] == loop._FINISH_ITERATIONS
+    assert [row.stage for row in smoothing.history[3:]] == ["newton"] * (len(smoothing.history) - 3)
+    assert (smoothing.converged, smoothing.convergence_reason) == (True, "stationary")
+    assert smoothing.objective == pytest.approx(
+        reference._require_fitted().smoothing.objective, abs=1e-6
+    )
+    np.testing.assert_allclose(
+        model.predict_link(frame), reference.predict_link(frame), rtol=0.0, atol=1e-4
+    )
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["gradient_unresolved", "max_iterations", "objective_rejected", "derivative_unavailable"],
+)
+def test_a_finish_that_stalls_after_a_rejected_round_leaves_the_round_s_verdict(monkeypatch, kind):
+    """A rejected round earned no plateau, so a finish that stalls from it reports none.
+
+    The fit is the one the rejected round left: not converged, at that round's
+    smoothing parameters, with the finish's steps dropped. Mutation check: read as
+    a plateau's finish, the stall reports ``practical_plateau`` and a converged fit.
+    """
+    calls = _spy_on_the_endgame(
+        monkeypatch, lambda outcome: dataclasses.replace(outcome, kind=kind)
+    )
+    _refuse_fellner_schall_steps_after(monkeypatch, 2)
+    model, frame, response = _two_smooth_gaussian()
+    with pytest.warns(ConvergenceWarning, match="objective_rejected"):
+        model.fit_reml(frame, response)
+
+    smoothing = model._require_fitted().smoothing
+    assert len(calls) == 1
+    assert (smoothing.converged, smoothing.convergence_reason) == (False, "objective_rejected")
+    assert [(row.stage, row.accepted) for row in smoothing.history] == [
+        ("efs", True),
+        ("efs", True),
+        ("efs", False),
+    ]
+    assert smoothing.lambdas == smoothing.history[-1].lambdas_before
+
+
 @pytest.mark.pins_behaviour
 @pytest.mark.usefixtures("no_endpoint_trial")
 def test_a_finish_that_moved_far_and_was_rejected_does_not_relabel_where_it_stalled():

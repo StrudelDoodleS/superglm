@@ -11,7 +11,7 @@ import joblib
 import numpy as np
 import pytest
 from sklearn.model_selection import KFold
-from tests._lss_editor_fixtures import lognormal_case, ruled_case
+from tests._lss_editor_fixtures import curved_lognormal_case, lognormal_case, ruled_case
 from tests.editor._chart_layout import wait_for_chart_to_fit
 from tests.editor.test_editor_workspace_browser import select_chart_tool
 
@@ -178,7 +178,9 @@ def test_cv_tab_draws_folds_and_runs_cv_and_final_fit(open_lss_editor_page):
 
 
 def test_diagnose_tab_lists_the_fits_and_switches_between_them(open_lss_editor_page):
-    case = lognormal_case()
+    # Every smooth of this case has an optimum inside its limits, so the four fits converge
+    # off every limit and share one verdict, wherever their searches step.
+    case = curved_lognormal_case()
     cv = cross_validate(
         case.model,
         case.X,
@@ -188,7 +190,9 @@ def test_diagnose_tab_lists_the_fits_and_switches_between_them(open_lss_editor_p
         return_estimators=True,
         error_score="raise",
     )
-    with open_lss_editor_page(cv=cv) as (page, _session):
+    statuses = [model.diagnose().fit_status for model in (case.model, *cv.estimators)]
+    assert statuses == ["converged_certified"] * 4
+    with open_lss_editor_page(cv=cv, case=case) as (page, _session):
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.locator("#diagnoseTab").click()

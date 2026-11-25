@@ -1305,6 +1305,15 @@ to its cap with the gradient still pointing outward, the fit reports
 cases the fit keeps the stop described above. Fits can remain
 start-dependent; vary `initial_lambda` when comparing solutions.
 
+A Fellner--Schall step can also fail outright: the LAML rises at the full step
+and at every shorter one. The step is then no descent direction, which says
+nothing about whether the fit is at an optimum, so `efs+finish` runs the same
+Newton finish from there, as `efs+newton` runs its Newton steps. The fit
+reports `stationary` if the finish reaches a stationary point. If the finish
+stalls, the fit is the one the failed step left and reports
+`objective_rejected` with `converged=False`; under plain `outer="efs"` a failed
+step reports that at once.
+
 A search can also push a penalty to its cap long before any plateau. If the
 exact-face check does not settle that penalty, `efs+finish` and `efs+newton` ask
 the exact gradient next, so the fit reports `lambda_cap_unresolved` only if the

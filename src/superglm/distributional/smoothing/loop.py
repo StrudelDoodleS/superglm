@@ -684,8 +684,12 @@ def fit_distributional_efs(
         if accelerator is not None:
             accelerator.reset()
 
-    def _run_endgame() -> DistributionalEFSResult | None:
-        """Run the endgame from the accepted state; a result ends the fit, ``None`` continues."""
+    def _run_endgame(*, earned: bool = True) -> DistributionalEFSResult | None:
+        """Run the endgame from the accepted state; a result ends the fit, ``None`` continues.
+
+        A finish that stalls leaves a plateau standing. One entered from a rejected
+        round has earned none (``earned`` false) and leaves that round's verdict.
+        """
         nonlocal current_lambdas, current_fit, current_objective, terminal_fit_index
         nonlocal terminal_evidence, endgame_outcome, endgame_stationary, pending_cap, newton_budget
         nonlocal endgame_due, handed_over
@@ -722,6 +726,8 @@ def fit_distributional_efs(
         terminal_evidence = state.evidence
         if stalled:
             endgame_outcome = None
+            if not earned:
+                return _result(converged=False, reason="objective_rejected")
             if current_face is None and not terminal_evidence.unresolved_upper_bound:
                 return _result(converged=True, reason="practical_plateau")
             # Only the strict stop revalidates a face, and a stall decides nothing about
@@ -1621,10 +1627,17 @@ def fit_distributional_efs(
             reason: EFSConvergenceReason = (
                 "objective_rejected" if any_converged_trial else "coefficient_not_converged"
             )
-            if _endgame_budget() > 0 and should_hand_off(
-                reason, max_accepted_step=0.0, iterations=len(history), config=outer_config
+            # A Fellner--Schall step the objective rejects at every length says the
+            # fixed-point direction is no descent direction here, not that the point is
+            # stationary, so the exact gradient decides: a finish, as an endgame does.
+            unearned = reason == "objective_rejected" and _plateau_finishes()
+            if _endgame_budget() > 0 and (
+                unearned
+                or should_hand_off(
+                    reason, max_accepted_step=0.0, iterations=len(history), config=outer_config
+                )
             ):
-                endgame_result = _run_endgame()
+                endgame_result = _run_endgame(earned=not unearned)
                 if endgame_result is not None:
                     return endgame_result
                 continue

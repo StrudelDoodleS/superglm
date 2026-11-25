@@ -7,7 +7,7 @@ import warnings
 
 import pytest
 from sklearn.model_selection import KFold
-from tests._lss_editor_fixtures import lognormal_case
+from tests._lss_editor_fixtures import curved_lognormal_case
 
 from superglm import LogNormalLS, SuperLSS, cat, cross_validate, s
 
@@ -18,12 +18,14 @@ pytestmark = pytest.mark.browser
 _FRAMES = [{"width": 1100, "height": 720}, {"width": 1600, "height": 900}]
 
 
-def _cv_with_a_fold_that_did_not_converge():
-    """Three folds: the second is a fit stopped at its second round, which cannot have converged.
+def _a_fold_that_did_not_converge():
+    """The case and three folds: the second is a fit stopped at its second round, which cannot have converged.
 
-    The others are the fixture's own converged fit, so no fold depends on where a search lands.
+    The others are the case's own fit. Every smooth of the case has an optimum inside
+    its limits, so that fit passes the search's own check and only the stopped fold
+    is named among the fits, wherever a search steps.
     """
-    case = lognormal_case()
+    case = curved_lognormal_case()
     cv = cross_validate(
         case.model,
         case.X,
@@ -36,18 +38,22 @@ def _cv_with_a_fold_that_did_not_converge():
     family = LogNormalLS()
     stopped = SuperLSS(
         family,
-        family.mean(s("age", k=8), cat("region"), s("power", k=6)),
+        family.mean(s("age", k=8), cat("region")),
         family.scale(s("age", k=6), cat("region")),
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         stopped.fit_reml(case.X, case.y, max_reml_iter=2, outer="efs")
     assert not stopped.result_.converged
-    return dataclasses.replace(cv, estimators=[case.model, stopped, case.model])
+    assert case.model.diagnose().fit_status == "converged_certified"
+    return {
+        "case": case,
+        "cv": dataclasses.replace(cv, estimators=[case.model, stopped, case.model]),
+    }
 
 
 def test_diagnose_opens_on_the_fit_that_did_not_converge(open_lss_editor_page):
-    with open_lss_editor_page(cv=_cv_with_a_fold_that_did_not_converge()) as (page, _session):
+    with open_lss_editor_page(**_a_fold_that_did_not_converge()) as (page, _session):
         page.locator("#diagnoseTab").click()
         frame = page.locator("#reportFrame")
         frame.locator(".diagnose-table").first.wait_for()
@@ -82,7 +88,7 @@ def _others(rows, failed) -> list[str]:
 def test_every_fit_s_verdict_and_the_search_path_are_on_the_first_screen(
     open_lss_editor_page, viewport
 ):
-    with open_lss_editor_page(cv=_cv_with_a_fold_that_did_not_converge(), viewport=viewport) as (
+    with open_lss_editor_page(**_a_fold_that_did_not_converge(), viewport=viewport) as (
         page,
         _session,
     ):
@@ -105,7 +111,7 @@ def test_every_fit_s_verdict_and_the_search_path_are_on_the_first_screen(
 
 
 def test_a_folded_section_stays_as_it_was_left_when_another_fit_opens(open_lss_editor_page):
-    with open_lss_editor_page(cv=_cv_with_a_fold_that_did_not_converge()) as (page, _session):
+    with open_lss_editor_page(**_a_fold_that_did_not_converge()) as (page, _session):
         page.locator("#diagnoseTab").click()
         frame = page.locator("#reportFrame")
         frame.locator(".diagnose-table").first.wait_for()

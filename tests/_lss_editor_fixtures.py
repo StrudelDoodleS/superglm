@@ -110,6 +110,26 @@ def lognormal_case() -> FitCase:
     return FitCase(model, X, y, None, None)
 
 
+@functools.cache
+def curved_lognormal_case() -> FitCase:
+    """The log-normal rows fitted on the terms that curve, for tests that need a certified fit.
+
+    ``power`` acts linearly on the log mean, so its smooth has no finite optimum:
+    the search of ``lognormal_case`` ends with it on an exact face, and a fit on an
+    exact face is never certified. Here every smooth has an optimum inside its
+    limits, so this fit and its refits on folds converge off every limit and
+    report that the search passed its own check, wherever the search steps.
+    """
+    X, y, _ = _lognormal_rows(_SEEDS[LogNormalLS], N_ROWS)
+    family = LogNormalLS()
+    model = SuperLSS(
+        family,
+        family.mean(s("age", k=8), cat("region")),
+        family.scale(s("age", k=6), cat("region")),
+    ).fit_reml(X, y, outer="efs+newton")
+    return FitCase(model, X, y, None, None)
+
+
 def _gamma_rows(seed: int, n: int):
     rng, X, region = _covariates(seed, n)
     mean = np.exp(7.0 + _log_mean(X, region))
