@@ -1913,6 +1913,8 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             # information on every row the clip holds, whichever rows its
             # iteration read: a clipped row's weight is the clip's, and the
             # covariance reads these.  An in-loop solve exports the rows it read.
+            # Either way a held row's exported weight is its Fisher information
+            # alone: the iteration's bound on it is no information.
             tail_rows = clip is not None and clip.declared and (clip.likelihood or self._published)
             export_rows = coefficient_working_rows(
                 distribution=self.family,
@@ -1925,7 +1927,13 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             )
             if tail_rows:
                 export_rows = clip.patched(
-                    self, export_rows, self.eta_unclipped, self.eta, self.mu, observed=False
+                    self,
+                    export_rows,
+                    self.eta_unclipped,
+                    self.eta,
+                    self.mu,
+                    observed=False,
+                    exported=True,
                 )
             W = export_rows.weights
             z = export_rows.response

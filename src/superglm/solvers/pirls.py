@@ -2117,6 +2117,7 @@ def _fit_pirls_inner(
             W_final,
             z_final,
             observed=False,
+            exported=True,
         )
     centered = build_centered_system(
         dm=selected_dm,

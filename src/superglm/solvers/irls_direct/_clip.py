@@ -77,12 +77,14 @@ class _IRLSDirectClipOverlay:
         mu: NDArray,
         *,
         observed: bool,
+        exported: bool = False,
     ) -> CoefficientWorkingRows:
         """``rows`` with every held row's weight and response read from the likelihood.
 
         A held row's response is about its unclipped predictor
         (``clip_rows.tail_working_rows``), which is every other row's own, so
         ``weights * (response - eta_unclipped)`` is the likelihood's score.
+        ``exported`` rows are the fit's returned ones: Fisher information, unbounded.
         """
         weights, response = likelihood_working_rows(
             fit.family,
@@ -95,6 +97,7 @@ class _IRLSDirectClipOverlay:
             rows.weights,
             rows.response,
             observed=observed,
+            exported=exported,
         )
         if weights is rows.weights:
             return rows

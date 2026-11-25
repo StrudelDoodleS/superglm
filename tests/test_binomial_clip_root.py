@@ -530,6 +530,85 @@ def test_default_standard_error_when_every_row_sits_in_a_tail():
     np.testing.assert_allclose(model.summary()._coef_rows[0].se, expected, rtol=1e-3)
 
 
+#: every row is held against its outcome, in pairs whose scores cancel
+_ALL_HELD_AGAINST = {
+    "logit_5_pairs_at_35": lambda: _Case(
+        "logit", np.tile([1.0, 0.0], 5), np.tile([-35.0, 35.0], 5)
+    ),
+    "logit_10_pairs_at_35": lambda: _Case(
+        "logit", np.tile([1.0, 0.0], 10), np.tile([-35.0, 35.0], 10)
+    ),
+    "probit_5_pairs_at_6": lambda: _Case("probit", np.tile([1.0, 0.0], 5), np.tile([-6.0, 6.0], 5)),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_ALL_HELD_AGAINST))
+def test_a_published_standard_error_is_the_likelihoods_information_alone(name):
+    """The intercept's error is ``1 / sqrt(sum w I(eta))`` on the Fisher information at the fit's predictor.
+
+    Every row is held against its outcome, so no other row's information
+    hides what a held row publishes.  While it iterates, the solver keeps
+    such a row's weight above ``|score| / 2^26`` so that its working response
+    stays within reach; that bound is no information.  The unfixed fit
+    published it: 2,590.54 for the 214,959.63 of five logit pairs, 1,831.79
+    for the 151,999.41 of ten.  The reference is read at the returned
+    coefficients, so it does not depend on where a likelihood this flat stops.
+    """
+    case = _ALL_HELD_AGAINST[name]()
+    model, coefficients = case.fit()
+    expected = 1.0 / math.sqrt(case.information(coefficients)[0, 0])
+    assert model._solver_pirls_result().clip_rows == "likelihood"
+    np.testing.assert_allclose(model.summary()._coef_rows[0].se, expected, rtol=1e-9)
+
+
+def test_a_coefficient_only_held_rows_inform_has_the_likelihoods_standard_error():
+    """A column that is zero off the held rows: its error is ``sqrt(1 / a + 1 / A)``.
+
+    ``a`` is the Fisher information of the five pairs held against their
+    outcome and ``A`` that of the forty ordinary rows; the intercept's error
+    is ``1 / sqrt(A)``.  Both are sums of positive terms, so the reference
+    needs no inverse of the near-singular 2 x 2 information.  The unfixed fit
+    published 2,590.54 for the column's 214,959.62.
+    """
+    n = 40
+    ordinary = (np.arange(n) % 3 == 0).astype(float)
+    case = _Case(
+        "logit",
+        np.r_[ordinary, np.tile([1.0, 0.0], 5)],
+        np.r_[np.zeros(n), np.tile([-35.0, 35.0], 5)],
+        x=np.r_[np.zeros(n), np.ones(10)],
+    )
+    model, coefficients = case.fit()
+    _, information = _score_information_rows("logit", case.y, case.X @ coefficients + case.offset)
+    ordinary_total, held_total = information[:n].sum(), information[n:].sum()
+    expected = [
+        1.0 / math.sqrt(ordinary_total),
+        math.sqrt(1.0 / held_total + 1.0 / ordinary_total),
+    ]
+    reported = np.array([row.se for row in model.summary()._coef_rows], dtype=float)
+    assert model.result.converged
+    np.testing.assert_allclose(reported, expected, rtol=1e-9)
+
+
+@pytest.mark.parametrize("response", ["against", "agreeing"])
+def test_information_float64_cannot_hold_is_published_as_none(response):
+    """Pairs at offsets of +-800: the fit returns, and its intercept error says nothing is determined.
+
+    ``p (1 - p)`` at a predictor of 800 is ``1e-348`` and underflows on every
+    row (the control), so the exact error is of order ``1e170``.  Held
+    against their outcome, the unfixed fit published 2,590.54, the bound on
+    its iteration weights; agreeing with it, the fit raised ``working
+    weights must have a positive finite sum``.
+    """
+    offset = np.tile([-800.0, 800.0], 5)
+    events = np.tile([1.0, 0.0], 5) if response == "against" else np.tile([0.0, 1.0], 5)
+    case = _Case("logit", events, offset)
+    model, coefficients = case.fit()
+    assert case.information(coefficients)[0, 0] == 0.0  # the control
+    assert model.result.converged
+    assert model.summary()._coef_rows[0].se > 1e100
+
+
 @pytest.mark.pins_behaviour
 def test_rows_held_on_the_side_of_their_outcome_leave_the_fit_at_the_root():
     """Pins: a fit whose held rows all agree with their outcome is already at the root.
@@ -1035,6 +1114,34 @@ def test_a_group_lasso_fit_reaches_the_penalised_likelihoods_minimum(link, lam, 
     for group in groups:
         if not np.any(beta[group.sl]):
             assert np.linalg.norm(gradient[group.sl]) <= lambda1 * group.weight * (1.0 + 1e-6)
+
+
+def test_a_group_lasso_fits_standard_errors_are_the_likelihoods_information():
+    """The proximal engine publishes ``sqrt(diag((X' W X)^-1))`` on the Fisher information too.
+
+    Forty ordinary rows carry a slope the penalty keeps; five pairs of weight
+    1,000 are held against their outcome and inform the intercept alone.  A
+    one-column group's selection penalty has no curvature, so the reference
+    is the unpenalised information of the kept columns at the fit's own
+    coefficients.  The unfixed export read each pair's iteration weight,
+    ``1,000 |score| / 2^26``, as information: errors 1.2e-5 and 1.3e-6 low.
+    """
+    n = 40
+    z = np.linspace(-1.0, 1.0, n)
+    ordinary = ((np.arange(n) * 7) % 10 < 3.0 + 3.0 * z).astype(float)
+    case = _Case(
+        "logit",
+        np.r_[ordinary, np.tile([1.0, 0.0], 5)],
+        np.r_[np.zeros(n), np.tile([-35.0, 35.0], 5)],
+        x=np.r_[z, np.zeros(10)],
+        weights=np.r_[np.ones(n), np.full(10, 1000.0)],
+    )
+    model, coefficients = case.fit(selection_penalty=1e-2)
+    result = model._solver_pirls_result()
+    expected = np.sqrt(np.diag(np.linalg.inv(case.information(coefficients))))
+    reported = np.array([row.se for row in model.summary()._coef_rows], dtype=float)
+    assert result.converged and result.clip_rows == "likelihood" and coefficients[1] != 0.0
+    np.testing.assert_allclose(reported, expected, rtol=1e-9)
 
 
 def test_a_selection_penalty_fit_stopped_by_the_clip_is_not_reported_as_converged():

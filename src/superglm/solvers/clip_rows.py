@@ -61,8 +61,14 @@ CLIP_ROWS_MOVES: dict[tuple[ClipRowsState, str], ClipRowsState] = {
 }
 
 # A held row's working response stays within this many units of its
-# predictor: its iteration weight is at least ``|score| / 2^26``.
+# predictor while a fit iterates: its iteration weight is at least ``|score| /
+# 2^26``.  The bound is the iteration's alone: an exported row's weight is the
+# information itself.
 _RESPONSE_REACH = 2.0**26
+
+# The information read on a positive-weight held row where float64 holds none
+# on any row (``_keep_some_information``): the smallest positive normal float64.
+_LEAST_INFORMATION = float(np.finfo(np.float64).tiny)
 
 
 class ClipRows:
@@ -233,26 +239,54 @@ def tail_rows(link: object, y: NDArray, eta: NDArray) -> tuple[NDArray, NDArray,
 
 
 def tail_working_rows(
-    link: object, y: NDArray, eta: NDArray, weights: NDArray, *, observed: bool
+    link: object,
+    y: NDArray,
+    eta: NDArray,
+    weights: NDArray,
+    *,
+    observed: bool,
+    exported: bool = False,
 ) -> tuple[NDArray, NDArray]:
     """A held row's working weight and response about its own unclipped ``eta``.
 
-    The weight is ``w`` times the row's information (the observed one for an
-    iteration's metric, Fisher's for the exported rows), raised to ``|score| /
-    2^26`` so the response ``eta + score / weight`` stays within ``2^26`` of the
-    predictor.  ``weight * (response - eta)`` is the likelihood's score either
-    way, so the fit's fixed point is the likelihood's.  A zero-weight row has
-    weight 0 and response ``eta``.
+    An iteration's weight is ``w`` times the row's information (observed, or
+    Fisher's), raised to ``|score| / 2^26`` so the response ``eta + score /
+    weight`` stays within ``2^26`` of the predictor: a bound on the metric,
+    which leaves the fixed point the likelihood's (``weight * (response -
+    eta)`` is its score).  An ``exported`` row's weight is ``w`` times the
+    Fisher information and nothing else: a covariance, a rank, an EDF and a
+    log-determinant read it, and the bound would count ``|score| / 2^26`` as
+    information the likelihood does not hold.  Its response carries the score
+    where float64 holds ``score / weight`` and is ``eta`` elsewhere.  A
+    zero-weight row has weight 0 and response ``eta``.
     """
     _, score, fisher, observed_information = tail_rows(link, y, eta)
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         score = weights * score
-        # the observed rows are a metric only: one float64 cannot form adds nothing
-        information = np.nan_to_num(observed_information, nan=0.0) if observed else fisher
-        weight = np.maximum(weights * information, np.abs(score) / _RESPONSE_REACH)
+        if exported:
+            weight = weights * fisher
+        else:
+            # the observed rows are a metric only: one float64 cannot form adds nothing
+            information = np.nan_to_num(observed_information, nan=0.0) if observed else fisher
+            weight = np.maximum(weights * information, np.abs(score) / _RESPONSE_REACH)
         step = np.zeros_like(score)
         np.divide(score, weight, out=step, where=weight > 0.0)
+        if exported:
+            step[~np.isfinite(step)] = 0.0
     return weight, eta + step
+
+
+def _keep_some_information(information: NDArray, held: NDArray, weights: NDArray) -> None:
+    """Give the rows' ``information`` a positive total where every row's has underflowed, in place.
+
+    A model's covariance needs some row's information.  A held row's underflows
+    to 0 past a predictor of about ``+-745`` (logit, cloglog) or ``+-38``
+    (probit); where that leaves no row any, each positive-weight held row's is
+    read as the smallest positive normal float64.  The standard errors that
+    follow are of order ``1e153``: not determined, as the exact ones say.
+    """
+    if np.sum(information) == 0.0:
+        information[held] = np.where(weights[held] > 0.0, _LEAST_INFORMATION, 0.0)
 
 
 def likelihood_working_rows(
@@ -267,13 +301,16 @@ def likelihood_working_rows(
     response: NDArray,
     *,
     observed: bool,
+    exported: bool = False,
 ) -> tuple[NDArray, NDArray]:
     """Working weights and response with every held row's read from the likelihood.
 
     A held row takes ``tail_working_rows`` about its unclipped predictor,
     which is every other row's own, so ``weights * (response -
-    eta_unclipped)`` is the likelihood's score on every row.  The same two
-    arrays when the clip holds no positive-weight row.
+    eta_unclipped)`` is the likelihood's score on every row.  ``exported``
+    rows are the ones a fit returns for its covariance and rank, whose held
+    rows carry the Fisher information itself.  The same two arrays when the
+    clip holds no positive-weight row.
     """
     low, high = held_rows(family, link, eta_unclipped, eta, mu)
     held = np.flatnonzero((low | high) & (weights > 0.0))
@@ -282,8 +319,10 @@ def likelihood_working_rows(
     working_weights = np.array(working_weights, dtype=np.float64, copy=True)
     response = np.array(response, dtype=np.float64, copy=True)
     working_weights[held], response[held] = tail_working_rows(
-        link, y[held], eta_unclipped[held], weights[held], observed=observed
+        link, y[held], eta_unclipped[held], weights[held], observed=observed, exported=exported
     )
+    if exported:
+        _keep_some_information(working_weights, held, weights)
     return working_weights, response
 
 
@@ -364,9 +403,9 @@ def likelihood_information(
     if not held.size:
         return information
     result = np.array(information, dtype=np.float64, copy=True)
-    result[held] = tail_information(
-        link, eta_unclipped[held], np.asarray(sample_weight, dtype=np.float64)[held]
-    )
+    weights = np.asarray(sample_weight, dtype=np.float64)
+    result[held] = tail_information(link, eta_unclipped[held], weights[held])
+    _keep_some_information(result, held, weights)
     return result
 
 
