@@ -958,18 +958,98 @@ class TestScoreTestZIStatistic:
         mu = np.exp(-1.0 + 1.8 * np.sin(2 * np.pi * X["x"].to_numpy()))
         _assert_chi_square_one(*_null_statistics(rng, 300, mu, fit, X))
 
+    def test_log_variance_of_a_row_matches_a_60_digit_reference(self):
+        """log(exp(mu) - 1 - mu) from the smallest float64 mean to 1e300, and on both
+        sides of the mean where the series hands over to the subtraction."""
+        mp = pytest.importorskip("mpmath")
+        from superglm.stats.model_tests import _ZI_SERIES_BELOW, _log_zi_information
+
+        below = np.nextafter(_ZI_SERIES_BELOW, 0.0)
+        mu = np.array(
+            [5e-324, 1e-300, 1e-160, 1e-35, 1e-19, 1e-8, 1e-3, below, _ZI_SERIES_BELOW]
+            + [0.03, 0.3, 1.0, 30.0, 355.0, 709.0, 710.0, 800.0, 1e5, 1e50, 1e300]
+        )
+        with mp.workdps(60):
+            expected = []
+            for m in map(mp.mpf, mu.tolist()):
+                series = (m**j / mp.factorial(j) for j in range(2, 50))
+                expected.append(float(mp.log(mp.fsum(series) if m < 1 else mp.exp(m) - 1 - m)))
+
+        # 1e-13 is the function's stated error; 4u covers the logs and the sum that form it.
+        np.testing.assert_allclose(
+            _log_zi_information(mu), expected, rtol=4 * UNIT_ROUNDOFF, atol=1e-13
+        )
+
     @pytest.mark.parametrize(
-        ("offset", "message"),
-        [(-60.0, "every predicted mean is 0 to rounding"), (9.0, "overflows float64")],
+        ("x", "y", "low", "high"),
+        [
+            pytest.param(
+                np.r_[np.zeros(999), 1.0],
+                np.r_[0.0, 800.0, np.full(997, 400.0), 800.0],
+                0.5,
+                2.0,
+                id="a zero at a mean of 400 beside a mean of 800",
+            ),
+            pytest.param(
+                np.arange(100.0),
+                np.tile([760.0, 800.0, 840.0, 800.0], 25),
+                0.0,
+                0.0,
+                id="every mean near 800",
+            ),
+            pytest.param(
+                np.r_[np.zeros(999), 1.0],
+                np.r_[0.0, 1420.0, np.full(998, 710.0)],
+                1e300,
+                1e308,
+                id="a zero among a thousand rows at a mean of 710",
+            ),
+        ],
     )
-    def test_a_score_without_a_finite_positive_variance_is_refused(
-        self, covariate_fit, offset, message
-    ):
-        """Forced through the offset: at -60 exp(mu) - 1 - mu rounds to 0 on every row,
-        and at 9 the means pass 709, where exp(mu) leaves float64."""
+    def test_a_fit_with_means_past_709_has_its_statistic(self, x, y, low, high):
+        """exp(mu) leaves float64 above 709.78 and the statistic does not: it is near 1
+        where a zero at 400 meets the variance of a row at 800, and 3e-346, which
+        rounds to 0, where a hundred counts near 800 have no zero among them.  Where
+        one of a thousand rows at 710 is a zero it is 2e305, and the score divided
+        by exp(710 / 2) alone still squares past float64."""
+        X = pd.DataFrame({"x": x})
+        model = _fit_poisson_numeric(X, y)
+        mu = np.asarray(model.predict(X), dtype=np.float64)
+        assert mu.max() > np.log(np.finfo(np.float64).max)
+
+        statistic = _assert_zi_exact(score_test_zi(model, X, y), y, mu)
+        assert low <= statistic <= high
+
+    @pytest.mark.parametrize(
+        ("offset", "low", "high"), [(-60.0, 1e50, 1e60), (9.0, np.inf, np.inf)]
+    )
+    def test_means_forced_far_from_one_have_their_statistic(self, covariate_fit, offset, low, high):
+        """Forced through the offset.  At -60 the means are near 1e-26, where
+        exp(mu) - 1 - mu rounds to 0 as a subtraction and the statistic is 2e54.  At 9
+        they run from 3700 to 27000 with zeros observed among them, and the statistic
+        is past float64's largest number: infinity, with a p-value of 0."""
         model, X, y, _ = covariate_fit
-        with pytest.raises(ValueError, match=message):
-            score_test_zi(model, X, y, offset=np.full(len(y), offset))
+        offset = np.full(len(y), offset)
+        mu = np.asarray(model.predict(X, offset=offset), dtype=np.float64)
+
+        statistic = _assert_zi_exact(score_test_zi(model, X, y, offset=offset), y, mu)
+        assert low <= statistic <= high
+
+    @pytest.mark.parametrize(
+        "means",
+        [np.zeros(3), np.array([0.5, np.inf, 2.0]), np.array([0.5, np.nan, 2.0])],
+        ids=["every mean zero", "an infinite mean", "a mean that is not a number"],
+    )
+    def test_means_that_define_no_statistic_are_refused(self, covariate_fit, monkeypatch, means):
+        """Forced into the function: ``predict`` holds the means of a log, identity or
+        square-root link inside a positive, finite range, so a fitted model of the
+        library's own does not reach these."""
+        from superglm.stats import model_tests
+
+        model, X, y, _ = covariate_fit
+        monkeypatch.setattr(model_tests, "_get_mu", lambda *args, **kwargs: means)
+        with pytest.raises(ValueError, match="score_test_zi has no statistic for these rows"):
+            score_test_zi(model, X.iloc[:3], y[:3])
 
 
 class TestUpperTailPValues:

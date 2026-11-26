@@ -14,6 +14,7 @@ import numpy as np
 import scipy.linalg
 from scipy.special import gammaln
 
+from superglm._roundoff import UNIT_ROUNDOFF
 from superglm.solvers.dispersion import (
     PRIOR_WEIGHTS,
     dispersion_likelihood_size,
@@ -348,6 +349,28 @@ def zero_inflation_index(
     )
 
 
+#: Below this mean ``_log_zi_information`` sums a series instead of subtracting.
+_ZI_SERIES_BELOW = (25200.0 * UNIT_ROUNDOFF) ** (1.0 / 6.0)
+
+
+def _log_zi_information(mu: NDArray) -> NDArray:
+    """``log(exp(mu) - 1 - mu)`` for ``mu >= 0``, ``-inf`` at zero.
+
+    ``mu + log(1 - exp(-mu) - mu exp(-mu))`` overflows at no mean, but it
+    subtracts two terms near ``mu`` that differ by ``mu**2 / 2``, which costs
+    about ``10 u / mu`` of the difference.  Below ``(25200 u)**(1/6)``, about
+    0.012, the series through ``mu**4`` takes over: its first dropped term,
+    ``mu**5 / 2520`` of the value, is the smaller error there.  The two meet
+    at ``1e-13``, the most either adds to the log.
+    """
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        series = 2.0 * np.log(mu) + np.log(
+            0.5 + mu * (1.0 / 6.0 + mu * (1.0 / 24.0 + mu * (1.0 / 120.0 + mu / 720.0)))
+        )
+        closed = mu + np.log(-np.expm1(-mu) - mu * np.exp(-mu))
+    return np.where(mu < _ZI_SERIES_BELOW, series, closed)
+
+
 def score_test_zi(
     model: SuperGLM,
     X,
@@ -421,6 +444,9 @@ def score_test_zi(
     Returns
     -------
     ScoreTestZIResult
+        ``statistic`` is infinite and ``p_value`` 0 where the statistic is
+        beyond float64's largest number: a zero observed at a fitted mean above
+        about 355 plus half the largest fitted mean.
 
     Raises
     ------
@@ -428,8 +454,8 @@ def score_test_zi(
         Where the model gives a row no predicted mean: the statistic would be
         read from a mean that does not exist.
     ValueError
-        Where the score has no finite positive variance: every predicted mean
-        is zero to rounding, or one is too large for ``exp(mu)`` in float64.
+        Where the statistic is undefined: a predicted mean is not finite, or
+        every predicted mean is zero.
 
     References
     ----------
@@ -462,27 +488,26 @@ def score_test_zi(
     y = np.asarray(y, dtype=float)
     mu = _get_mu(model, X, y, offset, what="the zero-inflation score test")
 
-    # (1 - p0)/p0 - mu is each row's variance and the score of a row with y = 0;
-    # a row with y > 0 scores -1 + (y - mu).
+    # exp(mu) - 1 - mu is each row's variance and the score of a row with y = 0;
+    # a row with y > 0 scores y - 1 - mu.  The largest of them, exp(top), divides
+    # the variance and its square root divides the score, which keeps both sums
+    # in range and leaves score / sqrt(variance) as it is.
+    log_information = _log_zi_information(mu)
+    top = float(np.max(log_information, initial=-np.inf))
+    if not np.isfinite(top):
+        raise ValueError(
+            "score_test_zi has no statistic for these rows: a predicted mean is not "
+            "finite, or every predicted mean is 0 and the Poisson model expects nothing "
+            "but zeros. Check the rows and the offset passed."
+        )
     with np.errstate(over="ignore"):
-        information = np.expm1(mu) - mu
-    score = float(np.sum(np.where(y == 0, information, y - 1.0 - mu)))
-    variance = float(np.sum(information))
-    if not np.isfinite(variance):
-        raise ValueError(
-            "score_test_zi cannot weigh a row whose predicted mean is above about 709: "
-            "exp(mean), the weight the test gives the row, overflows float64. A Poisson "
-            "count that large has no zeros to test; pass the rows with smaller means."
-        )
-    if variance <= 0.0:
-        raise ValueError(
-            "score_test_zi has nothing to test: every predicted mean is 0 to rounding, "
-            "so the Poisson model already expects every response to be 0. Check the "
-            "rows and the offset passed."
-        )
+        zero_rows = np.exp(log_information - 0.5 * top)
+        other_rows = (y - 1.0 - mu) / np.exp(0.5 * top)
+    score = float(np.sum(np.where(y == 0, zero_rows, other_rows)))
+    variance = float(np.sum(np.exp(log_information - top)))
 
-    # Standardised before it is squared: score**2 can pass float64's largest
-    # number where score**2 / variance does not.
+    # Squared after it is standardised, so that the square overflows only where
+    # the statistic does.
     standardised = score / float(np.sqrt(variance))
     statistic = standardised * standardised
     return ScoreTestZIResult(
