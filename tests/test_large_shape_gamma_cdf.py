@@ -254,6 +254,34 @@ def test_glm_residual_at_an_overflowing_prior_weight_stays_saturated(family):
 
 
 @pytest.mark.pins_behaviour
+@pytest.mark.parametrize(
+    ("family", "observed", "response", "weight", "level"),
+    [
+        # Endpoints either side of the shape switch: F(9999) from SciPy, F(10000) the log tail.
+        ("poisson", [0.0, 1.0, 1.0, 2.0], 10000.0 / 9192.0, 9192.0, 1.0 - 1e-10),
+        # y / mu rounds to zero at an ordinary shape.
+        ("gamma", [0.5, 1.5, 0.5, 1.5], 1e-20, 1.0, 1e-10),
+    ],
+)
+def test_glm_residual_at_the_edges_of_the_tail_switch_is_the_cap(
+    family, observed, response, weight, level
+):
+    """Pins master's behaviour at two boundary rows: the capped residual, with no warning.
+
+    Mutation checks: drawing between unordered Poisson endpoints raises ``high - low < 0``;
+    forming ``log1p(-1)`` for the Gamma row without silencing it warns of a division by zero.
+    """
+    frame = pd.DataFrame(index=range(len(observed)))
+    model = SuperGLM(family=family, selection_penalty=0.0, features={})
+    model.fit(frame, np.array(observed))
+    metrics = model.metrics(frame.iloc[:1], np.array([response]), sample_weight=np.array([weight]))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        residual = metrics.residuals("quantile")
+    assert residual == pytest.approx([special.ndtri(level)], rel=1e-12)
+
+
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("q", [1e-155, -1e-155, 0.0])
 def test_generalized_gamma_near_zero_shape_raises_no_overflow(q):
     """Pins master's behaviour at a tiny Q (the log-normal limit): no overflow, no warning.

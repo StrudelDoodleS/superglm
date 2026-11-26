@@ -1105,7 +1105,10 @@ class ModelMetrics:
                 return _large_shape_gamma_rows(poisson.cdf(k, lam), shape, log_ratio, upper=True)
 
             a = poisson_cdf(count - 1)
-            b = poisson_cdf(count)
+            # F is nondecreasing. Near one, F(k - 1) and F(k) can be a rounding apart, and
+            # either side of the shape switch they come from different routines; neither
+            # may reverse the interval the draw reads.
+            b = np.maximum(a, poisson_cdf(count))
             u = rng.uniform(a, b)
         elif isinstance(self._family, NegativeBinomial):
             theta = self._family.theta
@@ -1116,7 +1119,9 @@ class ModelMetrics:
             b = nbinom.cdf(count, n=n_param, p=p_nb)
             u = rng.uniform(a, b)
         elif isinstance(self._family, Gamma):
-            log_ratio = np.log1p((y - mu) / mu)  # log(x / a) at x = a y / mu
+            # log(x / a) at x = a y / mu; -inf where y / mu rounds to zero, where P = 0.
+            with np.errstate(divide="ignore"):
+                log_ratio = np.log1p((y - mu) / mu)
             if unit_phi is not None:
                 root = dispersion_standard_deviation(w if prior else np.ones_like(w), density_scale)
                 normal = root < 2.0**-256
