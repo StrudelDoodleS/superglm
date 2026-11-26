@@ -483,6 +483,27 @@ def _keeps_constrained_covariance(result) -> bool:
     return rank_info is not None and getattr(rank_info, "face", None) is not None
 
 
+def _large_shape_gamma_rows(probability, shape, log_ratio, *, upper=False):
+    """Overwrite ``P(a, x)`` (``Q(a, x)`` with ``upper``) where the gamma shape ``a`` is large.
+
+    ``probability`` holds SciPy's values; ``log_ratio`` is ``log(x / a)``.
+    Above :data:`LARGE_GAMMA_SHAPE` SciPy sums the series of ``P`` for at most
+    2,000 terms, too few more than 4.5 standard deviations below the mean from
+    shape about 1e6, so those rows read the generalised gamma log tail at
+    ``Q = a**-0.5``, as ``GammaLS``'s CDF does. Other rows keep SciPy's values.
+    """
+    from superglm.distributional.kernels.generalized_gamma import (
+        LARGE_GAMMA_SHAPE,
+        log_tail_cdf,
+    )
+
+    large = shape > LARGE_GAMMA_SHAPE
+    if np.any(large):
+        root = np.sqrt(shape[large])
+        probability[large] = log_tail_cdf(root * log_ratio[large], 1.0 / root, upper=upper)
+    return probability
+
+
 class ModelMetrics:
     """Post-fit diagnostics for a SuperGLM model.
 
@@ -1073,8 +1094,16 @@ class ModelMetrics:
         elif isinstance(self._family, Poisson):
             count = np.round(w * y) if prior else np.round(y)
             lam = w * mu if prior else mu
-            a = poisson.cdf(count - 1, lam)
-            b = poisson.cdf(count, lam)
+
+            def poisson_cdf(k):
+                # P(K <= k) = Q(k + 1, lam).
+                shape = k + 1.0
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    log_ratio = np.log1p((lam - shape) / shape)
+                return _large_shape_gamma_rows(poisson.cdf(k, lam), shape, log_ratio, upper=True)
+
+            a = poisson_cdf(count - 1)
+            b = poisson_cdf(count)
             u = rng.uniform(a, b)
         elif isinstance(self._family, NegativeBinomial):
             theta = self._family.theta
@@ -1085,6 +1114,7 @@ class ModelMetrics:
             b = nbinom.cdf(count, n=n_param, p=p_nb)
             u = rng.uniform(a, b)
         elif isinstance(self._family, Gamma):
+            log_ratio = np.log1p((y - mu) / mu)  # log(x / a) at x = a y / mu
             if unit_phi is not None:
                 root = dispersion_standard_deviation(w if prior else np.ones_like(w), density_scale)
                 normal = root < 2.0**-256
@@ -1095,11 +1125,19 @@ class ModelMetrics:
                 other = ~normal
                 if np.any(other):
                     shape = (1.0 / root[other]) ** 2
-                    u[other] = gamma_dist.cdf(y[other] / mu[other] * shape, a=shape)
+                    u[other] = _large_shape_gamma_rows(
+                        gamma_dist.cdf(y[other] / mu[other] * shape, a=shape),
+                        shape,
+                        log_ratio[other],
+                    )
             else:
                 shape = (w if prior else 1.0) / phi
                 scale = mu * phi / (w if prior else 1.0)
-                u = gamma_dist.cdf(y, a=shape, scale=scale)
+                u = _large_shape_gamma_rows(
+                    gamma_dist.cdf(y, a=shape, scale=scale),
+                    np.broadcast_to(shape, y.shape),
+                    log_ratio,
+                )
         elif isinstance(self._family, Gaussian):
             if unit_phi is not None:
                 sigma = dispersion_standard_deviation(

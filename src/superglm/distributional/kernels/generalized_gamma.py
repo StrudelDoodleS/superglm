@@ -1674,16 +1674,17 @@ def _location_arguments(
     return mu_values, sigma_values, q
 
 
-def log_tail_cdf(w: NDArray, shape: NDArray) -> NDArray[np.float64]:
+def log_tail_cdf(w: NDArray, shape: NDArray, *, upper: bool = False) -> NDArray[np.float64]:
     """``F(w)`` of the standardised law from its log tail, for ``|Q| <= 0.2887``.
 
-    Past ``|w| = 2^100``, the log tail's range, ``F`` is 0 or 1 as ``Phi(w)`` is.
+    With ``upper`` it is the survival ``S(w)``, accurate where it is small.
+    Past ``|w| = 2^100``, the log tail's range, either is 0 or 1 as ``Phi`` is.
     """
-    out = special.ndtr(w)
+    out = special.ndtr(-w if upper else w)
     inside = np.abs(w) <= _UNIFORM_REACH
     # No call with zero rows: the first call compiles the kernel.
     if np.any(inside):
-        out[inside] = np.exp(gg_log_tail_jets(w[inside], shape[inside], upper=False, order=0)[0])
+        out[inside] = np.exp(gg_log_tail_jets(w[inside], shape[inside], upper=upper, order=0)[0])
     return out
 
 
