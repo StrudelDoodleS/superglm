@@ -56,6 +56,11 @@ from superglm.distributional.family import (
     _validated_parameter_matrix,
 )
 from superglm.distributional.kernels._declared_bounds import gpd_window_jets
+from superglm.distributional.kernels._mean_excess import (
+    finite_amounts,
+    generalized_pareto_mean_excess,
+    on_positive_support,
+)
 from superglm.distributional.kernels.generalized_pareto import (
     GeneralizedParetoDomainError as GeneralizedParetoDomainError,
 )
@@ -230,6 +235,8 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
 
     # Its curvature directions take stacked (m, n, K) directions on one state evaluation.
     stacked_curvature_directions: ClassVar[bool] = True
+    # The response (an excess over the threshold) is zero or more.
+    response_support: ClassVar[ParameterSupport] = ParameterSupport(lower=0.0, lower_inclusive=True)
 
     shape_lower: float = 0.0
     shape_upper: float = 1.0
@@ -711,6 +718,18 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         values = self._theta(theta, None)
         probabilities = np.broadcast_to(np.asarray(p, dtype=np.float64), (len(values),))
         return readonly(generalized_pareto_quantile(probabilities, values[:, 0], values[:, 1]))
+
+    def mean_excess(self, v, theta) -> NDArray[np.float64]:
+        """``E[Y - v | Y > v] = (scale + shape v)/(1 - shape)`` per row."""
+        values = self._theta(theta, None)
+        amount = finite_amounts(v, len(values))
+        return on_positive_support(
+            amount,
+            self.default_prediction(values),
+            lambda rows: generalized_pareto_mean_excess(
+                amount[rows], values[rows, 0], values[rows, 1]
+            ),
+        )
 
     def expected_shortfall(self, p, theta) -> NDArray[np.float64]:
         """``E[Y | Y > q_p]`` for the generalized Pareto excess law."""

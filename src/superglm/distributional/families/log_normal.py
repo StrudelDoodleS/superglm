@@ -61,6 +61,11 @@ from superglm.distributional.kernels._declared_bounds import (
     log_normal_window_jets,
     normal_predictor_jets,
 )
+from superglm.distributional.kernels._mean_excess import (
+    finite_amounts,
+    log_normal_mean_excess,
+    on_positive_support,
+)
 from superglm.distributional.kernels.log_normal import (
     LogNormalDomainError,
     initialize_log_normal,
@@ -261,6 +266,8 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
 
     # Its curvature directions take stacked (m, n, K) directions on one state evaluation.
     stacked_curvature_directions: ClassVar[bool] = True
+    # The response is strictly positive.
+    response_support: ClassVar[ParameterSupport] = ParameterSupport(lower=0.0)
 
     parametrisation: Parametrisation = "mean"
     scale_floor: float = 0.01
@@ -764,6 +771,17 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
         values = self._theta(theta, None)
         probabilities = np.broadcast_to(np.asarray(p, dtype=np.float64), (len(values),))
         return log_normal_quantile(probabilities, self._location_coordinates(values), values[:, 1])
+
+    def mean_excess(self, v: NDArray, theta: NDArray) -> NDArray[np.float64]:
+        """``E[Y - v | Y > v]`` per row in either natural parametrisation."""
+        values = self._theta(theta, None)
+        amount = finite_amounts(v, len(values))
+        location, sigma = self._location_coordinates(values), values[:, 1]
+        return on_positive_support(
+            amount,
+            self.default_prediction(values),
+            lambda rows: log_normal_mean_excess(amount[rows], location[rows], sigma[rows]),
+        )
 
     def expected_shortfall(self, p: NDArray, theta: NDArray) -> NDArray[np.float64]:
         """``E[Y | Y > q_p]`` per row in either natural parametrisation."""

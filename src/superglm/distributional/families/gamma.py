@@ -55,6 +55,11 @@ from superglm.distributional.kernels._declared_bounds import (
     gamma_quantile,
     gamma_window_jets,
 )
+from superglm.distributional.kernels._mean_excess import (
+    finite_amounts,
+    gamma_mean_excess,
+    on_positive_support,
+)
 from superglm.distributional.kernels.gamma import (
     GammaInitializationError as GammaInitializationError,
 )
@@ -64,6 +69,7 @@ from superglm.distributional.kernels.gamma import (
     gamma_expected_shortfall,
     gamma_predictor_curvature_directional,
     gamma_predictor_fourth_derivatives,
+    gamma_shape_plus_one_log_increment,
     initialize_gamma,
 )
 from superglm.distributional.likelihood_identity import (
@@ -273,6 +279,8 @@ class GammaLS(MeanPredictor, ScalePredictor):
 
     # Its curvature directions take stacked (m, n, K) directions on one state evaluation.
     stacked_curvature_directions: ClassVar[bool] = True
+    # The response is strictly positive.
+    response_support: ClassVar[ParameterSupport] = ParameterSupport(lower=0.0)
 
     @property
     def parameters(self) -> tuple[ParameterSpec, ...]:
@@ -649,6 +657,28 @@ class GammaLS(MeanPredictor, ScalePredictor):
         probabilities = np.broadcast_to(np.asarray(p, dtype=np.float64), (len(values),))
         cv2 = values[:, 1] * values[:, 1]
         return gamma_expected_shortfall(probabilities, values[:, 0], 1.0 / cv2)
+
+    def mean_excess(self, v: NDArray, theta: NDArray) -> NDArray[np.float64]:
+        """``E[Y - v | Y > v]`` per row: shape ``1/cv^2`` and scale ``mean cv^2``."""
+        values = _validated_parameter_matrix(
+            theta, n_observations=None, parameters=self.parameters, family_name="GammaLS"
+        )
+        amount = finite_amounts(v, len(values))
+        cv2 = values[:, 1] * values[:, 1]
+        shape, scale = 1.0 / cv2, values[:, 0] * cv2
+
+        def inside(rows: NDArray[np.intp]) -> NDArray[np.float64]:
+            a, x = shape[rows], amount[rows] / scale[rows]
+
+            def log_hazard(body: NDArray[np.intp]) -> NDArray[np.float64]:
+                # log[x^a e^-x / Gamma(a)] - log Q(a, x), each from its own tail-safe kernel.
+                log_density = gamma_shape_plus_one_log_increment(a[body], x[body]) + np.log(a[body])
+                at = rows[body]
+                return log_density - self.log_window_probability(amount[at], np.inf, values[at])
+
+            return scale[rows] * gamma_mean_excess(a, x, log_hazard)
+
+        return on_positive_support(amount, values[:, 0], inside)
 
     def variance(self, theta: NDArray) -> NDArray[np.float64]:
         """``Var(Y) = (mean cv)^2`` per row at unit prior weight."""

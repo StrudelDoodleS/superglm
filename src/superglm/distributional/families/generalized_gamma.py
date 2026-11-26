@@ -54,6 +54,11 @@ from superglm.distributional.family import (
     _validated_parameter_matrix,
 )
 from superglm.distributional.kernels._declared_bounds import gg_window_jets
+from superglm.distributional.kernels._mean_excess import (
+    finite_amounts,
+    generalized_gamma_mean_excess,
+    on_positive_support,
+)
 from superglm.distributional.kernels.generalized_gamma import (
     GeneralizedGammaDomainError as GeneralizedGammaDomainError,
 )
@@ -69,6 +74,7 @@ from superglm.distributional.kernels.generalized_gamma import (
     location_of_mean,
     location_rows,
     location_third_fourth,
+    log_mean_loading,
     mean_exists,
     mean_expected_information,
     mean_hessian_direction,
@@ -261,6 +267,8 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
     stacked_curvature_directions: ClassVar[bool] = True
     # The compiled row kernels run on the pool, so the chunk stream stays on one thread.
     pools_rows: ClassVar[bool] = True
+    # The response is strictly positive.
+    response_support: ClassVar[ParameterSupport] = ParameterSupport(lower=0.0)
 
     parametrisation: Parametrisation = "mean"
     scale_floor: float = 0.01
@@ -748,6 +756,45 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
         return generalized_gamma_quantile(
             probabilities, self._location_coordinates(values), values[:, 1], values[:, 2]
         )
+
+    def mean_excess(self, v: NDArray, theta: NDArray) -> NDArray[np.float64]:
+        """``E[Y - v | Y > v]`` per row; ``inf`` where the location form has no mean.
+
+        The law weighted by ``y`` is read in location coordinates by the window kernel
+        itself, so its smaller scale is not held to ``scale_floor``.
+        """
+        values = self._theta(theta, None)
+        sigma, q = values[:, 1], values[:, 2]
+        exists = mean_exists(sigma, q)
+        mean_form = self.parametrisation == "mean"
+        if mean_form and not np.all(exists):
+            raise GeneralizedGammaDomainError("generalized gamma mean does not exist for every row")
+        amount = finite_amounts(v, len(values))
+        location = np.array(values[:, 0], copy=True)
+        log_mean = np.full(len(values), np.inf)
+        if mean_form:
+            location = self._location_coordinates(values)
+            log_mean = np.log(values[:, 0])
+        elif np.any(exists):
+            log_mean[exists] = location[exists] + log_mean_loading(sigma[exists], q[exists])[0]
+
+        def inside(rows: NDArray[np.intp]) -> NDArray[np.float64]:
+            at_amount = amount[rows]
+
+            def log_survival(at: NDArray[np.intp], mu: NDArray, scale: NDArray, shape: NDArray):
+                return gg_window_jets(
+                    at_amount[at],
+                    np.full(len(at), np.inf),
+                    np.column_stack((mu, scale, shape)),
+                    order=0,
+                    mean_form=False,
+                )[0]
+
+            return generalized_gamma_mean_excess(
+                at_amount, location[rows], sigma[rows], q[rows], log_mean[rows], log_survival
+            )
+
+        return on_positive_support(amount, self.default_prediction(values), inside)
 
     def expected_shortfall(self, p: NDArray, theta: NDArray) -> NDArray[np.float64]:
         """``E[Y | Y > q_p]`` per row in either natural parametrisation."""

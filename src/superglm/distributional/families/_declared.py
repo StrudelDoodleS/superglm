@@ -42,6 +42,7 @@ from superglm.distributional.family import (
     NaturalLikelihoodEvaluation,
     ObservationContract,
     ParameterSpec,
+    ParameterSupport,
     validated_derivative_order,
     validated_parameter_matrix,
 )
@@ -293,6 +294,13 @@ class DeclaredScalarFamily:
     @property
     def capabilities(self):
         return self.spec.capabilities
+
+    @property
+    def response_support(self) -> ParameterSupport:
+        """The response's support: from ``spec.response_lower`` up, closed there if declared so."""
+        return ParameterSupport(
+            lower=self.spec.response_lower, lower_inclusive=self.spec.response_lower_inclusive
+        )
 
     @property
     def _kernel(self):

@@ -22,6 +22,11 @@ from superglm.distributional.family import (
     ParameterSupport,
     _register_likelihood_reuse_contract,
 )
+from superglm.distributional.kernels._mean_excess import (
+    finite_amounts,
+    log_logistic_mean_excess,
+    on_positive_support,
+)
 from superglm.distributional.likelihood_identity import LOG_ERROR_UNITS
 from superglm.links import LogLink
 
@@ -89,6 +94,16 @@ class LogLogisticLSS(
 
     def initialize(self, y, plan):
         return initialize_parameters(self.validate_likelihood_plan(y, plan), plan)
+
+    def mean_excess(self, v, theta):
+        """``E[Y - v | Y > v]`` per row, ``inf`` for ``shape <= 1``."""
+        values = self._theta(theta)
+        amount = finite_amounts(v, len(values))
+        return on_positive_support(
+            amount,
+            self.default_prediction(values),
+            lambda rows: log_logistic_mean_excess(amount[rows], values[rows, 0], values[rows, 1]),
+        )
 
     def censored_recession(self, bounds):
         """Censored probabilities are strictly monotone in the scale.

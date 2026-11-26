@@ -589,6 +589,19 @@ class ExpectedShortfallFamily(Protocol):
 
 
 @runtime_checkable
+class MeanExcessFamily(Protocol):
+    """Optional row-wise mean excess ``E[Y - v | Y > v]`` from natural parameters.
+
+    ``v`` broadcasts to the rows and is finite.  The result is ``E[Y] - v`` at or below
+    the start of the support, and ``inf`` where the row's mean is.  A family that
+    implements it also declares ``response_support``, the response's
+    :class:`ParameterSupport`.
+    """
+
+    def mean_excess(self, v: NDArray, theta: NDArray) -> NDArray: ...
+
+
+@runtime_checkable
 class PriorWeightedExpectedShortfallFamily(Protocol):
     """Optional upper conditional tail mean under non-unit prior weights.
 

@@ -24,6 +24,11 @@ from superglm.distributional.family import (
     ParameterSupport,
     _register_likelihood_reuse_contract,
 )
+from superglm.distributional.kernels._mean_excess import (
+    finite_amounts,
+    lomax_mean_excess,
+    on_positive_support,
+)
 from superglm.links import LogLink
 
 _SPEC = DeclaredScalarSpec(
@@ -95,6 +100,16 @@ class LomaxLSS(
     def initialize(self, y, plan):
         response = self.validate_likelihood_plan(y, plan)
         return initialize_parameters(response, plan)
+
+    def mean_excess(self, v, theta):
+        """``E[Y - v | Y > v] = (scale + v)/(shape - 1)`` per row, ``inf`` for ``shape <= 1``."""
+        values = self._theta(theta)
+        amount = finite_amounts(v, len(values))
+        return on_positive_support(
+            amount,
+            self.default_prediction(values),
+            lambda rows: lomax_mean_excess(amount[rows], values[rows, 0], values[rows, 1]),
+        )
 
     def censored_recession(self, bounds):
         """One-sided censored levels escape in scale, including after truncation.
