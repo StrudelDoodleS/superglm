@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -24,9 +24,6 @@ from superglm.distributional.family import (
 from superglm.distributional.response import response_spec
 from superglm.distributional.surfaces import SCHEMA_VERSION, _json_scalar, _json_vector
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
-
-if TYPE_CHECKING:
-    from superglm.distributional.model import DenseDistributionalModel
 
 __all__ = ["DistributionCurve", "curve_grid", "row_density", "row_mean_excess"]
 
@@ -241,7 +238,7 @@ def curve_grid(
 
 
 def model_curve(
-    model: DenseDistributionalModel,
+    model: Any,
     row: FrameLike | EagerFrame,
     *,
     kind: str,
@@ -250,7 +247,7 @@ def model_curve(
     offsets: Mapping[str, NDArray] | None,
     caller: str,
 ) -> DistributionCurve:
-    """One SuperLSS row's :class:`DistributionCurve`: the default grid spans ``LEVELS[kind]``."""
+    """One row's :class:`DistributionCurve` from a fitted model; a default grid spans ``LEVELS[kind]``."""
     family: Any = model.family
     require_row_law(family, caller, mean_excess=kind == "mean_excess")
     grid = check_curve_request(len(as_eager_frame(row)), kind, y, n_points, caller)
