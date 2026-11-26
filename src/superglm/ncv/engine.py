@@ -25,8 +25,10 @@ system is the Woodbury identity on the whole neighbourhood (Wood, equation 4): w
 ``H_a^-1 Z_a' r = Y' (r + W^(1/2) (I - W^(1/2) B W^(1/2))^-1 W^(1/2) B r)``.  Form and factor
 accumulates ``Z_a' W_a Z_a`` over the neighbourhood's rows in bounded blocks and factors the
 Jacobi-scaled ``H - Z_a' W_a Z_a``.  Beyond the row product both share, the first costs
-``3 |a|^2 P + |a|^3`` and the second ``P^3`` (``P = p + 1``), which is the dispatch rule.  A
-neighbourhood of one row takes the scalar form ``1 - W_i h_i``, with no factorisation.
+``3 |a|^2 P + |a|^3`` and the second ``P^3`` (``P = p + 1``), which is the dispatch rule, with
+``|a|`` every row the neighbourhood removes: a stack carries a removed row of zero weight as a
+row of the identity (:func:`_stacked`).  A neighbourhood of one row takes the scalar form
+``1 - W_i h_i``, with no factorisation.
 
 **Stacks.**  Neighbourhoods on the first route are read in blocks of whole neighbourhoods,
 sorted by size, and those of one size are solved together, as ``(members, size, size)``
@@ -1644,7 +1646,7 @@ def _neighbourhoods(trial: _Trial, nb: Neighbourhoods, route: Route | None) -> N
         if problem.loss.quadratic:
             problem.cache.attach(nb, trial.fit, trial.eta, weighted, problem.width)
             trial.cache = problem.cache
-    size = np.minimum(weighted, width).astype(np.int64)
+    size = np.minimum(nb.sizes(), width).astype(np.int64)
     small = 3 * size * size * width + size**3 < width**3
     if route is not None:
         small = np.full(nb.m, route == "woodbury")

@@ -88,9 +88,12 @@ def removed_and_weighted(problem, nb):
 
 
 def on_small_route(problem, nb):
-    """Neighbourhoods the cost rule gives the neighbourhood-sized system: ``3 a^2 P + a^3 < P^3``."""
-    _, a = removed_and_weighted(problem, nb)
-    return (a > 0) & (3 * a**2 * problem.width + a**3 < problem.width**3)
+    """Neighbourhoods the cost rule gives the neighbourhood-sized system: ``3 a^2 P + a^3 < P^3``.
+
+    ``a`` counts every removed row, and a neighbourhood with no weighted row takes neither route.
+    """
+    a, weighted = removed_and_weighted(problem, nb)
+    return (weighted > 0) & (3 * a**2 * problem.width + a**3 < problem.width**3)
 
 
 def disc_margins(problem, nb, rho, fit):
@@ -240,6 +243,35 @@ def test_many_small_groups_take_one_stack_a_size(family):
     assert blocked.work.stacks > work.stacks and blocked.work.stacked == work.stacked
     assert blocked.work.small_factorisations == 0
     assert_same_evaluation(p, blocked, whole, condition(p, nb, RHO, whole.fit))
+
+
+@pytest.mark.parametrize("family", ["gaussian", "poisson"])
+def test_rows_of_zero_weight_count_in_the_size_that_decides_the_route(family):
+    """Twelve groups of 100 rows, two of them weighted: each formed alone, no 100-row stack.
+
+    A stack carries a removed row of zero weight as a row of the identity, so the rows a
+    neighbourhood removes decide its route.  The evaluation is the forced routes'.
+    """
+    rng = np.random.default_rng(17)
+    n, groups = 1200, 12
+    frame = pd.DataFrame({"z": rng.normal(size=n), "f": rng.choice(list("abcd"), n)})
+    signal = (0.4 * frame.z + 0.3 * (frame.f == "b")).to_numpy()
+    y = signal + rng.normal(0.0, 0.5, n)
+    if family == "poisson":
+        y = rng.poisson(np.exp(signal)).astype(float)
+    labels = np.repeat(np.arange(groups), n // groups)
+    weights = np.where(np.arange(n) % (n // groups) < 2, rng.choice([0.5, 1.0, 2.0], n), 0.0)
+    model = SuperGLM(features={"z": Numeric(), "f": Categorical()}, family=family)
+    model.fit(frame, y, sample_weight=weights)
+    problem = problem_of(model, y, weights, np.zeros(n))
+    nb = from_groups(labels, n)
+    assert problem.width == 5 and not on_small_route(problem, nb).any()
+    stacked, alone, formed = three_ways(problem, nb, np.zeros(0))
+    assert (stacked.work.stacks, stacked.work.stacked) == (0, 0)
+    assert (stacked.work.factorisations, stacked.work.small_factorisations) == (groups, 0)
+    kappa = condition(problem, nb, np.zeros(0), stacked.fit)
+    assert_same_evaluation(problem, stacked, alone, kappa)
+    assert_same_evaluation(problem, stacked, formed, kappa)
 
 
 @pytest.mark.parametrize("zero_weights", [False, True], ids=["weighted", "zero-weights"])
