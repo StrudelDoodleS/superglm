@@ -932,18 +932,30 @@ def cross_validate(
         turn, or forwarded to the inner splitter ``fit_kwargs`` gives as
         ``cv``.
     fit_mode : {"fit", "fit_reml", "fit_ncv"}, optional
-        Which fit method to call on each fold estimator. ``"fit"`` holds the
-        smoothing parameters fixed; ``"fit_reml"`` selects them again on each
-        fold's training rows by REML; ``"fit_ncv"`` (a SuperGLM only) selects
-        them on each fold's training rows by held-out prediction, holding out
-        within the fold each group of ``groups``, each split of an inner
-        splitter passed as ``fit_kwargs={"cv": ...}``, or, with neither,
-        each row. Each fold's fit is then the ``fit_ncv`` call one would make
-        on that fold's rows. By default ``"fit"`` for a SuperGLM. A SuperLSS
-        has no configured smoothing to hold fixed, so its default is
-        ``"fit_reml"``, or ``"fit"`` when ``fit_kwargs`` gives ``lambdas``. On
-        an unfitted SuperLSS with smooth terms, ``"fit"`` needs those
-        ``lambdas``: without them every fold fails, and each failure is logged.
+        Which fit method to call on each fold estimator. ``"fit"`` (default for
+        a ``SuperGLM``) holds the smoothing parameters fixed; ``"fit_reml"``
+        selects them again on each fold's training rows by REML; ``"fit_ncv"``
+        (``SuperGLM`` only; raises ``ValueError`` for ``SuperLSS`` or
+        unsupported model settings before any fold runs) runs a full
+        :meth:`SuperGLM.fit_ncv <superglm.SuperGLM.fit_ncv>` smoothing search
+        on each fold's training rows.
+        Under ``"fit_ncv"``, outer ``groups`` are sliced to each fold's
+        training rows so each training group is held out in turn by default,
+        ``fit_kwargs={"cv": inner}`` holds out inner folds instead (with sliced
+        ``groups`` forwarded to ``inner.split``), and omitting both holds out
+        single rows; ``fit_kwargs`` cannot set ``groups`` or ``neighbours``.
+        ``warm_start`` defaults to ``False`` under ``"fit_ncv"``,
+        ``fold_scores`` adds ``n_ncv_iter`` and ``warm_started`` (with
+        ``converged`` requiring both the search and the final coefficient fit
+        to converge), and a refusal that depends on a fold's rows fails that
+        fold only (setting its scores to ``error_score`` and logging the fold,
+        or raising with a note naming the fold when ``error_score="raise"``).
+        See :doc:`Choose smoothing by held-out prediction </how-to/choose-smoothing-by-holdout>`.
+        A ``SuperLSS`` has no configured smoothing to hold fixed, so its
+        default is ``"fit_reml"``, or ``"fit"`` when ``fit_kwargs`` gives
+        ``lambdas``. On an unfitted ``SuperLSS`` with smooth terms, ``"fit"``
+        needs those ``lambdas``: without them every fold fails, and each
+        failure is logged.
     scoring : str, callable, or sequence thereof, optional
         Metrics to evaluate. Built-in for a SuperGLM: ``"deviance"``, ``"nll"``,
         ``"gini"``; ``"deviance"`` by default. Built-in for a SuperLSS:

@@ -104,36 +104,33 @@ ncv_model = SuperGLM(family="gaussian", features=spec).fit_ncv(X, y, groups=grou
 :name: fig-ncv-grouped-curve
 :alt: Scatter of 600 simulated grouped observations and 30 group means with the true smooth curve, an overly wiggly fit_reml curve, and a smooth fit_ncv curve tracking the truth.
 
-Simulated grouped data (30 groups of 20 rows). `fit_reml` treats each displaced cluster of 20 rows as signal and spends 17.3 effective degrees of freedom chasing the group shocks (RMSE 0.205 against the truth). Holding out whole groups with `fit_ncv` drops the curve to 4.0 EDF and cuts the error against the truth to 0.075.
+Simulated grouped data (30 groups of 20 rows). `fit_reml` bends toward each displaced cluster; holding out whole groups with `fit_ncv` recovers the smooth curve.
 ```
 
 Because 20 rows in the same group all sit above or below the curve together,
 `fit_reml` picks a small smoothing parameter ($\lambda = 0.25$, EDF 17.3) and
-bends toward every group's shock, leaving an RMSE of 0.205 against the true
-curve. `fit_ncv` removes all 20 rows of each group before predicting them; a
-bump fitted to one group hurts predictions for neighbouring groups, so the
-search moves to $\lambda = 343.2$ (EDF 4.0) and cuts the error against the true
-curve by 63.2%, down to 0.075.
+chases every group's shock (RMSE 0.205 against the truth). `fit_ncv` removes
+all 20 rows of each group before predicting them; a bump fitted to one group
+hurts predictions for neighbouring groups, so the search moves to
+$\lambda = 343.2$ (EDF 4.0) and cuts RMSE by 63.2%, to 0.075.
 
 ### Held-out error against smoothing
 
 Sweeping $\lambda$ by hand across seven decades on the same grouped dataset
-shows what `fit_ncv` optimises. Each point on the curve below is the mean
-leave-group-out squared error per row:
+shows what `fit_ncv` optimises:
 
 ```{figure} ../images/ncv/criterion_vs_smoothing.png
 :name: fig-ncv-criterion-vs-smoothing
 :alt: Leave-group-out mean squared error plotted against smoothing parameter lambda on a log axis, with fit_reml marked high on the overfitted left side and fit_ncv marked at the minimum.
 
-Leave-group-out mean squared error on the grouped dataset above. `fit_reml` lands at $\lambda = 0.25$ (mean held-out error 0.571), well up the overfitted left side. `fit_ncv` finds the bottom of the curve directly at $\lambda = 343.2$ (mean held-out error 0.421, a 26.4% drop) in 5 outer steps.
+Leave-group-out mean squared error per row on the grouped dataset above, with `fit_reml` on the overfitted left side and `fit_ncv` at the minimum.
 ```
 
-At small $\lambda$ the spline follows individual group shocks and predicts
-unseen groups poorly (mean held-out error 0.571 at REML's $\lambda = 0.25$). At
-very large $\lambda$ the curve collapses toward a straight line and misses the
-true curvature. `fit_ncv` uses the analytic gradient of this curve to walk to
-its minimum at $\lambda = 343.2$ (mean held-out error 0.421) in 5 steps, without
-running a grid search.
+At small $\lambda$ the spline follows individual group shocks (`fit_reml`'s
+$\lambda = 0.25$ gives mean held-out error 0.571); at very large $\lambda$ it
+collapses toward a straight line and misses the true curvature. `fit_ncv` uses
+the analytic gradient to walk to the bottom at $\lambda = 343.2$ (mean held-out
+error 0.421, a 26.4% drop) in 5 outer steps, without a grid search.
 
 ## Spatial grids with ring neighbourhoods
 
@@ -180,14 +177,15 @@ neighbours (19 cells in total; corner and edge cells remove 7 to 18).
 :name: fig-ncv-spatial-ring-grid
 :alt: Three hexagonal grid heat maps comparing the true spatial risk surface with an example 2-ring highlighted, a blotchy fit_reml surface, and a smoother fit_ncv surface using 2-ring neighbours.
 
-Simulated $16 \times 16$ hexagonal grid (256 cells) with locally correlated spatial disturbances. Left: true spatial risk surface with one interior cell (red) and its 18 ring neighbours (amber) outlined. Centre: `fit_reml` spends 52.2 EDF chasing local pockets (RMSE 0.374). Right: `fit_ncv` with 2-ring neighbourhoods drops to 30.8 EDF and cuts RMSE by 19.3%, to 0.302.
+Simulated $16 \times 16$ hexagonal grid (256 cells) with locally correlated spatial disturbances. Left: true spatial risk surface with one interior cell (red) and its 18 ring neighbours (amber) outlined. Centre: `fit_reml`. Right: `fit_ncv` with 2-ring neighbourhoods.
 ```
 
-Because `fit_reml` assumes every hex cell is independent, it spends 52.2
-effective degrees of freedom fitting isolated pockets across the grid (RMSE
-0.374 against the true surface). Holding out each cell's 2-ring neighbourhood
-with `fit_ncv` lowers the effective degrees of freedom to 30.8 and cuts the
-spatial RMSE by 19.3%, to 0.302.
+Because `fit_reml` assumes independent cells, it spends 52.2 effective degrees
+of freedom fitting isolated pockets across the grid (RMSE 0.374 against the
+true surface). Holding out each cell's 2-ring neighbourhood with `fit_ncv`
+lowers the effective degrees of freedom to 30.8 and cuts RMSE by 19.3%, to
+0.302. Even so, `fit_ncv`'s map still shows pockets the true surface does not
+have: it cuts the error by 19.3%, rather than removing the disturbance.
 
 ## Inspecting held-out predictions by group
 
@@ -286,19 +284,17 @@ RMSE ratio (`fit_ncv` / `fit_reml`) against the true curve over 50 random seeds 
 
 Read the three rows plainly:
 
-- **Where `fit_ncv` wins**: with 30 correlated groups, `fit_ncv` beats
-  `fit_reml` on 48 of 50 seeds, cutting median error against the truth from
-  0.246 to 0.172 (median ratio 0.71×, and no seed worse than 1.02×).
-- **Where `fit_ncv` loses — few groups**: with only 5 groups, every fit warns
-  that the criterion is noisy (50 of 50 seeds). `fit_ncv` loses on 29 of 50
-  seeds, has higher median RMSE (0.367 against 0.348), and reaches 1.94× the
-  error of `fit_reml` on the worst seed.
+- **Where `fit_ncv` wins**: with 30 correlated groups, it beats `fit_reml` on
+  48 of 50 seeds (median ratio 0.71×, worst 1.02×).
+- **Where `fit_ncv` loses — few groups**: with 5 groups, every fit warns that
+  the criterion is noisy (50 of 50 seeds), `fit_ncv` loses on 29 of 50 seeds,
+  and the worst seed reaches 1.94× `fit_reml`'s error.
 - **Where `fit_ncv` does not pay — independent rows**: with no shared group
-  noise, median RMSE is effectively tied (0.0515 against 0.0520), mean RMSE
-  is slightly worse for `fit_ncv` (0.0548 against 0.0542), occasional seeds
-  under-smooth badly (up to 1.76×), and `fit_ncv` still does more fitting work
-  (median 9 criterion evaluations and 10 inner solves against 6 REML iterations;
-  on the 30-group model it also runs a median of 300 leave-out factorisations).
+  noise, medians tie (0.0515 against 0.0520), mean RMSE is slightly higher for
+  `fit_ncv` (0.0548 against 0.0542), occasional seeds under-smooth up to 1.76×,
+  and it still does more fitting work (median 10 inner solves against 6 REML
+  iterations; on the 30-group model, also a median of 300 leave-out
+  factorisations).
 
 ### Practical limits to keep in mind
 
@@ -342,13 +338,17 @@ error naming what is unsupported and what to do instead:
   part, or use `fit` / `fit_path` for sparse selection.
 - **Shape-constrained terms**: monotone, convex, concave, capped or step-limited
   terms (`Constraint.fit.*`) are not supported.
-- **Credibility terms**: `RandomEffect` and `FactorSmooth` are not supported.
+- **Credibility terms**: `RandomEffect` and `FactorSmooth` are not supported
+  (and `direct_solve="structured"` is refused before fitting).
 - **Distributional models**: `SuperLSS` does not offer `fit_ncv`.
 - **Factor levels isolated in one neighbourhood**: if every positive-weight row
   of a categorical level (including the reference level) lies inside a single
   neighbourhood, holding that neighbourhood out leaves nothing to identify that
   level. `fit_ncv` refuses before fitting and names the term, level and
-  neighbourhood; merge the level or choose a split that divides its rows.
+  neighbourhood; merge the level or choose a split that divides its rows. A
+  neighbourhood whose remaining rows fail to identify the model for another
+  reason (such as two columns coinciding once that neighbourhood leaves) is
+  refused before the search starts.
 
 ## How `fit_ncv` relates to `cross_validate`
 
@@ -359,37 +359,78 @@ play complementary roles:
 - **`fit_ncv()` chooses** the smoothing parameters inside a fit using the same
   kind of hold-out.
 
-When you pass the same `cv` splitter and `groups` to both,
-`model.ncv_diagnostics()["criterion_mean"]` is the pooled held-out deviance
-that `cross_validate(..., fit_mode="fit")` computes at the chosen smoothing,
-holding the full model's spline knots and factor levels fixed across folds
-(exact for Gaussian, within the one-step approximation for Poisson; if knots or
-factor levels are rebuilt inside each fold, the two differ by that rebuild).
+When you pass the same `cv` splitter and `groups` to both, on a model whose
+knots and factor levels do not depend on the fold,
+`model.ncv_diagnostics()["criterion_mean"]` equals
+`cross_validate(..., fit_mode="fit").pooled_scores["deviance"]` at the chosen
+smoothing (exact for Gaussian, within the one-step approximation for Poisson;
+if knots or factor levels are rebuilt per fold, the two differ by that rebuild).
 
 To check honestly on your own book whether choosing smoothing by `fit_ncv`
-actually improves out-of-sample predictions over `fit_reml`, run an outer
+improves out-of-sample predictions over `fit_reml`, run an outer
 `cross_validate` over your groups with `fit_mode="fit_ncv"` beside
 `fit_mode="fit_reml"`:
 
 ```python
 from sklearn.model_selection import GroupKFold
-from superglm import cross_validate
+from superglm import Spline, SuperGLM, cross_validate
 
+model = SuperGLM(family="gaussian", features={"x": Spline(kind="ps", k=25)})
 outer = GroupKFold(n_splits=5)
 
-reml_cv = cross_validate(
-    model, X, y, cv=outer, groups=groups, sample_weight=exposure, fit_mode="fit_reml"
-)
-ncv_cv = cross_validate(
-    model, X, y, cv=outer, groups=groups, sample_weight=exposure, fit_mode="fit_ncv"
-)
+reml_cv = cross_validate(model, X, y, cv=outer, groups=groups, fit_mode="fit_reml")
+ncv_cv = cross_validate(model, X, y, cv=outer, groups=groups, fit_mode="fit_ncv")
 ```
 
-In each outer fold, `fit_mode="fit_ncv"` slices `groups` to that fold's
-training rows and chooses smoothing there alone, so the outer test fold never
-leaks into the smoothing choice. Compare the fold-level held-out deviances
-(not just one average) before switching a production tariff from `fit_reml` to
-`fit_ncv`.
+How `fit_mode="fit_ncv"` runs inside each outer fold:
+
+- **Inner hold-out**: when `groups` is passed to `cross_validate`, it is
+  forwarded to the outer splitter and sliced to each fold's training rows for
+  `fit_ncv`, so by default every training group in that fold is held out in
+  turn. Pass an inner splitter as `fit_kwargs={"cv": inner}` to hold out inner
+  folds instead (the same splitter object is reused across folds and receives
+  the sliced `groups`); omit both `groups` and an inner `cv` for single-row
+  hold-out. `fit_kwargs` cannot set `groups` (pass it to `cross_validate` so it
+  slices per fold) or `neighbours` (whose row positions index the whole frame).
+- **Cost and `warm_start`**: every outer fold runs a whole `fit_ncv` smoothing
+  search on its training rows (several `fit_reml` fits' worth each). Unlike
+  `fit_mode="fit_reml"`, `warm_start` defaults to `False` for `"fit_ncv"`,
+  because the held-out criterion can have more than one local minimum and
+  starting later folds from the first converged fold's smoothing can move them
+  to a different stop than their own rows would choose.
+- **Fold table (`result.fold_scores`)**: adds `n_ncv_iter` (accepted smoothing
+  search steps) and `warm_started`. A fold's `converged` is `True` only when
+  both its smoothing search and its final coefficient fit converged; a fold
+  whose search stops short is still fitted and scored, with `converged=False`
+  and a `ConvergenceWarning`.
+- **Per-fold refusals**: model-level refusals (an unsupported family,
+  `discrete=True`, or a `SuperLSS`) raise before any fold runs. A refusal that
+  depends on a fold's rows — for instance, only one group left in a training
+  fold, or a factor level whose weighted rows all sit in one group of that fold
+  — fails that fold only: under the default `error_score=np.nan`, `fold_scores`
+  records `NaN` for that fold's scores and logs a warning naming the fold while
+  the remaining folds are scored (under `error_score="raise"`, the exception
+  carries a note naming the fold). Choose outer and inner groupings that leave
+  several groups in every training fold.
+
+Running the call above on the 30-group simulated Gaussian book from earlier
+(5 outer folds, each training on 24 groups of 20 rows and holding out those 24
+groups in turn inside `fit_ncv`) gives:
+
+| Outer fold | `fit_reml` deviance | `fit_ncv` deviance | Delta (`ncv − reml`) | `fit_reml` EDF | `fit_ncv` EDF | `n_ncv_iter` |
+|---|---:|---:|---:|---:|---:|---:|
+| 0 | 0.784 | 0.480 | −0.304 | 18.94 | 5.22 | 5 |
+| 1 | 0.662 | 0.512 | −0.150 | 16.09 | 5.33 | 7 |
+| 2 | 0.393 | 0.301 | −0.092 | 19.18 | 4.85 | 7 |
+| 3 | 0.496 | 0.418 | −0.078 | 17.83 | 4.60 | 6 |
+| 4 | 0.563 | 0.523 | −0.040 | 19.34 | 4.73 | 6 |
+| **Mean / pooled** | **0.579** | **0.447** | **−0.133 (−22.9%)** | — | — | — |
+
+All five folds converged in both modes with zero warnings (`effective_df` in
+`fold_scores` includes the intercept, and `warm_started` was `False` on every
+`fit_ncv` fold). `fit_ncv` lowered held-out deviance on all 5 folds, cutting
+pooled deviance by 22.9%. Compare the fold-level deltas (not just one average)
+before switching a production tariff from `fit_reml` to `fit_ncv`.
 
 ## Reading diagnostics, stop reasons and warnings
 
@@ -407,10 +448,12 @@ diag["at_bound"]           # components sitting on the floor or ceiling of the s
 ```
 
 `converged` is `True` only when **both** `search_converged` and
-`coefficients_converged` are `True`. A search that stops early, or a final
-coefficient fit that stops early, still returns a fitted model and discloses
-the stop with a `ConvergenceWarning`; it is never silently treated as converged
-and never refused.
+`coefficients_converged` are `True`. A search or final coefficient fit that
+stops early still returns a fitted model and discloses the stop with a
+`ConvergenceWarning`; it is never silently treated as converged and never
+refused. `model.summary()` shows `Method: NCV` and repeats any non-convergence
+or bound note, while `model.reml_diagnostics()` answers with `enabled=False`
+and `criterion="ncv"` (no REML score) and points to `ncv_diagnostics()`.
 
 ### Stop reasons (`termination_reason`)
 
@@ -425,8 +468,8 @@ and never refused.
 
 ### Warnings you may see
 
-- **Fewer than 10 neighbourhoods (`UserWarning`)**: emitted whenever the fit
-  has fewer than 10 neighbourhoods. Add more groups or folds if available.
+- **Fewer than 10 neighbourhoods (`UserWarning`)**: see
+  [Practical limits to keep in mind](#practical-limits-to-keep-in-mind).
 - **Unconverged search or final coefficient fit (`ConvergenceWarning`)**:
   names which stage stopped and why. If `search_converged` is `True` but
   `coefficients_converged` is `False`, the smoothing search succeeded while the
@@ -478,8 +521,15 @@ to obtain the leave-out predictor on $d(k)$ (Wood, 2024).
   over the estimated smoothing parameters, and the model is then fitted and
   published at the chosen smoothing using the same steps as `fit()`.
 
-R's `mgcv` package also provides neighbourhood cross-validation via
-`method="NCV"`.
+**For readers familiar with `mgcv`:** R's `mgcv` package offers the same method
+via `method="NCV"`. Both engines optimise the same score — the summed held-out
+deviance with prior weights, not averaged and not scaled — and both use one
+Newton step per neighbourhood for non-Gaussian families, choosing the same fit
+on the same design and penalties. `fit_ncv`'s standard errors are the ordinary
+ones at the chosen smoothing, whereas `mgcv`'s default on single-row and
+row-with-neighbours structures adjusts them for the neighbourhood structure, so
+the two differ there unless `mgcv` is told `nei$jackknife = FALSE`. When
+comparing the two engines directly, compare without an offset.
 
 ## Reference
 

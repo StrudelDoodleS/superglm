@@ -293,8 +293,54 @@ def _install_execution_doubles(monkeypatch) -> dict[str, object]:
     editor_session = create_autospec(EditorSession, instance=True, spec_set=True)
     editor_session.widget.return_value = object()
 
-    for name in ("fit", "fit_reml", "apply_shape_postfit"):
+    for name in ("fit", "fit_reml", "fit_ncv", "apply_shape_postfit"):
         _method_double(monkeypatch, superglm.SuperGLM, name, side_effect=return_model)
+    _method_double(
+        monkeypatch,
+        superglm.SuperGLM,
+        "ncv_diagnostics",
+        return_value={
+            "method": "fit_ncv",
+            "criterion": 1.0,
+            "criterion_mean": 0.1,
+            "neighbourhoods": {
+                "form": "groups",
+                "splitter": None,
+                "count": 5,
+                "size_min": 4,
+                "size_median": 4.0,
+                "size_max": 4,
+                "pairs_scored": 20,
+                "rows_scored": 20,
+                "rows_scored_more_than_once": 0,
+            },
+            "n_iter": 1,
+            "n_evaluations": 2,
+            "infeasible_trials": 0,
+            "infeasible_reasons": {},
+            "termination_reason": "gradient",
+            "converged": True,
+            "search_converged": True,
+            "coefficients_converged": True,
+            "coefficient_termination": None,
+            "heldout_available": True,
+            "heldout_failure": None,
+            "lambdas": {"x": 1.0},
+            "start_lambdas": {"x": 1.0},
+            "gradient": [0.0],
+            "at_bound": [],
+            "bound_pressure": [],
+            "lambda_floor": 1e-6,
+            "lambda_ceiling": 1e6,
+            "lambda_history": [{"x": 1.0}],
+            "criterion_history": [1.0],
+            "work": {},
+        },
+    )
+    _method_double(monkeypatch, superglm.SuperGLM, "ncv_heldout", return_value=pd.DataFrame())
+    _method_double(
+        monkeypatch, superglm.SuperGLM, "ncv_heldout_groups", return_value=pd.DataFrame()
+    )
     _method_double(monkeypatch, superglm.SuperLSS, "fit_reml", side_effect=return_model)
     _method_double(monkeypatch, superglm.SuperLSS, "apply_shape_postfit", side_effect=return_model)
     _method_double(
@@ -471,6 +517,7 @@ def _documentation_namespace(results: dict[str, object]) -> dict[str, object]:
             "Region": np.take(["R11", "R24"], index % 2),
             "Exposure": exposure,
             "ClaimNb": index % 3,
+            "policy_id": index % 5,
             "x": np.linspace(0.0, 1.0, n_rows),
             "x1": np.linspace(0.0, 1.0, n_rows),
             "x2": np.linspace(1.0, 2.0, n_rows),
@@ -496,6 +543,8 @@ def _documentation_namespace(results: dict[str, object]) -> dict[str, object]:
             "claim_count": y,
             "claim_counts": y,
             "claim_rate": y / exposure,
+            "claims": y,
+            "col": index % 5,
             "column_transformer": ColumnTransformer(
                 [("age", "passthrough", ["age"])],
             ),
@@ -505,6 +554,8 @@ def _documentation_namespace(results: dict[str, object]) -> dict[str, object]:
             "exposure_train": exposure,
             "features": features,
             "feats": features,
+            "fleets": index % 5,
+            "groups": index % 5,
             "holdout_df": frame,
             "log_exposure": np.log(exposure),
             "model": model,
@@ -512,16 +563,20 @@ def _documentation_namespace(results: dict[str, object]) -> dict[str, object]:
             "mu_holdout": np.ones(n_rows),
             "mu_new": np.ones(n_rows),
             "model_template": model,
+            "near": [np.array([i]) for i in range(n_rows)],
             "np": np,
+            "o": np.log(exposure),
             "offset": np.log(exposure),
             "pd": pd,
             "result": results["tweedie_profile"],
+            "row": index // 5,
             "score_df": frame,
             "score_exposure": exposure,
             "test": frame,
             "train": frame,
             "train_df": frame,
             "validation_weight": exposure,
+            "w": exposure,
             "w_next": exposure,
             "w_train": exposure,
             "w_val": exposure,
