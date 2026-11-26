@@ -414,8 +414,8 @@ class FactorSmooth:
         below ``k=73``, then a band of middle orders (``k=100``: ``17 <= m <= 75``),
         and orders near 480 and above, whose penalty's scale leaves float64's range;
         the error names the orders ``k`` supports.  With the wiggle's smoothing
-        parameter fixed at zero the penalty's condition does not enter, and every
-        ``m`` is accepted.
+        parameter fixed at zero the penalty's condition does not enter, and
+        every ``m`` in ``1 <= m < k`` is accepted.
     levels : list | tuple | Series | ndarray | CategoricalDtype, optional
         The grouping column's level universe.  Under ``basis="fs"`` a declared
         level with no training rows keeps its curve block and shrinks to zero

@@ -1976,7 +1976,7 @@ class SuperGLM:
             subsampling.
         residual_type : str
             .. deprecated::
-                Ignored. All panels use quantile residuals.
+                Ignored. All residual panels use quantile residuals.
 
         Returns
         -------

@@ -1988,9 +1988,11 @@ def build_rating_table_payload(
       in the impact sheet's ``band_*`` columns on its main and interaction rows.
       A term with a ``Constraint.postfit`` repair or a model with editor
       coefficient edits is refused under ``bin_strategy="exact"``.
-    - ``"ppform"`` exports each spline's exact piecewise-polynomial form: one
-      row per knot interval with SEVEN columns rather than three (``<feature>``,
-      ``Relativity``, ``Weight``, followed by ``a``, ``b``, ``c``, ``d``).
+    - ``"ppform"`` exports each spline of ``degree <= 3`` in its exact
+      piecewise-polynomial form: one row per knot interval with SEVEN columns
+      rather than three (``<feature>``, ``Relativity``, ``Weight``, followed by
+      ``a``, ``b``, ``c``, ``d``); higher-degree splines (``degree > 3``) cannot
+      be represented by four coefficients and raise ``PpformNotExactError``.
       ``Relativity`` is the curve value at the interval's lower bound
       (``u = 0``), not an interval average. A consumer reads both bounds back
       out of the interval key and evaluates ``exp(a + b*u + c*u**2 + d*u**3)``
@@ -2008,9 +2010,11 @@ def build_rating_table_payload(
       ``allow_unbounded_extrapolation=True`` (which clips tails to the boundary,
       so exactness holds over the knot range alone). Terms with
       ``Constraint.postfit`` repairs are refused under ``"ppform"``;
-      ``Constraint.fit`` constraints convert unchanged. ``Polynomial`` terms
-      stay binned, as do continuous-by-continuous interaction grids; converted
-      splines are omitted from the discretization-impact sweep.
+      ``Constraint.fit`` constraints convert unchanged. Splines with
+      ``degree > 3`` (or whose curve cannot be recovered exactly on their knots)
+      raise ``PpformNotExactError``. ``Polynomial`` terms stay binned, as do
+      continuous-by-continuous interaction grids; converted splines are omitted
+      from the discretization-impact sweep.
 
     .. rubric:: Interactions and discretization impact
 
@@ -2019,12 +2023,16 @@ def build_rating_table_payload(
     custom grid-shaped interaction over a ``Categorical`` or unspec'd parent is
     refused with ``NotImplementedError``. ``SplineCategorical`` interactions on
     numeric parents export as ``"spline_cells"`` blocks keyed on covariate bins
-    and categorical level text (base level ``1.0``; unseen levels have no column
-    and are rated as the base level; distinct levels sharing one text raise
-    ``ValueError``). Under non-``"exact"`` strategies, cells are evaluated at
-    bin representatives (exact at representatives, approximate between them).
-    When the spline parent is an ``OrderedCategorical``, the interaction exports
-    as an exact ``"cells"`` block and is excluded from the impact sheet.
+    and categorical level text (base level ``1.0``; distinct levels sharing one
+    text raise ``ValueError``). A level unseen in training has no column and
+    would be rated as the base level (``1.0``), which matches the model only
+    under ``unseen="base"``; the parent's other unseen-level policies still
+    apply when scoring with the model (the default ``unseen="error"`` raises
+    ``ValueError``, and a named group routes unseen levels to that group). Under
+    non-``"exact"`` strategies, cells are evaluated at bin representatives
+    (exact at representatives, approximate between them). When the spline parent
+    is an ``OrderedCategorical``, the interaction exports as an exact
+    ``"cells"`` block and is excluded from the impact sheet.
 
     All approximated blocks (binned main effects, sampled grids, binned
     spline-categorical deviations, and ``offset_kind="binned"``) are swept
@@ -2070,10 +2078,12 @@ def build_rating_table_payload(
         ``model.predict`` saturates on ``X``; if any emitted relativity or
         per-unit offset multiplier is non-finite or outside
         ``(exp(-500), exp(500))``; or under ``continuous_kind="ppform"`` if a
-        convertible spline carries a ``Constraint.postfit`` repair or
+        convertible spline carries a ``Constraint.postfit`` repair, uses
         ``extrapolation="extend"`` without
-        ``allow_unbounded_extrapolation=True``. Checked before
-        ``base_relativity`` when both fail.
+        ``allow_unbounded_extrapolation=True``, or has ``degree > 3`` / cannot
+        be recovered exactly on its knots (raising ``PpformNotExactError``, a
+        ``ValueError`` subclass). Checked before ``base_relativity`` when both
+        fail.
     OverflowError
         If an approximated prediction at the exported ``n_bins`` resolution is
         non-finite or zero (even when ``impact_bins=()``).
@@ -2445,12 +2455,15 @@ def export_rating_tables(
         - ``"binned"`` writes a three-column lookup block of interval averages
           (measured on a motor book with 81 distinct ages at ``n_bins=150``,
           the worst row was mis-rated by 60% in sparse tail intervals).
-        - ``"ppform"`` writes each spline's exact piecewise-polynomial form as
-          SEVEN columns rather than three: ``<feature>``, ``Relativity``, and
-          ``Weight`` followed by ``a``, ``b``, ``c``, ``d`` (blocks are laid
-          out at their own widths, so a seven-column block shifts blocks to its
-          right). A consumer reads both bounds back out of the interval key and
-          evaluates ``exp(a + b*u + c*u**2 + d*u**3)`` with
+        - ``"ppform"`` writes each spline of ``degree <= 3`` in its exact
+          piecewise-polynomial form as SEVEN columns rather than three:
+          ``<feature>``, ``Relativity``, and ``Weight`` followed by ``a``,
+          ``b``, ``c``, ``d`` (blocks are laid out at their own widths, so a
+          seven-column block shifts blocks to its right). Splines with
+          ``degree > 3`` (or whose curve cannot be recovered exactly on their
+          knots) raise ``PpformNotExactError``. A consumer reads both bounds
+          back out of the interval key and evaluates
+          ``exp(a + b*u + c*u**2 + d*u**3)`` with
           ``u = (x - lower) / (upper - lower)`` on bounded rows, and reads
           ``Relativity`` directly on unbounded tail rows (which carry text
           bounds such as ``[-inf, 18.0)`` and ``b = c = d = 0``; do not evaluate

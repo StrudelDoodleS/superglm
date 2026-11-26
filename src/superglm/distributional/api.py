@@ -392,7 +392,8 @@ class SuperLSS:
         coefficient for a predictor. The family defines these boundaries.
     coefficient_curvature : {"observed", "fisher"}, default="observed"
         Curvature used for coefficient updates. ``"fisher"`` requires a
-        family that supplies expected information.
+        family that supplies expected information and complete (non-truncated,
+        non-censored) observations.
 
     Notes
     -----
@@ -536,8 +537,9 @@ class SuperLSS:
         """Return the curvature the dense coefficient solve is asked to use.
 
         ``"observed"`` (the default) is Newton's method on the observed Hessian
-        for every family; ``"fisher"`` requests Fisher scoring and needs a
-        family with expected information.  Under either policy a materially
+        for every family; ``"fisher"`` requests Fisher scoring and requires a
+        family with expected information and complete (non-truncated,
+        non-censored) observations.  Under either policy a materially
         indefinite terminal penalized observed Hessian falls back to penalized
         expected information when the family supplies it, and otherwise to the
         nearest positive semidefinite curvature; the fit is not refused, and
@@ -1812,8 +1814,9 @@ class SuperLSS:
         weights select the row's weighted predictive law, while frequency
         weights return the compressed contribution of the repeated unit law.
         ``truncation`` and ``censored`` are the bounds the model was fitted
-        with, read as in :meth:`fit`; only the log score supports truncated or
-        censored rows, so pass ``which=("log",)`` with them.
+        with, read as in :meth:`fit`; CRPS and ``thresholds`` require a scalar
+        family and complete rows, so pass ``which=("log",)`` for vector
+        families (such as ``DirichletLSS``) and for truncated or censored rows.
         """
         self._warn_bounds_unread("scores", truncation, censored)
         return score_table(
@@ -2145,8 +2148,10 @@ class SuperLSS:
         point rather than a few quantiles of it: it is the picture that shows a
         shape change -- a mass moving into the tail, a mode splitting -- which
         no set of quantile curves states outright.
-        This payload supports continuous families only; families with atoms
-        refuse. ``weights`` gives positive prior-law weights per swept point,
+        This payload supports continuous scalar families with a CDF and quantile
+        function only; vector families (such as ``DirichletLSS``) and families
+        with atoms or without a CDF/quantile refuse with ``NotImplementedError``.
+        ``weights`` gives positive prior-law weights per swept point,
         with the unit law as the default, as in :meth:`risk_curves`.
         """
         require_scalar_response(self.family, "density_fan")

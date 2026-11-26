@@ -630,7 +630,8 @@ class PSpline(_BSplineBase):
 
     This is the concrete P-spline implementation. For the recommended
     public API, use :func:`Spline` which dispatches to ``PSpline``,
-    ``NaturalSpline``, or ``CubicRegressionSpline`` based on ``kind``.
+    ``BSplineSmooth``, ``NaturalSpline``, ``CubicRegressionSpline``, or
+    ``CardinalCRSpline`` based on ``kind``.
 
     The ``m`` parameter controls the discrete difference order(s) for the
     penalty (default 2, second-difference).
@@ -694,10 +695,13 @@ class PSpline(_BSplineBase):
         QP solver: monotone rules constrain adjacent B-spline coefficient
         differences to one sign, and convex/concave rules enforce exact
         curvature constraints. Both exact and ``discrete=True`` fits are
-        supported. With ``fit_reml()``, fixed lambdas work directly;
+        supported; fit-time rules require ``select=False`` and do not accept
+        ``max_step``. With ``fit_reml()``, fixed lambdas work directly;
         automatic lambda estimation runs unconstrained REML followed by a
-        constrained refit. Fit-time convexity/concavity is supported for
-        degrees 1 to 3; higher degrees require ``Constraint.postfit.*``.
+        constrained refit. Whole-range fit-time convexity/concavity is
+        supported for degrees 1 to 3 (higher degrees require
+        ``Constraint.postfit.*``); stretch rules require ``degree >= 2`` for
+        direction and ``degree >= 3`` for curvature.
     m : int or tuple of int, default 2
         Discrete difference order(s) for the penalty.
     lambda_policy : LambdaPolicy, dict of LambdaPolicy, or None, default None
@@ -835,11 +839,13 @@ class BSplineSmooth(_IntegratedPenaltySpline, _BSplineBase):
         ``Constraint.postfit.decreasing``, ``Constraint.postfit.convex``, or
         ``Constraint.postfit.concave``. Fit-time monotone and curvature
         constraints apply on the spline term's linear-predictor contribution
-        via the constrained QP solver. With ``fit_reml()``, fixed lambdas work
+        via the constrained QP solver (requires ``select=False``; ``max_step``
+        is not accepted on splines). With ``fit_reml()``, fixed lambdas work
         directly; automatic lambda estimation runs unconstrained REML followed
-        by a constrained refit rather than joint constrained REML. Fit-time
-        convexity/concavity is supported for degrees 1 to 3; higher degrees
-        require ``Constraint.postfit.*``.
+        by a constrained refit rather than joint constrained REML. Whole-range
+        fit-time convexity/concavity is supported for degrees 1 to 3 (higher
+        degrees require ``Constraint.postfit.*``); stretch rules require
+        ``degree >= 2`` for direction and ``degree >= 3`` for curvature.
     m : int or tuple of int, default 2
         Integrated derivative order(s) for the penalty.
     lambda_policy : LambdaPolicy, dict of LambdaPolicy, or None, default None
@@ -1062,7 +1068,8 @@ class CubicRegressionSpline(_IntegratedPenaltySpline):
         ``Constraint.fit.concave``, or any of the corresponding
         ``Constraint.postfit.*`` kinds. Fit-time constraints apply on the
         spline term's linear-predictor contribution via the constrained QP
-        solver. An increasing or decreasing rule holds adjacent B-spline
+        solver (requires ``select=False``; ``max_step`` is not accepted on
+        splines). An increasing or decreasing rule holds adjacent B-spline
         coefficient differences of the natural cubic to one sign; this is
         sufficient for monotonicity (like Wood 1994 behind mgcv's
         ``mono.con``) and more knots narrow the gap to all monotone curves.
@@ -1414,7 +1421,14 @@ def Spline(
     knot_alpha : float, default 0.2
         Density-weighting exponent for ``knot_strategy="quantile_tempered"``.
     constraint : ConstraintSpec, ConstraintRules, or None, default None
-        Shape constraint(s) for the curve (not supported for ``kind="ns"``).
+        Shape constraint(s) for the curve. Fit-time rules (``Constraint.fit.*``,
+        excluding ``max_step``) are supported for ``"cr"``, ``"ps"``, and
+        ``"bs"`` with ``select=False`` (whole-range curvature requires
+        ``degree <= 3``; stretch rules require ``degree >= 2`` for direction
+        and ``degree >= 3`` for curvature). ``"cr_cardinal"`` supports
+        ``Constraint.postfit.*`` only (fit-time rules raise
+        ``NotImplementedError``), and ``"ns"`` supports no constraints (raises
+        ``NotImplementedError``).
     m : int or tuple of int, default 2
         Penalty order(s) (difference order for ``"ps"``/``"ns"``, integrated
         derivative order for ``"bs"``/``"cr"``; ``"cr"`` accepts up to 3 and
@@ -1425,10 +1439,11 @@ def Spline(
         Ranges on which the curve is pinned to a polynomial while the rest
         remains a penalised smooth (``kind="bs"`` or ``kind="cr"`` only).
     shape_engine : {"qp", "scop"}, default "qp"
-        Engine for fit-time shape constraints. Every kind fits on the
-        constrained QP solver; ``"scop"`` names the retired SCOP engine and is
-        accepted with :class:`SCOPRetiredWarning` while fitting on the QP
-        solver instead.
+        Engine for fit-time shape constraints. Supported kinds (``"cr"``,
+        ``"ps"``, and ``"bs"``) fit on the constrained QP solver;
+        ``"cr_cardinal"`` takes post-fit constraints only and ``"ns"`` takes no
+        constraints. ``"scop"`` names the retired SCOP engine and is accepted
+        with :class:`SCOPRetiredWarning` while fitting on the QP solver instead.
 
     Returns
     -------

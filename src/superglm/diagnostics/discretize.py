@@ -1192,8 +1192,9 @@ def discretization_impact(
         at equal geometry-weight mass; ``"uniform"`` uses equal-width bins;
         ``"winsorized"`` uses geometry-weight quantiles on the interior
         ``[p5, p95]`` with dedicated tail bins; ``"exact"`` chooses the fewest
-        bands that keep every value's band average within
-        ``min(band_se * SE, log(1 + band_max_error))`` of the curve, then the
+        bands that keep every positive-weight observed value's band average in
+        ``X`` within ``min(band_se * SE, log(1 + band_max_error))`` of the curve
+        (not unobserved values between them, where the curve can bend), then the
         least weighted squared error, with ``n_bins`` as the maximum band
         count. When that is too few, every tolerance is widened by the least
         factor that fits and ``band_diagnostics`` reports it. A

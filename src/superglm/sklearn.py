@@ -693,8 +693,8 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
     smoothing : {"fixed", "reml"}, default="fixed"
         Keyword only. ``"fixed"`` fits with ``SuperGLM.fit`` at the
         ``spline_penalty`` smoothing; ``"reml"`` fits with
-        ``SuperGLM.fit_reml``, which selects every smoothing parameter by REML
-        and is the fit random effects and factor smooths need.
+        ``SuperGLM.fit_reml``, which selects unfixed smoothing parameters by
+        REML and is the fit random effects and factor smooths need.
     """
 
     def __init__(
@@ -908,8 +908,8 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
     smoothing : {"fixed", "reml"}, default="fixed"
         Keyword only. ``"fixed"`` fits with ``SuperGLM.fit`` at the
         ``spline_penalty`` smoothing; ``"reml"`` fits with
-        ``SuperGLM.fit_reml``, which selects every smoothing parameter by REML
-        and is the fit random effects and factor smooths need.
+        ``SuperGLM.fit_reml``, which selects unfixed smoothing parameters by
+        REML and is the fit random effects and factor smooths need.
     """
 
     def __init__(
