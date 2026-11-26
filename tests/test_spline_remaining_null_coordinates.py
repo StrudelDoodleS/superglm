@@ -866,6 +866,60 @@ def test_reml_finds_a_levels_optimum_beside_a_main_effect_its_bound_holds(
     )
 
 
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "binned"])
+def test_reml_started_beside_the_floor_steps_onto_it(discrete):
+    """Pin a start inside the stop's window of the floor ending on the floor (#735).
+
+    The stop reads an outward score within 0.01 log units of a bound as zero.
+    A search that takes no step there either certifies its own start: held out
+    of the Newton system with no step of its own, a term started 0.009 log
+    units above the floor was returned there, 0.22 nats above the criterion a
+    start on the floor and one 0.011 above it both reach. The clipped Newton
+    step this replaces already moved it onto the floor.
+    """
+    x = np.tile(np.geomspace(1.0, 1e5, 200), 2)
+    level_b = np.repeat([False, True], 200)
+    t = np.log(x) / np.log(x.max())
+    mean = 1.0 + t + np.sin(4.0 * t) + level_b * (1.0 + 2.0 * t + 0.5 * np.cos(3.0 * t))
+    y = mean + 0.1 * np.random.default_rng(5).normal(size=400)
+    frame = pd.DataFrame({"x": x, "g": np.where(level_b, "B", "A")})
+    tolerance = 1e-10
+
+    def stop(start):
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0,
+            discrete=discrete,
+            features={
+                "x": Spline(kind="cr_cardinal", n_knots=20, knot_strategy="quantile_rows"),
+                "g": Categorical(),
+            },
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit_reml(
+                frame,
+                y,
+                lambda2_init={"x": start},
+                reml_tol=tolerance,
+                pirls_tol=tolerance,
+            )
+        return model._reml_result
+
+    on_floor = stop(lambda_box.LAMBDA_FLOOR)
+    box = on_floor.lambda_box
+    assert on_floor.converged
+    assert on_floor.bound_pressure == (("x", "floor"),)
+    for offset in (0.009, 0.011):
+        result = stop(box.floor * np.exp(offset))
+        assert result.converged
+        assert box.side(result.lambdas["x"]) == "floor"
+        assert result.objective == pytest.approx(
+            on_floor.objective, abs=tolerance * (1 + abs(on_floor.objective))
+        )
+
+
 @pytest.mark.parametrize(
     ("repeats", "discrete", "expected_cls"),
     [

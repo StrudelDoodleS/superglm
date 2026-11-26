@@ -689,6 +689,20 @@ def test_unavailable_gradient_after_cap_release_retains_uncertified_fit(monkeypa
     assert restored.terminal_gradient is None and not restored.matched_certified
 
 
+def _stop_under_a_cap_of_ten(outer):
+    """Two location terms started at a cap of 10: one optimum beyond it, one two decades below."""
+    rng = np.random.default_rng(7)
+    x1 = np.sort(rng.uniform(0.0, 1.0, 600))
+    x2 = np.clip(x1 + 0.15 * rng.normal(size=600), -0.5, 1.5)
+    y = np.sin(12.0 * np.pi * x1) + 0.3 * np.sin(2.0 * x2) + 1e-3 * rng.normal(size=600)
+    family = GaussianLS()
+    model = SuperLSS(family, family.location(s("x1", k=12), s("x2", k=12)), family.scale())
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(pd.DataFrame({"x1": x1, "x2": x2}), y, max_lambda=10.0, outer=outer)
+    return model._require_fitted().smoothing
+
+
 @pytest.mark.parametrize("outer", [None, "efs+newton"], ids=["default", "efs+newton"])
 def test_endgame_steps_a_free_term_beside_one_its_cap_holds(outer) -> None:
     """A smoothing parameter held at its cap leaves the other's Newton step alone (#735).
@@ -699,26 +713,56 @@ def test_endgame_steps_a_free_term_beside_one_its_cap_holds(outer) -> None:
     returned it at the cap, 116 nats above the Fellner-Schall search's stop, and
     ``efs+newton`` ended on a rejected line search.
     """
-    rng = np.random.default_rng(7)
-    x1 = np.sort(rng.uniform(0.0, 1.0, 600))
-    x2 = np.clip(x1 + 0.15 * rng.normal(size=600), -0.5, 1.5)
-    y = np.sin(12.0 * np.pi * x1) + 0.3 * np.sin(2.0 * x2) + 1e-3 * rng.normal(size=600)
-    frame = pd.DataFrame({"x1": x1, "x2": x2})
-
-    def stop(outer):
-        family = GaussianLS()
-        model = SuperLSS(family, family.location(s("x1", k=12), s("x2", k=12)), family.scale())
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            model.fit_reml(frame, y, max_lambda=10.0, outer=outer)
-        return model._require_fitted().smoothing
-
-    fellner_schall, fitted = stop("efs"), stop(outer)
+    fellner_schall, fitted = _stop_under_a_cap_of_ten("efs"), _stop_under_a_cap_of_ten(outer)
     assert fitted.convergence_reason == "lambda_cap_unresolved"
     assert fitted.unresolved_upper_bound == ("location:x2#wiggle",)
     assert fitted.lambdas["location:x2#wiggle"] == 10.0
     assert fitted.objective <= fellner_schall.objective
     free = "location:x1#wiggle"
+    assert math.log(fitted.lambdas[free] / fellner_schall.lambdas[free]) == pytest.approx(
+        0.0, abs=1e-2
+    )
+
+
+@pytest.mark.parametrize(
+    "outer", [None, "efs+newton", "efs+stationary"], ids=["default", "efs+newton", "efs+stationary"]
+)
+def test_endgame_keeps_the_fellner_schall_step_of_a_score_it_cannot_sign(
+    monkeypatch, outer
+) -> None:
+    """A score at a cap whose certificate spans zero holds nothing there (#735).
+
+    The first term's score at its cap is +15.9, into the box. Reported instead
+    as -1e-9 with a certificate of 16.9, it reads as pointing out, but the
+    certificate does not settle its sign. Held on that sign, the term lost the
+    Fellner-Schall step such a score takes, and the search returned its start,
+    116 nats above the Fellner-Schall search's stop.
+    """
+    from superglm.distributional.smoothing import newton as newton_module
+
+    fellner_schall = _stop_under_a_cap_of_ten("efs")
+    real = newton_module.laml_derivatives
+    free = "location:x1#wiggle"
+    true_scores = []
+
+    def unsigned_at_the_cap(*args, lambdas, **kwargs):
+        derivatives = real(*args, lambdas=lambdas, **kwargs)
+        if lambdas[free] != 10.0:
+            return derivatives
+        k = derivatives.names.index(free)
+        true_scores.append(float(derivatives.gradient[k]))
+        gradient = derivatives.gradient.copy()
+        certificate = derivatives.gradient_certificate.copy()
+        certificate[k] = abs(gradient[k]) + 1.0
+        gradient[k] = -1e-9
+        return dataclasses.replace(derivatives, gradient=gradient, gradient_certificate=certificate)
+
+    monkeypatch.setattr(newton_module, "laml_derivatives", unsigned_at_the_cap)
+    fitted = _stop_under_a_cap_of_ten(outer)
+
+    assert true_scores and min(true_scores) > 1.0
+    assert fitted.lambdas["location:x2#wiggle"] == 10.0
+    assert fitted.objective <= fellner_schall.objective
     assert math.log(fitted.lambdas[free] / fellner_schall.lambdas[free]) == pytest.approx(
         0.0, abs=1e-2
     )

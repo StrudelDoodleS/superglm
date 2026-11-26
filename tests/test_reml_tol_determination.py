@@ -1832,6 +1832,57 @@ class TestNewtonStepStop:
         assert reads
         assert model._reml_profile.get("reml_newton_step_stop", {}).get("step_taken") is not True
 
+    @pytest.mark.pins_behaviour
+    def test_a_bound_that_lets_go_refuses_the_stop_on_the_held_hessian(self, monkeypatch):
+        """Pin the search reaching the minimum once a bound lets a term go (#735).
+
+        The outer criterion is a quadratic in log lambda about the start, where
+        ``z`` sits on the floor with its score pointing out. The first step is
+        then a negligible Newton step on ``x`` alone, and the coupling turns the
+        score of ``z`` into the box. The held Hessian covers ``x`` only and
+        reads no step left there, so a stop that looks no further returns ``z``
+        on the floor, 0.05 log units short of the quadratic's minimum. A step
+        solved with ``z`` in it, as before the projected step, went straight to
+        that minimum; the stop must see score outside its block to keep that.
+        """
+        from superglm.reml import direct
+
+        rng = np.random.default_rng(11)
+        frame = pd.DataFrame({"x": rng.uniform(size=300), "z": rng.uniform(size=300)})
+        y = np.sin(6.0 * frame["x"]) + 0.5 * frame["z"] + 0.1 * rng.normal(size=300)
+        start = {"x": 1.0, "z": 1e-6}
+        score = np.array([-4e-5, 5e-6])
+        hessian = np.array([[1.0, -0.25], [-0.25, 0.0626]])
+        real_objective, real_gradient = direct.reml_laml_objective, direct.reml_direct_gradient
+
+        def displacement(lambdas):
+            return np.array([np.log(lambdas[name] / start[name]) for name in start])
+
+        def objective(*args, **kwargs):
+            d = displacement(args[6])
+            value = float(score @ d + 0.5 * d @ hessian @ d)
+            return replace(real_objective(*args, **kwargs), value=value)
+
+        def gradient(*args, **kwargs):
+            real_gradient(*args, **kwargs)
+            return score + hessian @ displacement(args[3])
+
+        monkeypatch.setattr(direct, "reml_laml_objective", objective)
+        monkeypatch.setattr(direct, "reml_direct_gradient", gradient)
+        monkeypatch.setattr(direct, "reml_direct_hessian", lambda *_, **__: hessian.copy())
+        monkeypatch.setattr(direct, "reml_w_correction", lambda *_, **__: None)
+        model = SuperGLM(
+            family="gaussian", features={name: Spline(kind="cr", k=6) for name in frame.columns}
+        )
+        model.fit_reml(frame, y, lambda2_init=start, reml_tol=1e-9)
+
+        result = model._reml_result
+        assert result.lambda_box.floor == start["z"]
+        assert result.converged
+        np.testing.assert_allclose(
+            displacement(result.lambdas), -np.linalg.solve(hessian, score), rtol=0.0, atol=1e-9
+        )
+
     def test_a_search_that_never_contracted_stays_a_failure(self, monkeypatch):
         """A dead search also needs a taken step the small one contracted from."""
         from superglm.reml import direct
@@ -1860,7 +1911,8 @@ class TestNewtonStepStop:
         assert model.reml_diagnostics()["termination_reason"] == "line_search_failed"
 
     @pytest.mark.parametrize(
-        "move", ["shoulder", "restoration", "capped", "freezes", "reactivates", "certificate"]
+        "move",
+        ["shoulder", "restoration", "capped", "bound", "freezes", "reactivates", "certificate"],
     )
     def test_dead_search_checks_the_certificate_and_a_valid_newton_predecessor(
         self, monkeypatch, move
@@ -1939,6 +1991,16 @@ class TestNewtonStepStop:
                 result = replace(result, termination_reason="mean_space_boundary")
             return result, inverse, gram
 
+        if move == "bound":
+            # The first term is held by a bound throughout and steps onto it first.
+            monkeypatch.setattr(
+                direct, "bound_held_directions", lambda *_, **__: np.array([True, False])
+            )
+            monkeypatch.setattr(
+                direct,
+                "bound_held_step",
+                lambda *_, **__: np.array([1e-4 if len(freezes) == 1 else 0.0, 0.0]),
+            )
         monkeypatch.setattr(direct, "freeze_flat_directions", freeze)
         monkeypatch.setattr(direct, "reml_direct_hessian", hessian)
         monkeypatch.setattr(direct, "reml_laml_objective", objective)
@@ -1961,6 +2023,9 @@ class TestNewtonStepStop:
             assert len(model._reml_profile["reml_shoulder_reads"]) == 1
         elif move == "capped":
             assert caps
+        elif move == "bound":
+            # A step that moved a bound-held term is never read as Newton's own.
+            assert all(candidate != 1 for candidate, _ in holds)
         if move == "certificate":
             assert model.reml_diagnostics()["termination_reason"] == "converged_at_precision"
             assert "reml_newton_step_stop" not in model._reml_profile

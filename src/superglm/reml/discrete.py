@@ -41,6 +41,7 @@ from superglm.links import stabilize_eta
 from superglm.reml.convergence import (
     FLAT_DIRECTION_FREEZE_FLOOR,
     bound_held_directions,
+    bound_held_step,
     classify_dead_feasible_exit,
     coefficient_walk_guard_stopped,
     concave_live_directions,
@@ -1281,12 +1282,22 @@ def optimize_discrete_reml_cached_w(
         # Concave shoulders take the trust-region boundary step below, not
         # the flipped-curvature Newton step (``freeze_flat_directions``).
         shoulder_d = np.asarray(freeze_decision.shoulder, dtype=bool)
-        # Projected Newton: a direction its bound holds takes no step and stays
-        # out of the Newton system (``bound_held_directions``).
+        # Projected Newton: a direction its bound holds stays out of the Newton
+        # system and steps onto that bound alone (``bound_held_directions``).
         bound_held_d = bound_held_directions(
             grad, rho_clipped, estimated_mask, log_lower=log_lo, log_upper=log_hi
         )
+        bound_step_d = bound_held_step(
+            grad, rho_clipped, bound_held_d & ~frozen_d, log_lower=log_lo, log_upper=log_hi
+        )
         active_idx_d = np.where(~frozen_d & ~shoulder_d & ~bound_held_d)[0]
+        # A step that also moves a shoulder or a bound-held direction is not
+        # Newton's own: no stop and no contraction rate is read from it.
+        off_newton_d = bool(shoulder_d.any() or bound_step_d.any())
+        # A shared pair's half-difference is bounded while both margins take a
+        # Newton or shoulder step; one frozen or held by its bound leaves the
+        # other the coordinate box.
+        pair_exempt_d = frozen_d | bound_held_d
         stop_criterion_frozen_d = frozen_d.copy()
         if profile is not None:
             profile["reml_freeze_decision"] = freeze_record(
@@ -1299,7 +1310,7 @@ def optimize_discrete_reml_cached_w(
             )
 
         # Modified Newton: eigendecompose, flip negatives, floor small eigenvalues
-        if active_idx_d.size == 0 and not shoulder_d.any():
+        if active_idx_d.size == 0 and not off_newton_d:
             rho = rho_clipped
             _t_newton += _time.perf_counter() - _t0
             if poi_iter == 0:
@@ -1351,7 +1362,7 @@ def optimize_discrete_reml_cached_w(
                 m,
                 group_names,
                 shared_tensor_pairs,
-                frozen_d | shoulder_d,
+                pair_exempt_d | shoulder_d,
                 base_cap,
                 cap_v,
             )
@@ -1367,7 +1378,7 @@ def optimize_discrete_reml_cached_w(
                     f"binding={trust_binding}, active={active_idx_d.size}/{m}."
                 )
             for group_name, (i, j) in shared_tensor_pairs:
-                if frozen_d[i] or frozen_d[j]:
+                if pair_exempt_d[i] or pair_exempt_d[j]:
                     continue
                 tensor_step_diag = {
                     "group_name": group_name,
@@ -1387,7 +1398,7 @@ def optimize_discrete_reml_cached_w(
             # A shoulder in an active shared pair keeps the pair's
             # half-difference within cap_v (``_bound_shoulder_in_pair``).
             for _group_name, (i, j) in shared_tensor_pairs:
-                if frozen_d[i] or frozen_d[j]:
+                if pair_exempt_d[i] or pair_exempt_d[j]:
                     continue
                 for own, other in ((i, j), (j, i)):
                     if not shoulder_d[own]:
@@ -1397,6 +1408,7 @@ def optimize_discrete_reml_cached_w(
                     )
                     if scale < 1.0:
                         delta *= scale
+        delta += bound_step_d
         if use_tensor_linesearch and not active_idx_d.size:
             delta_newton = delta
         # Step capping on the generic path: scale the whole vector.
@@ -1417,7 +1429,7 @@ def optimize_discrete_reml_cached_w(
             start_out is None
             and candidate_mode_stationary
             and active_idx_d.size
-            and not shoulder_d.any()
+            and not off_newton_d
             and newton_step_same_terms(previous_idx, active_idx_d)
             and previous_step <= step_bar
             and newton_step_settled(max_delta_raw, previous_step, bar=step_bar)
@@ -1689,7 +1701,7 @@ def optimize_discrete_reml_cached_w(
             ):
                 if taking_tail:
                     allow_tail_trial = True
-                elif not shoulder_d.any() and step == 1.0:
+                elif not off_newton_d and step == 1.0:
                     previous_idx = active_idx_d.copy()
                 rho = rho_trial
                 warm_beta = beta_trial.copy()
@@ -1767,6 +1779,7 @@ def optimize_discrete_reml_cached_w(
                     or (
                         evaluated_feasible_trial
                         and not shoulder_d.any()
+                        and active_idx_d.size
                         and obj_change < resolution
                         and max_delta_raw <= step_bar
                         and newton_step_resolved(hess_sub_d, grad_sub_d, bar=step_bar)
@@ -1787,7 +1800,7 @@ def optimize_discrete_reml_cached_w(
                 # modification.
                 predicted_decrease = (
                     None
-                    if trust_mu > 0.0 or bool(shoulder_d.any())
+                    if trust_mu > 0.0 or bool(shoulder_d.any()) or not active_idx_d.size
                     else newton_predicted_decrease(
                         grad_sub_d, eigvals_h, eigvecs_h, eigenvalue_floor=eig_floor_d
                     )

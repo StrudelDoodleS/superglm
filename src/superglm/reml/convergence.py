@@ -680,10 +680,11 @@ def bound_held_directions(
 
     The binding set of projected Newton for ``log_lower <= rho <= log_upper``
     (Bertsekas 1982, SIAM J. Control Optim. 20(2), sec. 2), with a fixed
-    window. The stop reads these scores as zero (``project_reml_gradient``),
-    and the Newton step holds these directions and solves on the others alone:
-    a step solved with them and clipped to the box afterwards need not descend
-    (his fig. 1), as their Hessian coupling still moves the free directions.
+    window. The stop reads these scores as zero (``project_reml_gradient``).
+    The Newton step solves on the other directions alone and each of these
+    steps onto its bound (``bound_held_step``): a step solved with them and
+    clipped to the box afterwards need not descend (his fig. 1), as their
+    Hessian coupling still moves the free directions.
     """
     score = np.asarray(gradient, dtype=np.float64)
     log_lambda = np.asarray(rho, dtype=np.float64)
@@ -693,6 +694,27 @@ def bound_held_directions(
     upper = (log_lambda >= log_upper - bound_window) & (score < 0.0)
     lower = (log_lambda <= log_lower + bound_window) & (score > 0.0)
     return estimated & (upper | lower)
+
+
+def bound_held_step(
+    gradient: NDArray,
+    rho: NDArray,
+    held: NDArray,
+    *,
+    log_lower: float | NDArray,
+    log_upper: float | NDArray,
+) -> NDArray:
+    """The step that lands each ``held`` direction on the bound holding it, zero elsewhere.
+
+    Bertsekas's (1982, eqs. 81-84) projected step ``[rho - D g]#`` for a scaling
+    diagonal on the binding set, at any entry of at least
+    ``(rho_i - bound_i) / g_i``: downhill, and zero on the bound. At that entry
+    the way to the bound is a line inside the box, so an Armijo test on
+    ``g' step`` is his rule (37).
+    """
+    score = np.asarray(gradient, dtype=np.float64)
+    bound = np.where(score > 0.0, log_lower, log_upper)
+    return np.where(held, bound - np.asarray(rho, dtype=np.float64), 0.0)
 
 
 def project_reml_gradient(

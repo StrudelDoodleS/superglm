@@ -11,6 +11,7 @@ from superglm.reml.convergence import (
     FLAT_DIRECTION_CURVATURE_REL,
     FLAT_DIRECTION_FREEZE_FLOOR,
     bound_held_directions,
+    bound_held_step,
     classify_dead_feasible_exit,
     concave_live_directions,
     evaluate_reml_candidate,
@@ -57,6 +58,10 @@ def test_bound_held_directions_are_the_estimated_scores_the_projection_zeroes() 
         bound_held_directions(gradient, rho, estimated, **box, bound_window=0.0),
         held & (rho != -9.995),
     )
+    # Each held direction's own step lands it on the bound holding it; no other moves.
+    step = bound_held_step(gradient, rho, held, **box)
+    np.testing.assert_array_equal((rho + step)[held], [10.0, -10.0, -10.0])
+    assert step[5] < 0.0 and not step[~held].any()
 
 
 def test_project_reml_gradient_rejects_misaligned_inputs() -> None:

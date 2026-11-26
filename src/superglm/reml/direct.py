@@ -34,6 +34,7 @@ from superglm.reml._leverage_rows import reads_row_supports
 from superglm.reml.convergence import (
     FLAT_DIRECTION_FREEZE_FLOOR,
     bound_held_directions,
+    bound_held_step,
     classify_dead_feasible_exit,
     coefficient_walk_guard_stopped,
     concave_live_directions,
@@ -1526,8 +1527,8 @@ def optimize_direct_reml(
                 & (np.abs(proj_grad) <= max_newton_step * diagonal)
             )
             frozen = frozen & ~in_reach
-        # Projected Newton: a direction its bound holds takes no step and stays
-        # out of the Newton system (``bound_held_directions``).
+        # Projected Newton: a direction its bound holds stays out of the Newton
+        # system and steps onto that bound alone (``bound_held_directions``).
         bound_held = bound_held_directions(
             grad, rho_clipped, estimated_mask, log_lower=log_lo, log_upper=log_hi
         )
@@ -1600,6 +1601,12 @@ def optimize_direct_reml(
             # Scatter back to full delta
             delta[newton_idx] = delta_sub
         delta[shoulder] = -np.sign(proj_grad[shoulder]) * max_newton_step
+        delta += bound_held_step(
+            grad, rho_clipped, bound_held & ~frozen, log_lower=log_lo, log_upper=log_hi
+        )
+        # A step that also moves a shoulder or a bound-held direction is not
+        # Newton's own: no stop and no contraction rate is read from it.
+        off_newton = bool(shoulder.any() or delta[bound_held].any())
 
         # Proportional step cap: scale entire vector if any component > max_step
         max_delta = float(np.max(np.abs(delta)))
@@ -1609,7 +1616,7 @@ def optimize_direct_reml(
         # and this Hessian then confirms it at the next candidate.
         if (
             newton_idx.size
-            and not shoulder.any()
+            and not off_newton
             and mode_certified
             and revalidated_hess is None
             and max_delta <= step_bar
@@ -2090,11 +2097,11 @@ def optimize_direct_reml(
                         _accepted_observed_mode_residual_max,
                         trial_mode_residual,
                     )
-                # A rate needs an uncapped Newton predecessor on
-                # the same free terms; trust moves and changed sets give none.
+                # A rate needs an uncapped Newton predecessor on the same free
+                # terms; trust moves, bound moves and changed sets give none.
                 newton_predecessor = (
                     newton_idx.size
-                    and not shoulder.any()
+                    and not off_newton
                     and not taking_tail
                     and max_delta <= max_newton_step
                 )

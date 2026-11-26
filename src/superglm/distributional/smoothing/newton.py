@@ -1012,8 +1012,9 @@ def run_newton_endgame(
         frozen = np.asarray(freeze.frozen, dtype=bool)
         # Only outward scores are projected off a bound. Curvature coupled to
         # such a term must not displace the free Newton coordinates
-        # (``bound_held_directions``).
-        frozen = frozen | (projected != gradient)
+        # (``bound_held_directions``). A score its certificate cannot sign
+        # holds nothing: that term keeps its Fellner--Schall step.
+        frozen = frozen | ((projected != gradient) & ~fs_stepped)
         stop_gradient = np.where(frozen, 0.0, projected)
         candidate = evaluate_reml_candidate(
             iteration=accepted_count,
