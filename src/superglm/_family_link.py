@@ -12,7 +12,9 @@ Two kinds of fact:
   curvature claim or a cache key, and a user-defined family or link takes the
   generic path;
 - an *inherited* fact follows the members the classes declare and
-  ``isinstance``, so a subclass keeps its parent's domain.
+  ``isinstance``, so a subclass keeps its parent's domain. A class with more
+  than one shipped base takes each declared fact from the first base in its
+  method resolution order that declares it.
 
 The pair holds the family and the link and reads their parameters (Tweedie
 ``p``, the negative binomial's ``theta``, a power link's exponent) when asked,

@@ -48,6 +48,10 @@ class Link(Protocol):
         protection (``stabilize_eta``; a band of plus or minus 20).
         multiplicative — the mean is ``exp(eta)``, so an effect on the predictor
         multiplies it (False).
+
+    A class that inherits from more than one shipped link takes each declared
+    fact from the first base in its method resolution order that declares it:
+    ``class L(LogLink, IdentityLink)`` clips its predictor as the log link does.
     """
 
     def link(self, mu: NDArray) -> NDArray:

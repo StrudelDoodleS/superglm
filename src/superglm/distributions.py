@@ -244,6 +244,10 @@ class Distribution(Protocol):
     (the density's normalizer carries ``log w``, so a prior weight must be
     strictly positive; False) and scale_profile (the dispersion's exact REML
     profile on a fit's rows; a Gaussian-shaped approximation, with a warning).
+
+    A class that inherits from more than one shipped family takes each declared
+    fact from the first base in its method resolution order that declares it:
+    ``class F(Gaussian, Binomial)`` has Gaussian's unbounded means and scale profile.
     """
 
     @property

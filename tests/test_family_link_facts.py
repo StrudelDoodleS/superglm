@@ -622,3 +622,23 @@ def test_resolving_a_fact_never_raises_for_user_objects():
             probe(family.obj, link.obj)
     with pytest.raises(NotImplementedError, match="reml_curvature"):
         classify_reml_curvature(BareFamily(), LogLink())
+
+
+def test_more_than_one_shipped_base_reads_its_first_declaring_base():
+    """A class with two shipped bases takes each declared fact from the first in its MRO."""
+
+    class GaussianBinomial(Gaussian, Binomial):
+        pass
+
+    class LogIdentity(LogLink, IdentityLink):
+        pass
+
+    family, y, weights = GaussianBinomial(), np.array([0.0, 1.0, 2.0]), np.ones(3)
+    mu = np.array([-1.0, 0.5, 2.0])
+    np.testing.assert_array_equal(clip_mu(mu, family), mu)
+    assert isinstance(
+        prepare_reml_scale_data(family, y, weights, weight_semantics="prior"),
+        GaussianScaleProfile,
+    )
+    eta = np.array([-100.0, 0.0, 100.0])
+    np.testing.assert_array_equal(stabilize_eta(eta, LogIdentity()), [-80.0, 0.0, 80.0])
