@@ -770,10 +770,9 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
         if mean_form and not np.all(exists):
             raise GeneralizedGammaDomainError("generalized gamma mean does not exist for every row")
         amount = finite_amounts(v, len(values))
-        location = np.array(values[:, 0], copy=True)
+        location = self._location_coordinates(values)
         log_mean = np.full(len(values), np.inf)
         if mean_form:
-            location = self._location_coordinates(values)
             log_mean = np.log(values[:, 0])
         elif np.any(exists):
             log_mean[exists] = location[exists] + log_mean_loading(sigma[exists], q[exists])[0]

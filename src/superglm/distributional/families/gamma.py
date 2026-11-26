@@ -673,7 +673,9 @@ class GammaLS(MeanPredictor, ScalePredictor):
                 # log[x^a e^-x / Gamma(a)] - log Q(a, x), each from its own tail-safe kernel.
                 at = rows[body]
                 log_density = gamma_shape_plus_one_log_increment(shape[at], x) + np.log(shape[at])
-                log_survival = self.log_window_probability(amount[at], np.inf, values[at])
+                log_survival = self.log_window_probability(
+                    amount[at], np.full(len(at), np.inf), values[at]
+                )
                 # Q >= Q(a, a + 1.5 sqrt(a) + 1.5) > 0.05 on these rows, so a density below
                 # e^-800 gives a hazard of zero in float64 whatever the survival reads.
                 return np.where(log_density < -800.0, -np.inf, log_density - log_survival)
