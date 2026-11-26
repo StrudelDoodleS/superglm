@@ -331,6 +331,16 @@ class _Round:
         )
 
 
+@dataclass(slots=True)
+class _PlateauWindows:
+    """The plateau tests' runs over the accepted rounds; a new set or step starts them again."""
+
+    plateau_run: int = 0
+    practical_run: int = 0
+    plateau_qualified: bool = False
+    previous_accepted_step: float = math.inf
+
+
 def fit_distributional_efs(
     family: DistributionalFamily,
     layout: StackedLayout,
@@ -554,11 +564,7 @@ class _SmoothingSearch:
         self.unearned = False
         # The objective's fall over the last two accepted Fellner--Schall rounds.
         self.fall = self.previous_fall = math.inf
-
-        self.plateau_run = 0
-        self.practical_run = 0
-        self.plateau_qualified = False
-        self.previous_accepted_step = math.inf
+        self.windows = _PlateauWindows()
         self.accelerator = (
             WindowedTypeIIAnderson(
                 history=self.outer_config.acceleration_history,
@@ -819,7 +825,7 @@ class _SmoothingSearch:
             and self.estimated_names
             and (self.stationary_search or self._endgame_budget() > 0)
             and should_hand_off(
-                "objective_plateau" if self.plateau_qualified else "lambda_change",
+                "objective_plateau" if self.windows.plateau_qualified else "lambda_change",
                 max_accepted_step=0.0,
                 iterations=len(self.history),
                 config=self.outer_config,
@@ -1357,7 +1363,7 @@ class _SmoothingSearch:
 
     def _count_plateau(self, round_: _Round) -> None:
         """Count the accepted round in the plateau windows."""
-        config = self.outer_config
+        config, windows = self.outer_config, self.windows
         # The step test alone is first-order on a harmonic tail, so require both
         # a flat objective and a contracting step before nominating a plateau.
         # The practical policy below accepts its own sustained plateau and keeps
@@ -1367,10 +1373,10 @@ class _SmoothingSearch:
         comparable_flat_step = (
             round_.plateau_eligible and round_.objective_change <= config.plateau_tolerance
         )
-        self.plateau_run = self.plateau_run + 1 if comparable_flat_step else 0
-        self.plateau_qualified = (
-            self.plateau_run >= config.plateau_iterations
-            and round_.max_accepted_step <= self.previous_accepted_step
+        windows.plateau_run = windows.plateau_run + 1 if comparable_flat_step else 0
+        windows.plateau_qualified = (
+            windows.plateau_run >= config.plateau_iterations
+            and round_.max_accepted_step <= windows.previous_accepted_step
         )
         if config.practical_convergence:
             assert self.state.evidence.update is not None
@@ -1380,15 +1386,15 @@ class _SmoothingSearch:
                 self.state.evidence.update.raw_log_steps,
                 config,
             )
-            self.practical_run = (
-                self.practical_run + 1
+            windows.practical_run = (
+                windows.practical_run + 1
                 if comparable_flat_step
                 and round_.parameter_change <= config.practical_parameter_tolerance
-                and round_.max_accepted_step <= self.previous_accepted_step
+                and round_.max_accepted_step <= windows.previous_accepted_step
                 and not lower_pressure
                 else 0
             )
-        self.previous_accepted_step = (
+        windows.previous_accepted_step = (
             round_.max_accepted_step if round_.plateau_eligible else math.inf
         )
 
@@ -1402,7 +1408,7 @@ class _SmoothingSearch:
         evidence = self.state.evidence
         return (
             self.outer_config.practical_convergence
-            and self.plateau_run >= self.outer_config.plateau_iterations
+            and self.windows.plateau_run >= self.outer_config.plateau_iterations
             and self.state.face is None
             and evidence.maximum > self.outer_config.tolerance
             and evidence.update is not None
@@ -1434,7 +1440,7 @@ class _SmoothingSearch:
         """
         config, evidence = self.outer_config, self.state.evidence
         outward = self._outward_plateau()
-        practical = outward or self.practical_run >= config.plateau_iterations
+        practical = outward or self.windows.practical_run >= config.plateau_iterations
         interior = not evidence.unresolved_upper_bound and not evidence.working_infinity
         finishes = self._plateau_finishes() and self._endgame_budget() > 0
         if self.stationary_search and practical:
@@ -1676,17 +1682,10 @@ class _SmoothingSearch:
         """
         self.plateau_earned = self.plateau_earned and held_promoted
         self.fall = self.previous_fall = math.inf
-        self.pending_cap = None
-        self.endgame_outcome = None  # its derivatives named the old set's components
-        self.endgame_stationary = False
+        self._forget_endgame()  # its derivatives named the old set's components
         self.state = replace(self.state, evidence=self._evidence())
         self.estimated_names = self.state.evidence.estimated_names
-        self.plateau_run = 0
-        self.practical_run = 0
-        self.plateau_qualified = False
-        self.previous_accepted_step = math.inf
-        if self.accelerator is not None:
-            self.accelerator.reset()
+        self._restart_windows()
 
     def _plateau_finishes(self) -> bool:
         """Whether a practical plateau hands to the endgame rather than stopping.
@@ -1765,31 +1764,31 @@ class _SmoothingSearch:
             self.stationary_search and not self.state.evidence.estimated_names
         ):
             return "stationary"
-        return "objective_plateau" if self.plateau_qualified else "lambda_change"
+        return "objective_plateau" if self.windows.plateau_qualified else "lambda_change"
 
     def _resume_fellner_schall(self) -> None:
         """Keep the accepted fit; drop what cannot describe the next EFS step.
 
         Disabling handoff bounds the recovery by the ordinary outer budget.
         """
+        self._forget_endgame()
+        self.newton_budget = 0
+        self._restart_windows()
+
+    def _forget_endgame(self) -> None:
+        """Drop the endgame's verdict and the cap pressure it reported."""
         self.endgame_outcome = None
         self.endgame_stationary = False
         self.pending_cap = None
-        self.newton_budget = 0
-        self.plateau_run = 0
-        self.practical_run = 0
-        self.plateau_qualified = False
-        self.previous_accepted_step = math.inf
+
+    def _restart_windows(self) -> None:
+        """Start the plateau windows and the accelerator's secant history again."""
+        self.windows = _PlateauWindows()
         if self.accelerator is not None:
             self.accelerator.reset()
 
     def _run_endgame(self) -> DistributionalEFSResult | None:
-        """Run the endgame from the accepted state; a result ends the fit, ``None`` continues.
-
-        A finish that stalls leaves a plateau standing. One a rejected round came to
-        (``unearned``), at once or after the caps it held were judged, has none and
-        leaves that round's verdict.
-        """
+        """Run the endgame from the accepted state; a result ends the fit, ``None`` continues."""
         budget = self._endgame_budget()
         if budget <= 0:
             return self._result(converged=False, reason="max_iterations")
@@ -1801,6 +1800,13 @@ class _SmoothingSearch:
         self.endgame_due = self._release_held_caps() and pause
         if self.endgame_due:
             return None
+        outcome, stalled = self._endgame_from_here(budget)
+        if stalled:
+            return self._after_stalled_finish()
+        return self._after_endgame(outcome)
+
+    def _endgame_from_here(self, budget: int) -> tuple[NewtonEndgameOutcome, bool]:
+        """Run the endgame and take the state it ends at; whether a plateau's finish stalled."""
         entry = self.state
         entry_fits = list(self.coefficient_fits) if self._plateau_finishes() else []
         entry_iterations = len(self.history)
@@ -1824,16 +1830,26 @@ class _SmoothingSearch:
             terminal_fit_index=state.terminal_fit_index,
             evidence=state.evidence,
         )
-        if stalled:
-            self.endgame_outcome = None
-            if self.unearned:
-                return self._result(converged=False, reason="objective_rejected")
-            if self.state.face is None and not self.state.evidence.unresolved_upper_bound:
-                return self._result(converged=True, reason="practical_plateau")
-            # Only the strict stop revalidates a face, and a stall decides nothing about
-            # a nominated cap, so both carry on with the finish spent.
-            self._resume_fellner_schall()
-            return None
+        return outcome, stalled
+
+    def _after_stalled_finish(self) -> DistributionalEFSResult | None:
+        """A plateau's finish stalled: the plateau stands, or the search goes on.
+
+        One a rejected round came to (``unearned``), at once or after the caps it
+        held were judged, has no plateau and leaves that round's verdict.
+        """
+        self.endgame_outcome = None
+        if self.unearned:
+            return self._result(converged=False, reason="objective_rejected")
+        if self.state.face is None and not self.state.evidence.unresolved_upper_bound:
+            return self._result(converged=True, reason="practical_plateau")
+        # Only the strict stop revalidates a face, and a stall decides nothing about
+        # a nominated cap, so both carry on with the finish spent.
+        self._resume_fellner_schall()
+        return None
+
+    def _after_endgame(self, outcome: NewtonEndgameOutcome) -> DistributionalEFSResult | None:
+        """Act on the endgame's verdict: resume, wait on the cap assessment, or end."""
         if outcome.kind == "derivative_unavailable":
             if self.beyond_cap or self.stationary_search:
                 # EFS proposals use the original finite box and cannot safely
