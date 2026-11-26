@@ -938,7 +938,11 @@ def test_a_refused_cap_does_not_stop_the_free_terms(monkeypatch, stop: str) -> N
     assert judged == [start, dict(smoothing.lambdas)]
     assert moved == pytest.approx(3.0, abs=1.0e-6)
     fitted = reference._require_fitted().smoothing.terminal_fit.theta
-    np.testing.assert_allclose(smoothing.terminal_fit.theta, fitted, rtol=1.0e-6)
+    # To 1e-6 of the predictors' scale: a row near zero has no relative accuracy.
+    scale = float(np.abs(fitted).max())
+    np.testing.assert_allclose(
+        smoothing.terminal_fit.theta, fitted, rtol=1.0e-6, atol=1.0e-6 * scale
+    )
     assert model.result_.total_effective_df == pytest.approx(
         reference.result_.total_effective_df, rel=1.0e-6
     )
