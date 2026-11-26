@@ -63,6 +63,14 @@ Out-of-fold predictions are especially useful for challenger analysis because
 they let you compare models on the training portfolio without leaking each row
 into its own fitted mean.
 
+If rows belong together (repeated policies, fleets, calendar periods or
+neighbouring locations) and you want held-out prediction to choose the smooth
+terms' smoothing parameters inside the fit rather than only measuring a fit
+afterwards, see
+[Choose smoothing by held-out prediction](choose-smoothing-by-holdout.md).
+`cross_validate()` measures models on held-out folds; `fit_ncv()` uses the
+same kind of hold-out to pick the smoothing.
+
 ## Holdout Business Evidence
 
 After cross-validation, refit the chosen candidates on all training data and

@@ -7,10 +7,15 @@ reports knot spacing, basis correlation and effective rank, and
 smooth terms into rating-table bins and grids does to the predictions.
 {py:meth}`~superglm.SuperGLM.iteration_diagnostics` is the per-iteration IRLS
 table, a DataFrame available after `fit(record_diagnostics=True)`;
-{py:meth}`~superglm.SuperGLM.reml_diagnostics` and
+{py:meth}`~superglm.SuperGLM.reml_diagnostics`,
+{py:meth}`~superglm.SuperGLM.ncv_diagnostics` and
 {py:meth}`~superglm.SuperGLM.training_telemetry` are the solver's own records
 as plain JSON-serialisable dictionaries with no tracking dependency, ready for
-MLflow, files, logs or a governance system.
+MLflow, files, logs or a governance system. After a
+{py:meth}`~superglm.SuperGLM.fit_ncv` fit,
+{py:meth}`~superglm.SuperGLM.ncv_heldout` and
+{py:meth}`~superglm.SuperGLM.ncv_heldout_groups` return the held-out
+predictions per scored row and summed per group.
 
 ```{eval-rst}
 .. autosummary::
@@ -22,5 +27,8 @@ MLflow, files, logs or a governance system.
    ~superglm.SuperGLM.discretization_impact
    ~superglm.SuperGLM.iteration_diagnostics
    ~superglm.SuperGLM.reml_diagnostics
+   ~superglm.SuperGLM.ncv_diagnostics
+   ~superglm.SuperGLM.ncv_heldout
+   ~superglm.SuperGLM.ncv_heldout_groups
    ~superglm.SuperGLM.training_telemetry
 ```

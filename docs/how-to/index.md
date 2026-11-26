@@ -8,6 +8,7 @@ response and a question; the tutorials are where to learn the workflow.
 
 recommended-workflows
 choose-a-fitting-path
+choose-smoothing-by-holdout
 specify-features
 specify-interactions
 constrain-a-smooth
