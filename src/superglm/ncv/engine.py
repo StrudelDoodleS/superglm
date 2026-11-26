@@ -1248,21 +1248,31 @@ class _Trial:
 
     def score_cached(
         self, nb: Neighbourhoods, k: int, moments: _Moments, delta: NDArray[np.float64]
-    ) -> NDArray[np.float64]:
+    ) -> NDArray[np.float64] | None:
         """Add neighbourhood ``k``'s held-out sum of squares at the step ``delta``; returns ``Z_d' D'``.
 
         ``sum_d w (eta - y)^2`` from the fit's residuals, one term per scored row of this
-        neighbourhood, and ``2 delta' g_d + delta' G_d delta`` from its cross-products.
+        neighbourhood, and ``2 delta' g_d + delta' G_d delta`` from its cross-products, with
+        ``g_d`` moved from the reference fit by ``G_d`` times the shift.  The sum is known to
+        ``gamma_m`` times the same terms taken in absolute value, ``m`` the rows and columns
+        summed.  Where that exceeds both the inner fit's bar times the sum and
+        :data:`RESOLVED` times the ``gamma_m`` of the sum the rows themselves give, the terms
+        cancel: nothing is added, None is returned, and the rows are scored directly.
         """
         pos = nb.scored_positions(k)
         rows = nb.drop(k) if pos is None else nb.drop(k)[pos]
         gram, score = moments.scored_gram, moments.scored_score
-        if self.coords is not None:
-            gram, score = self.coords.gram(gram), self.coords.rows(score)
-        step = gram @ delta
+        lifted = self.lifted(delta)
+        step = gram @ lifted
         at_fit = float(self.score[rows] @ (self.eta[rows] - self.problem.y[rows]))
-        self.cached_value += at_fit + float(delta @ (2.0 * score + step))
-        return 2.0 * (score + step)
+        value = at_fit + float(lifted @ (2.0 * score + step))
+        reference = np.abs(self.cache.held[k].scored_score) + np.abs(gram) @ np.abs(self.shift)
+        size = at_fit + float(np.abs(lifted) @ (2.0 * reference + np.abs(gram) @ np.abs(lifted)))
+        rounding = gamma(len(rows) + 2 * self.problem.width + 2)
+        if rounding * size > max(self.problem.mode_bar, RESOLVED * rounding) * value:
+            return None
+        self.cached_value += value
+        return self.reduced(2.0 * (score + step))
 
     def score_removed(
         self, k: int, rows: NDArray[np.intp], delta: NDArray[np.float64]
@@ -1916,9 +1926,8 @@ def _factor_route(trial: _Trial, nb: Neighbourhoods, k: int, flagged: float | No
         delta, solve = trial.kept_fit(nb, k, flagged)
     else:
         delta = solve(score)
-    if cached and not trial.heldout:
-        r = trial.score_cached(nb, k, moments, delta)
-    else:
+    r = trial.score_cached(nb, k, moments, delta) if cached and not trial.heldout else None
+    if r is None:
         pos = nb.scored_positions(k)
         r = trial.score_removed(k, rows if pos is None else rows[pos], delta)
     if not trial.gradient:

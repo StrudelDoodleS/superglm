@@ -425,6 +425,35 @@ def test_fits_other_than_the_reference_use_the_same_cross_products():
         assert_pairs_equal(problem, pairs_of(with_pairs), want, slack)
 
 
+class _OneSplit:
+    """Train on rows 0 to 29 and score row 30; rows 31 on are removed and not scored."""
+
+    def split(self, X, y=None, groups=None):
+        yield np.arange(30), np.array([30])
+
+    def get_n_splits(self, X=None, y=None, groups=None):
+        return 1
+
+
+def test_cross_products_whose_terms_cancel_give_way_to_the_rows():
+    """Removed rows at 1e8 beside a scored row at 2: its held-out error is read from its row.
+
+    The step that removes them is of their size, so the cached sum's terms are about 1e16 and
+    cancel to the held-out error, 1.0031, which the cross-products alone return as 1.0.
+    """
+    rng = np.random.default_rng(5)
+    x = rng.uniform(size=60)
+    y = np.concatenate([1.0 + 0.01 * rng.normal(size=30), [2.0], np.full(29, 1e8)])
+    frame = pd.DataFrame({"x": x})
+    problem = numeric_columns(frame, y, np.ones(60), np.column_stack([np.ones(60), x])).problem
+    nb = from_splitter(_OneSplit(), frame, y)
+    by_rows = evaluate(rebuilt(problem), nb, np.zeros(0))
+    _, again, _ = cached_twice(problem, nb, np.zeros(0))
+    assert by_rows.value == pytest.approx(1.0031, abs=1e-4)
+    assert again.value == pytest.approx(by_rows.value, rel=1e-12)
+    assert again.work.rows_read == 1
+
+
 def test_cached_and_uncached_neighbourhoods_in_one_evaluation():
     """Small groups go by rows, large ones by cached cross-products; the sum is the row evaluation's."""
     design = twin("gaussian", False)
