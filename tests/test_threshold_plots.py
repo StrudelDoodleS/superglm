@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import warnings
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -31,6 +32,8 @@ from superglm import (
 from superglm._experimental import ExperimentalWarning
 from superglm.diagnostics.convergence import ConvergenceWarning
 from superglm.distributional import thresholds as module
+from superglm.distributional.families import LowerBoundedLogLink
+from superglm.distributional.families._links import BoundedLogitLink
 from superglm.distributional.rebuild import clone_with_replaced_terms, unfitted_clone
 from superglm.distributional.thresholds import (
     mean_excess,
@@ -207,20 +210,23 @@ def test_frequency_counts_equal_repeated_rows_at_every_kind_of_candidate():
 
 def test_a_threshold_far_below_tightly_spaced_losses_costs_no_digits():
     small = np.arange(1.0, 41.0) / 8.0  # exact in float64 beside 1e9
-    near = np.array([0.4375, 1.3125, 2.5625, 4.0625])  # sixteenths, exact too
-    result = mean_excess(1e9 + small, thresholds=[1.0, *(1e9 + near)])
-    above_one = small - small.mean()
-    assert result.table["threshold"].iloc[0] == 1.0
+    near = np.array([3.3125, 3.5625, 3.8125, 4.0625])  # sixteenths, exact too
+    # the excesses of the far candidate's own block straddle 2**29, where the spacing of float64
+    # doubles: those above it are rounded, so moments about the candidate would lose digits
+    far = 1e9 - 2.0**29 + 2.5 + 2.0**-24
+    result = mean_excess(1e9 + small, thresholds=[far, *(1e9 + near)])
+    centred = small - small.mean()
+    assert result.table["threshold"].iloc[0] == far
     np.testing.assert_allclose(
-        result.table["se"].iloc[0], math.sqrt(above_one @ above_one / (40 * 39)), rtol=1e-9
+        result.table["se"].iloc[0], math.sqrt(centred @ centred / (40 * 39)), rtol=1e-12
     )
     np.testing.assert_allclose(
-        result.table["mean_excess"].iloc[0], (1e9 - 1.0) + small.mean(), rtol=4 * U
+        result.table["mean_excess"].iloc[0], (1e9 - far) + small.mean(), rtol=4 * U
     )
     for line, u in zip(result.table.iloc[1:].itertuples(), near, strict=True):
         excess = small[small > u] - u
-        np.testing.assert_allclose(line.mean_excess, excess.mean(), rtol=1e-9)
-        np.testing.assert_allclose(line.se, excess.std(ddof=1) / math.sqrt(len(excess)), rtol=1e-9)
+        np.testing.assert_allclose(line.mean_excess, excess.mean(), rtol=1e-12)
+        np.testing.assert_allclose(line.se, excess.std(ddof=1) / math.sqrt(len(excess)), rtol=1e-12)
 
 
 def test_the_known_line_of_a_simulated_tail_lies_inside_the_band():
@@ -303,6 +309,51 @@ def test_the_default_fit_and_both_bands_match_scipy_at_nonzero_thresholds():
     last = result.table.iloc[-1]
     natural_se = math.sqrt(_scipy_tail(y[y > 5.0] - 5.0)[2][1, 1]) * last["shape"]
     assert last["shape"] - Z95 * natural_se * (1 - last["shape"]) < 0.0 < last["shape_lower"]
+
+
+@dataclass(frozen=True)
+class _FallingLogit(BoundedLogitLink):
+    """The bounded logit of ``-eta``: the same shapes, carried by a decreasing link."""
+
+    def link(self, mu):
+        return -super().link(mu)
+
+    def inverse(self, eta):
+        return super().inverse(-np.asarray(eta, dtype=np.float64))
+
+    def deriv(self, mu):
+        return -super().deriv(mu)
+
+    def deriv_inverse(self, eta):
+        return -super().deriv_inverse(-np.asarray(eta, dtype=np.float64))
+
+    def deriv2_inverse(self, eta):
+        return super().deriv2_inverse(-np.asarray(eta, dtype=np.float64))
+
+    def deriv3_inverse(self, eta):
+        return -super().deriv3_inverse(-np.asarray(eta, dtype=np.float64))
+
+    def deriv4_inverse(self, eta):
+        return super().deriv4_inverse(-np.asarray(eta, dtype=np.float64))
+
+
+def test_the_bands_do_not_depend_on_the_links_that_carry_the_parameters():
+    rng = np.random.default_rng(140)
+    y = 1.5 + _gpd(rng, 2_500, 0.2, scale=2.0)
+    frame = pd.DataFrame(index=np.arange(2_500))
+    family = GeneralizedParetoLSS()
+    classical = threshold_stability(None, y, [2.5]).table.iloc[0]
+    bands = ["shape", "shape_lower", "shape_upper", "modified_scale_lower", "modified_scale_upper"]
+    # a scale link whose slope is scale - 0.5, and a shape link that falls as its predictor rises
+    for tail in (
+        SuperLSS(family, family.scale(link=LowerBoundedLogLink(0.5)), family.shape()),
+        SuperLSS(family, family.scale(), family.shape(link=_FallingLogit())),
+    ):
+        line = threshold_stability(frame, y, [2.5], tail=tail).table.iloc[0]
+        assert line["shape_lower"] < line["shape"] < line["shape_upper"]
+        np.testing.assert_allclose(
+            line[bands].astype(float), classical[bands].astype(float), rtol=1e-6
+        )
 
 
 def test_a_wall_and_a_stopped_fit_are_the_fits_own_flags_and_stay_in_the_table():
@@ -393,6 +444,10 @@ def test_censored_claims_are_kept_while_their_limit_reaches_the_candidate():
     assert _row(result, 2.0)["notes"] == ""
     left_out = int(np.sum(capped & (y < 4.0)))
     assert f"{left_out} censored claims with a limit below" in _row(result, 4.0)["notes"]
+    # a candidate is admitted on its complete claims, whatever the censored ones add
+    complete = int(np.sum(~capped & (y > 4.0)))
+    with pytest.raises(ValueError, match=f"the most is {complete}, above 4"):
+        threshold_stability(None, y, [4.0], censored=capped, min_claims=complete + 1)
     # the same fit as on the rows without the claims that were left out
     rest = ~(capped & (y < 4.0))
     without = _row(threshold_stability(None, y[rest], [4.0], censored=capped[rest]), 4.0)
@@ -527,6 +582,13 @@ def test_a_fitted_tail_is_refitted_the_way_it_was_fitted():
     assert abs(_shape_of(by_reml, frame) - _shape_of(by_hand, frame)) > 1e-6  # the two differ
 
     # the caller's settings come first, and an unfitted tail follows ``reml``
+    stiff = {"scale:x#wiggle": 400.0}
+    restated = threshold_stability(frame, y, [2.0], tail=fixed, fit_options={"lambdas": stiff})
+    by_stiff = _smooth_tail().fit(rows, excess, lambdas=stiff)
+    np.testing.assert_allclose(
+        restated.table["shape"].iloc[0], _shape_of(by_stiff, frame), rtol=1e-10
+    )
+    assert abs(_shape_of(by_stiff, frame) - _shape_of(by_hand, frame)) > 1e-6
     overridden = threshold_stability(
         frame, y, [2.0], tail=searched, reml=False, fit_options={"lambdas": strength}
     )
