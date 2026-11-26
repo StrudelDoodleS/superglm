@@ -6,6 +6,7 @@ model or a fixed-penalty sparse model.
 | Situation | Recommended path | Why |
 |---|---|---|
 | Standard spline pricing model | `fit_reml()` with `selection_penalty=0` | Automatic smoothness selection and clean GAM-style inference |
+| Overdispersed counts or grouped/spatial rows | `fit_ncv()` (Gaussian/identity or Poisson/log) | Chooses smoothness by held-out prediction instead of trusting the count law and row independence |
 | Large-`n` spline pricing model | `fit_reml(discrete=True)` | Same modeling story, cheaper outer iterations |
 | High-cardinality random effect or factor smooth | `fit_reml()` with `direct_solve="auto"` | A compact solver for large terms, chosen from the model's size |
 | Smooth shrinkage inside REML | `fit_reml()` with `select=True` on spline terms | mgcv-style double-penalty shrinkage |
@@ -45,6 +46,25 @@ Use this when:
 - you want automatic smoothness selection
 - you care about interpretable smooth terms
 - you want statsmodels-style summaries and smooth-term inference
+
+## Smoothing By Held-Out Prediction (`fit_ncv`)
+
+`fit_reml()` trusts the declared count law and that rows are independent. When
+counts are far more variable than the declared law allows, or when rows belong
+together — repeated policies, fleets, calendar periods or neighbouring spatial
+cells that share unobserved risk — `fit_reml()` can overfit the noise. Use
+`fit_ncv()` instead to choose the smoothing by held-out prediction over
+neighbourhoods you define:
+
+```python
+model.fit_ncv(df, y, offset=np.log(exposure), groups=df["policy_id"])
+```
+
+`fit_ncv()` is currently supported on `SuperGLM` for Gaussian (identity link)
+and Poisson (log link) models without binning (`discrete=False`). See
+[Choose smoothing by held-out prediction](choose-smoothing-by-holdout.md) for
+real-data examples (where `fit_ncv` helps and where it agrees with `fit_reml`),
+all four hold-out forms, held-out group tables, diagnostics and limits.
 
 ## Large-`n` REML
 
@@ -380,6 +400,7 @@ column's offset times its coefficient:
 
 Next:
 
+- [Choose smoothing by held-out prediction](choose-smoothing-by-holdout.md)
 - [Recommended workflows](recommended-workflows.md)
 - [Feature types](specify-features.md)
 - [Monotone splines](constrain-a-smooth.md)

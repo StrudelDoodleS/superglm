@@ -589,6 +589,9 @@ def _glm_outcome(model, params=None) -> dict:
                 objective=_plain(diag.get("objective")),
                 n_lambdas=len(diag.get("lambdas") or {}),
             )
+    search = _safe(_ncv_outcome, model)
+    if "unavailable" not in search:
+        out.update(search)
     out["certification"] = {k: v for k, v in out["flags"].items() if "certif" in k}
     dist = getattr(model, "_distribution", None)
     out["fitted_family"] = {
@@ -596,6 +599,40 @@ def _glm_outcome(model, params=None) -> dict:
         "power": _plain(getattr(dist, "p", None)),
     }
     return out
+
+
+def _ncv_outcome(model) -> dict:
+    """A ``fit_ncv`` fit's search: its outer verdict in the fields a REML search fills, its
+    work counts, and under ``"ncv"`` the search and final-fit verdicts apart; {} for any
+    other fit."""
+    from superglm.model import fit_method
+
+    if fit_method.search_criterion(model) != "ncv":
+        return {}
+    diag = model.ncv_diagnostics()
+    return {
+        "n_iter": diag["n_iter"],
+        "converged": diag["converged"],
+        "termination_reason": diag["termination_reason"],
+        "objective": diag["criterion"],
+        "n_lambdas": len(diag["lambdas"]),
+        "work": {
+            k: v
+            for k, v in diag["work"].items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
+        },
+        "ncv": {
+            "search_converged": diag["search_converged"],
+            "coefficients_converged": diag["coefficients_converged"],
+            "coefficient_termination": diag["coefficient_termination"],
+            "coefficient_n_iter": _plain(getattr(model._result, "n_iter", None)),
+            "n_evaluations": diag["n_evaluations"],
+            "infeasible_trials": diag["infeasible_trials"],
+            "criterion_mean": diag["criterion_mean"],
+            "neighbourhoods": diag["neighbourhoods"],
+            "heldout_available": diag["heldout_available"],
+        },
+    }
 
 
 def _lss(model, params, design=True) -> dict:
@@ -822,6 +859,7 @@ def end(token, model, error) -> None:
             "fitted_family": outcome.get("fitted_family"),
             "certification": outcome.get("certification"),
             "work": outcome.get("work"),
+            **({"ncv": outcome["ncv"]} if "ncv" in outcome else {}),
             "cpu_s": cpu,
             "numba_compile_s": compile_s,
             "peak_rss_mib": peak_rss,

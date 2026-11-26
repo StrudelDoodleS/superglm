@@ -16,6 +16,8 @@ import warnings
 
 import numpy as np
 
+from superglm.model import fit_method
+
 _RETIRED_FLAG = "_retired_linear_state"
 
 
@@ -88,7 +90,7 @@ def release_capped_separation_records(model) -> None:
     finite optimum there: its record is cleared, and with it the flags and notices it
     drove.
     """
-    if (model.__dict__.get("_last_fit_meta") or {}).get("method") == "fit_path":
+    if not fit_method.traits_of(model).enforces_caps:
         return
     from superglm.model.separated_levels import record_separated_levels
 

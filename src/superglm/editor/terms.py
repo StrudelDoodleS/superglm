@@ -12,6 +12,7 @@ from superglm._frame import as_eager_frame
 from superglm.editor._types import EditableTerm
 from superglm.editor.errors import EditorKeyError, EditorValueError
 from superglm.features.ordered_categorical import _declared_matcher
+from superglm.model import fit_method
 
 
 def term_from_inference(ti) -> EditableTerm:
@@ -266,8 +267,7 @@ def native_log_effect_values(term: EditableTerm) -> NDArray:
 
 def resolve_refit_method(model, method: str) -> str:
     if method == "auto":
-        meta = getattr(model, "_last_fit_meta", None) or {}
-        return "fit_reml" if meta.get("method") == "fit_reml" else "fit"
+        return fit_method.traits_of(model).refit_as
     return method
 
 

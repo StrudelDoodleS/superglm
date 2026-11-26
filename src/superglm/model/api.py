@@ -906,6 +906,195 @@ class SuperGLM:
                     w_correction_order=w_correction_order,
                 )
 
+    def fit_ncv(
+        self,
+        X: FrameLike,
+        y: NDArray,
+        sample_weight: NDArray | None = None,
+        offset: NDArray | None = None,
+        *,
+        groups: Any = None,
+        cv: Any = None,
+        neighbours: Any = None,
+        max_ncv_iter: int | None = None,
+        ncv_tol: float | None = None,
+        pirls_tol: float | None = None,
+        max_pirls_iter: int | None = None,
+        lambda2_init: Mapping[str, float] | None = None,
+    ) -> SuperGLM:
+        """Fit with smoothing parameters chosen by held-out prediction.
+
+        Uses neighbourhood cross-validation (Wood, arXiv 2404.16490) to choose
+        smoothing parameters when rows are not conditionally independent — for
+        example repeated policies, fleets, calendar periods or neighbouring
+        spatial cells. For each neighbourhood, a set of rows is removed from
+        the fit and a subset of those rows is predicted; the search minimises
+        the summed weighted held-out deviance over the estimated smoothing
+        parameters. Leave-out fits are exact for a Gaussian identity model and
+        one Newton step from the full fit for a Poisson log model.
+
+        Once smoothing is chosen, the model is fitted and published at those
+        smoothing parameters just like :meth:`fit`: coefficients, standard
+        errors, effective degrees of freedom and the Pearson scale are the
+        ordinary ones at the chosen smoothing (standard errors are not adjusted
+        for residual dependence).
+
+        What is held out depends on the arguments passed:
+
+        - none of ``groups``, ``cv`` and ``neighbours``: every row is removed
+          and scored on its own;
+        - ``groups`` alone: every distinct group label is removed and scored as
+          one block;
+        - ``cv`` (optionally with ``groups`` forwarded to ``cv.split``): for
+          each ``(train, test)`` split, rows outside ``train`` are removed and
+          ``test`` rows are scored, so a forward-in-time splitter scores later
+          periods from earlier ones;
+        - ``neighbours`` alone: each row is scored after removing the rows
+          listed for it (including itself).
+
+        Only ``SuperGLM`` with a Gaussian family and identity link or a Poisson
+        family and log link is supported, without binning (``discrete=False``).
+        Unsupported configurations — other families or links, ``discrete=True``,
+        a nonzero or ``"auto"`` ``selection_penalty``, ``RandomEffect``,
+        ``FactorSmooth``, fit-time shape-constrained terms,
+        ``direct_solve="structured"``, invalid controls or hold-out arguments,
+        and any neighbourhood that removes every positive-weight row of an
+        unpenalised categorical level (including the reference level) — are
+        refused before any solve runs, leaving any earlier fit intact. A
+        neighbourhood whose remaining rows fail to identify the model is
+        refused before the search starts. Splines with ``select=True`` or a
+        fixed :class:`~superglm.LambdaPolicy` are supported.
+
+        Fewer than 10 neighbourhoods (including a single train/test split) fit
+        with a ``UserWarning`` that the criterion is noisy. An unconverged
+        search or final coefficient fit, a search that finds no finite
+        criterion (returning a coefficient fit at the starting smoothing
+        without held-out tables), or an estimated smoothing parameter left on a
+        search-range limit returns a fitted model with a
+        ``ConvergenceWarning``. So does a response that lies very far from
+        zero compared with its spread (less its offset): the coefficient fits
+        then stop at the limit of floating-point accuracy, and the model is
+        returned with the smoothing the search chose, its held-out tables and
+        the advice to subtract a constant from the response.
+        :meth:`ncv_diagnostics` records every verdict,
+        :meth:`summary` names ``NCV`` and repeats any convergence or bound
+        note, and :meth:`reml_diagnostics` reports ``enabled=False`` with
+        ``criterion="ncv"``.
+
+        See :doc:`Choose smoothing by held-out prediction </how-to/choose-smoothing-by-holdout>`.
+
+        Parameters
+        ----------
+        X : pandas or eager Polars DataFrame
+            Feature matrix. Lazy frames must be collected before fitting.
+        y : array-like
+            Response variable.
+        sample_weight : array-like, optional
+            Observation weights (default ``None``, equivalent to 1 for every
+            row), read under the model's declared ``weight_semantics``. Under
+            either ``"prior"`` or ``"frequency"``, each scored row's held-out
+            deviance is multiplied by its weight; ``weight_semantics`` sets the
+            likelihood-size divisor of ``criterion_mean`` (the count of
+            positive-weight scored pairs under ``"prior"``, the sum of their
+            weights under ``"frequency"``). A zero-weight row stays out of
+            every fit and adds nothing to the criterion, though it is still
+            predicted when scored. Under ``"frequency"``, a row's replicates
+            leave the fit together. Weights do not enter the linear predictor or
+            automatically scale the conditional mean.
+        offset : array-like, optional
+            Offset added to the linear predictor (default ``None``), applied to
+            both the full fit and every held-out prediction (not supplied by
+            ``sample_weight``).
+        groups : array-like, optional
+            One non-missing label per row of ``X`` (default ``None``). Passed
+            alone, each distinct label is held out in turn (at least two labels
+            are required). Passed with ``cv``, forwarded to
+            ``cv.split(X, y, groups)``. Cannot be combined with ``neighbours``.
+        cv : splitter, optional
+            Object with a ``split(X, y, groups)`` method, such as scikit-learn's
+            ``KFold``, ``GroupKFold`` or ``TimeSeriesSplit`` (default ``None``).
+            Called once and frozen for the whole search. Each split must have
+            non-empty test rows disjoint from training rows, with no repeated
+            row positions. Cannot be combined with ``neighbours``.
+        neighbours : sequence of array-like or scipy sparse matrix, optional
+            Per-row neighbourhoods (default ``None``): either a sequence of
+            length ``len(X)`` giving, for each row, the integer positions of the
+            rows removed with it, or an ``n x n`` sparse matrix whose stored
+            entries in row ``i`` mark the rows removed with row ``i``. Only the
+            focal row itself is scored, and it is added to its own removed set
+            if omitted. Cannot be combined with ``groups`` or ``cv``.
+        max_ncv_iter : int, optional
+            Maximum accepted steps of the smoothing search. Defaults to ``100``
+            (must be a whole number of at least 1).
+        ncv_tol : float, optional
+            First-order stopping tolerance of the smoothing search, relative to
+            the criterion (default ``1e-6``, must be finite and positive). The
+            search converges when no free slope of the held-out deviance in a
+            log smoothing parameter exceeds ``ncv_tol`` times the criterion — a
+            first-order stop of a local search, not a proof of a global minimum.
+            The chosen smoothing does not depend on the units of the response.
+        pirls_tol : float, optional
+            Coefficient-fit tolerance. Defaults to constructor ``tol``
+            (``1e-6``). Inner and final coefficient fits aim for a convergence
+            certificate at a thousandth of ``ncv_tol`` and are accepted at a
+            hundredth of ``ncv_tol``; ``pirls_tol`` applies where that
+            certificate is not used.
+        max_pirls_iter : int, optional
+            Maximum iterations per coefficient fit. Defaults to constructor
+            ``max_iter`` (``100``).
+        lambda2_init : mapping, optional
+            Starting smoothing parameters (default ``None``), mapping penalty
+            component names (the keys of ``ncv_diagnostics()["lambdas"]``) or
+            term names to finite positive values. Unnamed estimated components
+            use the default data-scaled start, fixed components keep their
+            values, and unknown keys are ignored with a ``UserWarning``.
+
+        Returns
+        -------
+        SuperGLM
+            The fitted model (self).
+
+        See Also
+        --------
+        fit_reml : Choose smoothing parameters by REML (for independent rows).
+        ncv_diagnostics : Plain-Python record of the smoothing search and verdicts.
+        ncv_heldout : Row-level held-out predictions and deviances.
+        ncv_heldout_groups : Held-out actual-versus-expected summary by group.
+
+        Examples
+        --------
+        >>> model = SuperGLM(family="poisson", features={"age": Spline(kind="cr", k=12)})
+        >>> model.fit_ncv(X, claims, offset=np.log(exposure), groups=df["policy_id"])
+        >>> model.ncv_diagnostics()["converged"]
+        True
+        """
+        with fit_record(self, "fit_ncv", locals()):
+            from superglm.diagnostics.separation import disclosure_scope
+            from superglm.model import ncv_ops
+            from superglm.solvers.centered_system import reuse_data_factors
+
+            with (
+                solver_blas_threads(),
+                self._parallel_scope(),
+                reuse_data_factors(),
+                disclosure_scope(self),
+            ):
+                return ncv_ops.fit_ncv(
+                    self,
+                    X,
+                    y,
+                    sample_weight,
+                    offset,
+                    groups=groups,
+                    cv=cv,
+                    neighbours=neighbours,
+                    max_ncv_iter=max_ncv_iter,
+                    ncv_tol=ncv_tol,
+                    pirls_tol=pirls_tol,
+                    max_pirls_iter=max_pirls_iter,
+                    lambda2_init=lambda2_init,
+                )
+
     def screen_interactions(
         self,
         X: FrameLike,
@@ -1215,6 +1404,223 @@ class SuperGLM:
         from superglm.model import telemetry_ops
 
         return telemetry_ops.reml_diagnostics(self)
+
+    def ncv_diagnostics(self) -> dict[str, Any]:
+        """Return plain-Python diagnostics for a ``fit_ncv`` fit.
+
+        The returned dictionary and all nested containers are copies, suitable
+        for logging or JSON serialisation. See
+        :doc:`Choose smoothing by held-out prediction </how-to/choose-smoothing-by-holdout>`.
+
+        Returns
+        -------
+        dict[str, Any]
+            Diagnostic payload with the following keys:
+
+            - ``"method"`` : ``"fit_ncv"``.
+            - ``"criterion"`` : float or None. Summed weighted held-out
+              deviance at the chosen smoothing; ``None`` if no finite criterion
+              was found or after post-fit coefficient revision.
+            - ``"criterion_mean"`` : float or None. ``criterion`` divided by
+              the likelihood size of the scored pairs (sum of weights under
+              ``weight_semantics="frequency"``, count of positive-weight scored
+              pairs under ``"prior"``), counting a row scored in several
+              neighbourhoods once per neighbourhood; ``None`` when
+              ``criterion`` is ``None``.
+            - ``"neighbourhoods"`` : dict with keys ``"form"`` (``"rows"``,
+              ``"groups"``, ``"cv"`` or ``"neighbours"``), ``"splitter"``
+              (splitter class name for ``"cv"``, else ``None``), ``"count"``,
+              ``"size_min"``, ``"size_median"``, ``"size_max"`` (removed rows
+              per neighbourhood), ``"pairs_scored"``, ``"rows_scored"`` and
+              ``"rows_scored_more_than_once"``.
+            - ``"n_iter"`` : int. Accepted outer steps of the smoothing search.
+            - ``"n_evaluations"`` : int. Total criterion evaluations, including
+              infeasible trials.
+            - ``"infeasible_trials"`` : int. Evaluations that yielded no finite
+              criterion.
+            - ``"infeasible_reasons"`` : dict[str, int]. Counts of infeasible
+              trials by reason.
+            - ``"termination_reason"`` : str. Why the search ended:
+              ``"gradient"`` or ``"no_smoothing_parameters"`` (converged);
+              ``"max_iter"``, ``"line_search"``, ``"criterion_settled"`` or
+              ``"no_finite_criterion"`` (unconverged); or
+              ``"coefficients_revised"`` after a post-fit coefficient edit.
+            - ``"converged"`` : bool. ``True`` only when both
+              ``search_converged`` and ``coefficients_converged`` are ``True``.
+            - ``"search_converged"`` : bool. Whether the smoothing search met
+              its first-order test.
+            - ``"coefficients_converged"`` : bool. Whether every coefficient
+              fit the result rests on met its convergence test: the final fit
+              at the chosen smoothing and each fit the search took a criterion
+              from (``False`` too after the coefficients were revised).
+            - ``"coefficient_termination"`` : str or None. Why a coefficient
+              fit fell short, else ``None``: the final fit's termination
+              reason, or ``"score_stagnated"`` when fits of the search or the
+              final fit stopped at the limit of floating-point accuracy for
+              the data.
+            - ``"heldout_available"`` : bool. Whether :meth:`ncv_heldout` and
+              :meth:`ncv_heldout_groups` have results to read.
+            - ``"heldout_failure"`` : str or None. Reason held-out results
+              could not be computed at the published fit, else ``None``.
+            - ``"lambdas"`` : dict[str, float]. Chosen smoothing parameter per
+              penalty component (fixed components included).
+            - ``"start_lambdas"`` : dict[str, float]. Starting smoothing
+              parameter for each estimated component.
+            - ``"gradient"`` : list[float] or None. Slope of the criterion in
+              each estimated log smoothing parameter at ``lambdas``; ``None``
+              if no finite criterion was found or after coefficient revision.
+            - ``"at_bound"`` : list[tuple[str, str]]. ``(component, side)``
+              pairs (``"floor"`` or ``"ceiling"``) for estimated components
+              sitting on a search-range limit.
+            - ``"bound_pressure"`` : list[tuple[str, str]]. Subset of
+              ``at_bound`` where the criterion was still falling outward at the
+              limit by at least the stopping tolerance.
+            - ``"lambda_floor"`` : float or None. Lower limit of the search
+              range.
+            - ``"lambda_ceiling"`` : float or None. Upper limit of the search
+              range.
+            - ``"lambda_history"`` : list[dict[str, float]]. Smoothing
+              parameters at each start and accepted step.
+            - ``"criterion_history"`` : list[float]. Criterion value at each
+              start and accepted step.
+            - ``"work"`` : dict[str, int or float]. Cumulative work counts of
+              the search (``inner_solves``, ``fallback_solves``,
+              ``stagnated_fits``, ``pirls_iterations``, ``factorisations``,
+              ``small_factorisations``, ``stacks``, ``stacked``, ``solves``,
+              ``rows_read``, ``rows_multiplied``, ``rows_streamed``,
+              ``kept_fits``).
+
+        Raises
+        ------
+        RuntimeError
+            If the model has not been fitted with :meth:`fit_ncv`.
+
+        Notes
+        -----
+        After coefficients are revised post-fit (for example in the browser
+        editor or by a post-fit shape repair), ``"termination_reason"`` becomes
+        ``"coefficients_revised"``, all convergence flags read ``False``, and
+        ``"criterion"``, ``"criterion_mean"``, ``"gradient"``,
+        ``"bound_pressure"`` and the held-out tables are withdrawn because they
+        described the fitted coefficients; ``"lambdas"`` and ``"at_bound"`` are
+        retained.
+
+        See Also
+        --------
+        fit_ncv, ncv_heldout, ncv_heldout_groups
+        """
+        from superglm.model import ncv_ops
+
+        return ncv_ops.ncv_diagnostics(self)
+
+    def ncv_heldout(self) -> pd.DataFrame:
+        """Return per-row held-out predictions from a ``fit_ncv`` fit.
+
+        Contains one row per scored ``(neighbourhood, row)`` pair in
+        neighbourhood order; a row scored by several neighbourhoods (for
+        example under repeated K-fold) appears once per neighbourhood. A
+        zero-weight row is still predicted when scored and carries zero
+        ``heldout_deviance``. The returned DataFrame is a copy. See
+        :doc:`Choose smoothing by held-out prediction </how-to/choose-smoothing-by-holdout>`.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Table with columns:
+
+            - ``"neighbourhood"`` : integer neighbourhood index.
+            - ``"label"`` : group label for a ``groups`` fit, otherwise the
+              neighbourhood index.
+            - ``"row"`` : zero-based row position in ``X``.
+            - ``"weight"`` : observation weight.
+            - ``"actual"`` : observed response ``y``.
+            - ``"heldout"`` : mean predicted for the row with its neighbourhood
+              removed (offset included).
+            - ``"fitted"`` : mean predicted by the full published fit (offset
+              included).
+            - ``"heldout_deviance"`` : weighted unit deviance evaluated at
+              ``heldout`` (``0.0`` when ``weight == 0``).
+
+        Raises
+        ------
+        RuntimeError
+            If the model was not fitted with :meth:`fit_ncv`, if coefficients
+            were revised after fitting, if held-out results could not be
+            computed at the published coefficients, or if the model was
+            constructed with ``retain_fit_state=False`` (which releases
+            row-level arrays; use :meth:`ncv_heldout_groups` instead).
+
+        See Also
+        --------
+        fit_ncv, ncv_heldout_groups, ncv_diagnostics
+        """
+        from superglm.model import ncv_ops
+
+        return ncv_ops.ncv_heldout(self)
+
+    def ncv_heldout_groups(self, by: Any = None) -> pd.DataFrame:
+        """Return held-out actual-versus-expected totals summed by group.
+
+        Aggregates the scored ``(neighbourhood, row)`` pairs of a
+        :meth:`fit_ncv` fit by group or split without refitting. A row scored
+        by several neighbourhoods counts once per neighbourhood, and a
+        zero-weight row counts in ``rows`` while adding nothing to weighted
+        totals. The returned DataFrame is a copy. See
+        :doc:`Choose smoothing by held-out prediction </how-to/choose-smoothing-by-holdout>`.
+
+        Parameters
+        ----------
+        by : array-like, optional
+            One non-missing label per row of ``X`` (default ``None``). When
+            ``None``, aggregates over the fit's own groups (for a ``groups``
+            fit) or splits (for a ``cv`` fit); that table is kept even when
+            ``retain_fit_state=False``. Required after a single-row or
+            ``neighbours`` fit, and passing ``by`` requires
+            ``retain_fit_state=True``.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Table indexed by ``"group"`` (for a ``groups`` fit or an unnamed
+            ``by``), ``"split"`` (for a ``cv`` fit with ``by=None``), or
+            ``by.name`` (when ``by`` is a named Series or Index), with columns:
+
+            - ``"rows"`` : count of scored ``(neighbourhood, row)`` pairs.
+            - ``"weight"`` : sum of positive observation weights.
+            - ``"actual"`` : weighted sum of observed responses.
+            - ``"heldout_expected"`` : weighted sum of held-out predicted means.
+            - ``"actual_over_expected"`` : ``actual / heldout_expected``, or
+              ``NaN`` where ``heldout_expected <= 0``.
+            - ``"heldout_deviance"`` : sum of ``heldout_deviance`` over
+              positive-weight scored pairs.
+
+        Raises
+        ------
+        RuntimeError
+            If the model was not fitted with :meth:`fit_ncv`, if coefficients
+            were revised after fitting, if held-out results are unavailable at
+            the published fit, or if ``by`` is passed with
+            ``retain_fit_state=False``.
+        ValueError
+            If ``by=None`` on a single-row or ``neighbours`` fit, if ``by``
+            does not have length ``len(X)``, or if ``by`` contains missing
+            labels on scored rows.
+
+        See Also
+        --------
+        fit_ncv, ncv_heldout, ncv_diagnostics
+
+        Examples
+        --------
+        >>> model = SuperGLM(family="poisson", features={"veh_age": Spline(kind="cr", k=14)})
+        >>> model.fit_ncv(X, claims, offset=np.log(exposure), groups=fleets)
+        >>> by_fleet = model.ncv_heldout_groups().sort_values(
+        ...     "actual_over_expected", ascending=False
+        ... )
+        """
+        from superglm.model import ncv_ops
+
+        return ncv_ops.ncv_heldout_groups(self, by)
 
     def diagnostics(self) -> dict[str, Any]:
         """Per-group diagnostic dict for programmatic / audit access."""

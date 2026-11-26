@@ -214,6 +214,12 @@ class ConvergenceWarning(UserWarning):
     ``fit_mode="reml"`` for the fit they publish; the summary's ``Converged``
     row and ``reml_diagnostics()["converged"]`` then read ``False``.
 
+    ``SuperGLM.fit_ncv`` warns when its smoothing search or its final
+    coefficient fit stops unconverged, when a coefficient fit it used stopped
+    at the limit of floating-point accuracy, when the search finds no smoothing
+    at which its criterion can be computed, and when it ends with a smoothing
+    parameter on a limit of its range; ``ncv_diagnostics()`` holds each verdict.
+
     ``SuperLSS.fit_reml`` warns when its coefficient or smoothing loop stops
     unconverged; ``result_.converged`` then reads ``False`` and the summary's
     ``note`` column says so (``SuperLSS.fit``, with fixed smoothing, reports
@@ -394,6 +400,254 @@ def _bootstrap_reason(reml_result: Any) -> str:
         "the convergence check (no retry ran: the starting values scaled to the data's "
         "curvature were the same)"
     )
+
+
+# Why a neighbourhood cross-validation search stopped short of its first-order test, for each
+# stop that means it did (``ncv.result.STOP_REASONS``), and what to do about it.
+_NCV_STOP_TEXT = {
+    "max_iter": (
+        "it reached the max_ncv_iter limit",
+        "Refit with a larger max_ncv_iter, passing "
+        "lambda2_init=model.ncv_diagnostics()['lambdas'] to continue from this fit.",
+    ),
+    "line_search": (
+        "no further step lowered the held-out deviance",
+        "The held-out deviance is flat or uneven around this smoothing: refit with "
+        "lambda2_init=model.ncv_diagnostics()['lambdas'] to search again from here, or "
+        "with a larger ncv_tol if the smoothing is good enough.",
+    ),
+    "criterion_settled": (
+        "its steps stopped lowering the held-out deviance before its slopes met ncv_tol",
+        "The held-out deviance is nearly flat around this smoothing: refit with "
+        "lambda2_init=model.ncv_diagnostics()['lambdas'] to search again from here, or "
+        "with a larger ncv_tol if the smoothing is good enough.",
+    ),
+}
+
+# What to do about each reason a trial of the search gave no criterion
+# (``ncv.result.TRIAL_FAILURES``).
+_NCV_TRIAL_ADVICE = {
+    "uncertified_mode": "Refit with a larger max_pirls_iter.",
+    "clipped_prediction": (
+        "Check the responses and offsets of the held-out rows for extreme values."
+    ),
+    "non_finite": "Check the responses, weights and offsets for extreme values.",
+    "leave_out_rank": (
+        "Choose neighbourhoods that leave rows of every term in the fit, or simplify the terms."
+    ),
+    "rank_deficient_fit": "Drop a term that repeats what another term already carries.",
+    "kept_rows_limit": (
+        "Neighbourhoods need fits of their own at every smoothing when two terms carry the "
+        "same information (a numeric term beside a spline of the same variable, or a spline "
+        "of a column that does not vary): drop one of the two, or choose this model's "
+        "smoothing with fit_reml."
+    ),
+    "leave_out_refused": (
+        "Choose neighbourhoods that divide the rows of every factor level and term."
+    ),
+}
+
+
+# A coefficient fit of a ``fit_ncv`` fit that the solver ended at the limit of float64
+# accuracy (``ncv.engine.ModeFit.stagnated``): what happened to it, and what brings it about.
+_NCV_FLOAT_LIMIT = (
+    "stopped at the limit of floating-point accuracy for this data, short of {their} "
+    "convergence test (termination_reason='score_stagnated')"
+)
+_NCV_FLOAT_LIMIT_ADVICE = (
+    " Coefficient fits stop at that limit when the response, less its offset where it has "
+    "one, lies very far from zero compared with its spread: subtract a constant from the "
+    "response before fitting and add it back to the predictions."
+)
+
+
+def _ncv_fits_short(result: Any) -> tuple[list[str], bool]:
+    """The coefficient fits of a ``fit_ncv`` fit short of their test, a clause each.
+
+    First those the solver ended at the limit of float64 accuracy, which stand for the
+    mode: the fits the search took a criterion from (``work["stagnated_fits"]`` of its
+    evaluations) and the final fit.  Then a final fit that stopped short in any other way,
+    which stands for none.  Also whether any fit was at that limit.
+    """
+    refit_reason = getattr(result, "terminal_refit_termination", None)
+    used = int((getattr(result, "work", None) or {}).get("stagnated_fits", 0))
+    tried = int(getattr(result, "n_evaluations", 0) or 0)
+    final = refit_reason == "score_stagnated"
+    clauses = []
+    if used:
+        fits = (
+            f"the coefficient fit{'' if used == 1 else 's'} at {used} of the {tried} "
+            f"smoothing setting{'' if tried == 1 else 's'} it tried"
+        ) + (", and the final coefficient fit," if final else "")
+        their = "its" if used == 1 and not final else "their"
+        clauses.append(f"{fits} {_NCV_FLOAT_LIMIT.format(their=their)}")
+    elif final:
+        clauses.append(
+            "the final coefficient fit at that smoothing " + _NCV_FLOAT_LIMIT.format(their="its")
+        )
+    if refit_reason is not None and not final:
+        clauses.append(
+            "the final coefficient fit at that smoothing did not meet its convergence test "
+            f"(it stopped with termination_reason={refit_reason!r})"
+        )
+    return clauses, bool(used or final)
+
+
+def _ncv_trial_reasons(result: Any) -> tuple[str, str]:
+    """Why a search's trials gave no criterion, a sentence a reason, and what to do about each."""
+    from superglm.ncv.result import TRIAL_FAILURES
+
+    counted = getattr(result, "infeasible_reasons", None) or {}
+    reasons = " ".join(
+        f"At {count} of them, {TRIAL_FAILURES.get(reason, str(reason))}."
+        for reason, count in counted.items()
+    )
+    advice = " ".join(
+        _NCV_TRIAL_ADVICE[reason] for reason in counted if reason in _NCV_TRIAL_ADVICE
+    )
+    return reasons, advice
+
+
+def ncv_nonconvergence_message(result: Any) -> str | None:
+    """The statement a ``fit_ncv`` fit that did not converge publishes, or None.
+
+    Three things can fall short, and the statement names each that did: the smoothing search
+    finding no smoothing at which its criterion could be computed (the model is then a
+    coefficient fit at the smoothing the search started from, and the reasons its trials
+    recorded are given in words); the search stopping short of its first-order test; and a
+    coefficient fit missing its convergence certificate (``_ncv_fits_short``).  A fit the
+    solver ended at the limit of floating-point accuracy stands for the mode, so the
+    statement then says the smoothing is the search's and what brings that limit about;
+    a final fit that stopped short in any other way leaves the model without held-out
+    results.  A model whose coefficients were revised after fitting publishes nothing here.
+    """
+    if result is None or bool(getattr(result, "converged", True)):
+        return None
+    reason = getattr(result, "termination_reason", None)
+    if reason == "coefficients_revised":
+        return None
+    refit_reason = getattr(result, "terminal_refit_termination", None)
+    short, at_limit = _ncv_fits_short(result)
+    also = "".join(f", and {clause}" for clause in short)
+    float_limit = _NCV_FLOAT_LIMIT_ADVICE if at_limit else ""
+    more_iterations = (
+        " Refit with a larger max_pirls_iter to let the final fit finish."
+        if refit_reason == "max_iter"
+        else ""
+    )
+    if reason == "no_finite_criterion":
+        tried = int(getattr(result, "n_evaluations", 0) or 0)
+        reasons, advice = _ncv_trial_reasons(result)
+        return (
+            "fit_ncv chose no smoothing: its held-out deviance could not be computed at the "
+            f"{tried} smoothing setting{'' if tried == 1 else 's'} it tried."
+            + (f" {reasons}" if reasons else "")
+            + " The model is returned as a coefficient fit at the smoothing the search "
+            "started from (model.ncv_diagnostics()['lambdas']), which held-out prediction "
+            "did not choose" + also + "." + (f" {advice}" if advice else "") + float_limit
+        )
+    steps = int(getattr(result, "n_reml_iter", 0) or 0)
+    after = f"after {steps} step{'' if steps == 1 else 's'}"
+    if reason in _NCV_STOP_TEXT:
+        why, advice = _NCV_STOP_TEXT[reason]
+        return (
+            f"fit_ncv did not converge: its smoothing search stopped {after} because {why}"
+            + also
+            + ". The model is returned at the lowest held-out deviance the search reached, "
+            "with the coefficients, effective degrees of freedom (how flexible each term is) "
+            "and standard errors of the fit there; that smoothing is not established as the "
+            f"one that predicts held-out rows best. {advice}" + more_iterations + float_limit
+        )
+    met = f"fit_ncv did not converge: its smoothing search met its test {after}, but "
+    if refit_reason in (None, "score_stagnated"):
+        held = (
+            ", standard errors and held-out results"
+            if getattr(result, "heldout", None) is not None
+            else " and standard errors"
+        )
+        return (
+            met + ", and ".join(short) + ". The smoothing is the one the search chose, and "
+            "the model is returned with the coefficients, effective degrees of freedom (how "
+            f"flexible each term is){held} of the fit there." + float_limit
+        )
+    return (
+        met + ", and ".join(short) + ". The model is returned with the coefficients, "
+        "effective degrees of freedom and standard errors of that fit's last step, and "
+        "without held-out results."
+        + (
+            more_iterations
+            or " The stop is not an iteration cap, so more iterations will not help: check "
+            "the responses, weights and offsets for extreme values, or simplify the terms."
+        )
+        + float_limit
+    )
+
+
+def warn_ncv_nonconvergence(result: Any) -> str | None:
+    """Emit the ``fit_ncv`` non-convergence statement as a ConvergenceWarning; return it."""
+    message = ncv_nonconvergence_message(result)
+    if message is not None:
+        warnings.warn(message, ConvergenceWarning, skip_file_prefixes=(_PACKAGE_PREFIX,))
+    return message
+
+
+def ncv_bound_message(result: Any) -> str | None:
+    """The terms a ``fit_ncv`` search left on a limit of its smoothing range, or None.
+
+    Every estimated component on a bound is named, whether or not the criterion still fell
+    there: a spline at the largest smoothing is a straight line, which the reader should know.
+    Those the bound held back (an outward slope of at least the stopping bar) are named again.
+    """
+    from superglm._lambda_box import LambdaBox, bound_warning_message
+
+    box = getattr(result, "lambda_box", None)
+    if not isinstance(box, LambdaBox):
+        return None
+    lambdas = result.lambdas
+    message = bound_warning_message(
+        [
+            (
+                name,
+                side,
+                float(lambdas[name]),
+                box.floor if side == "floor" else box.ceiling,
+                box.unit,
+            )
+            for name, side in getattr(result, "at_bound", ()) or ()
+            if name in lambdas
+        ],
+        lead="fit_ncv's smoothing search ended at a limit of its range on ",
+    )
+    held = [repr(name) for name, _ in getattr(result, "bound_pressure", ()) or ()]
+    if message is None or not held:
+        return message
+    return (
+        f"{message} The held-out deviance was still falling at the limit for "
+        f"{', '.join(held)}, so the limit, not the data, set that smoothing."
+    )
+
+
+def warn_ncv_bounds(result: Any) -> str | None:
+    """Emit ``ncv_bound_message`` as a ConvergenceWarning; return it."""
+    message = ncv_bound_message(result)
+    if message is not None:
+        warnings.warn(message, ConvergenceWarning, skip_file_prefixes=(_PACKAGE_PREFIX,))
+    return message
+
+
+def search_nonconvergence_message(criterion: str, result: Any) -> str | None:
+    """The non-convergence statement of a SuperGLM smoothing search by ``criterion``, or None.
+
+    ``criterion`` is the search's (``fit_method.search_criterion``): ``"reml"`` gives
+    ``fit_reml``'s statement, ``"ncv"`` ``fit_ncv``'s.
+    """
+    return _SEARCH_NONCONVERGENCE[criterion](result)
+
+
+_SEARCH_NONCONVERGENCE = {
+    "reml": reml_nonconvergence_message,
+    "ncv": ncv_nonconvergence_message,
+}
 
 
 def lss_nonconvergence_reason(

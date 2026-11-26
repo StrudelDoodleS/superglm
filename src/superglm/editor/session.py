@@ -95,6 +95,7 @@ from superglm.editor.terms import (
 )
 from superglm.editor.unseen import UnseenChoice
 from superglm.features.rebuild import base_names_level, clone_with_replaced_features
+from superglm.model import fit_method
 from superglm.model_selection import CrossValidationResult
 from superglm.solvers.dispersion import model_weight_semantics
 
@@ -1574,11 +1575,12 @@ class EditorSession:
         if base_offset is not None:
             combined_offset = np.asarray(base_offset, dtype=np.float64).ravel() + editor_offset
 
+        # A ``fit`` holds each lambda policy's resolved value; a ``fit_reml`` keeps the policies.
         refit_model = self.model._clone_without_features(
             set(names),
             lambda1=lambda1,
             lambda2=lambda2,
-            smoothing_resolved=True,
+            smoothing_resolved=resolve_refit_method(self.model, method) == "fit",
         )
         fit_refit_model(
             self.model,
@@ -1635,8 +1637,7 @@ class EditorSession:
             raise RuntimeError("Fit response data was not retained on the source model.")
 
         profile_model = self.model._clone_without_features(set())
-        if getattr(self.model, "_last_fit_meta", None) is not None:
-            profile_model._last_fit_meta = dict(self.model._last_fit_meta)
+        fit_method.copy_record(self.model, profile_model)
 
         key = parameter.lower().replace("-", "_")
         if key in {"tweedie", "tweedie_p", "p"}:
@@ -1965,8 +1966,11 @@ class EditorSession:
                 **fit_kwargs,
             )
             return refit_model, refit_model._fit_settings["method"]
+        # A ``fit`` carries no lambda policy: its lambda2, the source's resolved smoothing or
+        # the analyst's, holds every term's value.
+        held = resolve_refit_method(self.model, method) == "fit"
         refit_model = clone_with_replaced_features(
-            self.model, drafts, lambda1=lambda1, lambda2=lambda2
+            self.model, drafts, lambda1=lambda1, lambda2=lambda2, smoothing_resolved=held
         )
         method_used = fit_refit_model(
             self.model,

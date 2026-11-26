@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 
 from superglm._roundoff import gamma
+from superglm.model import fit_method
 from superglm.solvers.dispersion import model_weight_semantics
 
 if TYPE_CHECKING:
@@ -890,6 +891,17 @@ def publish_revised_coefficients(model, beta_before) -> None:
         reml_result.scop_states = None
         reml_result.curvature_source = None
         reml_result.termination_reason = "coefficients_revised"
+    from superglm.ncv.result import NCVResult
+
+    if isinstance(reml_result, NCVResult):
+        # The criterion, its slopes, the bound it still pressed and the held-out results
+        # described the fit's own coefficients. Which bound the smoothing sits on does not
+        # change.
+        reml_result.criterion_mean = None
+        reml_result.gradient = None
+        reml_result.bound_pressure = ()
+        reml_result.heldout = None
+        reml_result.heldout_failure = None
 
     # Profile likelihoods and confidence intervals are functions of the old
     # fitted mean, so they cannot survive an arbitrary coefficient revision.
@@ -1007,6 +1019,7 @@ def _validate_workspace_result(
     reml_result = getattr(work_model, "_reml_result", None)
     if reml_result is not None and getattr(reml_result, "pirls_result", None) is not solver_result:
         raise RuntimeError("fit candidate REML result does not reference its solver result")
+    fit_method.check_search_result(work_model)
     selection_penalty = getattr(fitted_penalty(work_model), "lambda1", None)
     if selection_penalty is None or not np.isfinite(selection_penalty):
         raise RuntimeError("fit candidate is missing its resolved selection penalty")

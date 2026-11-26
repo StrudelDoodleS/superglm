@@ -14,9 +14,11 @@ from superglm import __version__
 from superglm.diagnostics.convergence import (
     coefficient_nonconvergence_message,
     reml_nonconvergence_message,
+    search_nonconvergence_message,
 )
 from superglm.features.categorical import Categorical
 from superglm.features.constraint import rules_of
+from superglm.model import fit_method
 from superglm.model.fit_state import edited_statistics_unavailable
 
 
@@ -25,24 +27,37 @@ def training_telemetry(model) -> dict[str, Any]:
 
     The payload is intentionally tracking-system agnostic. It contains plain
     Python objects that callers can send to MLflow, logs, files, model cards, or
-    other governance systems.
+    other governance systems. A ``fit_ncv`` fit files its search under ``"ncv"``
+    (``ncv_diagnostics()``); its ``"reml"`` entry says the criterion was not REML.
     """
     result = _fitted_result(model)
-    return _json_ready(
-        {
-            "package": {
-                "name": "superglm",
-                "version": __version__,
-            },
-            "model": _model_config(model),
-            "rank_policy": _rank_policy_payload(result),
-            "fit": _fit_payload(model, result),
-            "fit_statistics": _fit_statistics_payload(model),
-            "features": feature_schema(model),
-            "edf": edf_by_term(model),
-            "reml": reml_diagnostics(model),
-        }
-    )
+    payload = {
+        "package": {
+            "name": "superglm",
+            "version": __version__,
+        },
+        "model": _model_config(model),
+        "rank_policy": _rank_policy_payload(result),
+        "fit": _fit_payload(model, result),
+        "fit_statistics": _fit_statistics_payload(model),
+        "features": feature_schema(model),
+        "edf": edf_by_term(model),
+        "reml": reml_diagnostics(model),
+    }
+    search = _ncv_search(model)
+    if search is not None:
+        payload["ncv"] = search
+    return _json_ready(payload)
+
+
+def _ncv_search(model) -> dict[str, Any] | None:
+    """``ncv_diagnostics()`` of a ``fit_ncv`` fit, or None for a fit whose smoothing it did
+    not choose."""
+    if fit_method.search_criterion(model) != "ncv":
+        return None
+    from superglm.model.ncv_ops import ncv_diagnostics
+
+    return ncv_diagnostics(model)
 
 
 def _rank_policy_payload(result) -> dict[str, Any]:
@@ -61,11 +76,22 @@ def _rank_policy_payload(result) -> dict[str, Any]:
     }
 
 
+_NOT_REML = (
+    "The smoothing was chosen by fit_ncv, by held-out prediction, not by REML, so this fit "
+    "has no REML score; model.ncv_diagnostics() reports its search."
+)
+
+
 def reml_diagnostics(model) -> dict[str, Any]:
     """Return REML telemetry for an already-fitted model.
 
     If the model was not fit with REML, the returned payload has
-    ``enabled=False`` and empty lambda/history fields. A ``fit_reml`` fit with
+    ``enabled=False`` and empty lambda/history fields. A ``fit_ncv`` fit's
+    payload says so and carries no REML score: ``criterion`` is ``"ncv"``,
+    ``lambdas`` the smoothing it chose, ``converged``, ``termination_reason``,
+    ``convergence_note`` and ``terminal_refit_termination`` the verdict of its
+    search and of its final fit in its own words, and ``note`` where the search
+    is reported (``ncv_diagnostics()``). A ``fit_reml`` fit with
     no smoothing to select fits its coefficients directly; its payload also
     carries that fit's ``converged``, ``termination_reason``,
     ``convergence_note`` and ``terminal_refit_termination``.
@@ -75,6 +101,23 @@ def reml_diagnostics(model) -> dict[str, Any]:
     reml = getattr(model, "_reml_result", None)
     lambdas = _model_lambdas(model)
     profile = getattr(model, "_reml_profile", None) or {}
+    criterion = fit_method.search_criterion(model)
+    if criterion == "ncv":
+        search = model._reml_result
+        return _json_ready(
+            {
+                "enabled": False,
+                "criterion": criterion,
+                "lambdas": dict(search.lambdas),
+                "lambda_history": [],
+                "profile": {},
+                "converged": bool(search.converged),
+                "termination_reason": search.termination_reason,
+                "convergence_note": search_nonconvergence_message(criterion, search),
+                "terminal_refit_termination": search.terminal_refit_termination,
+                "note": _NOT_REML,
+            }
+        )
     if reml is None:
         payload: dict[str, Any] = {
             "enabled": False,
@@ -82,7 +125,7 @@ def reml_diagnostics(model) -> dict[str, Any]:
             "lambda_history": [],
             "profile": profile,
         }
-        if (getattr(model, "_last_fit_meta", None) or {}).get("method") == "fit_reml":
+        if fit_method.traits_of(model).criterion is not None:
             # The ConvergenceWarning points here; the coefficient fit is the
             # only stage, so its stop is the terminal fit's.
             result = getattr(model, "_result", None)
@@ -187,6 +230,9 @@ def metrics_for_logging(model, *, prefix: str = "train") -> dict[str, float]:
 
     This helper is independent of any tracking package. A caller can pass the
     returned dictionary directly to a logger such as ``mlflow.log_metrics``.
+    A ``fit_ncv`` fit's search is under ``{prefix}.ncv.``: its steps, criterion
+    evaluations, criterion and its mean, and its overall, search and final-fit
+    verdicts (1.0 or 0.0); a ``fit_reml`` search's is under ``{prefix}.reml.``.
     """
     result = _fitted_result(model)
     metrics: dict[str, float] = {
@@ -213,6 +259,15 @@ def metrics_for_logging(model, *, prefix: str = "train") -> dict[str, float]:
         metrics[f"{prefix}.lambda.{_metric_part(key)}"] = float(value)
     for key, value in _group_edf(model).items():
         metrics[f"{prefix}.edf.{_metric_part(key)}"] = float(value)
+    search = _ncv_search(model)
+    if search is not None:
+        for key in ("n_iter", "n_evaluations", "criterion", "criterion_mean"):
+            value = search[key]
+            if value is not None:
+                metrics[f"{prefix}.ncv.{key}"] = float(value)
+        for key in ("converged", "search_converged", "coefficients_converged"):
+            metrics[f"{prefix}.ncv.{key}"] = 1.0 if search[key] else 0.0
+        return metrics
     reml = getattr(model, "_reml_result", None)
     if reml is not None:
         metrics[f"{prefix}.reml.n_iter"] = float(reml.n_reml_iter)
@@ -245,7 +300,7 @@ def _model_config(model) -> dict[str, Any]:
 def _fit_payload(model, result) -> dict[str, Any]:
     fit_meta = dict(getattr(model, "_last_fit_meta", None) or {})
     payload = {
-        "method": fit_meta.get("method"),
+        "method": fit_method.method_of(model),
         "fit_meta": fit_meta,
         "deviance": float(result.deviance),
         "effective_df": float(result.effective_df),

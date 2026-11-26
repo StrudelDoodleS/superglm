@@ -337,7 +337,9 @@ def _publish_profiled_family(
             exc, parameter=parameter, value=float(value), decoupled=decoupled
         ) from exc
     if precision:
-        final_model._last_fit_meta["initial_precision"] = precision
+        from superglm.model import fit_method
+
+        fit_method.annotate(final_model, initial_precision=precision)
     published = synchronize(final_model)
     _install_refit(model, final_workspace, family)
     from superglm.model import fit_ops
@@ -648,9 +650,9 @@ def _resolve_profile_fit_mode(model, fit_mode: str, *, parameter: str = "fit_mod
     if fit_mode == "reml":
         return "fit_reml"
     if fit_mode == "inherit":
-        meta = getattr(model, "_last_fit_meta", None)
-        if meta is not None and meta.get("method") == "fit_reml":
-            return "fit_reml"
+        from superglm.model import fit_method
+
+        return fit_method.traits_of(model).refit_as
     return "fit"
 
 

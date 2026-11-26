@@ -19,10 +19,11 @@ from superglm._lambda_box import LambdaBox, fitted_lambda_box
 from superglm.diagnostics.convergence import (
     coefficient_nonconvergence_message,
     lss_nonconvergence_message,
-    reml_nonconvergence_message,
+    search_nonconvergence_message,
 )
 from superglm.diagnostics.fit_report import phase_label, status_sentence
 from superglm.editor.lss.view import is_lss
+from superglm.model import fit_method
 from superglm.model.fit_state import fitted_lambda2
 from superglm.model.reml_setup import collect_reml_groups
 from superglm.model_selection import _fingerprint_columns, _take_offset, fold_adapter
@@ -37,7 +38,7 @@ SETTLED_REML = 0.01
 WORST_ROWS = 10
 _LIMIT_OUTCOMES = frozenset({"upper_bound", "unresolved_cap", "exact_face"})
 _SEVERITY_ORDER = {"error": 0, "warning": 1, "info": 2}
-_FIXED_STOPS = frozenset({"fixed_only", "fixed_lambdas"})
+_FIXED_STOPS = frozenset({"fixed_only", "fixed_lambdas", "no_smoothing_parameters"})
 # A finding about these affects the numbers a user reads; the rest are about how the search went.
 _NUMBER_IMPACTS = frozenset({"fit_validity", "fit_reliability", "inference_reliability"})
 # The tab's status of a fit, from a SuperLSS report's status code.
@@ -54,10 +55,28 @@ _SEARCH_WORDS = {
     "efs+newton": "A few quick smoothing updates, then Newton steps",
 }
 _GLM_CONVERGED = "Converged. The smoothing search met its stopping test."
+_NO_SEARCH = "no smoothing search ran"
+# A held-out search (``fit_ncv``) has no REML score: its verdicts and stops in its own words.
+_NCV_SEARCH = "Held-out prediction (fit_ncv)"
+_NCV_CONVERGED = (
+    "Converged. fit_ncv chose the smoothing by held-out prediction, and its search met its "
+    "stopping test."
+)
+# A fit that holds the smoothing a search chose for the model it was refitted from.
+_HELD = "No smoothing search. The smoothing is held where {method} chose it."
+_NCV_STOP_TEXT = {
+    "gradient": "the held-out deviance no longer falls in any direction of the smoothing, to "
+    "within the set tolerance",
+    "no_smoothing_parameters": _NO_SEARCH,
+    "criterion_settled": "its steps stopped lowering the held-out deviance before its slopes "
+    "met the set tolerance",
+    "line_search": "no further step lowered the held-out deviance",
+    "no_finite_criterion": "the held-out deviance could not be computed at any smoothing it tried",
+    "coefficients_revised": "the coefficients were edited after fitting",
+}
 _GLM_EDITED = "The coefficients were edited by hand after fitting, so they are not the fit's own."
 # A quoted term of a finding: ``'mean:power'``, or one of its penalties, ``'mean:power#wiggle'``.
 _QUOTED_TERM = re.compile(r"'([^':#]+:[^'#]+)(?:#[^']*)?'")
-_NO_SEARCH = "no smoothing search ran"
 _LSS_STOP_TEXT = {
     **dict.fromkeys(
         ("lambda_change", "objective_plateau"),
@@ -99,12 +118,22 @@ _STOP_TEXT = {
 }
 
 
-def _stop_text(reason: str | None, rounds: int | None = None, *, lss: bool = False) -> str:
-    """The stop in words after "Stopped because"; ``rounds`` names the budget a cap ran out of."""
+def _stop_text(
+    reason: str | None, rounds: int | None = None, *, lss: bool = False, ncv: bool = False
+) -> str:
+    """The stop in words after "Stopped because"; ``rounds`` names the budget a cap ran out of.
+
+    ``ncv`` reads the stop of a held-out search (``fit_ncv``), whose reasons are its own.
+    """
     if reason is None:
         return _NO_SEARCH
     if lss and reason in _LSS_STOP_TEXT:
         return _LSS_STOP_TEXT[reason]
+    if ncv and reason == "max_iter":
+        count = f"{rounds} smoothing round{'' if rounds == 1 else 's'}"
+        return f"it reached its limit of {count} (max_ncv_iter) before settling"
+    if ncv:
+        return _NCV_STOP_TEXT.get(reason, reason.replace("_", " "))
     if reason in {"max_iterations", "max_reml_iter"}:
         count = (
             "its smoothing rounds"
@@ -304,10 +333,11 @@ def _glm_verdict(model, reml) -> dict[str, Any]:
     """A SuperGLM fit's status, its sentence and, when it did not converge, the full statement."""
     if reml is not None and reml.termination_reason == "coefficients_revised":
         return {"status": "edited", "verdict": _GLM_EDITED, "explanation": None}
+    criterion = fit_method.search_criterion(model)
     message = (
         coefficient_nonconvergence_message(model._result)
-        if reml is None
-        else reml_nonconvergence_message(reml)
+        if criterion is None
+        else search_nonconvergence_message(criterion, reml)
     )
     searched = reml is not None and reml.termination_reason not in _FIXED_STOPS
     if message is not None or not (
@@ -319,8 +349,11 @@ def _glm_verdict(model, reml) -> dict[str, Any]:
             "explanation": message,
         }
     if searched:
-        return {"status": "converged", "verdict": _GLM_CONVERGED, "explanation": None}
-    return {"status": "fixed", "verdict": status_sentence("fixed_fit"), "explanation": None}
+        verdict = _NCV_CONVERGED if criterion == "ncv" else _GLM_CONVERGED
+        return {"status": "converged", "verdict": verdict, "explanation": None}
+    held = fit_method.smoothing_held_from(model)
+    verdict = status_sentence("fixed_fit") if held is None else _HELD.format(method=held)
+    return {"status": "fixed", "verdict": verdict, "explanation": None}
 
 
 def _glm_trace(model) -> dict[str, Any]:
@@ -328,7 +361,7 @@ def _glm_trace(model) -> dict[str, Any]:
     terms = _glm_terms(
         model, searched=reml is not None and reml.termination_reason not in _FIXED_STOPS
     )
-    return {
+    trace = {
         **_glm_verdict(model, reml),
         "search": None,
         "rows": getattr(getattr(model, "_fit_stats", None), "n_obs", None),
@@ -341,6 +374,10 @@ def _glm_trace(model) -> dict[str, Any]:
         "phases": [],
         "findings": [],
     }
+    # A held-out search has no REML score to chart; its trace names the method instead.
+    if fit_method.search_criterion(model) == "ncv":
+        trace.update(search=_NCV_SEARCH, criterion="ncv", path=[])
+    return trace
 
 
 def fit_trace(
@@ -359,7 +396,12 @@ def fit_trace(
     trace.update(
         id=fit_id,
         label=label,
-        stop_text=_stop_text(trace["stop"], trace["rounds"], lss=distributional),
+        stop_text=_stop_text(
+            trace["stop"],
+            trace["rounds"],
+            lss=distributional,
+            ncv=trace.get("criterion") == "ncv",
+        ),
         rows=trace["rows"] if n_rows is None else n_rows,
         seconds=trace["seconds"] if seconds is None else seconds,
         late_gain=path[len(path) // 2] - final if len(path) >= 2 else None,

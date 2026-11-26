@@ -65,6 +65,7 @@ from superglm.editor.display import DisplayTransform, display_for
 from superglm.editor.errors import EditorClientError, EditorTypeError, EditorValueError
 from superglm.editor.lss.availability import require_available
 from superglm.editor.refit import fit_refit_model
+from superglm.editor.terms import resolve_refit_method
 from superglm.features.categorical import Categorical, _grouping_labels
 from superglm.features.grouping import LevelGrouping
 from superglm.features.ordered_categorical import OrderedCategorical
@@ -185,7 +186,9 @@ def free_level_comparison(session, name: str) -> dict[str, Any]:
     held = {to_group[str(text)] for text in texts[supported]}
     if len(held) < 2:
         raise EditorValueError(_ONE_LEVEL.format(term=name, count=len(held)))
-    free_model = clone_with_replaced_features(session.model, {name: free})
+    # A ``fit`` at the source's smoothing holds each lambda policy's resolved value.
+    held = resolve_refit_method(session.model, "auto") == "fit"
+    free_model = clone_with_replaced_features(session.model, {name: free}, smoothing_resolved=held)
     shrunk = _lift_selection(free_model, session.model, name)
     # A level whose every response is at the family's bound is named below,
     # whatever the model's own rule for separated levels says.

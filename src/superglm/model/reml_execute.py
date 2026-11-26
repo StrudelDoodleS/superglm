@@ -194,11 +194,9 @@ def run_fixed_monotone_reml(
         likelihood_eta=eta_unclipped if on_likelihood_rows(result) else None,
     )
     model._solver_result = result
-    model._last_fit_meta = {
-        "method": "fit_reml",
-        "discrete": model._discrete,
-        "lambda_strategy": "fixed",
-    }
+    from superglm.model import fit_method
+
+    fit_method.record(model, "fit_reml", lambda_strategy="fixed")
     if profile is not None:
         if total_start is not None:
             profile["total_s"] = time.perf_counter() - total_start

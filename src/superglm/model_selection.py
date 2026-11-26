@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -29,6 +29,7 @@ from superglm.model.base import NoPredictedMeanError, unpriced_rows
 # The full-frame binding pass lives in a neutral module so the public
 # SuperGLM.bind_levels runs this exact resolution without importing this one.
 from superglm.model.binding_ops import resolve_level_bindings as _resolve_level_bindings
+from superglm.model.fit_method import FIT_METHODS, FitMethod
 from superglm.model.reml_setup import live_reml_lambdas
 from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
 from superglm.validation import _normalized_gini
@@ -46,10 +47,11 @@ class CrossValidationResult:
         One row per fold with columns: ``fold``, ``n_train``, ``n_test``,
         ``fit_time_s``, ``score_time_s``, ``converged``, ``n_iter``,
         ``effective_df``, plus one column per requested metric. Under
-        ``fit_mode="fit_reml"`` a fold is ``converged`` only when both its
-        smoothing-parameter selection and its final coefficient fit
-        converged, and two more columns say how it got there:
-        ``n_reml_iter`` (outer REML iterations) and ``warm_started``. A
+        ``fit_mode="fit_reml"`` or ``"fit_ncv"`` a fold is ``converged`` only
+        when both its smoothing search and its final coefficient fit
+        converged, and two more columns say how it got there: the search's
+        accepted steps (``n_reml_iter`` under ``"fit_reml"``, ``n_ncv_iter``
+        under ``"fit_ncv"``) and ``warm_started``. A
         ``"score refused"`` column appears when a fold's held-out rows of
         positive weight had no predicted mean: it holds the reason, naming
         the rows by their position in the frame (a custom scorer that reads
@@ -111,8 +113,11 @@ class CrossValidationResult:
         features and interaction parents, or every column when the model
         takes its features from ``X``. Other columns may hold anything.
         ``data_fingerprint`` is ``None`` when these columns cannot be hashed.
-    fit_mode : {"fit", "fit_reml"} or None
-        The fit method each fold was fitted with.
+    fit_mode : {"fit", "fit_reml", "fit_ncv"} or None
+        The fit method each fold was fitted with, and so what chose each
+        fold's smoothing: nothing under ``"fit"``, which holds it fixed; REML
+        under ``"fit_reml"``; held-out prediction on the fold's own training
+        rows under ``"fit_ncv"``.
     fingerprint_version : int or None
         The version of the recipe ``data_fingerprint`` was made with. A
         fingerprint of another version cannot be compared with these rows.
@@ -130,8 +135,13 @@ class CrossValidationResult:
     refused_scores : tuple of (int, str) or None
         The ``(fold, score)`` cells whose score was refused (``"score
         refused"``), in fold order. A fold's other scores stand.
+    ncv_groups : ndarray or None
+        Under ``fit_mode="fit_ncv"``, the ``groups`` labels the folds' fits
+        held out by, copied, one per row the folds index; ``None`` otherwise.
+        A replay of ``fold_indices`` passes them again, so each fold chooses
+        its smoothing as it did.
 
-    ``n_rows`` through ``refused_scores`` are ``None`` on a result made before
+    ``n_rows`` through ``ncv_groups`` are ``None`` on a result made before
     they were recorded; such a result without ``warm_start`` and
     ``fit_kwargs`` was fitted cold, with no extra fit arguments.
     """
@@ -154,6 +164,7 @@ class CrossValidationResult:
     warm_start: bool | None = None
     fit_kwargs: dict[str, Any] | None = None
     refused_scores: tuple[tuple[int, str], ...] | None = None
+    ncv_groups: NDArray | None = None
 
     def plot_terms_by_fold(
         self,
@@ -611,6 +622,7 @@ _RESERVED_COLUMNS = frozenset(
         "n_iter",
         "effective_df",
         "n_reml_iter",
+        "n_ncv_iter",
         "warm_started",
         REFUSED_COLUMN,
     }
@@ -650,7 +662,45 @@ class _GLMFolds:
         return "fit"
 
     def refuse_fit(self, fit_mode: str, fit_kwargs: Mapping[str, Any]) -> None:
-        """A SuperGLM holds its configured penalties fixed, so every fit mode can run."""
+        """Refuse, once and before any fold, what ``fit_ncv`` refuses without reading rows.
+
+        ``fit`` and ``fit_reml`` refuse nothing here: a SuperGLM holds its configured
+        penalties fixed, so both can run. Under ``fit_ncv`` the controls, the model's
+        settings and its declared terms are checked with ``fit_ncv``'s own checks and words;
+        what depends on a fold's rows (its groups, its levels, its inner split) is refused by
+        that fold's fit. The hold-out arguments that would not follow the fold are refused
+        here: ``groups``, which ``cross_validate`` slices to each fold's training rows, and
+        ``neighbours``, whose row positions refer to the whole frame.
+        """
+        if fit_mode != "fit_ncv":
+            return
+        if "groups" in fit_kwargs:
+            raise ValueError(
+                "fit_kwargs cannot set ['groups']: cross_validate slices groups to each fold's "
+                "training rows and passes them to fit_ncv; pass them as its own groups argument"
+            )
+        if "neighbours" in fit_kwargs:
+            raise ValueError(
+                "fit_kwargs cannot set ['neighbours']: its row positions refer to the whole "
+                "frame, not to a fold's training rows; pass groups to cross_validate to hold "
+                "out each group in turn, or an inner splitter as fit_kwargs={'cv': ...}"
+            )
+        from superglm.model import ncv_ops
+        from superglm.ncv.engine import DEFAULT_NCV_TOL
+        from superglm.ncv.search import DEFAULT_MAX_NCV_ITER
+
+        def control(name: str, default):
+            value = fit_kwargs.get(name)
+            return default if value is None else value
+
+        ncv_ops._validate_controls(
+            control("ncv_tol", DEFAULT_NCV_TOL),
+            control("max_ncv_iter", DEFAULT_MAX_NCV_ITER),
+            control("max_pirls_iter", self.model._max_iter),
+            fit_kwargs.get("lambda2_init"),
+        )
+        ncv_ops._refuse_unsupported_model(self.model)
+        ncv_ops._refuse_unsupported_terms(self.model)
 
     default_scoring = ("deviance",)
     scorers = _BUILTIN_SCORERS
@@ -691,17 +741,19 @@ class _GLMFolds:
         return est
 
     def fit_summary(self, est, fit_mode: str) -> dict[str, Any]:
-        # Under fit_reml the fold's convergence is its smoothing selection's
-        # as well as its final coefficient fit's: PIRLS converging at
-        # lambdas REML never settled is not a converged fold.
-        reml = getattr(est, "_reml_result", None) if fit_mode == "fit_reml" else None
+        # Under a method that searches the smoothing (fit_reml, fit_ncv) the
+        # fold's convergence is its search's as well as its final coefficient
+        # fit's: PIRLS converging at lambdas the search never settled is not a
+        # converged fold.
+        column = search_iteration_column(fit_mode)
+        search = None if column is None else getattr(est, "_reml_result", None)
         summary = {
-            "converged": bool(est._result.converged) and (reml is None or bool(reml.converged)),
+            "converged": bool(est._result.converged) and (search is None or bool(search.converged)),
             "n_iter": est._result.n_iter,
             "effective_df": est._result.effective_df,
         }
-        if fit_mode == "fit_reml":
-            summary["n_reml_iter"] = 0 if reml is None else int(reml.n_reml_iter)
+        if column is not None:
+            summary[column] = 0 if search is None else int(search.n_reml_iter)
         return summary
 
     def live_lambdas(self, est) -> dict[str, float] | None:
@@ -737,6 +789,16 @@ class _GLMFolds:
             sample_weight=sample_weight,
             n_points=200,
         )
+
+
+def search_iteration_column(fit_mode: str) -> str | None:
+    """The fold-table column of a fit method's smoothing-search steps; None for ``fit``.
+
+    The method's criterion (``fit_method.FIT_METHODS``) names it: ``n_reml_iter`` under
+    ``fit_reml``, ``n_ncv_iter`` under ``fit_ncv``.
+    """
+    criterion = FIT_METHODS[cast(FitMethod, fit_mode)].criterion
+    return None if criterion is None else f"n_{criterion}_iter"
 
 
 def fold_adapter(model) -> _GLMFolds | LSSFolds:
@@ -870,15 +932,36 @@ def cross_validate(
         arrays for training and replace them with held-out values for scoring;
         column sources resolve from each fold's frame.
     groups : array-like, optional
-        Group labels forwarded to ``cv.split()``.
-    fit_mode : {"fit", "fit_reml"}, optional
-        Which fit method to call on each fold estimator. ``"fit"`` holds the
-        smoothing parameters fixed; ``"fit_reml"`` selects them again on each
-        fold's training rows. By default ``"fit"`` for a SuperGLM. A SuperLSS
-        has no configured smoothing to hold fixed, so its default is
-        ``"fit_reml"``, or ``"fit"`` when ``fit_kwargs`` gives ``lambdas``. On
-        an unfitted SuperLSS with smooth terms, ``"fit"`` needs those
-        ``lambdas``: without them every fold fails, and each failure is logged.
+        Group labels forwarded to ``cv.split()``. Under ``fit_mode="fit_ncv"``
+        they are also sliced to each fold's training rows and passed to its
+        ``fit_ncv`` as ``groups``, so each group of the fold is held out in
+        turn, or forwarded to the inner splitter ``fit_kwargs`` gives as
+        ``cv``.
+    fit_mode : {"fit", "fit_reml", "fit_ncv"}, optional
+        Which fit method to call on each fold estimator. ``"fit"`` (default for
+        a ``SuperGLM``) holds the smoothing parameters fixed; ``"fit_reml"``
+        selects them again on each fold's training rows by REML; ``"fit_ncv"``
+        (``SuperGLM`` only; raises ``ValueError`` for ``SuperLSS`` or
+        unsupported model settings before any fold runs) runs a full
+        :meth:`SuperGLM.fit_ncv <superglm.SuperGLM.fit_ncv>` smoothing search
+        on each fold's training rows.
+        Under ``"fit_ncv"``, outer ``groups`` are sliced to each fold's
+        training rows so each training group is held out in turn by default,
+        ``fit_kwargs={"cv": inner}`` holds out inner folds instead (with sliced
+        ``groups`` forwarded to ``inner.split``), and omitting both holds out
+        single rows; ``fit_kwargs`` cannot set ``groups`` or ``neighbours``.
+        ``warm_start`` defaults to ``False`` under ``"fit_ncv"``,
+        ``fold_scores`` adds ``n_ncv_iter`` and ``warm_started`` (with
+        ``converged`` requiring both the search and the final coefficient fit
+        to converge), and a refusal that depends on a fold's rows fails that
+        fold only (setting its scores to ``error_score`` and logging the fold,
+        or raising with a note naming the fold when ``error_score="raise"``).
+        See :doc:`Choose smoothing by held-out prediction </how-to/choose-smoothing-by-holdout>`.
+        A ``SuperLSS`` has no configured smoothing to hold fixed, so its
+        default is ``"fit_reml"``, or ``"fit"`` when ``fit_kwargs`` gives
+        ``lambdas``. On an unfitted ``SuperLSS`` with smooth terms, ``"fit"``
+        needs those ``lambdas``: without them every fold fails, and each
+        failure is logged.
     scoring : str, callable, or sequence thereof, optional
         Metrics to evaluate. Built-in for a SuperGLM: ``"deviance"``, ``"nll"``,
         ``"gini"``; ``"deviance"`` by default. Built-in for a SuperLSS:
@@ -920,14 +1003,22 @@ def cross_validate(
         ``{"max_reml_iter": 100}``. ``sample_weight`` and ``offset`` come
         from the split and cannot be set here. Nor can a SuperLSS's
         ``truncation`` and ``censored``: its folds are scored on complete rows.
+        Under ``fit_mode="fit_ncv"``, ``cv`` is the inner splitter every fold
+        reuses, and neither ``groups`` (pass it to ``cross_validate``, which
+        slices it) nor ``neighbours`` (its positions refer to the whole frame)
+        can be set.
     warm_start : bool, optional
-        Under ``fit_mode="fit_reml"``, start every fold after the first
-        converged one from that fold's smoothing parameters
+        Under ``fit_mode="fit_reml"`` or ``"fit_ncv"``, start every fold after
+        the first converged one from that fold's smoothing parameters
         (``lambda2_init``, or ``lambdas`` for a SuperLSS). Components frozen as
         flat start cold, with the rest of their penalty block. Each fold still
         searches to its own convergence test. ``True`` by default for a
-        SuperGLM, whose later folds then take fewer outer iterations. ``False``
-        by default for a SuperLSS: its Fellner-Schall search can take longer
+        SuperGLM under ``"fit_reml"``, whose later folds then take fewer outer
+        iterations. ``False`` by default under ``"fit_ncv"``: its held-out
+        criterion can have more than one local minimum, and a fold started
+        from another fold's smoothing need not reach the one its own rows
+        choose from their own start. ``False`` by default for a SuperLSS: its
+        Fellner-Schall search can take longer
         from another fold's parameters than from its own data-scaled start, and
         can reach its iteration limit. That argument in ``fit_kwargs`` takes
         precedence for every fold.
@@ -953,8 +1044,13 @@ def cross_validate(
     fit_kwargs = dict(fit_kwargs or {})
     if fit_mode is None:
         fit_mode = folds.default_fit_mode(fit_kwargs)
-    if fit_mode not in ("fit", "fit_reml"):
-        raise ValueError(f"fit_mode must be 'fit' or 'fit_reml', got {fit_mode!r}")
+    if fit_mode not in ("fit", "fit_reml", "fit_ncv"):
+        raise ValueError(f"fit_mode must be 'fit', 'fit_reml' or 'fit_ncv', got {fit_mode!r}")
+    if fit_mode == "fit_ncv" and isinstance(model, SuperLSS):
+        raise ValueError(
+            "fit_mode='fit_ncv' chooses a SuperGLM's smoothing by held-out prediction, and a "
+            "SuperLSS has no fit_ncv; use fit_mode='fit_reml' to choose its smoothing in each fold"
+        )
     folds.refuse_fit(fit_mode, fit_kwargs)
     reserved_fit_kwargs = {"sample_weight", folds.offset_argument} & set(fit_kwargs)
     if reserved_fit_kwargs:
@@ -969,10 +1065,12 @@ def cross_validate(
             "scores complete rows; validate a truncated or censored fit on a held-out split "
             "with model.scores(X, y, which=('log',), truncation=..., censored=...)"
         )
+    # The column of the smoothing search's steps; None under fit, which searches nothing.
+    search_column = search_iteration_column(fit_mode)
     if warm_start is None:
-        warm_start = folds.default_warm_start
-    reml_warm_start = (
-        warm_start and fit_mode == "fit_reml" and folds.warm_argument not in fit_kwargs
+        warm_start = folds.default_warm_start and fit_mode != "fit_ncv"
+    search_warm_start = (
+        warm_start and search_column is not None and folds.warm_argument not in fit_kwargs
     )
     warm_lambdas: dict[str, float] | None = None
 
@@ -1074,9 +1172,11 @@ def cross_validate(
             # An empty mapping starts nothing warm (every component of the
             # first converged fold was left on a flat plateau): those folds
             # keep the model's own configured start, and read cold.
-            warm_this_fold = bool(reml_warm_start and warm_lambdas)
+            warm_this_fold = bool(search_warm_start and warm_lambdas)
             if warm_this_fold:
                 fold_kwargs[folds.warm_argument] = warm_lambdas
+            if fit_mode == "fit_ncv" and groups is not None:
+                fold_kwargs["groups"] = groups[train_idx]
             fit_fn(
                 X_train,
                 y_train,
@@ -1086,9 +1186,9 @@ def cross_validate(
             )
             record["fit_time_s"] = time.perf_counter() - t0
             record.update(folds.fit_summary(est, fit_mode))
-            if fit_mode == "fit_reml":
+            if search_column is not None:
                 record["warm_started"] = warm_this_fold
-                if reml_warm_start and warm_lambdas is None and record["converged"]:
+                if search_warm_start and warm_lambdas is None and record["converged"]:
                     warm_lambdas = folds.live_lambdas(est)
 
             # Score
@@ -1186,6 +1286,8 @@ def cross_validate(
 
         except Exception as exc:
             if error_score == "raise":
+                if fit_mode == "fit_ncv":
+                    exc.add_note(f"cross_validate: raised in fold {fold_i}.")
                 raise
             logger.warning(f"Fold {fold_i} failed: {exc!r}. Setting scores to {error_score}.")
             record.pop(REFUSED_COLUMN, None)
@@ -1196,8 +1298,8 @@ def cross_validate(
             record["converged"] = False
             record["n_iter"] = 0
             record["effective_df"] = np.nan
-            if fit_mode == "fit_reml":
-                record["n_reml_iter"] = 0
+            if search_column is not None:
+                record[search_column] = 0
                 record["warm_started"] = False
             for sname in score_names:
                 record[sname] = error_score
@@ -1303,4 +1405,5 @@ def cross_validate(
             for key, value in fit_kwargs.items()
         },
         refused_scores=tuple(sorted(refused_cells)),
+        ncv_groups=groups.copy() if fit_mode == "fit_ncv" and groups is not None else None,
     )

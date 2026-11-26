@@ -29,6 +29,7 @@ from superglm.diagnostics.separation import (
     take_held_levels,
 )
 from superglm.distributions import scale_is_known
+from superglm.model import fit_method
 
 
 def separated_labels(spec: Any) -> tuple:
@@ -573,7 +574,7 @@ def _design_record(model, y: NDArray, sample_weight: NDArray) -> _Record:
     boundaries = response_boundaries(model._distribution, model._link)
     weights = np.asarray(sample_weight, dtype=np.float64)
     response = np.asarray(y, dtype=np.float64)
-    caps_enforced = (getattr(model, "_last_fit_meta", None) or {}).get("method") != "fit_path"
+    caps_enforced = fit_method.traits_of(model).enforces_caps
     shrunk = selection_shrunk_group_names(fitted_penalty(model), model._groups)
 
     def penalised(term: str) -> bool:

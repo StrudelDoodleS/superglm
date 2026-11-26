@@ -63,7 +63,11 @@ from superglm.editor.lss.validation import (
     stack_offsets,
 )
 from superglm.editor.lss.view import LSSModelView, column_of, is_lss
-from superglm.editor.refit import EXPLICIT_PENALTY_ATTRIBUTE, fit_refit_model
+from superglm.editor.refit import (
+    EXPLICIT_PENALTY_ATTRIBUTE,
+    fit_refit_model,
+    holds_searched_smoothing,
+)
 from superglm.editor.terms import resolve_refit_method
 from superglm.features.categorical import Categorical, _codes_against, _grouping_labels
 from superglm.features.factor_smooth import FactorSmooth
@@ -1204,6 +1208,8 @@ class CVRunPlan(_Plan):
     scoring: tuple[str, ...]
     splitter: str | None
     n_points: int
+    # The supplied result's fit_ncv group labels, passed again so each fold holds out as it did.
+    groups: NDArray | None = None
 
 
 def capture_cv_run(session) -> CVRunPlan:
@@ -1216,7 +1222,10 @@ def capture_cv_run(session) -> CVRunPlan:
     supplied = _replayed_scores(cv, session.model)
     return CVRunPlan(
         model=session.model,
-        template=_declared_template(session),
+        # Folds replayed with the current model's own refit hold a search's smoothing as it does.
+        template=_declared_template(
+            session, cv.fit_mode is None and holds_searched_smoothing(session.model)
+        ),
         model_revision=session.model_revision,
         source=InForce.of(session),
         rows=session.cv_check.rows,
@@ -1234,6 +1243,7 @@ def capture_cv_run(session) -> CVRunPlan:
         scoring=supplied or tuple(name for name, *_ in _metrics_of(session.model)),
         splitter=cv.splitter,
         n_points=session.n_points,
+        groups=getattr(cv, "ncv_groups", None),
     )
 
 
@@ -1245,25 +1255,30 @@ def _replay_method(session) -> str:
     return session.cv.fit_mode or resolve_refit_method(session.model, "auto")
 
 
-def _declared_template(session):
+def _declared_template(session, holds: bool):
     """The in-force structure, unfitted, to choose again what the opened model estimates.
 
-    A Refit's model declares the selection penalty, smoothing and NB2 theta
-    its own fit chose on all the training rows. Each fold and the Final fit
-    choose them again on their own rows, as the opened model declares: the
-    penalties as :meth:`superglm.structure.Structure.apply` does, and a
-    ``theta="auto"`` too. Validation rows never set a fold's penalty or
-    theta. A theta the opened model fixes stays as the in-force model holds
-    it, re-profiled or not. A ``lambda1`` or ``lambda2`` passed to a Refit
-    is the analyst's choice and stays.
+    Each fold and the Final fit choose the penalties and an NB2
+    ``theta="auto"`` again on their own rows, as the opened model declares
+    them (as :meth:`superglm.structure.Structure.apply` does); a theta the
+    opened model fixes stays as the in-force model holds it. A ``lambda1``
+    or ``lambda2`` passed to a Refit is the analyst's choice and stays.
+    ``holds``: the fits are ``fit`` refits holding a search's smoothing
+    (:func:`~superglm.editor.refit.holds_searched_smoothing`), so the
+    in-force smoothing is declared, its lambda policies resolved.
     """
     if is_lss(session.model):
         return session.model.lss._clone_with_replaced_terms({})
     opened = session.reference_model
-    template = session.model.clone_unfitted()
     explicit = getattr(session.model, EXPLICIT_PENALTY_ATTRIBUTE, {})
+    if holds:
+        template = clone_with_replaced_features(
+            session.model, {}, lambda2=explicit.get("lambda2", ...), smoothing_resolved=True
+        )
+    else:
+        template = session.model.clone_unfitted()
+        template.lambda2 = explicit.get("lambda2", configured_lambda2(opened))
     template.selection_penalty = explicit.get("lambda1", configured_penalty(opened).lambda1)
-    template.lambda2 = explicit.get("lambda2", configured_lambda2(opened))
     family = configured_family(opened)
     if isinstance(family, NegativeBinomial) and family.theta == "auto":
         template.family = family
@@ -1444,6 +1459,7 @@ def run_cv(plan: CVRunPlan, context) -> CVRun:
             scoring=recorder.score,
             error_score="raise",
             fit_kwargs=plan.fit_kwargs,
+            groups=plan.groups,
             warm_start=plan.warm_start,
         )
     except JobCancelledError:
@@ -1657,7 +1673,7 @@ def capture_final_fit(session) -> FinalFitPlan:
         raise EditorValueError(reason)
     return FinalFitPlan(
         model=session.model,
-        template=_declared_template(session),
+        template=_declared_template(session, holds_searched_smoothing(session.model)),
         model_revision=session.model_revision,
         source=InForce.of(session),
         datasets=datasets,

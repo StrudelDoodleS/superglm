@@ -282,6 +282,14 @@ test("a fit that searched but kept no path says so, beside any that kept one", (
   assert.equal((beside.match(/class="diagnose-line"/g) ?? []).length, 1);
 });
 
+test("a held-out search has no REML score, so the chart neither draws it nor calls it unrecorded", () => {
+  const heldOut = { path: [], criterion: "ncv", search: "Held-out prediction (fit_ncv)" };
+  assert.equal(searchPathMarkup(payload([fit("model", "All rows", heldOut)]), "model"), "");
+  const beside = searchPathMarkup(payload([fit("model", "All rows", heldOut), fit("fold-1", "Fold 1")]), "fold-1");
+  assert.doesNotMatch(beside, /Not recorded/);
+  assert.equal((beside.match(/class="diagnose-line"/g) ?? []).length, 1);
+});
+
 const OPEN = { search: "open", phases: "open" };
 
 test("phases give seconds and share, widest bar full, once the section is opened", () => {
