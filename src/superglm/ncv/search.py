@@ -9,8 +9,9 @@ where it starts, the units it works in, what it is handed at an infeasible trial
 and what the stop is called.  The optimiser's own success flag is never read.
 
 **What is promised.**  A converged search is a first-order stop of a local numerical search:
-at the returned smoothing no slope of the criterion exceeds the tolerance.  It is not a proof
-of a minimum, and no curvature is examined.
+at the returned smoothing no slope of the criterion exceeds the tolerance, and every
+criterion it evaluated came from a certified inner fit.  It is not a proof of a minimum, and
+no curvature is examined.
 
 **Units.**  ``V`` carries the units of the loss and ``rho`` none, so every test is relative to
 ``V`` or to its slope and the chosen smoothing does not depend on the units of the response:
@@ -40,10 +41,10 @@ heuristic read from the provisional fit's data Gram, with a caller's start for a
 component it names.  The criterion is flat where every penalty is negligible or dominant, and
 can be stationary at a maximum, so a start at which the search takes no step is not taken as
 the answer while another start remains: the half-EDF point, then the configured smoothing
-(where the provisional fit was certified), are searched in turn until one moves, and the
+(where the provisional fit was usable), are searched in turn until one moves, and the
 lowest end is returned.  A start with no finite criterion passes to the next in the same way.
 
-**Infeasible trials.**  A trial with no certified inner mode, or no finite criterion and
+**Infeasible trials.**  A trial with no usable inner mode, or no finite criterion and
 gradient, is never handed to the optimiser as it is: it reads as far above the point the search
 stands on as the step to it promised to go below, with a zero slope, which a line search
 rejects.  The search stands only on feasible points, each lower than the last, so a search
@@ -55,6 +56,14 @@ engine's refusal (:class:`~superglm.ncv.engine.LeaveOutRankError`): true at ever
 it is raised when it comes before any criterion has been found, and later it is an infeasible
 trial.  A trial the engine could not afford (more kept-rows fits than ``engine.KEPT_FITS``) or
 could not resolve at its smoothing is infeasible and never a refusal.
+
+**Fits at the limit of float64.**  An inner fit whose solve the solver ended as stagnated,
+short of its bar, stands for the mode (``engine.ModeFit.usable``): its trial is a point like
+any other, it warms the next fit, and the search goes on from it.  The search's stop is
+then what its test found on those values, and ``termination_reason`` says so, but a search
+that took any criterion from such a fit is not converged: the count is
+``work["stagnated_fits"]``, and the fit is disclosed where it is published.  A fit stopped by
+its iteration limit is no such fit, and its trial is infeasible.
 
 **Rows read.**  The search asks for no held-out pairs, so a Gaussian model whose neighbourhoods
 are formed and factored reads its rows at the first evaluation only; the pairs are taken once,
@@ -181,7 +190,7 @@ class Descent:
     """Searches of one criterion from a sequence of starts, and what they found.
 
     ``ends`` holds, for every start with a finite criterion, the point its search ended on and
-    why; ``path`` each such start and each accepted step.  ``warm`` is the last certified inner
+    why; ``path`` each such start and each accepted step.  ``warm`` is the last usable inner
     fit, which starts the next one and carries the bar it runs to (``engine.first_bar``).
     ``reasons`` counts the infeasible trials by reason.
     """
@@ -378,7 +387,7 @@ class _Run:
 class SearchOutcome:
     """A finished search.
 
-    ``fit`` is the last certified inner fit, at or near the returned smoothing: the state to
+    ``fit`` is the last usable inner fit, at or near the returned smoothing: the state to
     start the terminal fit from.  It lives in the search's basis and is not part of ``result``.
     """
 
@@ -434,7 +443,7 @@ def search(
     }
     provisional = solve_mode(problem, declared, work=descent.work)
     default = declared
-    if provisional.certified:
+    if provisional.usable:
         descent.warm = provisional
         default = edf_share_start(problem, provisional, box, declared)
     first = np.array(
@@ -479,6 +488,8 @@ def _outcome(problem: NCVProblem, descent: Descent, first: NDArray[np.float64]) 
     """The result of ``descent``, whose first start was ``first``.
 
     With no finite criterion the result is at that start, with no criterion and no gradient.
+    A search is converged when its stop met the first-order test and no criterion it
+    evaluated came from a fit at the limit of float64 (``work["stagnated_fits"]``).
     """
     point, reason = descent.outcome()
     rho = first if point is None else point.rho
@@ -490,7 +501,8 @@ def _outcome(problem: NCVProblem, descent: Descent, first: NDArray[np.float64]) 
         lambdas=_lambdas(problem, rho),
         pirls_result=None,
         n_reml_iter=descent.steps,
-        converged=reason in ("gradient", "no_smoothing_parameters"),
+        converged=reason in ("gradient", "no_smoothing_parameters")
+        and descent.work.stagnated_fits == 0,
         lambda_history=[_lambdas(problem, visited.rho) for visited in descent.path],
         objective=None if point is None else point.value,
         reml_penalties=None,

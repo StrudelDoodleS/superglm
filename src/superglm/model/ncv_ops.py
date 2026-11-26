@@ -28,7 +28,10 @@ Convergence is disclosed and never refused.  A search that did not meet its test
 coefficient fit that did not, a search that found no smoothing at which the criterion could
 be computed (published as a coefficient fit at the smoothing it started from) and a smoothing
 parameter on a bound of the search each return a fitted model and one warning
-(:func:`warn_published_ncv`).
+(:func:`warn_published_ncv`).  So does a coefficient fit, of the search or the final one,
+that the solver ended at the limit of float64 accuracy short of its test: it stands for
+the mode (``engine.ModeFit.usable``), so the search goes on from it and the published fit
+keeps its held-out results, and the model reads as not converged.
 
 The solver's weight unit (``fit``'s exact rescaling of prior weights below ``2**-512``) is
 not applied: every fit here asks the solver for its geometry, which it returns in the
@@ -492,12 +495,12 @@ def _publish(
 
     The design is rebuilt in the basis the smoothing gives, as a ``fit`` declared with that
     smoothing builds it, and solved on the model's configured route from the search's last
-    certified coefficients.  The solve follows the inner fit's two-level rule
-    (``engine.two_level``): to ``aim``, or at once to the bar the search's fit was certified
-    at; then from where it stopped to ``bar``; then to ``bar`` from the solver's own start.
-    A fit certified at either bar is published as converged.  Returns the solve as the
-    engine reads one, with the geometry it was made in, and the penalty components in the
-    rebuilt basis.
+    usable coefficients.  The solve follows the inner fit's two-level rule
+    (``engine.two_level``): to ``aim``, or at once to the bar the search's fit ran to; then
+    from where it stopped to ``bar``; then, unless it stagnated at the limit of float64, to
+    ``bar`` from the solver's own start.  A fit certified at either bar is published as
+    converged, and any other as not converged.  Returns the solve as the engine reads one,
+    with the geometry it was made in, and the penalty components in the rebuilt basis.
     """
     from superglm.model.base import rebuild_dm_with_lambdas
 
@@ -563,7 +566,7 @@ def _publish(
 
 
 def _terminal_start(fit: ModeFit | None, searched, model) -> dict[str, Any]:
-    """The search's last certified coefficients, read in the rebuilt basis; nothing without one."""
+    """The search's last usable coefficients, read in the rebuilt basis; nothing without one."""
     if fit is None:
         return {}
     rebuilt = model._dm.group_matrices
@@ -583,10 +586,12 @@ def _evaluate_published(
     """The search's result completed at the published fit: the criterion and the held-out pairs.
 
     A search that found a criterion is evaluated once more, on the published fit's own
-    geometry and with no solve.  Where that gives none (a final fit short of its
-    certificate, as a rule), the search's own criterion stays and the result holds no
-    held-out table, with the reason in ``heldout_failure``.  The criterion's mean is over
-    the likelihood size of the scored pairs, a row scored twice counted twice.
+    geometry and with no solve.  A final fit that stagnated at the limit of float64 is
+    evaluated like a certified one (``engine.ModeFit.usable``) and keeps its held-out
+    table.  Where the evaluation gives no criterion (a final fit stopped by its iteration
+    limit, as a rule), the search's own stays and the result holds no held-out table, with
+    the reason in ``heldout_failure``.  The criterion's mean is over the likelihood size of
+    the scored pairs, a row scored twice counted twice.
     """
     certified = bool(terminal.result.converged)
     result = replace(
@@ -796,10 +801,14 @@ def ncv_diagnostics(model) -> dict[str, Any]:
     box = result.lambda_box
     floor, ceiling = (box.floor, box.ceiling) if isinstance(box, LambdaBox) else (None, None)
     search_converged = result.termination_reason in CONVERGED_STOPS
+    # The coefficient fits a result rests on are the final one and those the search took a
+    # criterion from; the only stop of the latter short of its test is the solver's
+    # stagnation at the limit of float64 (``engine.ModeFit.usable``).
+    stagnated = "score_stagnated" if result.work.get("stagnated_fits", 0) else None
+    coefficient_termination = result.terminal_refit_termination or stagnated
     # Revised coefficients are not the final fit's, whatever that fit's stop was.
     coefficients_converged = (
-        result.terminal_refit_termination is None
-        and result.termination_reason != "coefficients_revised"
+        coefficient_termination is None and result.termination_reason != "coefficients_revised"
     )
     return {
         "method": "fit_ncv",
@@ -814,7 +823,7 @@ def ncv_diagnostics(model) -> dict[str, Any]:
         "converged": bool(result.converged),
         "search_converged": search_converged,
         "coefficients_converged": coefficients_converged,
-        "coefficient_termination": result.terminal_refit_termination,
+        "coefficient_termination": coefficient_termination,
         "heldout_available": result.heldout is not None,
         "heldout_failure": result.heldout_failure,
         "lambdas": dict(result.lambdas),

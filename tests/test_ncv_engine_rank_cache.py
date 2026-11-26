@@ -30,6 +30,7 @@ from superglm.ncv.engine import (
 )
 from superglm.reml.penalty_algebra import build_penalty_matrix
 from tests.test_ncv_engine import (
+    BAR,
     RHO,
     ROUTES,
     KeptRows,
@@ -41,6 +42,7 @@ from tests.test_ncv_engine import (
     predictor_slack,
     problem_of,
     refit_pairs,
+    solver_ending,
 )
 
 ZERO = np.zeros(1)
@@ -470,22 +472,31 @@ def test_more_groups_than_the_cache_affords():
     assert_same_criterion(problem, again, by_rows, kappa)
 
 
-def test_response_translation_changes_no_criterion():
+@pytest.mark.parametrize("met", [True, False], ids=["bar-met", "short-of-the-bar"])
+def test_response_translation_changes_no_criterion(monkeypatch, met):
     """A response moved by 1e7 gives the same criterion and slopes, cached or not.
 
     Cross-products of the response itself would put the sum of squares together from terms
-    of 1e14 a row.
+    of 1e14 a row.  That far from zero the fit ends at the limit of float64, a rounding to
+    either side of the acceptance bar: its solves are reported once as meeting that bar and
+    once as short of it, and the criterion is the same.
     """
     design = twin("gaussian", False)
     problem = design.problem
     nb = from_splitter(KFold(4, shuffle=True, random_state=1), design.frame, problem.y)
+    unmoved = evaluate(rebuilt(problem, mode_bar=None), nb, ZERO)
     moved = rebuilt(problem, y=problem.y + 1e7, mode_bar=None)
     _, _, kappa = KeptRows(problem, ZERO).one_step(nb)
+
+    def at_the_limit(arguments):
+        return "converged" if met and arguments["_mode_bar"] == BAR else "score_stagnated"
+
+    monkeypatch.setattr(engine, "fit_irls_direct", solver_ending(at_the_limit, []))
     by_rows, again, _ = assert_cached_is_the_row_evaluation(moved, nb, ZERO, kappa)
     assert again.work.rows_read == 0
-    assert_same_criterion(
-        moved, evaluate(rebuilt(problem, mode_bar=None), nb, ZERO), by_rows, kappa
-    )
+    assert by_rows.fit.certified == met and by_rows.fit.stagnated != met
+    assert again.work.stagnated_fits == int(not met)
+    assert_same_criterion(moved, unmoved, by_rows, kappa)
 
 
 def test_problem_built_again_holds_no_cross_products():

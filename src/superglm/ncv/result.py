@@ -91,7 +91,10 @@ class NCVResult(REMLResult):
     ``termination_reason`` one of :data:`STOP_REASONS`, and ``bound_pressure`` the estimated
     components at a bound whose slope still points out of the box by the stopping bar or more.
 
-    ``converged`` is a first-order stop of a local numerical search, not a proof of a minimum.
+    ``converged`` is a first-order stop of a local numerical search on criteria taken from
+    certified coefficient fits, not a proof of a minimum: a search that met its test on a
+    fit at the limit of float64 (``work["stagnated_fits"]``) keeps its ``termination_reason``
+    and is not converged.
     When no finite criterion was found, ``objective`` and ``gradient`` are None and ``lambdas``
     is the smoothing the search started from; ``infeasible_reasons`` says why each trial gave
     none.
@@ -106,7 +109,7 @@ class NCVResult(REMLResult):
     criterion_mean: float | None = None
     #: Criterion evaluations, the infeasible ones included.
     n_evaluations: int = 0
-    #: Evaluations with no certified inner mode or no finite, differentiable criterion.
+    #: Evaluations with no usable inner mode or no finite, differentiable criterion.
     infeasible_trials: int = 0
     #: Those evaluations by reason (:data:`TRIAL_FAILURES`), in the order first met.
     infeasible_reasons: dict[TrialFailure, int] = field(default_factory=dict)

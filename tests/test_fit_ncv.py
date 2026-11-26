@@ -54,6 +54,7 @@ from tests.test_ncv_engine import (
     predictor_slack,
     problem_of,
     refit_pairs,
+    solver_ending,
     solver_short,
 )
 from tests.test_ncv_engine_rank_cache import twin
@@ -1356,51 +1357,312 @@ def test_response_units_do_not_move_the_chosen_curve():
     assert abs(mine["n_iter"] - theirs["n_iter"]) <= 2 and mine["converged"]
 
 
+# ── coefficient fits at the limit of float64 ──────────────────────────────────
+
+# What a fit says of a coefficient fit the solver ended at the limit of float64 accuracy.
+AT_THE_LIMIT = (
+    "stopped at the limit of floating-point accuracy for this data, short of {their} "
+    "convergence test (termination_reason='score_stagnated')"
+)
+THE_SEARCH_S = (
+    "The smoothing is the one the search chose, and the model is returned with the "
+    "coefficients, effective degrees of freedom (how flexible each term is), standard errors "
+    "and held-out results of the fit there."
+)
+NEARER_ZERO = (
+    "Coefficient fits stop at that limit when the response, less its offset where it has one, "
+    "lies very far from zero compared with its spread: subtract a constant from the response "
+    "before fitting and add it back to the predictions."
+)
+# What is reported of each coefficient solve: the solver's own report, every solve to the
+# aim stagnated and every solve to the acceptance bar certified, every solve stagnated, or
+# every solve stopped by its iteration limit.
+REPORTS = {
+    "as-solved": lambda arguments: None,
+    "bar-met": lambda arguments: (
+        "converged" if arguments["_mode_bar"] == BAR else "score_stagnated"
+    ),
+    "short-of-the-bar": lambda arguments: "score_stagnated",
+    "iteration-limit": lambda arguments: "max_iter",
+}
+# The three a response far from zero can meet.
+AT_THE_FLOAT_LIMIT = ("as-solved", "bar-met", "short-of-the-bar")
+
+
+def limit_statement(report: dict, final: bool) -> str:
+    """The disclosure of a search that met its test on coefficient fits at the limit of float64.
+
+    ``report`` is the fit's ``ncv_diagnostics()``; ``final`` says the final fit was one of them.
+    """
+    used, tried = report["work"]["stagnated_fits"], report["n_evaluations"]
+    several = used > 1 or (used == 1 and final)
+    fits = f"the coefficient fit{'' if used == 1 else 's'} at {used} of the {tried} smoothing "
+    fits += "settings it tried"
+    if used and final:
+        fits += ", and the final coefficient fit,"
+    if not used:
+        fits = "the final coefficient fit at that smoothing"
+    stopped = AT_THE_LIMIT.format(their="their" if several else "its")
+    return (
+        f"fit_ncv did not converge: its smoothing search met its test after {report['n_iter']} "
+        f"steps, but {fits} {stopped}. {THE_SEARCH_S} {NEARER_ZERO}"
+    )
+
+
+def fit_reported(model, b: Book, search="as-solved", final="as-solved", **arguments):
+    """``fit_ncv`` with its coefficient solves reported as ``REPORTS`` says; also both logs of solves."""
+    logs: tuple[list, list] = ([], [])
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(engine, "fit_irls_direct", solver_ending(REPORTS[search], logs[0]))
+        patch.setattr(ncv_ops, "fit_irls_direct", solver_ending(REPORTS[final], logs[1]))
+        model, caught = run(model, b, groups=b.labels, **arguments)
+    return model, caught, logs
+
+
 @cache
-def moved_book(level=0.0) -> Book:
-    """The rank-cache tests' 240-row Gaussian book in twelve groups, ``level`` of its spread from zero."""
+def twin_book() -> Book:
+    """The rank-cache tests' 240-row Gaussian book in twelve groups."""
     design = twin("gaussian", False)
     n = design.problem.n
     labels = np.array([f"g{k:02d}" for k in np.arange(n) % 12])
-    y = design.problem.y + level * np.std(design.problem.y)
-    return Book(design.frame[["t", "x"]], y, np.ones(n), np.zeros(n), labels)
+    return Book(design.frame[["t", "x"]], design.problem.y, np.ones(n), np.zeros(n), labels)
 
 
 @cache
-def unmoved_fit():
-    b = moved_book()
+def at_zero(name):
+    """A book as it is, its fit, and how far another first-order stop of its search may lie."""
+    b = curve_book() if name == "curve" else twin_book()
     model, caught = run(curve_model(), b, groups=b.labels)
     assert not caught
-    return model
+    return b, model, stops_apart(model, b), hessian_condition(model, b)
 
 
-@pytest.mark.parametrize("level", [1e7, 1e8])
-def test_response_far_from_zero_chooses_the_same_curve_and_pays_for_the_aim_once(solves, level):
-    """A Gaussian response ``level`` times its spread from zero: the curve of the response at zero.
+@cache
+def far_fit(name, level, report):
+    """A book's fit with its response far from zero, every coefficient solve reported as ``report``.
 
-    Counts, for fits certified at the acceptance bar and not at the aim, and fewer where
-    the aim is reached: a Gaussian solve is one iteration, its working response being the
-    same from any start, and the one that ends short of the aim takes a second, which finds
-    its state unchanged.  Only the first fit short of the aim tries for it, so the search's
-    solves are at most its evaluations, the provisional fit and one continuation, and the
-    published fit is one solve more.
+    The curve book is moved by ``level`` of its spread and the twin book by ``level``.
     """
-    b, plain = moved_book(), unmoved_fit()
-    apart, edf, _ = stops_apart(plain, b)
-    rounding = 64 * hessian_condition(plain, b) * U
-    solves.clear()
-    moved, caught = run(curve_model(), moved_book(level), groups=b.labels)
-    assert not messages(caught)
-    mine, theirs = moved.ncv_diagnostics(), plain.ncv_diagnostics()
-    work = mine["work"]
-    assert solves == {"direct": work["inner_solves"] + 1}
-    assert work["inner_solves"] <= mine["n_evaluations"] + 2 and work["fallback_solves"] <= 1
-    assert work["pirls_iterations"] <= work["inner_solves"] + 1
-    assert mine["converged"] and mine["termination_reason"] == "gradient"
-    assert moved.result.converged and mine["infeasible_trials"] == 0
-    assert mine["criterion"] == pytest.approx(theirs["criterion"], rel=10 * TOL)
+    b = at_zero(name)[0]
+    shift = level * float(np.std(b.y)) if name == "curve" else level
+    fit = fit_reported(curve_model(), replace(b, y=b.y + shift), search=report, final=report)
+    return shift, *fit
+
+
+FAR = [("curve", 1e7), ("curve", 1e8), ("twin", 1e7), ("twin", 1e8)]
+
+
+@pytest.mark.parametrize("report", AT_THE_FLOAT_LIMIT)
+@pytest.mark.parametrize(("name", "level"), FAR)
+def test_response_far_from_zero_chooses_the_curve_of_the_response_at_zero(name, level, report):
+    """A Gaussian response 1e7 and 1e8 from zero: the smoothing, EDF and curve of the response at zero.
+
+    That far out a coefficient fit ends at the limit of float64, a rounding to either side
+    of the acceptance bar.  The fit is made as the solver reports its solves, with every one
+    reported as meeting that bar, and with every one reported short of it.  The curve is
+    the same each way; the model reads as converged where no fit was short of the bar, and
+    as not converged, with one warning that says why and what to do, where one was.
+
+    Tolerances: two first-order stops (``stops_apart``), and ``64 kappa U`` times the size
+    of what is compared, which for a response at the shift is the shift.  The held-out
+    results are compared with library refits of the response at zero, moved by the shift: a
+    least-squares fit with an unpenalised intercept moves with its response.
+    """
+    b, plain, (apart, edf, moves), kappa = at_zero(name)
+    shift, model, caught, (searched, final) = far_fit(name, level, report)
+    mine, theirs = model.ncv_diagnostics(), plain.ncv_diagnostics()
+    rounding = 64 * kappa * U
     assert abs(np.log(mine["lambdas"]["t"] / theirs["lambdas"]["t"])) <= apart
-    assert abs(moved.result.effective_df - plain.result.effective_df) <= apart * edf + rounding * 9
+    assert abs(model.result.effective_df - plain.result.effective_df) <= apart * edf + rounding * 9
+    predicted = plain.predict(b.frame)
+    gap = np.abs(model.predict(b.frame) - shift - predicted)
+    assert np.all(gap <= apart * moves + rounding * np.abs(predicted + shift))
+    table = plain.ncv_heldout()
+    slope = 2 * table.weight * np.abs(table.heldout - table.actual)
+    resolved = rounding * float(np.sum(slope * np.abs(table.heldout + shift)))
+    assert abs(mine["criterion"] - theirs["criterion"]) <= 10 * TOL * theirs["criterion"] + resolved
+
+    problem, nb = at_chosen(model, b), from_groups(b.labels, len(b.y))
+    want = refit_pairs(problem, nb, NONE)
+    _, _, kappa_out = KeptRows(problem, NONE).one_step(nb)
+    got = heldout_pairs(model)
+    got = got.assign(predictor=got.predictor - shift, mean=got["mean"] - shift)
+    slack = predictor_slack(kappa_out, want.predictor.to_numpy() + shift)
+    assert_pairs_equal(problem, got, want, slack)
+    assert mine["heldout_available"] and mine["heldout_failure"] is None
+    assert mine["criterion"] == model.ncv_heldout().heldout_deviance.to_numpy().sum()
+
+    used, at_limit = mine["work"]["stagnated_fits"], not model.result.converged
+    assert mine["search_converged"] and mine["termination_reason"] == "gradient"
+    assert mine["infeasible_trials"] == 0 and final[-1].certified != at_limit
+    assert mine["converged"] == mine["coefficients_converged"] == (not used and not at_limit)
+    assert mine["coefficient_termination"] == (None if mine["converged"] else "score_stagnated")
+    expected = [] if mine["converged"] else [limit_statement(mine, at_limit)]
+    assert messages(caught) == expected
+    if report == "bar-met":
+        assert mine["converged"]
+    if report == "short-of-the-bar":
+        assert used == mine["n_evaluations"] and at_limit
+
+    # The aim is paid for once: the provisional fit and one continuation beside the
+    # evaluations, and a final fit of one solve unless it is the first short of the aim.
+    work = mine["work"]
+    assert work["inner_solves"] == len(searched) <= mine["n_evaluations"] + 2
+    assert work["fallback_solves"] <= 1 and len(final) <= 2 - work["fallback_solves"]
+    if report != "as-solved":
+        assert [solve.bar for solve in searched] == [AIM] + [BAR] * (mine["n_evaluations"] + 1)
+        assert [solve.bar for solve in final] == [BAR]
+
+
+@pytest.mark.parametrize(("name", "level"), FAR)
+def test_the_curve_does_not_depend_on_which_bar_a_fit_at_the_limit_met(name, level):
+    """The same solves reported as meeting the acceptance bar, and as short of it: one fit, to the last bit."""
+    _, met, _, _ = far_fit(name, level, "bar-met")
+    _, short, _, _ = far_fit(name, level, "short-of-the-bar")
+    mine, theirs = short.ncv_diagnostics(), met.ncv_diagnostics()
+    assert theirs["converged"] and not mine["converged"]
+    for key in ("lambdas", "criterion", "gradient", "lambda_history", "criterion_history"):
+        assert mine[key] == theirs[key], key
+    assert short.result.effective_df == met.result.effective_df
+    frame = at_zero(name)[0].frame
+    assert np.array_equal(short.predict(frame), met.predict(frame))
+    pd.testing.assert_frame_equal(short.ncv_heldout(), met.ncv_heldout(), check_exact=True)
+    pd.testing.assert_frame_equal(
+        short.ncv_heldout_groups(), met.ncv_heldout_groups(), check_exact=True
+    )
+
+
+@pytest.mark.parametrize("where", ["search", "final", "both"])
+def test_fits_at_the_limit_of_float64_are_used_and_disclosed_in_one_warning(where):
+    """The solves of the search, of the final fit, or of both are made to end stagnated.
+
+    The search goes on from such fits and the final fit keeps its held-out results, which
+    are library refits without each group.  The model is not converged: the search's verdict
+    stands, and the coefficient fits' does not.  A stagnated final fit is one solve after a
+    search that stopped aiming, and two after one that did not: no solve from another start.
+    """
+    b, good = curve_book(), curve_fit()
+    forced = {
+        "search": "short-of-the-bar" if where != "final" else "as-solved",
+        "final": "short-of-the-bar" if where != "search" else "as-solved",
+    }
+    model, caught, (_, final) = fit_reported(curve_model(), b, **forced)
+    report, reached = model.ncv_diagnostics(), good.ncv_diagnostics()
+    assert messages(caught) == [limit_statement(report, final=where != "search")]
+    assert report["search_converged"] and report["termination_reason"] == "gradient"
+    assert not report["converged"] and not report["coefficients_converged"]
+    assert report["coefficient_termination"] == "score_stagnated"
+    assert model.result.converged == (where == "search")
+    used = 0 if where == "final" else report["n_evaluations"]
+    assert report["work"]["stagnated_fits"] == used and reached["work"]["stagnated_fits"] == 0
+    assert [(solve.bar, solve.start is not None) for solve in final] == {
+        "search": [(BAR, True)],
+        "final": [(AIM, True), (BAR, True)],
+        "both": [(BAR, True)],
+    }[where]
+
+    apart, edf, moves = stops_apart(good, b)
+    kappa = hessian_condition(good, b)
+    assert abs(np.log(report["lambdas"]["t"] / reached["lambdas"]["t"])) <= apart
+    if where == "final":
+        assert report["lambdas"] == reached["lambdas"]
+    predicted = good.predict(b.frame)
+    gap = np.abs(model.predict(b.frame) - predicted)
+    assert np.all(gap <= apart * moves + 64 * kappa * U * np.maximum(1.0, np.abs(predicted)))
+    problem, nb = at_chosen(model, b), from_groups(b.labels, len(b.y))
+    want = refit_pairs(problem, nb, NONE)
+    _, _, kappa_out = KeptRows(problem, NONE).one_step(nb)
+    slack = predictor_slack(kappa_out, want.predictor.to_numpy())
+    assert_pairs_equal(problem, heldout_pairs(model), want, slack)
+    assert report["heldout_available"] and report["heldout_failure"] is None
+    assert len(model.ncv_heldout_groups()) == 12
+
+
+def test_fits_at_the_limit_of_float64_are_named_beside_whatever_else_fell_short():
+    """After a search on stagnated fits: one stopped at its step limit, and a final fit at its iteration limit.
+
+    The first keeps its held-out results.  The second has none: a fit stopped by its
+    iteration limit stands for no mode, and is solved once more from the solver's own start.
+    """
+    b, short = curve_book(), "short-of-the-bar"
+    model, caught, _ = fit_reported(curve_model(), b, search=short, final=short, max_ncv_iter=1)
+    mine = model.ncv_diagnostics()
+    tried = mine["n_evaluations"]
+    fits = f"the coefficient fits at {tried} of the {tried} smoothing settings it tried"
+    (message,) = messages(caught)
+    assert message.startswith(
+        "fit_ncv did not converge: its smoothing search stopped after 1 step because it "
+        f"reached the max_ncv_iter limit, and {fits}, and the final coefficient fit, "
+        f"{AT_THE_LIMIT.format(their='their')}. The model is returned at the lowest held-out "
+        "deviance the search reached"
+    )
+    assert message.endswith(f"to continue from this fit. {NEARER_ZERO}")
+    assert not mine["search_converged"] and not mine["coefficients_converged"]
+    assert mine["heldout_available"] and mine["work"]["stagnated_fits"] == tried
+
+    model, caught, (_, final) = fit_reported(
+        curve_model(), b, search=short, final="iteration-limit"
+    )
+    mine = model.ncv_diagnostics()
+    tried = mine["n_evaluations"]
+    fits = f"the coefficient fits at {tried} of the {tried} smoothing settings it tried"
+    assert messages(caught) == [
+        f"fit_ncv did not converge: its smoothing search met its test after {mine['n_iter']} "
+        f"steps, but {fits} {AT_THE_LIMIT.format(their='their')}, and the final coefficient "
+        "fit at that smoothing did not meet its convergence test (it stopped with "
+        "termination_reason='max_iter'). The model is returned with the coefficients, "
+        "effective degrees of freedom and standard errors of that fit's last step, and "
+        "without held-out results. Refit with a larger max_pirls_iter to let the final fit "
+        f"finish. {NEARER_ZERO}"
+    ]
+    assert [(solve.bar, solve.start is not None) for solve in final] == [(BAR, True), (BAR, False)]
+    assert mine["coefficient_termination"] == "max_iter" and not model.result.converged
+    assert (mine["heldout_available"], mine["heldout_failure"]) == (False, "uncertified_mode")
+
+
+def test_poisson_fits_at_the_limit_of_float64_are_used_and_disclosed():
+    """Every coefficient solve of a Poisson fit is made to end stagnated.
+
+    As for a Gaussian fit: each trial counts, the model is not converged and says so once,
+    and it keeps its held-out results, here the Newton step of each group's kept rows from
+    the published fit.  The search's stop is not asserted: its fits run to the acceptance
+    bar after the first, where the last steps of a Poisson search depend on their rounding.
+    """
+    b = curve_book("poisson")
+    good, quiet = run(curve_model("poisson"), b, groups=b.labels)
+    assert not messages(quiet) and good.ncv_diagnostics()["work"]["stagnated_fits"] == 0
+    report = "short-of-the-bar"
+    model, caught, (searched, final) = fit_reported(
+        curve_model("poisson"), b, search=report, final=report
+    )
+    mine, theirs = model.ncv_diagnostics(), good.ncv_diagnostics()
+    assert mine["work"]["stagnated_fits"] == mine["n_evaluations"] > 1
+    assert mine["infeasible_trials"] == 0 and mine["termination_reason"] != "no_finite_criterion"
+    assert not mine["converged"] and not mine["coefficients_converged"]
+    assert mine["coefficient_termination"] == "score_stagnated" and not model.result.converged
+    assert [solve.bar for solve in searched] == [AIM] + [BAR] * (mine["n_evaluations"] + 1)
+    assert [solve.bar for solve in final] == [BAR]
+    (message,) = messages(caught, ConvergenceWarning)
+    fits = (
+        f"the coefficient fits at {mine['n_evaluations']} of the {mine['n_evaluations']} "
+        "smoothing settings it tried, and the final coefficient fit, "
+    )
+    assert fits + AT_THE_LIMIT.format(their="their") in message and message.endswith(NEARER_ZERO)
+    if mine["search_converged"]:
+        assert message == limit_statement(mine, final=True)
+
+    apart, _, _ = stops_apart(good, b)
+    assert abs(np.log(mine["lambdas"]["t"] / theirs["lambdas"]["t"])) <= apart
+    assert mine["criterion"] == pytest.approx(theirs["criterion"], rel=10 * TOL)
+    problem, nb = at_chosen(model, b), from_groups(b.labels, len(b.y))
+    reference = KeptRows(problem, NONE, at=(predictor(model, b), model.result.beta))
+    want, residual, kappa = reference.one_step(nb)
+    table = model.ncv_heldout()
+    assert np.array_equal(table.row, nb.scored_rows())
+    slack = residual + predictor_slack(kappa, want)
+    held_gap = np.abs(np.log(table.heldout.to_numpy()) - want)
+    assert np.all(held_gap <= slack), f"gap {held_gap.max():.3e} against {slack.min():.3e}"
+    assert mine["heldout_available"] and mine["criterion"] == table.heldout_deviance.sum()
 
 
 def test_duplicated_column_fits_as_the_model_without_it():

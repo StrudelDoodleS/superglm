@@ -2,11 +2,12 @@
 
 The readers are the summary, ``reml_diagnostics()``, both forms of the training telemetry, the
 per-group ``diagnostics()``, the fit recorder, the editor's Diagnose tab and its refit, and the
-readers of a model whose coefficients were edited after fitting.  Each is read in five states
+readers of a model whose coefficients were edited after fitting.  Each is read in six states
 (a converged search, one stopped at its step limit, one stopped on its line search, a search
-that found no smoothing and was published at its start, and a converged fit with
-``retain_fit_state=False``); the summary also in two more (a final coefficient fit short of
-its test after a converged search, and a smoothing parameter on a bound).  Each says which
+that found no smoothing and was published at its start, a converged fit with
+``retain_fit_state=False``, and a search that met its test on coefficient fits the solver
+ended at the limit of float64); the summary also in two more (a final coefficient fit short
+of its test after a converged search, and a smoothing parameter on a bound).  Each says which
 method chose the smoothing, gives the search's verdict in ``fit_ncv``'s words and presents
 nothing as a REML score.  What the same readers say of ``fit`` and ``fit_reml`` models is
 pinned in ``tests/test_fit_method_table.py``, whose module collects without ``fit_ncv``.
@@ -33,11 +34,14 @@ from superglm.features.rebuild import clone_with_replaced_features
 from superglm.model import ncv_ops
 from superglm.model.fit_state import fitted_lambda2
 from superglm.model.telemetry_ops import metrics_for_logging
+from superglm.ncv import engine
 from superglm.ncv import search as search_module
 from tests.test_fit_ncv import curve_book, curve_fit, curve_model, run
+from tests.test_ncv_engine import always, solver_short
 from tests.test_ncv_search import NarrowBox
 
 FIVE = ("converged", "step_limit", "line_search", "failed_search", "compact")
+SIX = (*FIVE, "at_the_limit")
 NOT_REML = (
     "The smoothing was chosen by fit_ncv, by held-out prediction, not by REML, so this fit "
     "has no REML score; model.ncv_diagnostics() reports its search."
@@ -58,6 +62,12 @@ LEADS = {
         "smoothing setting it tried."
     ),
     "compact": None,
+    "at_the_limit": (
+        "fit_ncv did not converge: its smoothing search met its test after {n} steps, but the "
+        "coefficient fits at {tried} of the {tried} smoothing settings it tried, and the final "
+        "coefficient fit, stopped at the limit of floating-point accuracy for this data, short "
+        "of their convergence test (termination_reason='score_stagnated')."
+    ),
     "final_fit_short": (
         "fit_ncv did not converge: its smoothing search met its test after {n} steps, but the "
         "final coefficient fit at that smoothing did not meet its convergence test"
@@ -74,7 +84,7 @@ STOP_WORDS = {
     "line_search": "no further step lowered the held-out deviance",
     "failed_search": "the held-out deviance could not be computed at any smoothing it tried",
 }
-STOP_WORDS["compact"] = STOP_WORDS["converged"]
+STOP_WORDS["compact"] = STOP_WORDS["at_the_limit"] = STOP_WORDS["converged"]
 NCV_CONVERGED = (
     "Converged. fit_ncv chose the smoothing by held-out prediction, and its search met its "
     "stopping test."
@@ -117,6 +127,10 @@ def fit_in(state: str):
             patch.setattr(ncv_ops, "search_smoothing", _stalled(ncv_ops.search_smoothing))
         if state == "final_fit_short":
             patch.setattr(ncv_ops, "fit_irls_direct", _uncertified(ncv_ops.fit_irls_direct))
+        if state == "at_the_limit":
+            # Every coefficient solve, of the search and the final one, ends stagnated.
+            patch.setattr(engine, "fit_irls_direct", solver_short(always, []))
+            patch.setattr(ncv_ops, "fit_irls_direct", solver_short(always, []))
         if state == "bound":
             box = NarrowBox(high=curve_fit().ncv_diagnostics()["lambdas"]["t"] / 100.0)
             patch.setattr(search_module, "_fit_box", lambda problem: box)
@@ -134,7 +148,8 @@ def expected_statement(state: str, model) -> str | None:
     if lead is None:
         assert message is None
         return None
-    assert message.startswith(lead.format(n=model.ncv_diagnostics()["n_iter"]))
+    report = model.ncv_diagnostics()
+    assert message.startswith(lead.format(n=report["n_iter"], tried=report["n_evaluations"]))
     assert "REML" not in message and "fit_reml" not in message
     return message
 
@@ -142,7 +157,7 @@ def expected_statement(state: str, model) -> str | None:
 # ── the summary ───────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("state", (*FIVE, "final_fit_short", "bound"))
+@pytest.mark.parametrize("state", (*SIX, "final_fit_short", "bound"))
 def test_summary_names_the_method_and_gives_the_verdict_in_its_own_words(state):
     model = fitted_in(state)
     report = model.ncv_diagnostics()
@@ -175,12 +190,16 @@ def test_summary_discloses_a_search_that_failed_and_a_final_fit_that_failed_apar
     assert "its smoothing search stopped" in outer_note and "final coefficient" not in outer_note
     assert "its smoothing search met its test" in inner_note
     assert "the final coefficient fit at that smoothing did not meet" in inner_note
+    limit = fitted_in("at_the_limit").ncv_diagnostics()
+    assert (limit["search_converged"], limit["coefficients_converged"]) == (True, False)
+    assert limit["coefficient_termination"] == "score_stagnated" and not limit["converged"]
+    assert limit["work"]["stagnated_fits"] == limit["n_evaluations"] and limit["heldout_available"]
 
 
 # ── reml_diagnostics(), the telemetry and diagnostics() ───────────────────────
 
 
-@pytest.mark.parametrize("state", FIVE)
+@pytest.mark.parametrize("state", SIX)
 def test_reml_diagnostics_answers_that_the_criterion_was_not_reml(state):
     model = fitted_in(state)
     report = model.ncv_diagnostics()
@@ -198,7 +217,7 @@ def test_reml_diagnostics_answers_that_the_criterion_was_not_reml(state):
     }
 
 
-@pytest.mark.parametrize("state", FIVE)
+@pytest.mark.parametrize("state", SIX)
 def test_telemetry_files_the_search_as_fit_ncv_s_in_both_forms(state):
     model = fitted_in(state)
     report = model.ncv_diagnostics()
@@ -225,7 +244,7 @@ def test_telemetry_files_the_search_as_fit_ncv_s_in_both_forms(state):
     assert {key: value for key, value in metrics.items() if ".ncv." in key} == want
 
 
-@pytest.mark.parametrize("state", FIVE)
+@pytest.mark.parametrize("state", SIX)
 def test_diagnostics_label_the_search_by_its_method(state):
     model = fitted_in(state)
     report = model.ncv_diagnostics()
@@ -243,7 +262,7 @@ def test_diagnostics_label_the_search_by_its_method(state):
 # ── the fit recorder ──────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("state", FIVE)
+@pytest.mark.parametrize("state", SIX)
 def test_the_fit_record_carries_the_search_as_fit_ncv_s(state, monkeypatch, tmp_path):
     monkeypatch.delenv("SUPERGLM_FIT_RECORD", raising=False)
     monkeypatch.setenv("BENCHBOARD_DIR", str(tmp_path / "absent"))
@@ -279,7 +298,7 @@ def test_the_fit_record_carries_the_search_as_fit_ncv_s(state, monkeypatch, tmp_
 # ── the editor ────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("state", FIVE)
+@pytest.mark.parametrize("state", SIX)
 def test_the_diagnose_tab_names_fit_ncv_and_charts_no_reml_score(state):
     model = fitted_in(state)
     report = model.ncv_diagnostics()

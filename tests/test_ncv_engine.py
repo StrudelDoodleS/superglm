@@ -694,19 +694,21 @@ def test_uncertified_warm_solve_is_retried_from_a_cold_start(monkeypatch):
     assert_same_criterion(c.problem, got, evaluate(c.problem, nb, RHO, gradient=False), kappa)
 
 
-def solver_short(when, log):
-    """The solver, reporting each solve whose arguments ``when`` accepts as ended short of its bar.
+def solver_ending(stop, log):
+    """The solver, each solve reported as ended the way ``stop(arguments)`` names.
 
-    The solve is the solver's own, so the state it returns is what a solve at its limiting
-    accuracy hands back: the mode, without the certificate.  ``log`` takes every solve's bar,
-    the coefficients it was started from (``None`` for the solver's own start) and returned,
-    its iterations and whether it is reported certified.
+    ``"converged"`` is a solve certified at its bar and any other reason one that ended short
+    of it; ``None`` leaves the solver's own report.  The solve is the solver's own, so the
+    state it returns is the mode whatever is reported of it.  ``log`` takes every solve's
+    bar, the coefficients it was started from (``None`` for the solver's own start) and
+    returned, its iterations and whether it is reported certified.
     """
 
     def solve(**arguments):
         result, *rest = fit_irls_direct(**arguments)
-        if when(arguments):
-            result = replace(result, converged=False, termination_reason="score_stagnated")
+        reason = stop(arguments)
+        if reason is not None:
+            result = replace(result, converged=reason == "converged", termination_reason=reason)
         log.append(
             SimpleNamespace(
                 bar=arguments["_mode_bar"],
@@ -721,8 +723,20 @@ def solver_short(when, log):
     return solve
 
 
+def solver_short(when, log, stop="score_stagnated"):
+    """The solver, reporting each solve whose arguments ``when`` accepts as ended short of its bar.
+
+    By stagnation, as a solve at the limit of float64 accuracy ends, or by ``stop``.
+    """
+    return solver_ending(lambda arguments: stop if when(arguments) else None, log)
+
+
 def at_the_aim(arguments) -> bool:
     return arguments["_mode_bar"] == AIM
+
+
+def always(arguments) -> bool:
+    return True
 
 
 def test_both_bars_follow_the_tolerance_and_neither_goes_below_a_hundred_eps():
@@ -778,17 +792,17 @@ def test_fit_carries_its_bar_to_the_solve_it_warms(monkeypatch):
 
 
 def test_solve_short_of_both_bars_is_solved_once_from_the_solvers_own_start(monkeypatch):
-    """Every solve given a start is made to end short of its bar: the third is the solver's own.
+    """Every solve given a start is made to end on its iteration limit: the third is the solver's own.
 
-    From the solver's own start there are two solves and no third, and a mode certified at
-    neither bar gives no criterion.
+    From the solver's own start there are two solves and no third, and a mode that is neither
+    certified nor at the limit of float64 gives no criterion.
     """
     c = case("poisson", 300)
     problem = replace(c.problem, mode_aim=AIM, mode_bar=BAR)
     nb = neighbourhoods("cv", c)
     warm = evaluate(problem, nb, RHO + 3.0, gradient=False).fit
     log: list = []
-    started = solver_short(lambda arguments: "beta_init" in arguments, log)
+    started = solver_short(lambda arguments: "beta_init" in arguments, log, stop="max_iter")
     monkeypatch.setattr(engine, "fit_irls_direct", started)
     got = evaluate(problem, nb, RHO, warm=warm, gradient=False)
     assert [(call.bar, call.start is not None) for call in log] == [
@@ -799,14 +813,78 @@ def test_solve_short_of_both_bars_is_solved_once_from_the_solvers_own_start(monk
     assert got.feasible and got.fit.bar == BAR
     assert (got.work.inner_solves, got.work.fallback_solves) == (3, 2)
     del log[:]
-    monkeypatch.setattr(engine, "fit_irls_direct", solver_short(lambda arguments: True, log))
+    monkeypatch.setattr(engine, "fit_irls_direct", solver_short(always, log, stop="max_iter"))
     lost = evaluate(problem, nb, RHO, gradient=False)
     assert [(call.bar, call.start is not None) for call in log] == [(AIM, False), (BAR, True)]
     assert not lost.feasible and lost.infeasible_reason == "uncertified_mode" and lost.fit is None
     assert (lost.work.inner_solves, lost.work.fallback_solves) == (2, 1)
+    assert lost.work.stagnated_fits == 0
     monkeypatch.undo()
     _, _, kappa = one_step("poisson", 300, "cv")
     assert_same_criterion(problem, got, evaluate(problem, nb, RHO, gradient=False), kappa)
+
+
+@pytest.mark.parametrize("family", ["gaussian", "poisson"])
+def test_solve_ended_at_the_limit_of_float64_is_the_mode_of_its_trial(monkeypatch, family):
+    """Every solve is made to end stagnated, as on data whose limit lies above the acceptance bar.
+
+    The fit is the first solve continued once, and no solve from another start follows.  It
+    stands for the mode: the trial has the criterion, the slopes and the held-out pairs that
+    the same state gives when it is certified, to the last bit, and the evaluation is counted
+    as made at a stagnated fit.  A solve it warms runs to the acceptance bar at once.
+    """
+    c = case(family, 300)
+    problem = replace(c.problem, mode_aim=AIM, mode_bar=BAR)
+    nb = neighbourhoods("cv", c)
+    log: list = []
+    monkeypatch.setattr(engine, "fit_irls_direct", solver_short(always, log))
+    got = evaluate(problem, nb, RHO)
+    assert [(call.bar, call.start is not None) for call in log] == [(AIM, False), (BAR, True)]
+    assert log[1].start is log[0].beta
+    fit = got.fit
+    assert got.feasible and fit.stagnated and fit.usable and not fit.certified
+    assert fit.bar == BAR
+    assert (got.work.inner_solves, got.work.fallback_solves, got.work.stagnated_fits) == (2, 1, 1)
+    del log[:]
+    onward = evaluate(problem, nb, RHO + 0.5, warm=fit, gradient=False)
+    assert [(call.bar, call.start is fit.result.beta) for call in log] == [(BAR, True)]
+    assert onward.feasible and onward.fit.stagnated and onward.work.stagnated_fits == 1
+    monkeypatch.undo()
+    certified = replace(fit.result, converged=True, termination_reason="converged")
+    same = evaluate_fit(problem, nb, replace(fit, result=certified))
+    assert same.feasible and same.work.stagnated_fits == 0
+    assert got.value == same.value and np.array_equal(got.gradient, same.gradient)
+    pd.testing.assert_frame_equal(pairs_of(got), pairs_of(same), check_exact=True)
+    assert evaluate(problem, nb, RHO).work.stagnated_fits == 0
+    if family == "gaussian":
+        want = refits("gaussian", 300, "cv")
+        _, _, kappa = one_step("gaussian", 300, "cv")
+        slack = predictor_slack(kappa, want.predictor.to_numpy())
+        assert_pairs_equal(problem, pairs_of(got), want, slack)
+
+
+@pytest.mark.parametrize(
+    ("stop", "usable"),
+    [
+        ("converged", True),
+        ("score_stagnated", True),
+        ("max_iter", False),
+        ("step_rejected", False),
+        ("nonfinite_deviance", False),
+    ],
+)
+def test_only_the_solvers_stagnation_makes_an_uncertified_fit_usable(stop, usable):
+    """A fit short of its certificate stands for the mode only where the solver ended it as stagnated."""
+    c = case("poisson", 300)
+    nb = neighbourhoods("groups", c)
+    solved = solve_mode(c.problem, RHO)
+    result = replace(solved.result, converged=stop == "converged", termination_reason=stop)
+    fit = replace(solved, result=result)
+    assert (fit.certified, fit.stagnated) == (stop == "converged", stop == "score_stagnated")
+    got = evaluate_fit(c.problem, nb, fit)
+    assert fit.usable == got.feasible == usable
+    assert got.infeasible_reason == (None if usable else "uncertified_mode")
+    assert (got.fit is fit) == usable and got.work.stagnated_fits == int(fit.stagnated)
 
 
 @pytest.mark.parametrize("form", ["rows", "groups", "cv"])

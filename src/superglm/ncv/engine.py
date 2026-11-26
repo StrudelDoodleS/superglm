@@ -29,8 +29,9 @@ Jacobi-scaled ``H - Z_a' W_a Z_a``.  Beyond the row product both share, the firs
 rows take the scalar form ``1 - W_i h_i`` in blocks of rows, with no factorisation.
 
 Rows of zero weight are in no system and no sum; a scored one is predicted at the full fit plus
-the step.  A trial counts only at a certified inner mode, and with every weighted scored row on
-the scale where its mean is the unclipped inverse link.
+the step.  A trial counts only at a usable inner mode (a certified one, or one at the limit of
+float64, below), and with every weighted scored row on the scale where its mean is the
+unclipped inverse link.
 
 **The inner fit's two bars.**  The criterion is not stationary in the coefficients, so the
 error an inner fit stops with enters the criterion and its gradient at first order, and a line
@@ -42,12 +43,28 @@ contracts to a limiting accuracy and no further (Tisseur 2001, as
 ``solvers.mode_score.stagnation_window`` cites it), and that limit can lie above the aim: a
 Gaussian response 1e7 of its spread from zero is resolved to between 1e-10 and 2e-8 of the
 score's scale, by how its rounding falls.  A solve that ends short of the aim is continued, from
-the state it stopped on, to ``ncv_mode_bar``, a hundredth of the tolerance, and one still
-short is solved to that bar from the solver's own start (:func:`two_level`).  A fit certified
-at either bar is a certified mode, and one certified at neither gives its trial no criterion.
-The limit is taken to be the data's more than the smoothing's, so a fit carries the bar it
-was certified at and a solve it warms runs to that bar at once: a search pays once for an aim
-its data cannot reach.
+the state it stopped on, to ``ncv_mode_bar``, a hundredth of the tolerance
+(:func:`two_level`).  A fit certified at either bar is a certified mode.  The limit is taken
+to be the data's more than the smoothing's, so a fit carries the bar its solve ran to and a
+solve it warms runs to that bar at once: a search pays once for an aim its data cannot reach.
+
+**A fit at the limit of float64.**  The limit can lie above the acceptance bar as well: one
+240-row response 1e8 of its spread from zero is resolved to 1e-7 of the score's scale.  The
+solver ends such a solve as stagnated (``"score_stagnated"``), a verdict it gives on two
+grounds only (``solvers.irls_direct``): a full Newton step left the state bitwise unchanged,
+or a score within ``mode_score.MODE_RESOLVE_CAP`` of zero on every coefficient did not halve
+over ``mode_score.stagnation_window`` iterations.  On either the state is as near the mode
+as float64 brings it for the data, so a stagnated fit is used as the mode
+(:attr:`ModeFit.usable`): its trial has a criterion, it warms the next solve, and no solve
+from another start follows, which would end at the same limit.  The continuation of a
+stagnated solve takes one step from the state it stopped on, so the state a trial is
+evaluated at is the same whether the acceptance bar is then met or not, and the criterion
+does not depend on which side of that bar the rounding falls.  A stagnated fit is not a
+certified mode: an evaluation made at one is counted (``WorkCounts.stagnated_fits``), and
+the search and the published fit that rest on one are not converged.  A solve that ends
+short of its bar in any other way (its iteration limit, a rejected step, a deviance that is
+not finite) says nothing of where the mode is: it is solved once more from the solver's own
+start, and its trial has no criterion if that solve ends the same way.
 
 **A rank-deficient fit.**  When the fit's own slope Hessian has a null space (a duplicated
 column, a column constant on the weighted rows), every weighted row and every penalty with a
@@ -169,8 +186,9 @@ def ncv_mode_bar(ncv_tol: float = DEFAULT_NCV_TOL) -> float:
     """The certificate bar an inner fit is accepted at, for a search stopping at ``ncv_tol``.
 
     A hundredth of the tolerance: the looser of the inner fit's two bars (module docstring),
-    which a fit short of :func:`ncv_mode_aim` is taken to.  A trial without a fit certified
-    at it has no criterion.  Never below ``100 eps``, the least the certificate expresses.
+    which a fit short of :func:`ncv_mode_aim` is taken to.  A fit short of it is certified
+    at neither bar, and is used only where its solve ended at the limit of float64
+    (:attr:`ModeFit.usable`).  Never below ``100 eps``, the least the certificate expresses.
     """
     return max(0.01 * float(ncv_tol), 100.0 * EPS)
 
@@ -211,11 +229,14 @@ class WorkCounts:
     ``kept_fits`` are leave-out systems fitted from their kept rows, each one or two passes of
     the solver's row factor over the design, which neither row count includes.
     ``fallback_solves`` are the inner solves, of ``inner_solves``, made because an earlier one
-    at the same smoothing ended short of its bar (:func:`two_level`).
+    at the same smoothing ended short of its bar (:func:`two_level`).  ``stagnated_fits``
+    are the evaluations that took their criterion from a fit at the limit of float64, short
+    of its bar (:attr:`ModeFit.stagnated`): 0 or 1 for one evaluation.
     """
 
     inner_solves: int = 0
     fallback_solves: int = 0
+    stagnated_fits: int = 0
     pirls_iterations: int = 0
     factorisations: int = 0
     small_factorisations: int = 0
@@ -494,6 +515,20 @@ class ModeFit:
         """Whether the solve ended on its mode certificate."""
         return bool(self.result.converged)
 
+    @property
+    def stagnated(self) -> bool:
+        """Whether the solve ended at the limit of float64 accuracy, short of its bar.
+
+        The solver's own verdict, ``"score_stagnated"`` (module docstring): no threshold is
+        applied here.
+        """
+        return not self.certified and self.result.termination_reason == "score_stagnated"
+
+    @property
+    def usable(self) -> bool:
+        """Whether the fit stands for the mode: certified, or stagnated at the limit of float64."""
+        return self.certified or self.stagnated
+
 
 def warm_start(fit: ModeFit) -> dict[str, Any]:
     """The solver's start arguments for the state ``fit``'s solve ended on."""
@@ -507,9 +542,9 @@ def warm_start(fit: ModeFit) -> dict[str, Any]:
 def first_bar(warm: ModeFit | None, aim: float, bar: float) -> float:
     """The bar a solve warmed by ``warm`` first runs to.
 
-    The bar ``warm`` was certified at, within ``[aim, bar]``: a fit accepted only at ``bar``
-    shows the aim is beyond what its data resolve, and the next solve does not try for it.
-    ``aim`` with no fit, or with one that carries no bar.
+    The bar ``warm``'s solve ran to, within ``[aim, bar]``: a fit accepted only at ``bar``, or
+    stagnated short of it, shows the aim is beyond what its data resolve, and the next solve
+    does not try for it.  ``aim`` with no fit, or with one that carries no bar.
     """
     if warm is None or warm.bar is None:
         return aim
@@ -523,15 +558,17 @@ def two_level(
 
     ``start`` holds the solver's start arguments and is empty for its own start.  The solve
     runs to ``aim`` from ``start``.  One that ends short of it is continued to ``bar`` from
-    the state it stopped on, which is as near the mode as that solve could bring it.  One
-    still short is solved to ``bar`` from the solver's own start, unless it began there.  At
-    most three solves, each within the solver's iteration budget; the last one is returned,
-    certified or not.
+    the state it stopped on, which is as near the mode as that solve could bring it.  A fit
+    that is then neither certified nor stagnated at the limit of float64
+    (:attr:`ModeFit.usable`) is solved to ``bar`` from the solver's own start, unless it
+    began there; a stagnated one is not, since every start ends at that limit.  At most
+    three solves, each within the solver's iteration budget; the last one is returned,
+    usable or not.
     """
     fit = solve(start, aim)
     if not fit.certified and aim < bar:
         fit = solve(warm_start(fit), bar)
-    if not fit.certified and start:
+    if not fit.usable and start:
         fit = solve({}, bar)
     return fit
 
@@ -619,7 +656,8 @@ class Evaluation:
     ``value`` is the summed held-out deviance, ``gradient`` its derivative in the estimated
     ``rho`` and ``heldout`` its pairs, each when asked for.  An infeasible trial has
     ``feasible`` False, its reason, a NaN value and no gradient or held-out pairs.  ``fit`` is
-    the certified mode, ``None`` without one: the state to start the next solve from.
+    the usable mode (:attr:`ModeFit.usable`), ``None`` without one: the state to start the
+    next solve from.
     """
 
     feasible: bool
@@ -784,7 +822,7 @@ def _evaluate(
             f"The neighbourhoods index {nb.n_rows} rows and the design has {problem.n}; build "
             "them for the rows being fitted."
         )
-    if not fit.certified:
+    if not fit.usable:
         return Evaluation(False, "uncertified_mode", float("nan"), None, None, None, work)
     try:
         trial = _Trial.start(problem, nb, fit, gradient and bool(problem.names), heldout, work)
@@ -809,6 +847,7 @@ def _evaluate(
             mean=trial.mean,
             deviance=trial.deviance,
         )
+    work.stagnated_fits += int(fit.stagnated)
     return Evaluation(True, None, value, slopes, pairs, fit, work)
 
 

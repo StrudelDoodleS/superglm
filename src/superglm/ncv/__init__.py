@@ -2,8 +2,10 @@
 
 The package's names, in the order a fit uses them: the neighbourhoods of the rows being fitted
 (:func:`build_neighbourhoods`, or one of the builders, and the checks on them), the engine's
-problem for a built design (:func:`build_problem`, its inner fits certified to
-:func:`ncv_mode_bar` of the search's tolerance), the search over the smoothing parameters
+problem for a built design (:func:`build_problem`; its inner fits run to
+:func:`ncv_mode_aim`, a thousandth of the search's tolerance, are accepted at
+:func:`ncv_mode_bar`, a hundredth of it, and one the solver ends at the limit of float64
+accuracy short of both is used and disclosed), the search over the smoothing parameters
 (:func:`search_smoothing`, which returns a :class:`SearchOutcome` holding an
 :class:`NCVResult`), and the criterion with its held-out pairs at the fit that is published
 (:func:`evaluate_fit` on a :class:`ModeFit`).  ``superglm.ncv.search`` is the module;
@@ -28,6 +30,7 @@ if _typing.TYPE_CHECKING:
         build_problem,
         evaluate,
         evaluate_fit,
+        ncv_mode_aim,
         ncv_mode_bar,
     )
     from superglm.ncv.neighbourhoods import (  # noqa: F401
@@ -69,6 +72,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
         "build_problem",
         "evaluate",
         "evaluate_fit",
+        "ncv_mode_aim",
         "ncv_mode_bar",
     ),
     "superglm.ncv.neighbourhoods": (

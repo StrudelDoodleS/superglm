@@ -51,7 +51,7 @@ from superglm.reml.penalty_algebra import build_penalty_context, build_penalty_m
 from superglm.reml.result import REMLResult
 from superglm.solvers.mode_score import linear_predictor
 from tests.test_import_compat import _LIBRARIES, _loaded_after, _type_checking_imports
-from tests.test_ncv_engine import AIM, BAR, at_the_aim, solver_short
+from tests.test_ncv_engine import AIM, BAR, always, at_the_aim, solver_short
 from tests.test_ncv_engine_rank_cache import one_row_on_the_right, rebuilt, spectral_basis, twin
 
 U = 2.0**-53
@@ -627,6 +627,49 @@ def test_search_pays_for_an_aim_its_data_cannot_reach_at_one_fit(monkeypatch):
     assert outcome.fit.certified and outcome.fit.bar == BAR
     assert result.objective == pytest.approx(reached.objective, rel=10 * TOL)
     assert abs(np.log(result.lambdas["t"] / reached.lambdas["t"])) <= 4 * stop_reach(c, reached)
+
+
+@pytest.mark.parametrize("counts", [False, True], ids=["gaussian", "poisson"])
+def test_search_goes_on_from_fits_at_the_limit_of_float64(monkeypatch, counts):
+    """Every solve is made to end stagnated, as on data whose limit lies above the acceptance bar.
+
+    Each trial has its criterion, so the search starts where it starts with certified fits
+    and takes the same path to the last bit as the search whose fits are accepted at the
+    acceptance bar: the states are the same, and only what is reported of them differs.  It
+    is not converged, whatever its stop, and every evaluation is counted as made at a
+    stagnated fit.  The provisional fit pays for the aim, and each later fit is one solve.
+    """
+    c = counts_curve() if counts else curve()
+    assert (c.problem.mode_aim, c.problem.mode_bar) == (AIM, BAR)
+    reached = search(c.problem, c.nb, configured=c.configured).result
+    # A problem of its own for each search, so neither reads cross-products the other formed.
+    monkeypatch.setattr(engine, "fit_irls_direct", solver_short(at_the_aim, []))
+    accepted = search(replace(c.problem), c.nb, configured=c.configured).result
+    log: list = []
+    monkeypatch.setattr(engine, "fit_irls_direct", solver_short(always, log))
+    outcome = search(replace(c.problem), c.nb, configured=c.configured)
+    result = outcome.result
+    assert result.infeasible_trials == 0 and result.infeasible_reasons == {}
+    assert result.work["stagnated_fits"] == result.n_evaluations > 1
+    assert accepted.work["stagnated_fits"] == reached.work["stagnated_fits"] == 0
+    assert not result.converged and result.termination_reason == accepted.termination_reason
+    assert accepted.converged == (accepted.termination_reason == "gradient")
+    assert [call.bar for call in log] == [AIM] + [BAR] * (result.n_evaluations + 1)
+    assert result.work["inner_solves"] == result.n_evaluations + 2
+    assert result.work["fallback_solves"] == 1
+    assert outcome.fit.stagnated and outcome.fit.bar == BAR
+    # The start is read from the provisional fit, here one Newton step on from a state
+    # within the aim: it is the unforced search's to well within the acceptance bar.
+    assert result.start_lambdas == accepted.start_lambdas
+    assert result.start_lambdas["t"] == pytest.approx(reached.start_lambdas["t"], rel=BAR)
+    assert result.lambda_history == accepted.lambda_history
+    assert result.objective_history == accepted.objective_history
+    assert result.lambdas == accepted.lambdas and result.objective == accepted.objective
+    assert np.array_equal(result.gradient, accepted.gradient)
+    assert result.objective == pytest.approx(reached.objective, rel=10 * TOL)
+    assert abs(np.log(result.lambdas["t"] / reached.lambdas["t"])) <= 4 * stop_reach(c, reached)
+    if not counts:
+        assert result.termination_reason == "gradient"
 
 
 # ── infeasible trials ─────────────────────────────────────────────────────────
@@ -1244,6 +1287,7 @@ SURFACE = {
     "build_problem",
     "evaluate",
     "evaluate_fit",
+    "ncv_mode_aim",
     "ncv_mode_bar",
     # the search and its result
     "DEFAULT_MAX_NCV_ITER",
