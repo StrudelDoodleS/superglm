@@ -748,13 +748,270 @@ The fitted body and tail describe the uncut laws. Joining them:
   `u` for an exceedance probability `q < p` is
   `u + tail.predict_quantile(X, 1 - q / p)`.
 
+### Choosing a tail threshold
+
 Choosing `u` is a modelling decision, not a fitted parameter, and the tail fit
-is conditional on it. Compare candidate thresholds on the tail: mean-excess
-and shape-stability plots, and a held-out log score of the claims above a high
-fixed point, with every claim below it scored as censored there. A held-out
-log score of the whole model is dominated by the claims below `u` and favours
-low thresholds. Check how the quantities you price move with `u`, and price
-from a stretch where they are stable.
+is conditional on it. Before fitting a body-plus-tail model, inspect candidate
+thresholds directly on the claims with `mean_excess` / `plot_mean_excess` and
+`threshold_stability` / `plot_threshold_stability`.
+
+All of the threshold functions and the per-row distribution methods in the next
+subsection are **experimental**: their names, arguments and return layouts may
+change in a minor release without a deprecation period, while their numbers are
+held to the same tests as the rest of `superglm`. The first call to any of them
+in a session emits one `ExperimentalWarning`; silence it with the standard
+warnings filter:
+
+```python
+import warnings
+import superglm
+
+warnings.filterwarnings("ignore", category=superglm.ExperimentalWarning)
+```
+
+The examples below use the public French motor third-party liability severity
+book `freMTPL2sev` (OpenML 41215, CC0), inner-joined on `IDpol` to
+`freMTPL2freq` (OpenML 41214, CC0) for driver age (`DrivAge`, clipped to 18–90).
+Fetch both files with:
+
+```bash
+uv run python scripts/fetch_fremtpl.py --dest data/
+```
+
+Joining the 26,639 severity rows to the 678,013 policies yields 26,444 claims
+ranging from 1.00 to 4,075,400.56 (median 1,172.00, mean 2,265.51; all amounts
+are unit-free). The committed script `docs/scripts/row_law_figures.py`
+reproduces every figure and number in this section.
+
+```python
+import numpy as np
+import pandas as pd
+from superglm import (
+    mean_excess,
+    plot_mean_excess,
+    plot_threshold_stability,
+    threshold_stability,
+)
+
+sev = pd.read_parquet("data/freMTPL2sev.parquet")
+freq = pd.read_parquet("data/freMTPL2freq.parquet")
+claims = sev.merge(freq, on="IDpol", how="inner", validate="many_to_one")
+claims["DrivAge"] = claims["DrivAge"].clip(18, 90)
+y = claims["ClaimAmount"].to_numpy(dtype=np.float64)
+
+me = mean_excess(y)
+plot_mean_excess(me, threshold=20_000)
+
+candidates = [
+    2_000, 3_000, 4_000, 5_000, 6_000, 7_500, 10_000, 12_500,
+    15_000, 17_500, 20_000, 25_000, 30_000, 35_000, 40_000, 50_000,
+]
+stability = threshold_stability(None, y, thresholds=candidates)
+plot_threshold_stability(stability)
+```
+
+```{figure} ../images/row-law/mean_excess.png
+:name: fig-row-law-mean-excess
+:alt: Empirical mean excess over candidate thresholds for the 26,444 joined freMTPL2sev claims with a 95% pointwise band, a vertical marker and fitted generalized Pareto tail line from 20,000, and grey shading where fewer than 50 claims remain.
+
+Empirical mean excess on the 26,444 joined `freMTPL2sev` claims (163 default
+candidates from 1.00 to 369,131.88, trimming the top five claims), with a
+chosen threshold at 20,000 (215 claims above). The orange line is the classical
+generalized Pareto tail fitted above 20,000 (scale 23,266, shape 0.769). Grey
+shading starts at 85,552 (47 claims remaining), and the unclipped lower 95%
+band dips below zero from 200,885 (19 claims remaining) onward.
+```
+
+```{figure} ../images/row-law/threshold_stability.png
+:name: fig-row-law-threshold-stability
+:alt: Two-panel threshold stability plot for freMTPL2sev showing fitted generalized Pareto tail shape with walls at 0 and 1 on the left and threshold-free modified scale on the right across thresholds from 2,000 to 50,000, with 7,500 drawn hollow at the upper wall and both panels levelling out from 20,000 onward.
+
+Classical threshold stability (one scale and one shape) on `freMTPL2sev` across
+16 candidates from 2,000 (3,843 claims above) to 50,000 (88 claims above). At
+7,500 (738 claims above), the fit presses against the upper wall 1 and is drawn
+hollow with a full-width band. From 20,000 onward, the shape stays level
+between 0.717 and 0.775 and the threshold-free scale stays level within its 95%
+band.
+```
+
+**How to read each plot.**
+
+- *Mean excess plot:* look for the lowest threshold above which the observed
+  mean excess runs approximately straight. Above a valid generalized Pareto
+  threshold $u$, the theoretical mean excess is linear with slope
+  $\xi / (1 - \xi)$. Passing `threshold=20_000` to `plot_mean_excess` marks
+  the candidate and draws the straight line of a classical tail fitted to the
+  excesses above it.
+- *Threshold stability plot:* look for the lowest threshold above which the
+  fitted tail shape stays level within its band — and, when one scale and one
+  shape are fitted for all claims, above which the threshold-free modified
+  scale $\sigma_u - \xi u$ stays level within its band too. On `freMTPL2sev`,
+  the shape climbs from 0.776 at 2,000 to the upper wall 1 at 7,500, then
+  settles at 0.769 (20,000), 0.767 (25,000), 0.765 (30,000), 0.775 (35,000),
+  0.729 (40,000) and 0.717 (50,000), while the threshold-free scale holds near
+  7,885 to 6,764 across 20,000–35,000 and stays inside its band through 50,000.
+
+**Limits of the mean excess band and the trim.** The band on `mean_excess` is a
+normal-theory interval on the sample mean of excesses, which requires finite
+excess variance — a tail shape strictly below $1/2$. At a shape of 1 or above,
+the mean excess has no finite limit and the plot is not usable. On
+`freMTPL2sev`, the fitted tail shape sits near 0.72–0.77 (above $1/2$), so read
+the empirical mean-excess band here as rough visual context rather than a
+calibrated confidence band, and lean on the stability plot and tail diagnostics.
+Where few claims remain, the lower band can dip below zero (from 200,885 with
+19 claims left down to $-50{,}300$ at 369,132 with 5 claims left): it is an
+unclipped normal-theory band on a mean of few claims, not a statement that
+excesses can be negative. Trimming the top five claims (`min_above=5`) is a
+convention because the top few order statistics average too few observations;
+`plot_mean_excess` also shades the stretch with fewer than 50 claims above
+(`few_claims=50`).
+
+**What the plots do not show.** Every band is per point, and neighbouring
+thresholds share almost all of their claims, so the bands are pointwise rather
+than simultaneous across the whole curve. Neither plot shows that the
+generalized Pareto tail actually fits the excesses above `u`. Once you choose a
+threshold, check the fitted tail with `plot_diagnostics` (for the `u = 20,000`
+tail fitted below on the 215 excesses, the PIT Kolmogorov–Smirnov statistic is
+0.0314, $p = 0.980$, with quantile residual mean $-0.012$ and standard
+deviation 1.026). Pair the plots with a held-out log score of the claims above
+a high fixed point — scoring every claim below it as censored there, since a
+whole-model log score is dominated by the body and favours low thresholds — and
+check that the prices or layers you care about are stable around `u`.
+
+**Flags and walls.** On the stability plot, hollow points mark a candidate
+whose fit did not converge or sits at a wall of the shape (on the mean excess
+plot, a flagged fitted line is drawn dashed with a `ConvergenceWarning`). The
+default shape walls are 0 and 1, so a tail with no positive shape shows at the
+lower wall 0, and a tail whose data push past an infinite mean shows at the
+upper wall 1 (as at 7,500 on `freMTPL2sev`). Estimates and bands at flagged
+candidates reflect where the fit stopped rather than the claims alone; inspect
+`stability.table[["threshold", "converged", "wall", "notes"]]`.
+
+**Censored claims.** Pass `censored=` to `threshold_stability` when policy
+limits cap some claims (passing the limit in `y`), assuming the policy limits
+do not depend on the loss itself. At candidate `u`, censored claims with a
+limit at or above `u` are kept as right-censored excesses `limit - u`; a claim
+censored below `u` is left out at that candidate and counted in
+`stability.table["notes"]`. `mean_excess` reads complete claims only and
+refuses rows flagged censored, pointing you to `threshold_stability(...,
+censored=...)`. Both functions accept integer frequency counts via
+`sample_weight=`.
+
+**Tail fits with curves.** Pass your own `SuperLSS(GeneralizedParetoLSS(), ...)`
+specification as `tail=` to `threshold_stability` to refit covariate terms at
+every candidate threshold without modifying the object you passed:
+
+- With curves (or an offset) on the **shape**, the plotted value is the
+  frequency-weighted mean fitted shape over the whole book, evaluated on the
+  same rows at every threshold so changes reflect the model rather than a
+  shrinking subset of claims.
+- With curves (or an offset) on the **scale**, there is no single
+  threshold-free scale, so the stability plot draws the shape panel alone.
+  Because a log-link scale model does not preserve its functional form as the
+  threshold moves, a drift in the fitted shape across thresholds can come from
+  the scale's functional form as well as from the tail itself (Northrop and
+  Jonathan 2011, reporting Eastoe and Tawn 2009).
+- With curves in the tail, a book's empirical mean excess is a mixture over
+  rows and is not a straight line even when the model is right. Compare a
+  fitted `SplitSplice` against the observed mean excess at any amount `v` by
+  forming the model's book curve from `predict_mean_excess` and
+  `predict_survival`:
+
+```python
+w = np.ones(len(claims))  # or integer frequency counts
+sv = splice.predict_survival(X, v)
+book_mean_excess = np.sum(w * splice.predict_mean_excess(X, v) * sv) / np.sum(w * sv)
+```
+
+For the `SplitSplice` fitted at `u = 20,000` below, that book curve tracks the
+empirical mean excess closely across the tail: 42,349 against 43,295 at 10,000;
+87,029 against 81,647 at 20,000; 113,341 against 105,238 at 30,000; and 165,380
+against 153,606 at 50,000.
+
+### Seeing the fitted law of one row
+
+Once a threshold is chosen and the model is fitted, four experimental methods —
+with the same names on both `SuperLSS` (for any continuous scalar family) and
+`SplitSplice` — let you inspect individual rows' fitted laws directly:
+
+- `predict_pdf(X, y)`: each row's fitted probability density at `y` (for
+  `SplitSplice`, the truncated body up to and including `u`, and the tail above
+  `u`, with the step at `u`).
+- `predict_mean_excess(X, v)`: each row's expected excess $E[Y - v \mid Y > v]$
+  at `v` (above `u` on `SplitSplice`, the exact linear tail formula
+  $(\sigma + \xi(v - u)) / (1 - \xi)$).
+- `distribution_curve(row, kind=...)`: the underlying grid and values for one
+  row (`kind="density"`, `"survival"`, or `"mean_excess"`), with `.to_json()`.
+- `plot_distribution(row, kind=..., engine=...)`: draws that curve in
+  Matplotlib or Plotly, colouring body and tail separately, marking the
+  threshold, and joining the density step at `u`.
+
+Fitting `SplitSplice` on the joined `freMTPL2sev` claims at `u = 20,000` (all
+three components converge cleanly under REML, with no wall hit):
+
+```python
+from superglm import GeneralizedParetoLSS, LogNormalLS, SplitSplice, SuperGLM, SuperLSS, s
+
+u = 20_000.0
+X = claims[["DrivAge"]]
+body_family = LogNormalLS()
+tail_family = GeneralizedParetoLSS()
+
+splice = SplitSplice.fit(
+    X,
+    y,
+    threshold=u,
+    body=SuperLSS(body_family, body_family.mean(s("DrivAge", kind="cr", k=8)), body_family.scale()),
+    exceedance=SuperGLM(family="binomial", terms=[s("DrivAge", kind="cr", k=8)]),
+    tail=SuperLSS(tail_family, tail_family.scale(s("DrivAge", kind="cr", k=8)), tail_family.shape()),
+    reml=True,
+)
+
+row = pd.DataFrame({"DrivAge": [45.0]})
+grid = np.linspace(100.0, 60_000.0, 300)
+
+fig_density = splice.plot_distribution(row, kind="density", y=grid)
+fig_density.axes[0].set_yscale("log")
+
+fig_me = splice.plot_distribution(row, kind="mean_excess", y=grid)
+```
+
+For a heavy-tailed book where the threshold sits near the 99th percentile, the
+tail's 0.999 quantile lies far beyond the bulk and the body's mode is orders of
+magnitude taller than the density at `u`. Passing an explicit `y` grid and
+putting the density axis on a log scale makes both the body peak and the step
+at `u` legible in one view (for survival probabilities, `kind="survival"`
+already draws on log-log axes).
+
+```{figure} ../images/row-law/row_density.png
+:name: fig-row-law-density
+:alt: Log-scale density of a 45-year-old driver from SplitSplice fitted at threshold 20,000 on freMTPL2sev, showing the blue log-normal body peaking near small claims, a small upward step at the dashed threshold 20,000, and the orange generalized Pareto tail extending to 60,000.
+
+Fitted density for a 45-year-old driver from `SplitSplice(LogNormalLS,
+GeneralizedParetoLSS)` at threshold 20,000 (log density scale). The row's
+exceedance probability is 0.692%, its body mean is 1,642.73 (scale 1.081), and
+its tail has scale 20,603.81 and shape 0.720. At the threshold, the density
+steps from $3.14 \times 10^{-7}$ (body left limit) to $3.36 \times 10^{-7}$
+(tail right limit, ratio 1.070).
+```
+
+```{figure} ../images/row-law/row_mean_excess.png
+:name: fig-row-law-row-mean-excess
+:alt: Fitted mean excess curve of a 45-year-old driver from SplitSplice at threshold 20,000, rising smoothly in blue across the body to 73,471 at 20,000 and continuing as a straight orange line above 20,000 to 176,105 at 60,000.
+
+Fitted mean excess for the same 45-year-old driver. Starting from the row's
+unconditional mean (2,219.05 at 0), the expected excess rises continuously
+across the threshold (73,470.57 at 20,000) into the generalized Pareto tail's
+straight line with slope $\xi / (1 - \xi) = 2.566$ (reaching 124,788.02 at
+40,000 and 176,105.46 at 60,000).
+```
+
+Families without a continuous scalar density — `TweedieLSS` (point mass at
+zero), `NegativeBinomialLS` (counts) and `DirichletLSS` (shares) — refuse
+`predict_pdf`, `predict_mean_excess`, `distribution_curve` and
+`plot_distribution` with a `NotImplementedError` pointing to `predict_cdf()`
+(where available) or `predict_parameters()`. `distribution_curve` and
+`plot_distribution` require a single-row frame such as `X.iloc[[0]]`.
 
 **Oracles.** `scipy.stats.genpareto(c=shape, scale=scale)`; gamlss `GP` with
 `mu = scale/shape`, `sigma = 1/shape`.
