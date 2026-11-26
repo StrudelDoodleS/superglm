@@ -40,10 +40,11 @@ a whole on a singular member and says nothing of which, where the batched LAPACK
 returns a status per matrix (Abdelfattah et al., "A set of batched basic linear algebra
 subprograms and LAPACK routines", ACM Trans. Math. Softw. 47(3), 2021), and it has no
 condition estimate.  A stack therefore takes the members it can show sound beforehand:
-those whose Gershgorin discs all lie right of ``sqrt(size)`` times the flag level (below).
+those whose Gershgorin discs all lie right of ``sqrt(size)`` times the level this route
+accepts a margin above (below).
 Such a system is symmetric and strictly diagonally dominant, so it is positive definite
 with its smallest eigenvalue above that bound; its margin, the reciprocal of
-``||A^-1||_1 <= sqrt(size) ||A^-1||_2``, is above the flag level; and elimination on it
+``||A^-1||_1 <= sqrt(size) ||A^-1||_2``, is above that level; and elimination on it
 meets no zero pivot and grows no entry beyond twice the largest (Wilkinson; Higham 2002,
 Theorem 9.9), so the solve is backward stable.  Every other member is factored and decided
 on its own, in the neighbourhoods' order and before its block's stacks are scored.  The
@@ -140,6 +141,34 @@ mean as the solver centres a fit, on the solver's row factor and under its rank 
 penalties either leave a direction free at every smoothing (a null direction of the kept rows'
 own factor that no penalty with a positive smoothing parameter sees), which is refused with
 :class:`LeaveOutRankError`, or they do not, and the trial is infeasible at this smoothing.
+
+**A margin the inverse does not resolve.**  The neighbourhood-sized system is built on
+``H^-1``, so its margin carries that inverse's error, which grows with the condition of
+``H``.  With ``D = diag(H)^(-1/2)``, the Hessian the solver formed differs from the exact one
+by ``dH`` with ``||D dH D||_2 <= P gamma_n`` (each entry of a Gram within ``gamma_n`` of a
+unit diagonal; Higham 2002, section 3.5).  The rows of the fit have
+``||W^(1/2) Z H^(-1/2)||_2 <= 1``, so the exact inverse of the formed Hessian moves
+``W^(1/2) Z H^-1 Z' W^(1/2)``, and with it every eigenvalue of a leave-out system (Weyl), by
+at most ``eta / (1 - eta)``, ``eta = P gamma_n ||(D H D)^-1||_2``.  The computed inverse and
+the two products with it add terms of the same form whose constants hold ``P`` and no ``n``
+(Du Croz and Higham, "Stability of methods for matrix inversion", IMA J. Numer. Anal. 12,
+1992: the inverse from a Cholesky factor has a residual of order ``u kappa``), and the
+identity is not backward stable where ``H`` is ill conditioned, whatever solves with ``H``
+(Hashemi and Nakatsukasa, "Instability of the Sherman-Morrison formula and stabilization by
+iterative refinement", arXiv:2510.01696: a backward error of order ``u kappa(H)``).  A leverage
+from the inverse of a Gram is therefore known to ``u`` times the Gram's condition, the
+square of the rows' own, where the leverage itself is conditioned by the rows' (Holodnak,
+Ipsen and Wentworth, "Conditioning of leverage scores and computation by QR decomposition",
+arXiv:1402.0957, Theorem 2.4).  A system is solved on this route only when its margin
+exceeds ``2 P gamma_n ||(D H D)^-1||_1``: the Gram's term twice over, which is at least
+``eta / (1 - eta)`` wherever it is below one and leaves the other terms as much again while
+``eta`` is small.  The 1-norm is at least the 2-norm and is ``O(P^2)`` to read from the
+Hessian's diagonal and the solver's inverse.  The product of the system's margin and the
+full fit's own, which bounds the smallest eigenvalue of its Jacobi-scaled leave-out Hessian
+from below, then clears the error of that Hessian's two Grams.  A system at or below the
+level, and above the flag level, is formed and factored instead, where the margin is read
+from ``H - Z_a' W_a Z_a`` itself and owes nothing to ``H^-1``; that margin flags it for its
+kept rows or does not.
 
 **Gaussian cross-products.**  For a Gaussian identity model ``l'' = w`` and the centre do not
 move with ``rho``, so a form-and-factor neighbourhood's ``G_a = Z_a' W_a Z_a`` is formed once
@@ -1018,6 +1047,21 @@ class _Trial:
         """
         return max(SHARED_RANK_POLICY.factor_rcond, 2.0 * self.width * gamma(self.problem.n))
 
+    @cached_property
+    def unresolved(self) -> float:
+        """The margin at or below which a neighbourhood-sized system is not solved as one.
+
+        Its margin is built on ``H^-1`` and is known to ``2 P gamma_n ||(D H D)^-1||_1``,
+        ``D = diag(H)^(-1/2)`` (module docstring): the error of the Hessian's Gram, twice
+        over, times the 1-norm of the inverse of the Jacobi-scaled Hessian.  That norm is
+        read from the solver's own inverse in the design's columns, where the intercept's
+        entry is one.  Never below :attr:`questionable`.
+        """
+        fit = self.fit
+        root = np.sqrt(np.maximum(np.diag(fit.slope_hessian), 0.0))
+        inverse = float(np.max(root * (np.abs(fit.slope_inverse) @ root), initial=1.0))
+        return max(self.questionable, 2.0 * self.width * gamma(self.problem.n) * inverse)
+
     def raw(self, rows: NDArray[np.intp]) -> NDArray[np.float64]:
         """The augmented centred rows of ``rows`` in the design's own columns.
 
@@ -1459,9 +1503,9 @@ class _Trial:
 
 
 def _leave_out_factor(
-    system: NDArray[np.float64], questionable: float
+    system: NDArray[np.float64], level: float
 ) -> tuple[tuple[NDArray[np.float64], bool] | None, float]:
-    """A leave-out system's Cholesky factor and its margin; no factor where the margin is questionable.
+    """A leave-out system's Cholesky factor and its margin; no factor where the margin is at or below ``level``.
 
     The margin is ``1 / ||A^-1||_1`` as ``xPOCON`` estimates it from the factor, on a diagonal
     of at most one, and zero when the factorisation fails.  It only flags:
@@ -1473,7 +1517,7 @@ def _leave_out_factor(
         return None, 0.0
     norm = float(np.linalg.norm(system, 1))
     margin = float(_POCON(factor[0], norm, uplo="L")[0]) * norm
-    return (factor if margin > questionable else None), margin
+    return (factor if margin > level else None), margin
 
 
 @dataclass(frozen=True)
@@ -1544,26 +1588,27 @@ def _stack(
 ) -> _Stack:
     """A stack with ``B`` formed and the members it solves together marked; none unless ``stacked``.
 
-    Single rows: every member whose margin ``1 - W h`` is above the flag level.  Larger
-    systems: the members Gershgorin's discs put above ``sqrt(size)`` times that level, whose
-    margin as :func:`_leave_out_factor` estimates it is then above the level (module
-    docstring): taken alone they would be factored and not flagged.
+    Single rows: every member whose margin ``1 - W h`` is above the level the inverse
+    resolves (:attr:`_Trial.unresolved`).  Larger systems: the members Gershgorin's discs
+    put above ``sqrt(size)`` times that level, whose margin as :func:`_leave_out_factor`
+    estimates it is then above the level (module docstring): taken alone they would be
+    factored and solved on this route.
     """
     size = rows.shape[1]
     curvature = trial.curvature[rows]
     if size == 1:
         B = np.einsum("ij,ij->i", Y[:, 0], Z[:, 0])[:, None, None]
-        sound = 1.0 - curvature[:, 0] * B[:, 0, 0] > trial.questionable
+        sound = 1.0 - curvature[:, 0] * B[:, 0, 0] > trial.unresolved
     else:
         B = np.matmul(Y, Z.transpose(0, 2, 1))
-        sound = _dominant(_systems(B, np.sqrt(curvature)), np.sqrt(size) * trial.questionable)
+        sound = _dominant(_systems(B, np.sqrt(curvature)), np.sqrt(size) * trial.unresolved)
     return _Stack(ks, rows, slots, Z, Y, B, sound & stacked)
 
 
 def _alone(trial: _Trial, nb: Neighbourhoods, stack: _Stack, at: int, stacked: bool) -> None:
     """Member ``at`` of ``stack``, which the stack does not solve.
 
-    A single row is flagged by its margin ``1 - W h`` (:func:`_factor_route`); any other
+    A single row goes on with its margin ``1 - W h`` (:func:`_factor_route`); any other
     member, and every member unless ``stacked``, is decided by its own factorisation
     (:func:`_woodbury`).
     """
@@ -1792,7 +1837,7 @@ def _woodbury(
 ) -> None:
     """One neighbourhood by the system of its weighted removed rows.
 
-    One whose system is questionable is fitted from the rows it keeps (:func:`_factor_route`).
+    One whose margin the inverse does not resolve goes on with it (:func:`_factor_route`).
     """
     on = trial.problem.active[rows]
     every = bool(on.all())
@@ -1801,7 +1846,7 @@ def _woodbury(
     root = np.sqrt(trial.curvature[members])
     B = Y @ Z.T
     factor, margin = _leave_out_factor(
-        np.eye(len(members)) - root[:, None] * B * root[None, :], trial.questionable
+        np.eye(len(members)) - root[:, None] * B * root[None, :], trial.unresolved
     )
     if factor is None:
         _factor_route(trial, nb, k, flagged=margin)
@@ -1834,9 +1879,11 @@ def _factor_route(trial: _Trial, nb: Neighbourhoods, k: int, flagged: float | No
     """One neighbourhood by forming its leave-out Hessian.
 
     The Hessian is factored as ``H - Z_a' W_a Z_a``.  Where that factorisation's margin is
-    questionable, or another route's was (``flagged``, its margin), the neighbourhood is
-    fitted from the rows it keeps.  A Gaussian neighbourhood with cached cross-products is
-    scored from them unless the held-out pairs are wanted.
+    questionable, the neighbourhood is fitted from the rows it keeps.  ``flagged`` is the
+    margin of a neighbourhood-sized system that route did not solve: questionable, the
+    neighbourhood is fitted from its kept rows with no factorisation here; above that, the
+    inverse did not resolve it and this factorisation decides.  A Gaussian neighbourhood
+    with cached cross-products is scored from them unless the held-out pairs are wanted.
     """
     rows = nb.drop(k)
     active = trial.problem.active[rows]
@@ -1844,7 +1891,7 @@ def _factor_route(trial: _Trial, nb: Neighbourhoods, k: int, flagged: float | No
     moments, cached = trial.cross_products(nb, k, rows, active)
     gram, score = trial.within(moments)
     solve = None
-    if flagged is None:
+    if flagged is None or flagged > trial.questionable:
         scale = trial.jacobi
         factor, flagged = _leave_out_factor(
             (trial.hessian - gram) * scale[:, None] * scale[None, :], trial.questionable

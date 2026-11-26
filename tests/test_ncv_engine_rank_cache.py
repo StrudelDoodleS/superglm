@@ -625,3 +625,155 @@ def test_questionable_group_is_the_least_squares_fit_of_its_kept_rows(rho):
         want = want[got.heldout.row[at]]
         gap = np.abs(got.heldout.predictor[at] - want)
         assert np.all(gap <= predictor_slack(condition**2, want)), f"{k}: gap {gap.max():.3e}"
+
+
+# ── a margin the full fit's inverse does not resolve ──────────────────────────
+
+
+@dataclass(frozen=True)
+class Apart:
+    """A problem, and columns of the same span that lie far apart: the reference's own."""
+
+    problem: engine.NCVProblem
+    columns: np.ndarray
+
+
+def numeric_columns(frame, y, weights, columns) -> Apart:
+    model = SuperGLM(
+        features={name: Numeric() for name in frame}, family="gaussian", selection_penalty=0
+    )
+    model.fit(frame, y, sample_weight=weights)
+    return Apart(problem_of(model, y, weights, None, mode_bar=BAR), columns)
+
+
+@cache
+def near_alias(exact=False) -> Apart:
+    """Columns ``x`` and ``z`` 1e-7 of their size apart, and 1e-3 apart at row 0, beside three more.
+
+    Row 0 holds nearly all that tells the two apart.  Its leverage is one less 1e-6, and
+    the Jacobi-scaled Hessian has a condition of 4e8, so its inverse gives a leverage to
+    4e-8.  ``exact``: the two are equal on every other row, row 0's leverage is one, and the
+    rows that remain without it do not identify the model.  Row 1 has no weight.
+    """
+    rng = np.random.default_rng(0)
+    n = 100
+    x = rng.normal(size=n)
+    apart = np.zeros(n) if exact else 1e-7 * rng.normal(size=n)
+    apart[0] += 1e-3
+    others = rng.normal(size=(n, 3))
+    frame = pd.DataFrame({"x": x, "z": x + apart, **dict(zip("abc", others.T, strict=True))})
+    columns = np.column_stack([np.ones(n), x, (frame.z.to_numpy() - x) / 1e-7, others])
+    weights = np.where(np.arange(n) == 1, 0.0, 1.0)
+    return numeric_columns(frame, rng.normal(size=n), weights, columns)
+
+
+@cache
+def lone_column() -> Apart:
+    """A column that is row 0's alone to 3e-5, beside two columns 6e-4 of their size apart.
+
+    Row 0's margin is 3e-7.  The Hessian's inverse, of norm 6e6 on a unit diagonal and
+    summed over 400 rows, does not resolve it, while row 0's leave-out Hessian has its
+    smallest eigenvalues at 2e-7 of a unit diagonal: sound for a factorisation of its own.
+    """
+    rng = np.random.default_rng(3)
+    n = 400
+    x = rng.normal(size=n)
+    unit = rng.normal(size=n)
+    lone = 3e-5 * rng.normal(size=n)
+    lone[0] = 1.0
+    frame = pd.DataFrame({"x": x, "z": x + 6e-4 * unit, "lone": lone})
+    columns = np.column_stack([np.ones(n), x, (frame.z.to_numpy() - x) / 6e-4, lone / 3e-5])
+    return numeric_columns(frame, rng.normal(size=n), np.ones(n), columns)
+
+
+def blocks(n, size):
+    """Consecutive rows ``size`` at a time: single rows, or groups whose first holds rows 0 and 1."""
+    return single_rows(n) if size == 1 else from_groups(np.arange(n) // size, n)
+
+
+def kept_rows_fit(design: Apart, removed):
+    """Least squares on the weighted rows outside ``removed``: its predictor on every row.
+
+    Taken in the reference's columns.  With it the condition of the kept rows in the
+    model's own columns, centred and at unit length.
+    """
+    problem = design.problem
+    keep = np.setdiff1d(np.flatnonzero(problem.weights > 0.0), removed)
+    theta = np.linalg.lstsq(design.columns[keep], problem.y[keep], rcond=None)[0]
+    own = problem.dm.toarray()[keep]
+    own = own - own.mean(axis=0)
+    singular = np.linalg.svd(own / np.linalg.norm(own, axis=0), compute_uv=False)
+    return design.columns @ theta, float(singular[0] / singular[-1])
+
+
+def assert_kept_rows_fits(design: Apart, nb, got, from_rows=()):
+    """Every held-out prediction of ``got`` is the least-squares fit of the rows its neighbourhood keeps.
+
+    Within ``64 kappa u`` for a neighbourhood in ``from_rows``, fitted from its kept rows,
+    ``kappa`` their condition: rounding two columns moves what lies between them by that
+    much.  Within the square for any other, solved through a Gram.
+    """
+    for k in range(nb.m):
+        want, condition = kept_rows_fit(design, nb.drop(k))
+        at = got.heldout.neighbourhood == k
+        want = want[got.heldout.row[at]]
+        slack = predictor_slack(condition if k in from_rows else condition**2, want)
+        gap = np.abs(got.heldout.predictor[at] - want)
+        assert np.all(gap <= slack), f"{k}: gap {gap.max():.3e} against {slack.min():.3e}"
+
+
+@pytest.mark.parametrize("route", [None, "woodbury"], ids=["cost-rule", "alone"])
+@pytest.mark.parametrize("size", [1, 2, 3], ids=["rows", "pairs", "triples"])
+def test_margin_the_inverse_does_not_resolve_is_fitted_from_its_kept_rows(size, route):
+    """A margin of 1e-6 from an inverse good to 4e-8: the neighbourhood is fitted from its kept rows.
+
+    As pairs, row 0 shares its neighbourhood with the row of no weight, so its system is
+    diagonal and only the bound on the inverse's error keeps it out of its stack; every
+    other pair is solved in the stack.  As triples a weighted row joins the two.
+    """
+    design = near_alias()
+    nb = blocks(design.problem.n, size)
+    got = evaluate(design.problem, nb, np.zeros(0), gradient=False, route=route)
+    assert got.feasible
+    assert_kept_rows_fits(design, nb, got, from_rows=(0,))
+    assert got.work.kept_fits == 1
+    if route is None and size == 2:
+        assert (got.work.stacked, got.work.small_factorisations) == (nb.m - 1, 0)
+
+
+@pytest.mark.parametrize("route", [None, "woodbury"], ids=["cost-rule", "alone"])
+@pytest.mark.parametrize("size", [1, 2, 3], ids=["rows", "pairs", "triples"])
+def test_inverse_within_its_error_does_not_hide_an_unidentified_deletion(size, route):
+    """Two columns equal on every row but row 0: with it held out the model is refused.
+
+    Row 0's margin is zero and the computed one is the inverse's error, of either sign.  The
+    refusal does not rest on how that fell: it holds for a slope inverse ``64 kappa u``
+    below the solver's too, ``kappa`` the condition of the Jacobi-scaled Hessian, which an
+    inverse from a Cholesky factor is good to and which leaves the margin at 3e-6.
+    """
+    problem = near_alias(exact=True).problem
+    nb = blocks(problem.n, size)
+    fit = solve_mode(problem, np.zeros(0))
+    assert fit.usable and fit.result.reml_hessian_rank == problem.width
+    scale = 1.0 / np.sqrt(np.diag(fit.slope_hessian))
+    kappa = np.linalg.cond(fit.slope_hessian * scale[:, None] * scale[None, :])
+    below = replace(fit, slope_inverse=fit.slope_inverse * (1.0 - 64 * U * kappa))
+    for at in (fit, below):
+        with pytest.raises(LeaveOutRankError) as refusal:
+            evaluate_fit(problem, nb, at, gradient=False, route=route)
+        assert refusal.value.neighbourhood == 0
+
+
+@pytest.mark.parametrize("route", [None, "woodbury"], ids=["cost-rule", "alone"])
+def test_unresolved_margin_with_a_sound_leave_out_hessian_is_factored(route):
+    """A margin the inverse does not resolve is decided by the leave-out Hessian's own factorisation.
+
+    That Hessian is sound here, so row 0 costs one factorisation and no pass over the rows
+    it keeps, and its prediction is their least-squares fit as closely as a Gram gives it.
+    """
+    design = lone_column()
+    nb = single_rows(design.problem.n)
+    got = evaluate(design.problem, nb, np.zeros(0), gradient=False, route=route)
+    assert got.feasible
+    assert_kept_rows_fits(design, nb, got)
+    assert (got.work.factorisations, got.work.kept_fits) == (1, 0)
