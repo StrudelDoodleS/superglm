@@ -16,7 +16,6 @@ import pytest
 from scipy import integrate, special, stats
 
 import superglm.plotting.distributional as mpl_renderers
-import superglm.plotting.distributional_plotly as plotly_renderers
 from superglm import (
     DirichletLSS,
     GammaLS,
@@ -479,10 +478,13 @@ def test_an_infinite_mean_excess_is_null_in_json():
 
 @pytest.mark.parametrize("engine", ["matplotlib", "plotly"])
 def test_plot_distribution_hands_the_curve_to_its_engines_renderer(monkeypatch, engine):
-    module, function = {
-        "matplotlib": (mpl_renderers, "plot_distribution_curve"),
-        "plotly": (plotly_renderers, "plotly_distribution_curve"),
-    }[engine]
+    if engine == "plotly":
+        pytest.importorskip("plotly")  # the plotting extra, not the dev one
+        import superglm.plotting.distributional_plotly as module
+
+        function = "plotly_distribution_curve"
+    else:
+        module, function = mpl_renderers, "plot_distribution_curve"
     monkeypatch.setattr(module, function, lambda curve: ("drawn", curve), raising=False)
     model, X = _fitted("gamma")
     drawn, curve = model.plot_distribution(X.iloc[[0]], kind="survival", engine=engine, n_points=9)
