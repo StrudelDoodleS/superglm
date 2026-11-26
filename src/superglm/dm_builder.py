@@ -763,7 +763,7 @@ def _fixed_qp_lambdas(info: GroupInfo, group_name: str, lambda2: float | dict) -
     return lambda2
 
 
-def _whitening(info, group_name, lambda2, rows, weights, term_roots, in_term):
+def _whitening(info, group_name, lambda2, rows, weights, term_roots):
     """``(R_inv, R_inv_local)`` of a block that whitens (``info.uses_ssp``) on ``rows``."""
     P = info.projection
     if P is None:
@@ -771,8 +771,6 @@ def _whitening(info, group_name, lambda2, rows, weights, term_roots, in_term):
         R_inv = compute_R_inv(rows, omega, weights, lam)
         # No projection: constraints are in raw space, same as R_inv input.
         return R_inv, R_inv
-    if in_term:
-        lambda2 = _fixed_qp_lambdas(info, group_name, lambda2)
     lam, omega = _applied_penalty(info, group_name, lambda2)
     penalty = _whitening_penalty(omega, term_roots, group_name, lambda2)
     R_inv_local = compute_projected_R_inv(rows, P, penalty, weights, lam)
@@ -784,12 +782,14 @@ def _block_transform(
 ):
     """``(R_inv, R_inv_local)``: the block's map to solver coordinates, ``None`` for its own."""
     if info.uses_ssp:
+        # Only this route whitens a projected in-term QP block at its fixed
+        # lambdas; a spline-by-level block whitens at ``lambda2``.
+        if in_term and info.projection is not None:
+            lambda2 = _fixed_qp_lambdas(info, group_name, lambda2)
         if binned is None:
-            return _whitening(
-                info, group_name, lambda2, info.columns, sample_weight, term_roots, in_term
-            )
+            return _whitening(info, group_name, lambda2, info.columns, sample_weight, term_roots)
         return _whitening(
-            info, group_name, lambda2, binned.B_unique, binned.exposure_agg, term_roots, in_term
+            info, group_name, lambda2, binned.B_unique, binned.exposure_agg, term_roots
         )
     P = info.projection
     if P is None:
@@ -875,7 +875,7 @@ def _coded_group(info: GroupInfo) -> GroupMatrix:
     return CategoricalGroupMatrix(cast(NDArray, info.cat_codes), info.n_cols)
 
 
-def _spline_by_level_group(info, group_name, sample_weight, lambda2, in_term, term_roots):
+def _spline_by_level_group(info, group_name, sample_weight, lambda2, term_roots):
     """``(group, R_inv, R_inv_local)`` of one level of a spline-by-category term.
 
     The level is held on its own rows, or on their distinct support when the
@@ -896,9 +896,7 @@ def _spline_by_level_group(info, group_name, sample_weight, lambda2, in_term, te
         rows = sp.csr_matrix(info.spline_cat_basis)[row_idx]
         weights = sample_weight[row_idx]
     if info.uses_ssp:
-        R_inv, R_inv_local = _whitening(
-            info, group_name, lambda2, rows, weights, term_roots, in_term
-        )
+        R_inv, R_inv_local = _whitening(info, group_name, lambda2, rows, weights, term_roots)
     else:
         R_inv = (
             np.eye(info.n_cols, dtype=np.float64) if info.projection is None else info.projection
@@ -998,7 +996,7 @@ def _process_info(
         or (info.spline_cat_basis_unique is not None and info.spline_cat_bin_idx is not None)
     ):
         gm, R_inv, R_inv_local = _spline_by_level_group(
-            info, group_name, sample_weight, lambda2, in_term, term_roots
+            info, group_name, sample_weight, lambda2, term_roots
         )
         _attach_penalty(gm, info, in_term, components=False)
     elif (

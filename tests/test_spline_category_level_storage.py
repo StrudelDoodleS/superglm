@@ -3,14 +3,15 @@
 import pickle
 
 import numpy as np
+import pandas as pd
 import pytest
 import scipy.sparse as sp
 
-from superglm import dm_builder
+from superglm import SuperGLM, dm_builder
 from superglm._group_matrix._group_matrix_range import group_range_matvec, group_row_range
 from superglm.distributional.solver._formation import abs_group
 from superglm.group_matrix import DesignMatrix, SplineCategoricalGroupMatrix
-from superglm.types import GroupInfo, GroupSlice
+from superglm.types import GroupInfo, GroupSlice, LambdaPolicy, LinearConstraintSet
 
 
 @pytest.mark.parametrize("saturated", [False, True], ids=["sparse", "saturated"])
@@ -91,3 +92,64 @@ def test_saved_level_rows_drive_subset_range_and_absolute_products():
     )
     assert block.B is subset.B is None
     assert block._data is block.B_level.data
+
+
+class _FixedQPLevel:
+    """A user spec whose level block is a projected, in-term, fixed-lambda QP block."""
+
+    def build(self, x, sample_weight=None):
+        return GroupInfo(
+            columns=None,
+            n_cols=2,
+            penalty_matrix=np.diag([1.0, 2.0]),
+            reparametrize=True,
+            projection=np.eye(3)[:, 1:],
+            penalty_components=[("wiggle", np.diag([1.0, 2.0]))],
+            lambda_policies={"wiggle": LambdaPolicy.fixed(7.0)},
+            penalty_in_term_coordinates=True,
+            monotone_engine="qp",
+            constraints=LinearConstraintSet(A=np.eye(2), b=np.zeros(2)),
+            spline_cat_basis=sp.csr_matrix(np.column_stack([np.ones_like(x), x, x * x])),
+            spline_cat_mask=x > 0,
+        )
+
+    def _build_monotone_constraints_raw(self):
+        return LinearConstraintSet(A=np.eye(3)[1:], b=np.zeros(2))
+
+    def transform(self, x):
+        return np.column_stack([x, x * x]) * (x > 0)[:, None]
+
+    def reconstruct(self, beta):
+        return {}
+
+
+@pytest.mark.pins_behaviour
+def test_a_fixed_qp_level_block_whitens_at_the_fit_lambda():
+    """Pins master's whitening of a compact spline-by-level block from a user spec.
+
+    The block is projected, in term coordinates and a QP block whose one
+    component is fixed at 7. Only a generic projected block is whitened at
+    its fixed QP lambdas; this level block is whitened at the fit's lambda.
+    The values are master's (27633b021): the block's ``R_inv`` and the
+    predictions after ``fit_path``.
+    """
+    x = np.linspace(-1.0, 1.0, 12)
+    X = pd.DataFrame({"x": x})
+    model = SuperGLM(features={"x": _FixedQPLevel()}, spline_penalty=0.2)
+    model.fit_path(
+        X, 1 + 2 * np.maximum(x, 0), sample_weight=np.arange(1.0, 13.0), lambda_seq=[0.05, 0.01]
+    )
+    np.testing.assert_allclose(
+        model._dm.group_matrices[0].R_inv,
+        [[0.0, 0.0], [1.235759364823351, -0.8079407647416339], [0.0, 1.3952108513201944]],
+        rtol=1e-12,
+    )
+    expected = [1.0540477648990099] * 6 + [
+        1.1480454357000967,
+        1.3479476406541595,
+        1.5610212173733053,
+        1.7830619223847166,
+        2.0088424717254707,
+        2.232272322172331,
+    ]
+    np.testing.assert_allclose(model.predict(X), expected, rtol=1e-6)
