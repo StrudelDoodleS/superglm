@@ -161,11 +161,13 @@ def test_gamma_distribution_functions_stay_probabilities_at_any_concentration(cv
         assert cdf[[1, 3]] == pytest.approx(special.ndtr(w), rel=1e-6)
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("q", [1e-155, -1e-155, 0.0])
 def test_generalized_gamma_near_zero_shape_raises_no_overflow(q):
-    """A tiny Q is the log-normal limit; choosing the branch must not form ``1/Q^2``.
+    """Pins master's behaviour at a tiny Q (the log-normal limit): no overflow, no warning.
 
-    Mutation check: testing ``1/Q^2 > 1e4`` overflows at ``Q = 1e-155``.
+    Choosing the large-shape branch must not form ``1/Q^2``. Mutation check: testing
+    ``1/Q^2 > 1e4`` overflows at ``Q = 1e-155``.
     """
     family = GeneralizedGammaLSS(parametrisation="location")
     theta = np.array([[0.0, 1.0, q]] * 3)
@@ -178,10 +180,12 @@ def test_generalized_gamma_near_zero_shape_raises_no_overflow(q):
     assert np.all(np.diff(quantile) > 0.0)
 
 
+@pytest.mark.pins_behaviour
 def test_an_ordinary_law_never_calls_the_log_tail_kernel(monkeypatch):
-    """Below the switch nothing reaches the compiled log tail, whose first call compiles it.
+    """Pins master's behaviour below the switch: no call into the compiled log tail.
 
-    Mutation check: calling the kernel with zero rows counts one call per function.
+    Its first call compiles it, so an ordinary law must not reach it. Mutation check:
+    calling the kernel with zero rows counts one call per function.
     """
     from superglm.distributional.kernels import generalized_gamma as kernels
 
