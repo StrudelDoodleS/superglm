@@ -47,6 +47,8 @@ __all__ = [
     "plotly_comparison",
     "plotly_density_fan",
     "plotly_diagnostics_figure",
+    "plotly_distribution_curve",
+    "plotly_mean_excess_figure",
     "plotly_pit",
     "plotly_portfolio",
     "plotly_qq",
@@ -54,6 +56,7 @@ __all__ = [
     "plotly_spread",
     "plotly_term_effect",
     "plotly_term_grid",
+    "plotly_threshold_stability_figure",
     "plotly_worm",
 ]
 
@@ -1448,6 +1451,295 @@ def plotly_density_fan(payload: Any) -> go.Figure:
         fig,
         title=f"Conditional density along {payload.covariate}",
         showlegend=quantiles is not None,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# One row's law and the choice of a tail threshold
+# --------------------------------------------------------------------------- #
+
+#: The hue of each piece of a row's law, as the matplotlib renderer draws it.
+_PIECE_COLORS = {"law": TOKENS["blue"], "body": TOKENS["blue"], "tail": TOKENS["orange"]}
+_CURVE_LABELS = {
+    "density": "density",
+    "survival": "chance above the amount",
+    "mean_excess": "mean excess over the amount",
+}
+_FEW_CLAIMS_SHADE = _rgba(TOKENS["border_strong"], 0.16)
+_STEP = dict(color=TOKENS["muted"], width=1.2)
+#: The numeric columns of a stability table that the plot reads.
+_STABILITY_COLUMNS = (
+    "shape",
+    "shape_lower",
+    "shape_upper",
+    "modified_scale",
+    "modified_scale_lower",
+    "modified_scale_upper",
+)
+
+
+def _flagged_fits(table: Any) -> np.ndarray:
+    """The candidates whose fit did not converge or sits at a wall of the shape."""
+    return ~table["converged"].to_numpy(dtype=bool) | table["wall"].notna().to_numpy()
+
+
+def _drawn(values: Any) -> np.ndarray:
+    """The values with every non-finite entry (an infinite mean excess) left undrawn."""
+    values = np.asarray(values, dtype=np.float64)
+    return np.where(np.isfinite(values), values, np.nan)
+
+
+def _vertical(fig: go.Figure, x: float, *, name: str) -> None:
+    """Mark an amount with the zero-line style, across the whole panel."""
+    fig.add_shape(
+        type="line",
+        x0=x,
+        x1=x,
+        xref="x",
+        y0=0.0,
+        y1=1.0,
+        yref="y domain",
+        line=_line(_ZERO),
+        name=name,
+    )
+
+
+def plotly_distribution_curve(curve: Any) -> go.Figure:
+    """One row's law: its density, its survival or its mean excess.
+
+    A body-plus-tail law draws its body and its tail in two hues, marks the threshold and
+    joins the two one-sided values there by a vertical step. A survival curve of positive
+    amounts is drawn on log axes. An infinite mean excess is not drawn.
+    """
+    y = np.asarray(curve.y, dtype=np.float64)
+    values = _drawn(curve.values)
+    piece = np.asarray(curve.piece)
+    label = _CURVE_LABELS[curve.kind]
+    fig = go.Figure()
+    for name in dict.fromkeys(curve.piece):
+        rows = np.flatnonzero(piece == name)
+        fig.add_trace(
+            go.Scatter(
+                x=y[rows],
+                y=values[rows],
+                mode="lines",
+                line=_line(_FITTED, color=_PIECE_COLORS[name]),
+                name=name,
+                hovertemplate=f"{name}<br>amount %{{x:.4g}}<br>{label} %{{y:.4g}}<extra></extra>",
+            )
+        )
+    joins = np.flatnonzero((piece[:-1] == "body") & (piece[1:] == "tail"))
+    if curve.threshold is not None and joins.size:
+        left = int(joins[0])
+        fig.add_trace(
+            go.Scatter(
+                x=[curve.threshold, curve.threshold],
+                y=[float(curve.values[left]), float(curve.values[left + 1])],
+                mode="lines",
+                line=dict(_STEP),
+                name="step",
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+    if curve.threshold is not None and y[0] <= curve.threshold <= y[-1]:
+        _vertical(fig, curve.threshold, name="threshold")
+    if not np.any(np.isfinite(values)):
+        fig.add_annotation(
+            text="the mean excess is infinite at every amount on the grid",
+            xref="paper",
+            yref="paper",
+            x=0.5,
+            y=0.5,
+            showarrow=False,
+            font=dict(size=LABEL_PT, color=TOKENS["muted"]),
+        )
+    if curve.kind == "survival":
+        fig.update_yaxes(type="log")
+        if curve.amount_scale == "log":
+            fig.update_xaxes(type="log")
+    _axis_titles(fig, x="amount", y=label)
+    return _finalise(
+        fig,
+        title=f"{curve.family}: {label} of one row's law",
+        showlegend=curve.threshold is not None,
+    )
+
+
+def plotly_mean_excess_figure(payload: Any) -> go.Figure:
+    """The empirical mean excess with its band, and the fitted tail above a threshold.
+
+    With a threshold the plot marks it and draws the tail's straight line, dashed when that
+    fit did not converge or sits at a wall. The stretch with too few claims above is shaded.
+    """
+    table = payload.table
+    x = table["threshold"].to_numpy(dtype=np.float64)
+    fig = go.Figure()
+    if payload.shaded_from is not None:
+        fig.add_vrect(
+            x0=payload.shaded_from,
+            x1=float(x[-1]),
+            fillcolor=_FEW_CLAIMS_SHADE,
+            line_width=0,
+            layer="below",
+            name="few claims",
+            annotation_text=f"fewer than {payload.few_claims} claims above",
+            annotation_position="top left",
+            annotation_font=dict(size=LABEL_PT, color=TOKENS["muted"]),
+        )
+    fig.add_trace(
+        _band_trace(
+            x,
+            table["lower"].to_numpy(dtype=np.float64),
+            table["upper"].to_numpy(dtype=np.float64),
+            name=f"{payload.level:.0%} band",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=table["mean_excess"].to_numpy(dtype=np.float64),
+            mode="markers",
+            marker=_point_marker(size=5.0),
+            name="mean excess",
+            customdata=table["n_above"].to_numpy(),
+            hovertemplate=(
+                "threshold %{x:.4g}<br>mean excess %{y:.4g}"
+                "<br>claims above %{customdata}<extra></extra>"
+            ),
+        )
+    )
+    if payload.threshold is not None:
+        _vertical(fig, payload.threshold, name="threshold")
+    line = payload.line
+    if line is not None:
+        flagged = not line.converged or line.wall is not None
+        fig.add_trace(
+            go.Scatter(
+                x=list(line.x),
+                y=list(line.y),
+                mode="lines",
+                line=_line(
+                    _FITTED, color=_PIECE_COLORS["tail"], dash="dash" if flagged else "solid"
+                ),
+                name="fitted tail" + (" (did not converge or at a wall)" if flagged else ""),
+                hovertemplate="fitted tail %{y:.4g}<extra></extra>",
+            )
+        )
+    _axis_titles(fig, x="threshold", y="mean excess over the threshold")
+    return _finalise(
+        fig, title=f"Mean excess over each threshold, with its {payload.level:.0%} band"
+    )
+
+
+def _stability_traces(
+    fig: go.Figure,
+    x: np.ndarray,
+    value: np.ndarray,
+    lower: np.ndarray,
+    upper: np.ndarray,
+    flagged: np.ndarray,
+    *,
+    name: str,
+    col: int,
+) -> None:
+    cell = dict(row=1, col=col)
+    fig.add_trace(_band_trace(x, lower, upper, name=f"{name} band", showlegend=False), **cell)
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=value,
+            mode="lines",
+            line=_line(_FITTED, width=1.2),
+            name=f"{name} estimate",
+            showlegend=False,
+            hoverinfo="skip",
+        ),
+        **cell,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x[~flagged],
+            y=value[~flagged],
+            mode="markers",
+            marker=_point_marker(),
+            name=name,
+            showlegend=False,
+            hovertemplate=f"threshold %{{x:.4g}}<br>{name} %{{y:.4g}}<extra></extra>",
+        ),
+        **cell,
+    )
+    if np.any(flagged):
+        fig.add_trace(
+            go.Scatter(
+                x=x[flagged],
+                y=value[flagged],
+                mode="markers",
+                marker=dict(
+                    symbol="circle-open",
+                    size=7.0,
+                    color=CHART["point"]["face"],
+                    line=dict(width=CHART["point"]["width"]),
+                ),
+                name="did not converge or at a wall",
+                showlegend=col == 1,
+                hovertemplate=(
+                    f"threshold %{{x:.4g}}<br>{name} %{{y:.4g}}"
+                    "<br>did not converge or at a wall<extra></extra>"
+                ),
+            ),
+            **cell,
+        )
+
+
+def plotly_threshold_stability_figure(payload: Any) -> go.Figure:
+    """The tail shape at each threshold with its band, and the threshold-free scale.
+
+    A candidate whose fit did not converge or sits at a wall is drawn hollow. The shape's
+    walls are marked. The scale has its own panel only when the table carries it.
+    """
+    table = payload.table
+    x = table["threshold"].to_numpy(dtype=np.float64)
+    flagged = _flagged_fits(table)
+    column = {name: table[name].to_numpy(dtype=np.float64) for name in _STABILITY_COLUMNS}
+    with_scale = bool(np.any(np.isfinite(column["modified_scale"])))
+    walls = payload.shape_walls
+    titles = [f"{payload.shape_label}, walls at {walls[0]:g} and {walls[1]:g}"]
+    if with_scale:
+        titles.append("threshold-free scale: scale − shape × threshold")
+    fig = make_subplots(rows=1, cols=len(titles), subplot_titles=titles)
+    _style_titles(fig)
+    _stability_traces(
+        fig,
+        x,
+        column["shape"],
+        column["shape_lower"],
+        column["shape_upper"],
+        flagged,
+        name=payload.shape_label,
+        col=1,
+    )
+    if with_scale:
+        _stability_traces(
+            fig,
+            x,
+            column["modified_scale"],
+            column["modified_scale_lower"],
+            column["modified_scale_upper"],
+            flagged,
+            name="threshold-free scale",
+            col=2,
+        )
+        _axis_titles(fig, x="threshold", y="threshold-free scale", row=1, col=2)
+    # after the traces: plotly puts a line on a subplot only once it holds data
+    for side, wall in zip(("lower", "upper"), walls, strict=True):
+        fig.add_hline(y=wall, line=_line(_ZERO), name=f"{side} wall", row=1, col=1)
+    _axis_titles(fig, x="threshold", y=payload.shape_label, row=1, col=1)
+    return _finalise(
+        fig,
+        cols=len(titles),
+        title=f"Threshold stability, {payload.level:.0%} bands: {payload.tail}",
+        showlegend=bool(np.any(flagged)),
     )
 
 

@@ -318,6 +318,8 @@ _RENDERERS = {
             "diagnostics": "plot_diagnostics_figure",
             "term_grid": "plot_term_grid",
             "distribution": "plot_distribution_curve",
+            "mean_excess": "plot_mean_excess_figure",
+            "threshold_stability": "plot_threshold_stability_figure",
         },
     ),
     "plotly": (
@@ -326,6 +328,8 @@ _RENDERERS = {
             "diagnostics": "plotly_diagnostics_figure",
             "term_grid": "plotly_term_grid",
             "distribution": "plotly_distribution_curve",
+            "mean_excess": "plotly_mean_excess_figure",
+            "threshold_stability": "plotly_threshold_stability_figure",
         },
     ),
 }

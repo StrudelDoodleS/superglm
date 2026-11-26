@@ -14,7 +14,7 @@ from __future__ import annotations
 import html
 import math
 from collections.abc import Iterable, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -35,6 +35,7 @@ from superglm.distributional.checks.pit import PITPayload
 from superglm.distributional.checks.qq import QQPayload
 from superglm.distributional.checks.worm import WormPanel, WormPayload
 from superglm.distributional.residuals import ResidualSet, _sample_residuals
+from superglm.distributional.row_law import DistributionCurve
 from superglm.distributional.surfaces import DensityFan, Histogram, Portfolio, RiskCurves, Spread
 from superglm.distributional.terms import ParameterTermEffect
 from superglm.plotting.editor_style import (
@@ -48,6 +49,9 @@ from superglm.plotting.editor_style import (
     sequential_cmap,
 )
 
+if TYPE_CHECKING:
+    from superglm.distributional.thresholds import MeanExcessFigure, ThresholdStabilityResult
+
 __all__ = [
     "plot_actual_expected",
     "plot_binned",
@@ -56,6 +60,8 @@ __all__ = [
     "plot_comparison",
     "plot_density_fan",
     "plot_diagnostics_figure",
+    "plot_distribution_curve",
+    "plot_mean_excess_figure",
     "plot_pit",
     "plot_portfolio",
     "plot_qq",
@@ -63,6 +69,7 @@ __all__ = [
     "plot_spread",
     "plot_term_effect",
     "plot_term_grid",
+    "plot_threshold_stability_figure",
     "plot_worm",
 ]
 
@@ -859,6 +866,221 @@ def plot_density_fan(payload: DensityFan, *, ax: Axes | None = None, contours: i
         ax.set_xlabel(payload.covariate)
         ax.set_ylabel("response")
         return _finish(fig, [ax])
+
+
+# --------------------------------------------------------------------------- #
+# One row's law and the choice of a tail threshold
+# --------------------------------------------------------------------------- #
+
+#: The hue of each piece of a row's law: a single law and a body share the
+#: fitted blue, and a tail takes the next hue of the editor's colourway.
+_PIECE_COLORS = {"law": TOKENS["blue"], "body": TOKENS["blue"], "tail": TOKENS["orange"]}
+#: The axis label of each kind of curve, unit-free.
+_CURVE_LABELS = {
+    "density": "density",
+    "survival": "chance above the amount",
+    "mean_excess": "mean excess over the amount",
+}
+#: The grey that shades the stretch of a mean excess plot with few claims left.
+_FEW_CLAIMS_SHADE = to_rgba(TOKENS["border_strong"], 0.16)
+
+
+def _flagged_fits(table: pd.DataFrame) -> NDArray[np.bool_]:
+    """The candidates whose fit did not converge or sits at a wall of the shape."""
+    return ~table["converged"].to_numpy(dtype=bool) | table["wall"].notna().to_numpy()
+
+
+def _curve_pieces(curve: DistributionCurve) -> list[tuple[str, NDArray[np.intp]]]:
+    """The positions of each piece of the curve, in grid order."""
+    piece = np.asarray(curve.piece)
+    return [(name, np.flatnonzero(piece == name)) for name in dict.fromkeys(curve.piece)]
+
+
+def _curve_step(curve: DistributionCurve) -> tuple[float, float] | None:
+    """The body's left value and the tail's right value at the threshold, when both are on the grid."""
+    piece = np.asarray(curve.piece)
+    joins = np.flatnonzero((piece[:-1] == "body") & (piece[1:] == "tail"))
+    if curve.threshold is None or joins.size == 0:
+        return None
+    left = int(joins[0])
+    return float(curve.values[left]), float(curve.values[left + 1])
+
+
+def _drawn(values: NDArray) -> NDArray[np.float64]:
+    """The values with every non-finite entry (an infinite mean excess) left undrawn."""
+    values = np.asarray(values, dtype=np.float64)
+    return np.where(np.isfinite(values), values, np.nan)
+
+
+def plot_distribution_curve(curve: DistributionCurve, *, ax: Axes | None = None) -> Figure:
+    """Draw one row's law: its density, its survival or its mean excess.
+
+    A body-plus-tail law draws its body and its tail in two hues, marks the threshold and
+    joins the two one-sided values there by a vertical step. A survival curve of positive
+    amounts is drawn on log axes. An infinite mean excess is not drawn.
+    """
+    y = np.asarray(curve.y, dtype=np.float64)
+    values = _drawn(curve.values)
+    with matplotlib_context():
+        fig, ax = _single_panel(ax)
+        for name, rows in _curve_pieces(curve):
+            ax.plot(
+                y[rows],
+                values[rows],
+                gid=name,
+                label=None if name == "law" else name,
+                **_line(CHART["edited"], color=_PIECE_COLORS[name]),
+            )
+        step = _curve_step(curve)
+        if step is not None:
+            ax.plot(
+                [curve.threshold, curve.threshold],
+                list(step),
+                gid="step",
+                **_line(CHART["edited"], color=TOKENS["muted"], linewidth=1.2),
+            )
+        if curve.threshold is not None and y[0] <= curve.threshold <= y[-1]:
+            ax.axvline(curve.threshold, gid="threshold", label="threshold", **_line(CHART["zero"]))
+        if not np.any(np.isfinite(values)):
+            _note(ax, "the mean excess is infinite at every amount on the grid")
+        if curve.kind == "survival":
+            ax.set_yscale("log")
+            if curve.amount_scale == "log":
+                ax.set_xscale("log")
+        if curve.threshold is not None:
+            ax.legend(fontsize=LABEL_PT, frameon=False)
+        ax.set_title(f"{curve.family}: {_CURVE_LABELS[curve.kind]} of one row's law")
+        ax.set_xlabel("amount")
+        ax.set_ylabel(_CURVE_LABELS[curve.kind])
+        return _finish(fig, [ax])
+
+
+def plot_mean_excess_figure(payload: MeanExcessFigure, *, ax: Axes | None = None) -> Figure:
+    """Draw the empirical mean excess with its band, and the fitted tail above a threshold.
+
+    With a threshold the plot marks it and draws the tail's straight line, dashed when that
+    fit did not converge or sits at a wall. The stretch with too few claims above is shaded.
+    """
+    table = payload.table
+    x = table["threshold"].to_numpy(dtype=np.float64)
+    with matplotlib_context():
+        fig, ax = _single_panel(ax)
+        if payload.shaded_from is not None:
+            ax.axvspan(
+                payload.shaded_from,
+                float(x[-1]),
+                color=_FEW_CLAIMS_SHADE,
+                linewidth=0.0,
+                gid="few claims",
+                label=f"fewer than {payload.few_claims} claims above",
+                zorder=0,
+            )
+        ax.fill_between(
+            x,
+            table["lower"].to_numpy(dtype=np.float64),
+            table["upper"].to_numpy(dtype=np.float64),
+            gid="band",
+            label=f"{payload.level:.0%} band",
+            **_fill(CHART["ci"]),
+        )
+        ax.scatter(
+            x,
+            table["mean_excess"].to_numpy(dtype=np.float64),
+            gid="mean excess",
+            **_points(CHART["point"], s=14.0, linewidths=0.6),
+        )
+        if payload.threshold is not None:
+            ax.axvline(
+                payload.threshold, gid="threshold", label="threshold", **_line(CHART["zero"])
+            )
+        line = payload.line
+        if line is not None:
+            flagged = not line.converged or line.wall is not None
+            ax.plot(
+                list(line.x),
+                list(line.y),
+                gid="tail line",
+                label="fitted tail" + (" (did not converge or at a wall)" if flagged else ""),
+                **_line(
+                    CHART["edited"], color=_PIECE_COLORS["tail"], linestyle="--" if flagged else "-"
+                ),
+            )
+        ax.legend(fontsize=LABEL_PT, frameon=False)
+        ax.set_title(f"Mean excess over each threshold, with its {payload.level:.0%} band")
+        ax.set_xlabel("threshold")
+        ax.set_ylabel("mean excess over the threshold")
+        return _finish(fig, [ax])
+
+
+#: The numeric columns of a stability table that the plot reads.
+_STABILITY_COLUMNS = (
+    "shape",
+    "shape_lower",
+    "shape_upper",
+    "modified_scale",
+    "modified_scale_lower",
+    "modified_scale_upper",
+)
+
+
+def _draw_stability_panel(
+    ax: Axes, x: NDArray, value: NDArray, lower: NDArray, upper: NDArray, flagged: NDArray
+) -> None:
+    ax.fill_between(x, lower, upper, gid="band", **_fill(CHART["ci"]))
+    ax.plot(x, value, gid="estimate", **_line(CHART["edited"], linewidth=1.2))
+    ax.scatter(x[~flagged], value[~flagged], gid="fitted", **_points(CHART["point"]))
+    if np.any(flagged):
+        ax.scatter(
+            x[flagged],
+            value[flagged],
+            gid="flagged",
+            label="did not converge or at a wall",
+            **_points(CHART["point"], facecolor="none", edgecolor=_colour(CHART["point"], "face")),
+        )
+        ax.legend(fontsize=LABEL_PT, frameon=False)
+    ax.set_xlabel("threshold")
+
+
+def plot_threshold_stability_figure(
+    payload: ThresholdStabilityResult, *, fig: Figure | None = None
+) -> Figure:
+    """Draw the tail shape at each threshold with its band, and the threshold-free scale.
+
+    A candidate whose fit did not converge or sits at a wall is drawn hollow. The shape's
+    walls are marked. The scale has its own panel only when the table carries it.
+    """
+    table = payload.table
+    x = table["threshold"].to_numpy(dtype=np.float64)
+    flagged = _flagged_fits(table)
+    columns = {name: table[name].to_numpy(dtype=np.float64) for name in _STABILITY_COLUMNS}
+    with_scale = bool(np.any(np.isfinite(columns["modified_scale"])))
+    with matplotlib_context():
+        fig, axes = _panel_grid(fig, 2 if with_scale else 1, 2)
+        shape_ax = axes[0]
+        for side, wall in zip(("lower", "upper"), payload.shape_walls, strict=True):
+            shape_ax.axhline(wall, gid=f"{side} wall", **_line(CHART["zero"]))
+        _draw_stability_panel(
+            shape_ax, x, columns["shape"], columns["shape_lower"], columns["shape_upper"], flagged
+        )
+        shape_ax.set_title(
+            f"{payload.shape_label}, walls at {payload.shape_walls[0]:g} and "
+            f"{payload.shape_walls[1]:g}"
+        )
+        shape_ax.set_ylabel(payload.shape_label)
+        if with_scale:
+            scale_ax = axes[1]
+            _draw_stability_panel(
+                scale_ax,
+                x,
+                columns["modified_scale"],
+                columns["modified_scale_lower"],
+                columns["modified_scale_upper"],
+                flagged,
+            )
+            scale_ax.set_title("threshold-free scale: scale − shape × threshold")
+            scale_ax.set_ylabel("threshold-free scale")
+        fig.suptitle(f"Threshold stability, {payload.level:.0%} bands: {payload.tail}")
+        return _finish(fig, axes, suptitle=True)
 
 
 def _draw_histogram(ax: Axes, histogram: Histogram, title: str, xlabel: str) -> None:
