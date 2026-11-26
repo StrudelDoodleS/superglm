@@ -173,6 +173,26 @@ level, and above the flag level, is formed and factored instead, where the margi
 from ``H - Z_a' W_a Z_a`` itself and owes nothing to ``H^-1``; that margin flags it for its
 kept rows or does not.
 
+**A single row the inverse does not resolve.**  That bound is the worst case over every row.
+A row's own leverage ``h = s' A^-1 s``, ``A = D H D`` as the solver formed it and ``s = D z``,
+moves under a perturbation ``E`` of ``A`` by ``x' E y`` for ``x = A^-1 s`` and
+``y = (A + E)^-1 s``, at most ``||E|| ||x||^2 / (1 - eta)``, ``eta = ||E|| ||A^-1||_2``.  The
+exact Hessian's leverage is that of such an ``A + E``, ``E`` the formed Gram's error
+(``P gamma_n``).  Taken through the Cholesky factor of ``A``, one an evaluation, by a forward
+and a back substitution, the computed leverage is that of another, and the computed solved
+row ``x`` that of a third, each ``E`` of the form of a Gram's error: the scaling's
+(``gamma_2`` an entry), the factorisation's (``gamma_(P+1) |L||L'|``, Higham 2002, Theorem
+10.3) and the two substitutions' (``2 gamma_P |L||L'|``, Theorem 8.5), where ``|L||L'|`` is
+at most one an entry on a unit diagonal.  With ``||E||_2 <= P gamma_(n + 3P + 6)`` for the
+two together and the computed ``x``, the leverage is known to
+``|w| (||E|| ||x||^2 (1 + eta)^2 / (1 - eta) + gamma_(P+2) h)`` while ``eta <= 1/2``.  A single row whose margin ``1 - w h`` from the factor clears
+:data:`RESOLVED` times that is solved by the scalar form on the factor's leverage and solved
+row (:func:`_through_factor`); the bound's own roundings leave its step within 1/63.  The
+Rayleigh quotient of ``A - w s s'`` at ``x`` is ``h (1 - w h) / ||x||^2``, so a row it leaves
+has a leave-out Hessian whose smallest eigenvalue on a unit diagonal is below
+``RESOLVED (||E|| (1 + eta)^2 / (1 - eta) + P gamma_(P+2))``, about ``64 P gamma_n``: near the
+flag level, where its own factorisation decides it as above.
+
 **Gaussian cross-products.**  For a Gaussian identity model ``l'' = w`` and the centre do not
 move with ``rho``, so a form-and-factor neighbourhood's ``G_a = Z_a' W_a Z_a`` is formed once
 and kept by the problem, with ``G_d`` over its scored rows and both scores at a reference fit
@@ -196,7 +216,8 @@ weighted rows).  An evaluation holds a block and its solved rows, one more array
 size at most (a stack's ``(u, Delta)`` pairs, or two blocks of pairs from neighbourhoods
 taken one at a time), ``size x size`` per stacked neighbourhood of the block (at most
 ``0.54`` of the block), a handful of ``P x P`` matrices, and row-length vectors: the mode's
-rows and five entries per scored pair.  A neighbourhood served as a row subset holds that subset's
+rows and five entries per scored pair.  Single rows the inverse does not resolve take two
+more arrays of a block's size at most through the fit's factor.  A neighbourhood served as a row subset holds that subset's
 stored form (an index per lookup term, its dense columns) and the solver's plan for it, one
 neighbourhood at a time; the compact third pass adds row-length vectors and reads the design's
 own lookup plan, which the design holds until the fit is published.  Between evaluations only a
@@ -214,7 +235,7 @@ from typing import Any, Literal
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.linalg import cho_factor, cho_solve, get_lapack_funcs
+from scipy.linalg import cho_factor, cho_solve, cholesky, get_lapack_funcs, solve_triangular
 
 from superglm._roundoff import EPS, gamma
 from superglm.distributions import Distribution
@@ -330,8 +351,10 @@ class WorkCounts:
     ``solves`` the solves with one factored system, of either size.  ``stacked`` are the
     neighbourhood-sized systems solved together, in ``stacks`` of one size, each stack by one
     LAPACK call a right-hand side; a single row's scalar system is in none of these.
-    ``kept_fits`` are leave-out systems fitted from their kept rows, each one or two passes of
-    the solver's row factor over the design, which neither row count includes.
+    ``resolved_by_factor`` are single rows whose margin the full fit's inverse did not
+    resolve and its Cholesky factor did (:func:`_through_factor`).  ``kept_fits`` are
+    leave-out systems fitted from their kept rows, each one or two passes of the solver's row
+    factor over the design, which neither row count includes.
     ``fallback_solves`` are the inner solves, of ``inner_solves``, made because an earlier one
     at the same smoothing ended short of its bar (:func:`two_level`).  ``stagnated_fits``
     are the evaluations that took their criterion from a fit at the limit of float64, short
@@ -350,6 +373,7 @@ class WorkCounts:
     rows_read: int = 0
     rows_multiplied: int = 0
     rows_streamed: int = 0
+    resolved_by_factor: int = 0
     kept_fits: int = 0
 
 
@@ -1069,11 +1093,37 @@ class _Trial:
         entry is one.  A margin is resolved at :data:`RESOLVED` times that error.  Never
         below :attr:`questionable`.
         """
+        error = 2.0 * self.width * gamma(self.problem.n) * self.inverse_norm
+        return max(self.questionable, RESOLVED * error)
+
+    @cached_property
+    def inverse_norm(self) -> float:
+        """``||(D H D)^-1||_1``, read from the solver's own inverse in the design's columns."""
         fit = self.fit
         root = np.sqrt(np.maximum(np.diag(fit.slope_hessian), 0.0))
-        inverse = float(np.max(root * (np.abs(fit.slope_inverse) @ root), initial=1.0))
-        error = 2.0 * self.width * gamma(self.problem.n) * inverse
-        return max(self.questionable, RESOLVED * error)
+        return float(np.max(root * (np.abs(fit.slope_inverse) @ root), initial=1.0))
+
+    @cached_property
+    def factor(self) -> tuple[NDArray[np.float64], float] | None:
+        """The Cholesky factor of ``D H D`` and a single row's leverage error through it per ``|w| ||x||^2``.
+
+        The error is ``||E|| (1 + eta)^2 / (1 - eta)`` for ``||E|| = P gamma_(n + 3P + 6)`` and
+        ``eta = ||E|| ||(D H D)^-1||_1`` (module docstring, "A single row the inverse does not
+        resolve").  ``None`` where ``eta`` exceeds a half or the factorisation fails.
+        """
+        width = self.width
+        error = width * gamma(self.problem.n + 3 * width + 6)
+        eta = error * self.inverse_norm
+        if not eta <= 0.5:
+            return None
+        scale = self.jacobi
+        try:
+            factor = cholesky(
+                self.hessian * scale[:, None] * scale[None, :], lower=True, check_finite=False
+            )
+        except np.linalg.LinAlgError:
+            return None
+        return factor, error * (1.0 + eta) ** 2 / (1.0 - eta)
 
     def raw(self, rows: NDArray[np.intp]) -> NDArray[np.float64]:
         """The augmented centred rows of ``rows`` in the design's own columns.
@@ -1612,28 +1662,64 @@ def _stack(
     """A stack with ``B`` formed and the members it solves together marked; none unless ``stacked``.
 
     Single rows: every member whose margin ``1 - W h`` is above the level the inverse
-    resolves (:attr:`_Trial.unresolved`).  Larger systems: the members Gershgorin's discs
-    put above ``sqrt(size)`` times that level, whose margin as :func:`_leave_out_factor`
-    estimates it is then above the level (module docstring): taken alone they would be
-    factored and solved on this route.
+    resolves (:attr:`_Trial.unresolved`), and of the others those the fit's Cholesky factor
+    resolves (:func:`_through_factor`), whose leverage in ``B`` and solved row in ``Y`` are
+    then the factor's: written into the block's solved rows, which nothing else reads.
+    Larger systems: the members Gershgorin's discs put above ``sqrt(size)`` times that
+    level, whose margin as :func:`_leave_out_factor` estimates it is then above the level
+    (module docstring): taken alone they would be factored and solved on this route.
     """
     size = rows.shape[1]
     curvature = trial.curvature[rows]
     if size == 1:
         B = np.einsum("ij,ij->i", Y[:, 0], Z[:, 0])[:, None, None]
         sound = 1.0 - curvature[:, 0] * B[:, 0, 0] > trial.unresolved
+        pending = np.flatnonzero(~sound & stacked)
+        through = _through_factor(trial, rows[pending, 0], Z[pending, 0]) if len(pending) else None
+        if through is not None:
+            B[pending, 0, 0], Y[pending, 0], sound[pending] = through
     else:
         B = np.matmul(Y, Z.transpose(0, 2, 1))
         sound = _dominant(_systems(B, np.sqrt(curvature)), np.sqrt(size) * trial.unresolved)
     return _Stack(ks, rows, slots, Z, Y, B, sound & stacked)
 
 
+def _through_factor(
+    trial: _Trial, rows: NDArray[np.intp], block: NDArray[np.float64]
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.bool_]] | None:
+    """Single rows by the full fit's Cholesky factor: their leverages, solved rows and which it resolves.
+
+    ``rows`` and ``block`` are the rows and ``Z``; the solved rows are ``Z H^-1``.  A row is
+    resolved where its margin ``1 - w h`` exceeds :data:`RESOLVED` times the error of its own
+    leverage (module docstring, "A single row the inverse does not resolve").  ``None`` where
+    the trial has no factor (:attr:`_Trial.factor`).
+    """
+    held = trial.factor
+    if held is None:
+        return None
+    factor, error = held
+    scale = trial.jacobi
+    forward = solve_triangular(
+        factor, (block * scale).T, lower=True, overwrite_b=True, check_finite=False
+    )
+    leverage = np.einsum("ij,ij->j", forward, forward)
+    back = solve_triangular(
+        factor, forward, lower=True, trans="T", overwrite_b=True, check_finite=False
+    )
+    curvature = trial.curvature[rows]
+    known = error * np.einsum("ij,ij->j", back, back) + gamma(trial.width + 2) * leverage
+    resolved = 1.0 - curvature * leverage > RESOLVED * np.abs(curvature) * known
+    trial.work.rows_multiplied += len(rows)
+    trial.work.resolved_by_factor += int(np.count_nonzero(resolved))
+    return leverage, back.T * scale, resolved
+
+
 def _alone(trial: _Trial, nb: Neighbourhoods, stack: _Stack, at: int, stacked: bool) -> None:
     """Member ``at`` of ``stack``, which the stack does not solve.
 
-    A single row goes on with its margin ``1 - W h`` (:func:`_factor_route`); any other
-    member, and every member unless ``stacked``, is decided by its own factorisation
-    (:func:`_woodbury`).
+    A single row goes on with its margin ``1 - W h``, the fit's Cholesky factor's where the
+    trial has one (:func:`_stack`), to :func:`_factor_route`; any other member, and every
+    member unless ``stacked``, is decided by its own factorisation (:func:`_woodbury`).
     """
     k = int(stack.ks[at])
     if not stacked or stack.rows.shape[1] > 1:
@@ -1860,7 +1946,9 @@ def _woodbury(
 ) -> None:
     """One neighbourhood by the system of its weighted removed rows.
 
-    One whose margin the inverse does not resolve goes on with it (:func:`_factor_route`).
+    One whose margin the inverse does not resolve goes on with it (:func:`_factor_route`),
+    unless it has one weighted row and the fit's Cholesky factor resolves that row's margin,
+    which then takes the factor's leverage and solved row (:func:`_through_factor`).
     """
     on = trial.problem.active[rows]
     every = bool(on.all())
@@ -1871,6 +1959,13 @@ def _woodbury(
     factor, margin = _leave_out_factor(
         np.eye(len(members)) - root[:, None] * B * root[None, :], trial.unresolved
     )
+    through = _through_factor(trial, members, Z) if factor is None and len(members) == 1 else None
+    if through is not None:
+        leverage, Y, resolved = through
+        B = leverage[:, None]
+        margin = float(1.0 - trial.curvature[members[0]] * leverage[0])
+        if resolved[0]:
+            factor = (np.sqrt([[margin]]), True)
     if factor is None:
         _factor_route(trial, nb, k, flagged=margin)
         return

@@ -298,6 +298,35 @@ def test_one_row_groups_cost_what_single_rows_cost(family, zero_weights):
         assert_same_criterion(p, groups, rows, kappa)
 
 
+@pytest.mark.parametrize("family", ["gaussian", "poisson"])
+def test_single_rows_the_inverse_does_not_resolve_are_resolved_through_the_factor(
+    family, monkeypatch
+):
+    """Every single row past the inverse's level: none factored or fitted from its kept rows.
+
+    The level is forced above every margin, where an inverse of 1-norm 1.4e7 on a unit
+    diagonal puts it for 17,000 rows and 300 coefficients.  Through the fit's Cholesky factor
+    each row's leverage is known to about ``P gamma_n ||H^-1 z||^2`` on a unit diagonal, so
+    every row is solved by the scalar form, in stacks and alone (a factorisation of one
+    entry), each row is read once, and the evaluation is the inverse's.
+    """
+    c = case(family, 300)
+    p, n = c.problem, c.problem.n
+    nb = single_rows(n)
+    want = evaluate(rebuilt(p), nb, RHO)
+    monkeypatch.setattr(engine._Trial, "unresolved", property(lambda trial: 2.0))
+    stacked = evaluate_fit(rebuilt(p), nb, want.fit)
+    alone = evaluate_fit(rebuilt(p), nb, want.fit, route="woodbury")
+    kappa = condition(p, nb, RHO, want.fit)
+    for got in (stacked, alone):
+        assert (got.work.factorisations, got.work.kept_fits) == (0, 0)
+        assert got.work.resolved_by_factor == n
+        assert got.work.rows_read == want.work.rows_read
+        assert_same_evaluation(p, got, want, kappa)
+    assert (stacked.work.small_factorisations, alone.work.small_factorisations) == (0, n)
+    assert want.work.resolved_by_factor == 0
+
+
 def test_pairs_of_a_stack_enter_the_forms_kept_row_by_row():
     """Few small folds on a design without tables: each stack's pairs add their forms to every row's.
 
