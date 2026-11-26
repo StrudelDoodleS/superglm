@@ -674,10 +674,10 @@ def _compute_fit_stats(
     null_dev = weighted_deviance_sum(distribution, y, weights, null_mu, null_held)
     dev = weighted_deviance_sum(distribution, y, weights, mu, held)
     if held is not None:
-        ll -= 0.5 * held.deviance_sum(physical_weights)
+        ll += held.log_likelihood_sum(physical_weights)
         pearson += held.pearson_sum(weights)
     if null_held is not None:
-        null_ll -= 0.5 * null_held.deviance_sum(physical_weights)
+        null_ll += null_held.log_likelihood_sum(physical_weights)
     expl_dev = _explained_deviance(dev, null_dev, y, null_mu, weights)
 
     return FitStats(

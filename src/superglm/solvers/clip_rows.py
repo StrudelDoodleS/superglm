@@ -854,10 +854,10 @@ class HeldRows:
             event = np.where(np.isinf(self.non_event_score), np.exp(-self.eta), event)
             return _by_outcome(self.y, event, -1.0 / self.event_score)
 
-    def weighted_deviance(self, weights: NDArray) -> NDArray:
-        """``w`` times the unit deviance, an exact 0 on a row of weight 0.
+    def weighted_log_likelihood(self, weights: NDArray) -> NDArray:
+        """``w`` times the binomial log likelihood, an exact 0 on a row of weight 0.
 
-        ``-2 [y (w log p) + (1 - y) (w log(1 - p))]``.  The one term an
+        ``y (w log p) + (1 - y) (w log(1 - p))``. The one term an
         ordinary predictor overflows is the cloglog non-event's ``log(1 - p) =
         -e^eta``, from ``eta = 709.8``: there ``w log(1 - p)`` is ``-e^(eta +
         log w)``, the row's float64 value wherever it has one.
@@ -868,8 +868,13 @@ class HeldRows:
             if self._cloglog:
                 combined = -np.exp(self.eta + np.log(weight))
                 non_event = np.where(np.isinf(self.log_q), combined, non_event)
-            rows = -2.0 * _by_outcome(self.y, weight * self.log_p, non_event)
-        return np.where(weight > 0.0, rows, 0.0)
+            rows = _by_outcome(self.y, weight * self.log_p, non_event)
+        return np.where(weight > 0.0, rows, -0.0)
+
+    def weighted_deviance(self, weights: NDArray) -> NDArray:
+        """``w`` times the unit deviance, an exact 0 on a row of weight 0."""
+        with np.errstate(over="ignore"):
+            return -2.0 * self.weighted_log_likelihood(weights)
 
     def pearson(self, weights: NDArray) -> NDArray:
         """``sqrt(w)`` times the Pearson residual, an exact 0 on a row of weight 0.
@@ -898,12 +903,14 @@ class HeldRows:
         return result
 
     def deviance_sum(self, weights: NDArray) -> float:
-        """``sum w d`` over the held rows.
+        """``sum w d`` over the held rows."""
+        with np.errstate(over="ignore"):
+            return float(np.sum(self.weighted_deviance(weights)))
 
-        A log-likelihood's share is ``-1/2`` of it: the binomial unit deviance
-        is ``-2 l`` under either weight contract.
-        """
-        return float(np.sum(self.weighted_deviance(weights)))
+    def log_likelihood_sum(self, weights: NDArray) -> float:
+        """Weighted binomial log likelihood over the held rows."""
+        with np.errstate(over="ignore"):
+            return float(np.sum(self.weighted_log_likelihood(weights)))
 
     def pearson_sum(self, weights: NDArray) -> float:
         """Pearson's ``sum w (y - p)^2 / (p (1 - p))`` over the held rows."""

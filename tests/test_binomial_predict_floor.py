@@ -393,6 +393,37 @@ def test_a_non_event_past_the_overflow_of_exp_keeps_its_weighted_loss(weight, lo
     np.testing.assert_allclose(density, -0.5 * expected, rtol=_RTOL)
 
 
+@pytest.mark.filterwarnings("ignore:.*non-integral sample_weight")
+@pytest.mark.parametrize(
+    ("predictor", "weight", "count"),
+    [(709.5, 1.0, 1), (800.0, math.exp(-90.5), 1), (708.75, 1.0, 2)],
+    ids=["unit-deviance-overflows", "unit-likelihood-overflows", "deviance-sum-overflows"],
+)
+def test_held_log_likelihood_is_finite_when_deviance_overflows(predictor, weight, count):
+    model, frame, offset = _rows_at("cloglog", [predictor] * count + [0.0, 0.0])
+    y = np.r_[np.zeros(count), 1.0, 0.0]
+    weights = np.r_[np.full(count, weight), 1.0, 1.0]
+    expected_rows = np.r_[
+        np.full(count, -math.exp(predictor + math.log(weight))),
+        math.log(-math.expm1(-1.0)),
+        -1.0,
+    ]
+    expected = expected_rows.sum()
+
+    metrics = model.metrics(frame, y, sample_weight=weights, offset=offset)
+    cv, _ = _pooled_nll_parts(model, frame, y, sample_weight=weights, offset=offset)
+    editor = compute_dataset_metrics(model, _dataset(frame, y, weights, offset))
+    density = _per_obs_log_likelihood(model, frame, y, offset, sample_weight=weights)
+
+    assert np.isposinf(metrics.deviance)
+    assert np.isposinf(editor["deviance"])
+    rtol = 4 * np.spacing(predictor)
+    np.testing.assert_allclose(
+        [metrics.log_likelihood, -cv, editor["log_likelihood"]], expected, rtol=rtol, atol=0.0
+    )
+    np.testing.assert_allclose(density, expected_rows, rtol=rtol, atol=0.0)
+
+
 def test_an_edit_scored_on_a_loss_past_float64_has_no_statistics_and_says_why():
     """An editor's model re-scored on a cloglog non-event at 800 withholds its statistics.
 

@@ -606,7 +606,7 @@ def _pooled_nll_parts(model, X_val, y_val, *, sample_weight=None, offset=None):
         weight_semantics=model_weight_semantics(model),
     )
     if held is not None:
-        ll -= 0.5 * held.deviance_sum(weights)
+        ll += held.log_likelihood_sum(weights)
     return float(-ll), denominator
 
 

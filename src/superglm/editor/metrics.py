@@ -276,7 +276,7 @@ def _compute_metrics(
         )
     )
     if held is not None:
-        log_likelihood -= 0.5 * held.deviance_sum(w)
+        log_likelihood += held.log_likelihood_sum(w)
     aic = float(-2.0 * log_likelihood + 2.0 * edf)
     bic = float(-2.0 * log_likelihood + np.log(likelihood_size) * edf)
     denom = likelihood_size - edf - 1.0

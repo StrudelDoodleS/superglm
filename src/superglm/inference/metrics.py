@@ -808,7 +808,7 @@ class ModelMetrics:
             weight_semantics=self._weight_semantics,
             report_contract=not self._contract_checked,
         )
-        return value if held is None else value - 0.5 * held.deviance_sum(self._weights)
+        return value if held is None else value + held.log_likelihood_sum(self._weights)
 
     @cached_property
     def deviance(self) -> float:
