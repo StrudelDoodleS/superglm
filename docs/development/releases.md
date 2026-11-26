@@ -23,6 +23,19 @@ The code diff is authoritative. Impact declarations and labels are evidence,
 and ambiguous materiality blocks preparation for a human decision. None of the
 three changes any version field: the exact version is chosen at release time.
 
+## Experimental features
+
+Features marked experimental — the library's first such label — promise the
+same numerical accuracy and test coverage as the rest of SuperGLM, while
+leaving their spelling open: their names, arguments and return layouts may
+change in a minor release without a deprecation period. Calling any
+experimental function or method emits a single `ExperimentalWarning` per
+session, which a caller silences through the standard warnings filter
+(`warnings.filterwarnings("ignore", category=superglm.ExperimentalWarning)`),
+with no separate feature flag or switch. A feature loses the label only in a
+later pull request that removes both the experimental notice from its
+documentation and the `ExperimentalWarning` call from its entry points.
+
 ## One release, one act
 
 A release is one deliberate act after merging: a bump-only pull request whose
