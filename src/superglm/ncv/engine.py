@@ -28,6 +28,26 @@ Jacobi-scaled ``H - Z_a' W_a Z_a``.  Beyond the row product both share, the firs
 ``3 |a|^2 P + |a|^3`` and the second ``P^3`` (``P = p + 1``), which is the dispatch rule.  Single
 rows take the scalar form ``1 - W_i h_i`` in blocks of rows, with no factorisation.
 
+**Row work.**  Rows enter through four products, ``Z v``, ``Z' v``, ``Z' W Z`` and ``z' M z``,
+and dense blocks of ``rows.chunk_rows(P)`` rows serve all four.  A set of rows of at least
+``rows.COMPACT_ENTRIES`` dense entries is served by the design's stored form instead
+(``rows.CentredRows``, ``rows.serves_compact``), and no row of it is made dense:
+
+- A form-and-factor neighbourhood is a row subset of the design.  The solver's centred system
+  on it is its Gram about its own weighted mean ``m``; about the fit's centre ``c`` that is
+  ``G_m + w (m - c)(m - c)'`` with the intercept cross term ``w (m - c)``, two positive
+  semidefinite terms, each formed on rows centred about an exact pair.  Its scores and its
+  third-derivative term are products with the subset.
+- The third-derivative pass over every weighted row needs ``z' M z`` for ``M = sum_k u_k
+  Delta_k'``.  A design of lookups and dense columns reads it from its term-pair tables,
+  whatever the rank of ``M``.  Any other design keeps ``sum_k (z' u_k)(z' Delta_k)`` row by
+  row as the pairs arrive, while ``2 K <= P``: two products a pair against a block's ``P`` a
+  row.
+
+The neighbourhood-sized system and the single-row form multiply each row with the rows of
+its own neighbourhood, and keep their dense blocks.  The compact products and the blocks
+give the same numbers to rounding, so the rule decides cost only.
+
 Rows of zero weight are in no system and no sum; a scored one is predicted at the full fit plus
 the step.  A trial counts only at a usable inner mode (a certified one, or one at the limit of
 float64, below), and with every weighted scored row on the scale where its mean is the
@@ -115,7 +135,11 @@ pairs reads the scored rows.
 neighbourhood on the neighbourhood-sized route is held whole (under the cost rule it has fewer
 than ``0.54 P`` weighted rows).  An evaluation holds a block, its two products and two blocks of
 ``(u, Delta)`` pairs, a handful of ``P x P`` matrices, and row-length vectors: the mode's rows
-and five entries per scored pair.  Between evaluations only a Gaussian problem keeps anything:
+and five entries per scored pair.  A neighbourhood served as a row subset holds that subset's
+stored form (an index per lookup term, its dense columns) and the solver's plan for it, one
+neighbourhood at a time; the compact third pass adds row-length vectors and reads the design's
+own lookup plan, which the design holds until the fit is published.  Between evaluations only a
+Gaussian problem keeps anything:
 the reference predictor and ``8 (P^2 + P)`` bytes per cached neighbourhood, twice that when it
 scores part of what it removes, within ``rows.cache_allowance()``.
 """
@@ -137,12 +161,14 @@ from superglm.group_matrix import DesignMatrix
 from superglm.links import Link
 from superglm.ncv.neighbourhoods import Neighbourhoods
 from superglm.ncv.rows import (
+    CentredRows,
     RowLoss,
     augmented_rows,
     cache_allowance,
     chunk_rows,
     row_chunks,
     row_loss,
+    serves_compact,
 )
 from superglm.reml.penalty_algebra import build_penalty_matrix
 from superglm.solvers.centered_system import (
@@ -225,7 +251,9 @@ class WorkCounts:
 
     ``rows_read`` are design rows materialised.  ``rows_multiplied`` are rows that entered a
     product costing ``(p + 1)^2`` each: solved rows, leave-out Grams, the signed Gram and the
-    third-derivative pass.  Divide either by the row count for passes over the data.
+    third-derivative pass.  ``rows_streamed`` are rows a pass took through compact products
+    in place of a dense block (``rows.CentredRows``), once per pass, and are in neither of
+    the other two.  Divide any of them by the row count for passes over the data.
     ``kept_fits`` are leave-out systems fitted from their kept rows, each one or two passes of
     the solver's row factor over the design, which neither row count includes.
     ``fallback_solves`` are the inner solves, of ``inner_solves``, made because an earlier one
@@ -243,6 +271,7 @@ class WorkCounts:
     solves: int = 0
     rows_read: int = 0
     rows_multiplied: int = 0
+    rows_streamed: int = 0
     kept_fits: int = 0
 
 
@@ -874,9 +903,11 @@ class _Trial:
     cross: NDArray[np.float64]
     cache: _GaussianCache | None = None
     cached_value: float = 0.0
+    forms: NDArray[np.float64] | None = None
     _left: NDArray[np.float64] = field(default_factory=lambda: np.empty((0, 0)))
     _right: NDArray[np.float64] = field(default_factory=lambda: np.empty((0, 0)))
     _held: int = 0
+    _subset: tuple[NDArray[np.intp], CentredRows] | None = None
 
     @classmethod
     def start(
@@ -958,6 +989,33 @@ class _Trial:
         block = self.raw(rows)
         return block if self.coords is None else self.coords.rows(block)
 
+    @cached_property
+    def design(self) -> CentredRows:
+        """Every row about the fit's centre pair, in the design's own columns, never dense."""
+        return CentredRows(self.problem.dm, self.fit.centre_hi, self.fit.centre_lo)
+
+    def compact(self, rows: NDArray[np.intp]) -> CentredRows | None:
+        """``rows`` as a design of their own where compact products are the cheaper route, else ``None``.
+
+        The rule is ``rows.serves_compact``.  The trial holds the one it made last and hands
+        it back while the same rows are asked for, so a neighbourhood's cross-products, scores
+        and third-derivative term share one; the next neighbourhood's replaces it.
+        """
+        if not serves_compact(len(rows), self.problem.width):
+            return None
+        self.work.rows_streamed += len(rows)
+        if self._subset is None or not np.array_equal(self._subset[0], rows):
+            self._subset = (rows, self.design.subset(rows))
+        return self._subset[1]
+
+    def lifted(self, vector: NDArray[np.float64]) -> NDArray[np.float64]:
+        """A vector of the trial's coordinates in the design's own columns, ``T v``."""
+        return vector if self.coords is None else self.coords.lift(vector, self.problem.width)
+
+    def reduced(self, vector: NDArray[np.float64]) -> NDArray[np.float64]:
+        """A vector of the design's own columns in the trial's coordinates, ``T' v``."""
+        return vector if self.coords is None else self.coords.rows(vector)
+
     def within(self, moments: _Moments) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         """``moments``' Gram and score over the removed rows, in the trial's coordinates."""
         if self.coords is None:
@@ -1002,11 +1060,21 @@ class _Trial:
         return slope
 
     def moments(self, rows: NDArray[np.intp], scored: NDArray[np.bool_] | None) -> _Moments:
-        """``rows``' cross-products at this fit, block by block; ``scored`` marks the scored ones.
+        """``rows``' cross-products at this fit; ``scored`` marks the scored ones.
 
         ``None`` for ``scored`` is every row, and the cross-products over the scored rows are
-        then those over ``rows``.
+        then those over ``rows``.  Through the rows' own compact design (:meth:`compact`), or
+        block by block.
         """
+        design = self.compact(rows)
+        if design is not None:
+            gram, score = design.gram(self.curvature[rows]), design.rmatvec(self.score[rows])
+            if scored is None:
+                return _Moments(gram, score, gram, score)
+            inside, part = design.subset(np.flatnonzero(scored)), rows[scored]
+            return _Moments(
+                gram, score, inside.gram(self.curvature[part]), inside.rmatvec(self.score[part])
+            )
         width = self.problem.width
         gram, score = np.zeros((width, width)), np.zeros(width)
         scored_gram, scored_score = gram, score
@@ -1081,8 +1149,16 @@ class _Trial:
     def score_removed(
         self, k: int, rows: NDArray[np.intp], delta: NDArray[np.float64]
     ) -> NDArray[np.float64]:
-        """Score neighbourhood ``k``'s rows at the step ``delta``, block by block; returns ``Z_d' D'``."""
+        """Score neighbourhood ``k``'s rows at the step ``delta``; returns ``Z_d' D'``.
+
+        Through the rows' own compact design (:meth:`compact`), or block by block.
+        """
         first = int(self.pair_ptr[k])
+        design = self.compact(rows)
+        if design is not None:
+            predictor = self.eta[rows] + design.matvec(self.lifted(delta))
+            slope = self.score_pairs(slice(first, first + len(rows)), rows, predictor)
+            return self.reduced(design.rmatvec(slope))
         total = np.zeros(self.width)
         for chunk in row_chunks(np.arange(len(rows), dtype=np.intp), self.problem.width):
             members = rows[chunk]
@@ -1094,7 +1170,14 @@ class _Trial:
     def third_inside(
         self, rows: NDArray[np.intp], u: NDArray[np.float64], delta: NDArray[np.float64]
     ) -> NDArray[np.float64]:
-        """``sum_i l'''_i z_i (z_i' u) (z_i' delta)`` over ``rows``, block by block."""
+        """``sum_i l'''_i z_i (z_i' u) (z_i' delta)`` over ``rows``.
+
+        Through the rows' own compact design (:meth:`compact`), or block by block.
+        """
+        design = self.compact(rows)
+        if design is not None:
+            along = design.matvec(self.lifted(u)) * design.matvec(self.lifted(delta))
+            return self.reduced(design.rmatvec(self.third[rows] * along))
         total = np.zeros(self.width)
         for chunk in row_chunks(rows, self.problem.width):
             block = self.read(chunk)
@@ -1211,8 +1294,30 @@ class _Trial:
         self._left = np.empty((capacity, self.width))
         self._right = np.empty((capacity, self.width))
 
+    def keep_forms(self, pairs: int) -> None:
+        """Keep ``z' M z`` row by row as the pairs arrive, where that is the cheapest third pass.
+
+        ``M = sum_k u_k Delta_k'`` has rank at most ``pairs`` and ``z' M z = sum_k (z' u_k)
+        (z' Delta_k)``: two products with the design a pair, where a dense block takes ``P`` of
+        them a row.  Kept when ``2 pairs <= P`` and the weighted rows are many enough for
+        compact products (``rows.serves_compact``), on a design without lookup tables: those
+        read the forms of any ``M`` in one pass (:meth:`_third_pass`).
+        """
+        rows = int(np.count_nonzero(self.problem.active))
+        if (
+            self.gradient
+            and self.problem.loss.has_third_derivative
+            and 2 * pairs <= self.problem.width
+            and serves_compact(rows, self.problem.width)
+            and not self.design.has_tables
+        ):
+            self.forms = np.zeros(self.problem.n)
+
     def pair(self, u: NDArray[np.float64], delta: NDArray[np.float64]) -> None:
-        """Add ``u Delta'`` to ``M``."""
+        """Add ``u Delta'`` to ``M``, and its form to every row's where those are kept."""
+        if self.forms is not None:
+            design = self.design
+            self.forms += design.matvec(self.lifted(u)) * design.matvec(self.lifted(delta))
         if not len(self._left):
             self.reserve(1)
         self._left[self._held] = u
@@ -1251,14 +1356,32 @@ class _Trial:
         )
 
     def _third_pass(self) -> None:
-        """Subtract ``sum_i l'''_i z_i (z_i' M z_i)`` over every weighted row from ``q``."""
+        """Subtract ``sum_i l'''_i z_i (z_i' M z_i)`` over every weighted row from ``q``.
+
+        The forms are the pairs' own where they were kept (:meth:`keep_forms`); else, where
+        the rows are many enough and the design has lookup tables, they are read from those;
+        else they are formed block by block.
+        """
+        active = self.problem.active
+        rows = np.flatnonzero(active)
         symmetric = 0.5 * (self.cross + self.cross.T)
-        rows = np.flatnonzero(self.problem.active)
-        for chunk in row_chunks(rows, self.problem.width):
-            block = self.read(chunk)
-            forms = np.einsum("ij,ij->i", block @ symmetric, block)
-            self.q -= block.T @ (self.third[chunk] * forms)
-        self.work.rows_multiplied += len(rows)
+        forms = self.forms
+        if forms is None and serves_compact(len(rows), self.problem.width):
+            lifted = symmetric
+            if self.coords is not None:
+                lifted = self.coords.lift_gram(symmetric, self.problem.width)
+            forms = self.design.quadratic_forms(lifted, active)
+        if forms is None:
+            for chunk in row_chunks(rows, self.problem.width):
+                block = self.read(chunk)
+                within = np.einsum("ij,ij->i", block @ symmetric, block)
+                self.q -= block.T @ (self.third[chunk] * within)
+            self.work.rows_multiplied += len(rows)
+            return
+        weighted = np.zeros(self.problem.n)
+        weighted[rows] = self.third[rows] * forms[rows]
+        self.q -= self.reduced(self.design.rmatvec(weighted))
+        self.work.rows_streamed += len(rows)
 
 
 def _leave_out_factor(
@@ -1329,6 +1452,7 @@ def _neighbourhoods(trial: _Trial, nb: Neighbourhoods, route: Route | None) -> N
     if route is not None:
         small = np.full(nb.m, route == "woodbury")
     trial.reserve(int(np.count_nonzero(weighted)))
+    trial.keep_forms(int(np.count_nonzero(weighted)))
     _woodbury_route(trial, nb, np.flatnonzero(small & (weighted > 0)))
     for k in np.flatnonzero(~small & (weighted > 0)).tolist():
         _factor_route(trial, nb, k)
