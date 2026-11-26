@@ -1028,7 +1028,7 @@ class _Trial:
     _block: tuple[NDArray[np.intp], NDArray[np.float64]] | None = None
     _lean_q: NDArray[np.float64] | None = None
     _lean_d: NDArray[np.float64] | None = None
-    _lean_rows: int = 0
+    _lean_on: tuple[CentredRows, NDArray[np.intp], bool] | None = None
 
     @classmethod
     def start(
@@ -1550,23 +1550,34 @@ class _Trial:
         are kept pair by pair (:meth:`keep_forms`).  The leverages are read from the tables
         in one pass, with the bound ``CentredRows.leverages`` gives on their distance from
         the dense rows'.  ``q`` and ``M`` then take the rows' terms as row weights
-        (:meth:`lean_pairs`), each added in one pass at the end (:meth:`flush_lean`).
+        (:meth:`lean_pairs`), each added in one pass at the end (:meth:`flush_lean`).  The
+        passes run over the whole design where the rows are more than half of it, else
+        over their row subset (``CentredRows.subset``): a cost rule only.
         """
         problem = self.problem
+        rows = np.unique(rows)
         if (
             self.coords is not None
             or self.forms is not None
             or not serves_compact(len(rows), problem.width)
+            or not self.design.has_tables
         ):
             return None
-        active = np.zeros(problem.n, dtype=bool)
-        active[rows] = True
-        found = self.design.leverages(self.fit.slope_inverse, active)
+        whole = 2 * len(rows) > problem.n
+        design = self.design if whole else self.design.subset(rows)
+        active = np.ones(design.dm.n, dtype=bool)
+        if whole:
+            active = np.zeros(problem.n, dtype=bool)
+            active[rows] = True
+        found = design.leverages(self.fit.slope_inverse, active)
         if found is None:
             return None
         slopes, bound = found
-        self._lean_rows = int(np.count_nonzero(active))
-        self.work.rows_streamed += self._lean_rows
+        if not whole:
+            slopes = np.zeros(problem.n)
+            slopes[rows] = found[0]
+        self._lean_on = (design, rows, whole)
+        self.work.rows_streamed += len(rows)
         if self.gradient:
             self._lean_q, self._lean_d = np.zeros(problem.n), np.zeros(problem.n)
         return slopes + 1.0 / self.fit.sum_w, bound
@@ -1591,17 +1602,19 @@ class _Trial:
         the held-out step moves the mean away from the response, so the two scores share a
         sign and ``D`` is nonnegative; a negative entry is taken in a Gram of its own.
         """
-        values, product = self._lean_q, self._lean_d
-        if values is None or product is None:
+        values, product, served = self._lean_q, self._lean_d, self._lean_on
+        if values is None or product is None or served is None:
             return
         self._lean_q = self._lean_d = None
-        design = self.design
+        design, rows, whole = served
+        if not whole:
+            values, product = values[rows], product[rows]
         self.q += design.rmatvec(values)
         gram = design.gram(np.maximum(product, 0.0))
         if np.any(product < 0.0):
             gram = gram - design.gram(np.maximum(-product, 0.0))
         self.cross += self.apply_inverse(self.apply_inverse(gram).T)
-        self.work.rows_streamed += 2 * self._lean_rows
+        self.work.rows_streamed += 2 * len(rows)
 
     def rho_gradient(self) -> NDArray[np.float64]:
         """``dV / d rho`` from ``q`` and ``M``, after every neighbourhood has added to them."""
