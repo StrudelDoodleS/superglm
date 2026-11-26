@@ -670,7 +670,7 @@ def vuong_test(
         raise ValueError(f"correction must be 'none', 'aic', or 'bic', got {correction!r}.")
 
     from superglm._utils import contract_weights
-    from superglm.distributions import Tweedie
+    from superglm.distributions import prior_weights_in_normalizer
     from superglm.model.input_validation import _finite_vector
 
     y_raw = np.asarray(y)
@@ -694,7 +694,7 @@ def vuong_test(
     if contract_a == PRIOR_WEIGHTS and contract_b == PRIOR_WEIGHTS:
         # Either model being Tweedie makes the weights strictly positive.
         family = getattr(model_a, "_distribution")
-        if not isinstance(family, Tweedie):
+        if not prior_weights_in_normalizer(family):
             family = getattr(model_b, "_distribution")
         prior_weights = (
             None

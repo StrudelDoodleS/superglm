@@ -11,7 +11,6 @@ from superglm import Numeric, SuperGLM
 from superglm.distributions import Binomial, Gamma, Gaussian, Poisson, Tweedie, clip_mu
 from superglm.links import (
     _LINK_SHORTCUTS,
-    _STABILIZE_ETA_BY_LINK_TYPE,
     CauchitLink,
     CloglogLink,
     IdentityLink,
@@ -389,7 +388,7 @@ class TestResolveLinkShortcuts:
 
 
 def test_stabilize_eta_dispatch_covers_every_registered_shortcut():
-    assert set(_LINK_SHORTCUTS.values()) <= set(_STABILIZE_ETA_BY_LINK_TYPE)
+    assert all(callable(getattr(cls, "clip_eta", None)) for cls in _LINK_SHORTCUTS.values())
 
 
 @pytest.mark.parametrize(
@@ -414,9 +413,7 @@ def test_stabilize_eta_dispatch_covers_every_registered_shortcut():
 )
 def test_every_named_stabilization_path_dispatches_to_its_registered_handler(link):
     eta = np.array([-100.0, -1.0, 0.0, 1.0, 100.0])
-    handler = _STABILIZE_ETA_BY_LINK_TYPE[type(link)]
-
-    assert_allclose(stabilize_eta(eta, link), handler(eta, link))
+    assert_allclose(stabilize_eta(eta, link), link.clip_eta(eta))
 
 
 def test_sqrt_and_cauchit_use_link_specific_eta_ranges():
@@ -457,13 +454,12 @@ def test_sqrt_stabilization_preserves_negative_branch_and_only_bounds_overflow()
 def test_sqrt_stabilization_preserves_signed_zero_and_predictors_past_the_binary_band():
     """Regression guard for a fix that already shipped, in commit 67b90f8.
 
-    67b90f8 gave SqrtLink its own ``stabilize_eta`` entry (``_sqrt_eta``, band
+    67b90f8 gave SqrtLink its own ``stabilize_eta`` band (``SqrtLink.clip_eta``,
     +/-6.7e153).  Before it, SqrtLink matched no branch and inherited the
     catch-all ``np.clip(eta, -20.0, 20.0)``.  So this cannot fail against the
     branch parent 37a1c18 -- 67b90f8 is its ancestor.  To break it, restore the
-    old dispatch: map ``SqrtLink`` to ``_binary_eta`` in
-    ``_STABILIZE_ETA_BY_LINK_TYPE``; the +/-50 and +/-1e150 entries then come
-    back as +/-20.
+    old band: have ``SqrtLink.clip_eta`` return ``np.clip(eta, -20.0, 20.0)``;
+    the +/-50 and +/-1e150 entries then come back as +/-20.
     """
     link = SqrtLink()
     # The subnormal and signed-zero entries guard the +/-6.7e153 branch; the
@@ -485,7 +481,7 @@ def test_sqrt_stabilization_round_trips_means_from_subnormal_to_past_the_old_cap
     Same shipped fix as the test above, seen from the mean side: an eta cap of
     20 put a hard ceiling of mu = 400 on any sqrt-link fit.  It cannot fail
     against the branch parent 37a1c18, since 67b90f8 is its ancestor.  To break
-    it, map ``SqrtLink`` to ``_binary_eta`` in ``_STABILIZE_ETA_BY_LINK_TYPE``;
+    it, have ``SqrtLink.clip_eta`` return ``np.clip(eta, -20.0, 20.0)``;
     mu = 1e6 then round-trips back as 400.
     """
     link = SqrtLink()

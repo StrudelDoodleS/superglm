@@ -18,7 +18,7 @@ import numpy as np
 
 from superglm._roundoff import TINY, UNIT_ROUNDOFF
 from superglm._warn import warn_caller
-from superglm.links import LogLink
+from superglm.links import is_multiplicative
 
 
 class FitPrecisionWarning(UserWarning):
@@ -141,7 +141,7 @@ def _scan_initial_precision(weights, information, eta, link) -> dict:
     """
     findings: dict = {}
     extrema = [[(inf, -1), (0.0, -1)] for _ in range(2)]
-    log_link = isinstance(link, LogLink)
+    log_link = is_multiplicative(link)
 
     def record(kind, mask, start):
         count = int(np.count_nonzero(mask))

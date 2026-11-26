@@ -28,7 +28,13 @@ from superglm.dm_builder import (
 )
 from superglm.features.ordered_categorical import resolve_interaction_parent_of
 from superglm.group_matrix import DesignMatrix
-from superglm.links import Link, eta_domain_text, interior_eta, stabilize_eta
+from superglm.links import (
+    Link,
+    eta_domain_text,
+    interior_eta,
+    outside_eta_domain,
+    stabilize_eta,
+)
 from superglm.model.fit_state import (
     configured_family,
     configured_lambda2,
@@ -49,7 +55,6 @@ from superglm.penalties.group_lasso import GroupLasso
 from superglm.penalties.ridge import Ridge
 from superglm.penalties.sparse_group_lasso import SparseGroupLasso
 from superglm.solvers.dispersion import model_weight_semantics, validate_weight_semantics
-from superglm.solvers.irls_state import link_domain_rows
 from superglm.solvers.pirls import PIRLSResult
 from superglm.terms import TermInput, check_column_label, check_column_texts, normalize_terms
 from superglm.types import FeatureSpec, FitStats, GroupSlice
@@ -593,7 +598,7 @@ def predict_eta_raw_exact(
     """
     quiet = (
         np.errstate(over="ignore", invalid="ignore")
-        if link_domain_rows(model._link) is not None
+        if outside_eta_domain(model._link) is not None
         else contextlib.nullcontext()
     )
     with quiet:
@@ -617,7 +622,7 @@ def _no_mean_rows(model, eta: NDArray[np.floating]) -> NDArray[np.bool_]:
 
     The domain the link declares (``links.declared_eta_domain``): the inverse,
     inverse-squared and negative-power links have a mean only on
-    ``0 < eta < inf``, whatever the family (``link_domain_rows``, given no
+    ``0 < eta < inf``, whatever the family (``links.outside_eta_domain``, given no
     family).  The fit holds its positive-weight rows inside, but a new row can
     combine covariate values that cross, and ``stabilize_eta`` would clip it to
     ``1e-12`` and report a mean of ``1e12`` for it; a predictor that overflows
@@ -625,7 +630,7 @@ def _no_mean_rows(model, eta: NDArray[np.floating]) -> NDArray[np.bool_]:
     ``1e12`` and read ``1e-12``.
     """
     eta = np.asarray(eta, dtype=np.float64)
-    outside_rows = link_domain_rows(model._link)
+    outside_rows = outside_eta_domain(model._link)
     if outside_rows is None:
         return np.zeros(eta.shape, dtype=bool)
     return outside_rows(eta)
@@ -670,7 +675,7 @@ def unpriced_rows(model, mu: NDArray) -> NDArray[np.bool_]:
     """
     mu = np.asarray(mu, dtype=np.float64)
     link = getattr(model, "_link", None)
-    if link is None or link_domain_rows(link) is None:
+    if link is None or outside_eta_domain(link) is None:
         return np.zeros(mu.shape, dtype=bool)
     return np.isnan(mu)
 
@@ -682,7 +687,7 @@ def _shown_positions(positions: NDArray[np.intp]) -> str:
 
 def _refit_advice(model) -> str:
     """The refit that removes a bounded domain, or nothing for a link without one."""
-    if link_domain_rows(model._link) is None:
+    if outside_eta_domain(model._link) is None:
         return ""
     link = "logit" if isinstance(model._distribution, Binomial) else "log"
     return f", or refit with a {link} link"

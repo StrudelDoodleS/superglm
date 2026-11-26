@@ -24,7 +24,7 @@ from superglm.features.spline import _SplineBase
 from superglm.inference._ordered_reference import ordered_reference_intercept
 from superglm.inference._term_helpers import _VALID_CENTERING
 from superglm.inference._term_types import TermInference
-from superglm.links import LogLink
+from superglm.links import is_multiplicative
 
 if TYPE_CHECKING:
     from superglm.model import SuperGLM
@@ -732,7 +732,7 @@ def _fit_used_offset(model: SuperGLM) -> bool:
 
 
 def _require_log_link_offset_export(model: SuperGLM) -> None:
-    if not isinstance(model._link, LogLink):
+    if not is_multiplicative(model._link):
         raise ValueError(
             "Rating-table offset relativities are currently supported only for log-link models."
         )
@@ -746,7 +746,7 @@ def _require_log_link_export(model: SuperGLM) -> None:
     identity or logit links the product yields ``exp(eta)`` or odds rather than
     the predicted mean, so non-log links are rejected at the export boundary.
     """
-    if not isinstance(model._link, LogLink):
+    if not is_multiplicative(model._link):
         raise ValueError(
             "Rating-table export is supported only for log-link models, because the "
             "exported table is multiplicative: base_relativity times one relativity "
@@ -811,9 +811,9 @@ def _require_unclamped_response_export(model: SuperGLM) -> None:
     ``[1e-50, 1e50]``, which ``exp`` of the stabilization band -- ``[1.8e-35,
     5.5e34]`` -- sits strictly inside, and ``Gaussian`` is not clamped.
     """
-    from superglm.distributions import Binomial
+    from superglm.distributions import mean_domain
 
-    if isinstance(model._distribution, Binomial):
+    if mean_domain(model._distribution).bounded_above:
         raise ValueError(
             "Rating-table export is not supported for Binomial models. The exported "
             "table is a product of per-block factors, and model.predict finishes by "

@@ -9,12 +9,16 @@ from typing import NamedTuple
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._family_link import pair_of
 from superglm._frame import as_eager_frame
 from superglm._utils import weighted_row_sum
-from superglm.distributions import Binomial, Gamma, NegativeBinomial, Poisson, Tweedie
+from superglm.distributions import (
+    Poisson,
+    scale_is_known,
+)
 from superglm.features.constraint import rules_of
 from superglm.group_matrix import DesignMatrix, GroupMatrix
-from superglm.links import CloglogLink, IdentityLink, InverseLink, LogitLink, LogLink, ProbitLink
+from superglm.links import IdentityLink
 from superglm.model.fit_state import (
     FittedStateRevision,
     canonical_intercept_shift,
@@ -445,32 +449,16 @@ def _profile_repaired_intercept(
     return eta_base + shift, shift, rounding, deviance
 
 
-#: The links under which each family's unit deviance is convex in the linear predictor,
-#: whatever the response, so that a root of the intercept's score is the profile's minimum:
-#: a canonical link, where it is twice the convex cumulant less a linear term, and those
-#: whose second derivative in the predictor is positive by hand: the Poisson's under the
-#: identity link (2y/eta**2), the gamma's and the Tweedie's (1 < p < 2) under the log link,
-#: the negative binomial's under the log link (2(y+t)t e**eta/(t+e**eta)**2), and the
-#: binomial's under the probit, cloglog and log links, whose probabilities and complements
-#: are log-concave. Any other pairing, or a subclass, is not taken to be convex.
-_CONVEX_DEVIANCE_LINKS: dict[type, tuple[type, ...]] = {
-    Poisson: (LogLink, IdentityLink),
-    Gamma: (InverseLink, LogLink),
-    NegativeBinomial: (LogLink,),
-    Tweedie: (LogLink,),
-    Binomial: (LogitLink, ProbitLink, CloglogLink, LogLink),
-}
-
-
 def _searched_intercept(
     model, eta_base: NDArray, *, y: NDArray, weights: NDArray
 ) -> tuple[np.ndarray, float, float, float | None]:
     from superglm._roundoff import gamma
     from superglm.constraints import _ROW_STEPS, shape_sum_tolerance
-    from superglm.distributions import _VARIANCE_FLOOR, Gaussian, clip_mu
-    from superglm.links import IdentityLink, stabilize_eta
+    from superglm.distributions import _VARIANCE_FLOOR, clip_mu
+    from superglm.links import stabilize_eta
 
     y_arr, weights_arr = y, weights
+    pair = pair_of(model._distribution, model._link)
     row_gamma = float(gamma(_ROW_STEPS))
     if eta_base.shape != y_arr.shape or weights_arr.shape != y_arr.shape:
         raise RuntimeError(
@@ -485,7 +473,7 @@ def _searched_intercept(
     # Gaussian/identity has an exact conditional solution.  Keeping this
     # algebraic also preserves frequency-weight/physical-row replication to
     # floating-point precision when a repair leaves only a constant fit.
-    if type(model._distribution) is Gaussian and type(model._link) is IdentityLink:
+    if pair.linear_model:
         weighted_residuals = weights_arr * (y_arr - eta_base)
         residual_sum = float(np.sum(weighted_residuals, dtype=np.float64))
         roundoff = (
@@ -519,7 +507,7 @@ def _searched_intercept(
     held: NDArray | None = None
     # Whether a search's root is compared with its start (below): not where every row's
     # deviance is convex in its predictor and no row is held.
-    checked = type(model._link) not in _CONVEX_DEVIANCE_LINKS.get(type(model._distribution), ())
+    checked = not pair.deviance_convex_in_eta
     # Where the deviance is not convex, a stationary shift can be a maximum, at which the
     # Fisher information is still positive: a search's stationary shift is then a minimum only
     # where the deviance's own curvature there is positive (``_deviance_curvature``).
@@ -1671,7 +1659,7 @@ def _refresh_repaired_scale_and_statistics(
     solver_phi = None
     mu = np.asarray(model._fit_mu, dtype=np.float64)
     distribution = model._distribution
-    if getattr(distribution, "scale_known", True):
+    if scale_is_known(distribution):
         phi = 1.0
     else:
         # Standard errors read Pearson's estimate at the repaired mean on every route.
@@ -1715,7 +1703,7 @@ def _refresh_repaired_scale_and_statistics(
 
     likelihood_phi = solver_likelihood_phi = None
     likelihood_method = ML_AT_MEAN
-    if getattr(distribution, "scale_known", True):
+    if scale_is_known(distribution):
         pass
     elif getattr(model, "_last_fit_meta", {}).get("method") == "fit_reml":
         from superglm.model.reml_finalize import profiled_likelihood_scale

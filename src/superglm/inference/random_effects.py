@@ -18,7 +18,7 @@ from superglm.distributions import _VARIANCE_FLOOR, Poisson, clip_mu
 from superglm.features.random_effect import RandomEffect
 from superglm.group_matrix import RandomEffectGroupMatrix
 from superglm.inference.covariance import covariance_selected_diagonal
-from superglm.links import LogLink, stabilize_eta
+from superglm.links import LogLink, is_multiplicative, stabilize_eta
 from superglm.model.fit_data_guard import FitGeometryGuard, require_unchanged_fit_data
 from superglm.model.retired_state import retained_linear_state
 from superglm.model.state_ops import _solver_space_working_weights
@@ -434,7 +434,7 @@ def random_effect_result(
     effect = np.asarray(model.result.beta[group.sl], dtype=np.float64)
     relativity = (
         np.exp(effect)
-        if isinstance(model._link, LogLink)
+        if is_multiplicative(model._link)
         else np.full(effect.shape, np.nan, dtype=np.float64)
     )
     has_information = np.isfinite(information) & (information > 0.0)

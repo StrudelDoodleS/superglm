@@ -18,6 +18,7 @@ from typing import Any, Literal
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._family_link import pair_of
 from superglm._group_matrix._group_matrix_centered import centered_gram_rhs
 from superglm.distributions import (
     _VARIANCE_FLOOR,
@@ -31,17 +32,8 @@ from superglm.distributions import (
 )
 from superglm.group_matrix import DesignMatrix
 from superglm.links import (
-    CauchitLink,
-    CloglogLink,
     IdentityLink,
-    InverseLink,
-    InverseSquaredLink,
-    LogitLink,
     LogLink,
-    NegativeBinomialLink,
-    PowerLink,
-    ProbitLink,
-    SqrtLink,
     _own_deriv4_inverse,
     stabilize_eta,
 )
@@ -394,58 +386,6 @@ def observed_row_error_scale(
 
 REMLCurvature = Literal["fisher", "observed"]
 
-_BUILTIN_REML_DISTRIBUTIONS = (
-    Gaussian,
-    Poisson,
-    Binomial,
-    Gamma,
-    NegativeBinomial,
-    Tweedie,
-)
-_BUILTIN_REML_LINKS = (
-    IdentityLink,
-    LogLink,
-    LogitLink,
-    ProbitLink,
-    CloglogLink,
-    CauchitLink,
-    InverseLink,
-    InverseSquaredLink,
-    SqrtLink,
-    PowerLink,
-    NegativeBinomialLink,
-)
-
-
-def _parameters_match(left: float, right: float) -> bool:
-    scale = max(1.0, abs(left), abs(right))
-    return abs(left - right) <= 32.0 * np.finfo(np.float64).eps * scale
-
-
-def _builtin_fisher_equals_observed(distribution: Any, link: Any) -> bool:
-    """Return whether the residual term in Wood's Newton rows is identically zero."""
-    distribution_type = type(distribution)
-    link_type = type(link)
-    if distribution_type is Gaussian:
-        return link_type is IdentityLink or (
-            link_type is PowerLink and _parameters_match(float(link.power), 1.0)
-        )
-    if distribution_type is Poisson:
-        return link_type is LogLink
-    if distribution_type is Binomial:
-        return link_type is LogitLink
-    if distribution_type is Gamma:
-        return link_type is InverseLink or (
-            link_type is PowerLink and _parameters_match(float(link.power), -1.0)
-        )
-    if distribution_type is NegativeBinomial and link_type is NegativeBinomialLink:
-        theta = distribution.theta
-        return theta != "auto" and _parameters_match(float(theta), float(link.theta))
-    if distribution_type is Tweedie and link_type is PowerLink:
-        return _parameters_match(float(link.power), 1.0 - float(distribution.p))
-    return False
-
-
 # Frames under this directory are superglm's own; a warning skips them to land
 # on the caller's line.
 _PACKAGE_DIRECTORY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -503,10 +443,9 @@ def _explicit_curvature_protocol(
 
 def classify_reml_curvature(distribution: Any, link: Any) -> REMLCurvature:
     """Select the exact coefficient geometry for ordinary direct LAML."""
-    distribution_is_builtin = type(distribution) in _BUILTIN_REML_DISTRIBUTIONS
-    link_is_builtin = type(link) in _BUILTIN_REML_LINKS
-    if distribution_is_builtin and link_is_builtin:
-        return "fisher" if _builtin_fisher_equals_observed(distribution, link) else "observed"
+    pair = pair_of(distribution, link)
+    if pair.is_shipped:
+        return "fisher" if pair.fisher_equals_observed else "observed"
 
     declared = _explicit_curvature_protocol(
         distribution,
@@ -526,16 +465,14 @@ def classify_binned_reml_curvature(distribution: Any, link: Any) -> REMLCurvatur
     """The REML curvature of the binned (``discrete=True``) route: a function of family and link.
 
     Observed where the exact route's is and the pair declares observed rows
-    that stay non-negative in floating point (``concave_observed_rows``:
+    that stay non-negative in floating point (``observed_rows_concave``:
     Gamma/log, Tweedie/log, NB2/log, binomial probit and cloglog), since the
     performance iteration's working linear model needs non-negative weights
     (Wood, Pya & Saefken 2016, JASA 111(516)). Every other pair is Fisher,
     including binomial/log, whose maximum can sit on the mean-space boundary,
     and custom families and links.
     """
-    from superglm.solvers.working_rows import concave_observed_rows
-
-    if concave_observed_rows(distribution, link) and (
+    if pair_of(distribution, link).observed_rows_concave and (
         classify_reml_curvature(distribution, link) == "observed"
     ):
         return "observed"
@@ -571,9 +508,10 @@ def validate_observed_derivative_capability(
 
     missing = [label for owner, name, label in required if not callable(getattr(owner, name, None))]
     if derivative_order >= 2:
-        if type(link) not in _BUILTIN_REML_LINKS and _own_deriv4_inverse(link) is None:
+        pair = pair_of(distribution, link)
+        if not pair.link_is_shipped and _own_deriv4_inverse(link) is None:
             missing.append("link.deriv4_inverse")
-        if type(distribution) not in _BUILTIN_REML_DISTRIBUTIONS and not callable(
+        if not pair.family_is_shipped and not callable(
             getattr(distribution, "variance_third_derivative", None)
         ):
             missing.append("distribution.variance_third_derivative")

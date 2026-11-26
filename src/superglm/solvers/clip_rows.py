@@ -35,13 +35,12 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
+from superglm._family_link import pair_of
 from superglm.distributions import Binomial, Distribution, clip_mu
 from superglm.links import (
     CloglogLink,
-    IdentityLink,
     Link,
     LogitLink,
-    LogLink,
     ProbitLink,
     stabilize_eta,
 )
@@ -185,21 +184,6 @@ def record_rescored(result: PIRLSResult, held_against: bool) -> None:
     rows = clip_rows_after(result)
     if note_rescored(rows, held_against):
         result.clip_rows = rows.state
-
-
-def clip_can_hold_against(family: object, link: object) -> bool:
-    """Whether the working clip can hold a row of this family and link against its outcome.
-
-    A binomial fit under any link but the log and identity ones, whose clipped
-    rows are the boundary of their mean space and have their own verdict
-    (``irls_state.mean_space_boundary_rows``).
-    """
-    return isinstance(family, Binomial) and not isinstance(link, LogLink | IdentityLink)
-
-
-def declares_tail_rows(family: object, link: object) -> bool:
-    """Whether ``tail_rows`` has this family and link's rows.  Exact types."""
-    return type(family) is Binomial and type(link) in (LogitLink, ProbitLink, CloglogLink)
 
 
 def held_rows(
@@ -456,7 +440,7 @@ def count_held_against(
     mu: NDArray,
 ) -> int:
     """Positive-weight rows a state holds against their outcome; 0 where the clip cannot."""
-    if not clip_can_hold_against(family, link):
+    if not pair_of(family, link).clip_can_hold_against:
         return 0
     low, high = held_rows(family, link, eta_unclipped, eta, mu)
     return int(np.count_nonzero(held_against_outcome(y, weights, low, high)))
@@ -540,7 +524,7 @@ def exported_information(
     rows, or no row holds any information (``information_underflowed``), which
     the flag says.
     """
-    if not declares_tail_rows(family, link):
+    if not pair_of(family, link).tail_rows:
         return information, False
     eta_unclipped = np.asarray(eta_unclipped, dtype=np.float64)
     low, high = held_rows(family, link, eta_unclipped, eta, mu)
@@ -887,7 +871,7 @@ def held_likelihood_rows(
     With ``against``, the rows' weights, also where the clip holds no
     positive-weight row against its outcome (``held_against_outcome``).
     """
-    if not declares_tail_rows(family, link):
+    if not pair_of(family, link).tail_rows:
         return None
     eta_unclipped = np.asarray(eta_unclipped, dtype=np.float64)
     eta = stabilize_eta(eta_unclipped, link)
@@ -912,7 +896,7 @@ def clip_may_hold(family: Distribution, link: Link, mu: NDArray) -> bool:
     edge's or the upper edge's means no held row, without the predictor.
     ``False`` for a pair that declares no tail rows.
     """
-    if not declares_tail_rows(family, link):
+    if not pair_of(family, link).tail_rows:
         return False
     with np.errstate(over="ignore", under="ignore"):
         edges = stabilize_eta(np.array([-np.inf, np.inf]), link)
@@ -964,7 +948,7 @@ def likelihood_intercept(
     tail rows, the positive-weight responses are all 0 or all 1 (no finite
     root), or no bracket is found.
     """
-    if not declares_tail_rows(family, link):
+    if not pair_of(family, link).tail_rows:
         return None
     from scipy.optimize import brentq
 

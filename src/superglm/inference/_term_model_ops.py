@@ -9,6 +9,7 @@ import pandas as pd  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 from superglm._frame import FrameLike
+from superglm.distributions import prior_weights_in_normalizer, scale_is_known
 from superglm.inference._term_covariance import (
     feature_se_from_cov,
     ordered_level_contrasts,
@@ -344,14 +345,13 @@ def drop1(
     exponent = model._result.weight_exponent
     # A known-scale family's chi-square reference is its unit dispersion, not the
     # result's: fit() pins phi to 1.0 but fit_path() publishes Pearson dispersion.
-    chisq_scale = 1.0 if getattr(model._distribution, "scale_known", True) else phi
+    chisq_scale = 1.0 if scale_is_known(model._distribution) else phi
     if sample_weight is None:
         diagnostic_weights = np.ones(n, dtype=np.float64)
     else:
-        from superglm.distributions import Tweedie
         from superglm.solvers.dispersion import PRIOR_WEIGHTS, model_weight_semantics
 
-        if isinstance(model._distribution, Tweedie) and (
+        if prior_weights_in_normalizer(model._distribution) and (
             model_weight_semantics(model) == PRIOR_WEIGHTS
         ):
             from superglm._utils import _validate_strict_prior_weights
@@ -421,7 +421,7 @@ def drop1(
             )
 
             stat = (delta_dev / delta_df) / phi
-            if exponent and getattr(model._distribution, "scale_known", True):
+            if exponent and scale_is_known(model._distribution):
                 stat = float(np.ldexp(stat, -exponent))
             resid_df = pearson_residual_degrees_of_freedom(
                 diagnostic_weights,
@@ -431,7 +431,7 @@ def drop1(
             p_value = float(f_dist.sf(stat, delta_df, resid_df))
         else:
             stat = delta_dev / chisq_scale
-            if exponent and getattr(model._distribution, "scale_known", True):
+            if exponent and scale_is_known(model._distribution):
                 stat = float(np.ldexp(stat, -exponent))
             p_value = float(chi2.sf(stat, delta_df))
 

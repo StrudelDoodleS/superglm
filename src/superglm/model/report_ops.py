@@ -12,6 +12,7 @@ from superglm.diagnostics.convergence import (
     coefficient_nonconvergence_message,
     reml_nonconvergence_message,
 )
+from superglm.distributions import scale_is_known
 from superglm.inference._term_helpers import (
     ordered_level_fit,
     spline_group_enrichment,
@@ -328,7 +329,7 @@ def summary(
         "lambda1": lam1,
         # The scale this summary's standard errors read: 1 for a known-scale family,
         # whose ``fit_path`` result still carries Pearson's statistic in ``phi``.
-        "phi": 1.0 if getattr(model._distribution, "scale_known", True) else res.phi,
+        "phi": 1.0 if scale_is_known(model._distribution) else res.phi,
         **_scale_info(res),
         "pearson_chi2": fs.pearson_chi2,
         "deviance": res.deviance,
@@ -456,7 +457,7 @@ def summary(
         model_info["standard_error_note"] = saved_standard_error_note(
             model, inf["coefficient_estimable"]
         )
-    known_scale = getattr(model._distribution, "scale_known", True)
+    known_scale = scale_is_known(model._distribution)
     coef_rows = build_coef_rows(
         groups=model._groups,
         specs=model._specs,

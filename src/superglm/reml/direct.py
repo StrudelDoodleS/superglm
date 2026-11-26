@@ -20,6 +20,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._family_link import pair_of
 from superglm._fit_trace import TraceRun
 from superglm._lambda_box import LambdaBox, bound_pressure, glm_lambda_box
 from superglm._roundoff import NEWTON_EIGENVALUE_FLOOR
@@ -27,9 +28,10 @@ from superglm.diagnostics.separation import (
     disclose_solver_separation,
     validate_solver_separation_mode,
 )
-from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
+from superglm.distributions import (
+    scale_is_known,
+)
 from superglm.group_matrix import DesignMatrix
-from superglm.links import CloglogLink, LogitLink, LogLink, ProbitLink
 from superglm.reml._leverage_rows import reads_row_supports
 from superglm.reml.convergence import (
     FLAT_DIRECTION_FREEZE_FLOOR,
@@ -85,12 +87,7 @@ from superglm.reml.penalty_algebra import (
 )
 from superglm.reml.penalty_support import PenaltyNumericalError
 from superglm.reml.result import REMLResult
-from superglm.reml.scale import (
-    prepare_reml_scale_data,
-    profile_gamma_reml_scale,
-    profile_gaussian_reml_scale,
-    profile_tweedie_reml_scale,
-)
+from superglm.reml.scale import prepare_reml_scale_data, tweedie_rows
 from superglm.reml.w_derivatives import reml_w_correction, validate_w_correction_order
 from superglm.solvers._structured.selection import (
     record_auto_backend_decision,
@@ -144,23 +141,9 @@ _PRESOLVE_MIN_ESTIMATED = 8
 # Nor under a shorter iteration cap: the pre-solve takes up to
 # ``max_reml_iter`` updates itself, which would double a capped budget.
 _PRESOLVE_MIN_REML_ITER = 10
-# Only for these exact family/link types, with no RandomEffect or FactorSmooth
-# term the structured solvers could take: on them the cached-W working model
-# carries the exact loop's curvature (Fisher on a canonical link, observed rows
-# where ``concave_observed_rows`` declares them) and the pre-solve pays.
-# Tweedie power-search candidates and estimated-theta NB2 fits start cold
-# (``model.reml_ops``).
-_PRESOLVE_PAIRS = frozenset(
-    {
-        (Poisson, LogLink),
-        (Binomial, LogitLink),
-        (Binomial, ProbitLink),
-        (Binomial, CloglogLink),
-        (Gamma, LogLink),
-        (Tweedie, LogLink),
-        (NegativeBinomial, LogLink),
-    }
-)
+# Only for a pair that declares it (``FamilyLinkPair.presolve_eligible``), with no
+# RandomEffect or FactorSmooth term the structured solvers could take. Tweedie
+# power-search candidates and estimated-theta NB2 fits start cold (``model.reml_ops``).
 # First-order fits keep the derivative Grams (``m n p^2`` multiply-adds per
 # iteration) until they pass this work, then take the one-pass leverage route
 # (``n p^2``, ``reml_w_correction(leverage_hessian=True)``); Wood (2011, sec.
@@ -391,17 +374,10 @@ def optimize_direct_reml(
             separation=separation,
         )
 
-    scale_known = getattr(distribution, "scale_known", True)
-    (
-        likelihood_size,
-        saturated_log_weight,
-        gamma_scale_data,
-        tweedie_scale_data,
-    ) = prepare_reml_scale_data(
-        distribution,
-        y,
-        sample_weight,
-        weight_semantics=weight_semantics,
+    scale_known = scale_is_known(distribution)
+    pair = pair_of(distribution, link)
+    scale_profile = prepare_reml_scale_data(
+        distribution, y, sample_weight, weight_semantics=weight_semantics
     )
     use_observed_geometry = (
         isinstance(dm, DesignMatrix)
@@ -543,7 +519,7 @@ def optimize_direct_reml(
         presolve = (
             not warm_lambdas
             and int(np.count_nonzero(estimated_mask)) >= _PRESOLVE_MIN_ESTIMATED
-            and (type(distribution), type(link)) in _PRESOLVE_PAIRS
+            and pair.presolve_eligible
             and not structured_alternative
             and max_reml_iter >= _PRESOLVE_MIN_REML_ITER
         )
@@ -723,32 +699,8 @@ def optimize_direct_reml(
             coefficient_width=dm.p,
         )
         penalized_deviance = float(boot_result.deviance + pq_boot)
-        if isinstance(distribution, Gaussian):
-            assert likelihood_size is not None
-            boot_scale = profile_gaussian_reml_scale(
-                penalized_deviance,
-                likelihood_size,
-                boot_penalty_nullity,
-                saturated_log_weight=saturated_log_weight or 0.0,
-            )
-            boot_phi = boot_scale.phi
-            boot_inv_phi = boot_scale.inverse_phi
-        elif isinstance(distribution, Gamma):
-            assert gamma_scale_data is not None
-            boot_scale = profile_gamma_reml_scale(
-                gamma_scale_data,
-                penalized_deviance,
-                boot_penalty_nullity,
-            )
-            boot_phi = boot_scale.phi
-            boot_inv_phi = boot_scale.inverse_phi
-        elif isinstance(distribution, Tweedie):
-            assert tweedie_scale_data is not None
-            boot_scale = profile_tweedie_reml_scale(
-                tweedie_scale_data,
-                penalized_deviance,
-                boot_penalty_nullity,
-            )
+        if scale_profile is not None:
+            boot_scale = scale_profile.profile(penalized_deviance, boot_penalty_nullity)
             boot_phi = boot_scale.phi
             boot_inv_phi = boot_scale.inverse_phi
         else:
@@ -926,8 +878,9 @@ def optimize_direct_reml(
         # A binomial/identity boundary state is feasible, and is disclosed instead.
         restoration_step = 1.0
         rho_at_boundary = rho_clipped
-        while pirls_result.termination_reason == "mean_space_boundary" and isinstance(
-            link, LogLink
+        while (
+            pirls_result.termination_reason == "mean_space_boundary"
+            and pair.mean_space_violation is not None
         ):
             if not bool(np.any(estimated_mask & (rho_clipped < log_hi))):
                 raise ObservedModeNotConvergedError(
@@ -1078,11 +1031,8 @@ def optimize_direct_reml(
             hessian_rank=objective_hessian_rank,
             S_override=S_cand,
             reml_penalties=penalties,
-            likelihood_size=likelihood_size,
-            saturated_log_weight=saturated_log_weight,
+            scale_profile=scale_profile,
             weight_semantics=weight_semantics,
-            gamma_scale_data=gamma_scale_data,
-            tweedie_scale_data=tweedie_scale_data,
             return_evaluation=True,
         )
 
@@ -1191,15 +1141,14 @@ def optimize_direct_reml(
         w_correction_args: tuple = ()
         w_correction_kwargs: dict[str, Any] = {}
         if not discrete:
-            # Binomial/logit on a dense factor takes the leverage route at any
-            # work, with the exact gradient and no W(rho) cross terms
-            # (``gradient_terms_only``), at every iteration and at the stop:
-            # its derivative Grams cost several leverage passes.
+            # A pair that declares it (binomial/logit) takes the leverage route on
+            # a dense factor at any work, with the exact gradient and no W(rho)
+            # cross terms (``gradient_terms_only``), at every iteration and at
+            # the stop.
             leverage_ready = w_correction_order == 1 and len(penalties) >= _LEVERAGE_MIN_PENALTIES
             binomial_logit = bool(
                 leverage_ready
-                and type(distribution) is Binomial
-                and type(link) is LogitLink
+                and pair.leverage_route_always
                 and geometry is None
                 and isinstance(as_hessian_factor(reml_inverse), DenseHessianFactor)
             )
@@ -1914,11 +1863,8 @@ def optimize_direct_reml(
                     hessian_rank=trial_hessian_rank,
                     S_override=S_trial,
                     reml_penalties=penalties,
-                    likelihood_size=likelihood_size,
-                    saturated_log_weight=saturated_log_weight,
+                    scale_profile=scale_profile,
                     weight_semantics=weight_semantics,
-                    gamma_scale_data=gamma_scale_data,
-                    tweedie_scale_data=tweedie_scale_data,
                     return_evaluation=True,
                 )
             except PenaltyNumericalError:
@@ -2265,7 +2211,7 @@ def optimize_direct_reml(
         objective_history=objective_history,
         curvature_source="observed" if use_observed_geometry else "fisher",
         termination_reason=termination_reason,
-        tweedie_scale_data=tweedie_scale_data,
+        tweedie_scale_data=tweedie_rows(scale_profile),
         mean_space_restorations=n_mean_space_restorations,
         lambda_box=box,
         bound_pressure=best_bound_pressure,

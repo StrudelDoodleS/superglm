@@ -34,6 +34,7 @@ import superglm.reml.direct as direct_module
 import superglm.reml.discrete as discrete_module
 from superglm import Categorical, LambdaPolicy, Numeric, RandomEffect, SuperGLM
 from superglm.distributions import (
+    SHIPPED_FAMILIES,
     Binomial,
     Gamma,
     Gaussian,
@@ -49,6 +50,7 @@ from superglm.group_matrix import (
     RandomEffectGroupMatrix,
 )
 from superglm.links import (
+    SHIPPED_LINKS,
     CauchitLink,
     CloglogLink,
     IdentityLink,
@@ -63,8 +65,6 @@ from superglm.links import (
     stabilize_eta,
 )
 from superglm.reml.observed_geometry import (
-    _BUILTIN_REML_DISTRIBUTIONS,
-    _BUILTIN_REML_LINKS,
     ObservedGeometryInfeasibleError,
     build_observed_reml_geometry,
     classify_reml_curvature,
@@ -134,8 +134,8 @@ PAIRS = [pytest.param(family, link, id=f"{family}-{link}") for family in FAMILIE
 
 def test_the_registry_is_covered() -> None:
     """Every registered built-in family and link type appears in the parametrisation."""
-    assert {type(value) for value in FAMILIES.values()} == set(_BUILTIN_REML_DISTRIBUTIONS)
-    assert {type(value) for value in LINKS.values()} == set(_BUILTIN_REML_LINKS)
+    assert {type(value) for value in FAMILIES.values()} == set(SHIPPED_FAMILIES)
+    assert {type(value) for value in LINKS.values()} == set(SHIPPED_LINKS)
 
 
 def _grid(family) -> tuple[np.ndarray, np.ndarray]:

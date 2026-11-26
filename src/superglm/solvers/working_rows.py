@@ -9,6 +9,7 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
+from superglm._family_link import pair_of
 from superglm.distributions import (
     _VARIANCE_FLOOR,
     Binomial,
@@ -21,6 +22,7 @@ from superglm.distributions import (
     _weighted_residual_square,
     clip_mu,
     initial_mean,
+    mean_domain,
 )
 from superglm.links import (
     CloglogLink,
@@ -49,39 +51,6 @@ class CoefficientWorkingRows:
     rejection_reason: str | None = None
 
 
-def supports_observed_newton(distribution: object, link: object) -> bool:
-    """Return whether the family/link declares exact observed-Newton rows for PIRLS.
-
-    The declaration is by exact type and is the whole curvature choice: a fit
-    whose pair is declared takes observed rows on every iteration its route
-    allows, whatever their values.
-    """
-    # Exact types are intentional: a subclass can change either likelihood or
-    # inverse-link derivatives and must not inherit an unproved Hessian.
-    return type(link) is LogLink and type(distribution) in (Gamma, Tweedie)
-
-
-def concave_observed_rows(distribution: object, link: object) -> bool:
-    """Whether the pair's observed working rows exist and are never negative.
-
-    Declared for Gamma/log and Tweedie/log (``supports_observed_newton``),
-    NB2/log and binomial probit and cloglog (log-concave CDFs; Pratt 1981,
-    JASA 76(373)), each with rows formed in ``eta`` that stay non-negative in
-    floating point.  Probit and cloglog use closed forms in ``eta``, since the
-    generic row reads the clipped mean and goes negative past the clip.
-    Binomial/log stays on Fisher rows (its maximum can sit on the mean-space
-    boundary), as does Poisson/sqrt (not declared); Gaussian/log and
-    binomial/cauchit rows go negative.  Exact types: a subclass must not
-    inherit the claim.
-    """
-    if supports_observed_newton(distribution, link):
-        return True
-    family, link_type = type(distribution), type(link)
-    if family is Binomial and link_type in (ProbitLink, CloglogLink):
-        return True
-    return family is NegativeBinomial and link_type is LogLink
-
-
 def coefficient_initial_intercept(
     *,
     distribution: Distribution,
@@ -90,7 +59,7 @@ def coefficient_initial_intercept(
     sample_weight: NDArray,
 ) -> float:
     """Return a link-appropriate intercept before offsets are applied."""
-    if type(distribution) is Poisson and type(link) is SqrtLink:
+    if pair_of(distribution, link).reaches_zero_mean:
         # Unlike log, sqrt represents zero and arbitrarily small non-negative
         # means directly.  Do not inherit the positive-family initialization
         # floor needed by singular-at-zero links.
@@ -98,15 +67,6 @@ def coefficient_initial_intercept(
         return float(np.sqrt(max(mean, 0.0)))
     mean = initial_mean(y, sample_weight, distribution)
     return float(link.link(np.atleast_1d(mean))[0])
-
-
-def _log_link_variance_power(distribution: object, link: object) -> float | None:
-    """``p`` of a built-in log-link family whose variance is ``mu**p``, else None."""
-    if type(link) is not LogLink:
-        return None
-    if type(distribution) is Tweedie:
-        return float(distribution.p)
-    return {Gaussian: 0.0, Poisson: 1.0, Gamma: 2.0}.get(type(distribution))
 
 
 def null_fit_eta(
@@ -140,7 +100,7 @@ def null_fit_eta(
     carried = weights > 0.0
     shifted = offset - (float(np.max(offset[carried])) if np.any(carried) else 0.0)
     y = np.asarray(y, dtype=np.float64)
-    power = _log_link_variance_power(distribution, link)
+    power = pair_of(distribution, link).log_link_variance_power
     varies = bool(np.any(shifted[carried]))
     rows = None if varies else (y, weights)
     if varies and power is not None:
@@ -152,15 +112,17 @@ def null_fit_eta(
             np.isfinite(rescaled_weights[carried])
         ):
             rows = (rescaled_y, rescaled_weights)
-    if isinstance(distribution, Binomial):
+    domain = mean_domain(distribution)
+    bounded = domain.bounded_above
+    if bounded:
         # ``initial_mean`` returns the weighted mean unclamped for an
-        # unbounded mean space.  A mean of 0 or 1 has no finite intercept
+        # unbounded mean space.  A mean at either end has no finite intercept
         # under any offset, whatever a binary link's own clamp at 1e-15 would
         # make of it.
         mean = initial_mean(y, weights, Gaussian())
-        if not 0.0 < mean < 1.0:
+        if not 0.0 < mean < domain.upper:
             return None
-    if rows is not None and isinstance(distribution, Binomial):
+    if rows is not None and bounded:
         intercept = float(link.link(np.atleast_1d(mean))[0])
     elif rows is not None:
         intercept = coefficient_initial_intercept(
@@ -674,7 +636,7 @@ def coefficient_working_rows(
     ``z = eta + (y - mu) g' / alpha``, with
     ``alpha = 1 + (y - mu) (V'/V + g''/g')``; Fisher scoring is ``alpha = 1``.
     Which one a fit takes is chosen by the caller from the family and link
-    (``prefer_observed`` with a ``concave_observed_rows`` pair), never from
+    (``prefer_observed`` with an ``observed_rows_concave`` pair), never from
     the rows' values.  Every declared pair's rows are non-negative, as the
     dense working system requires.  A non-finite observed row or total sets
     ``rejection_reason``, and the caller rejects the step rather than mix in
@@ -684,7 +646,7 @@ def coefficient_working_rows(
     mu = np.asarray(mu, dtype=np.float64)
     eta = np.asarray(eta, dtype=np.float64)
     sample_weight = np.asarray(sample_weight, dtype=np.float64)
-    if not prefer_observed or not concave_observed_rows(distribution, link):
+    if not prefer_observed or not pair_of(distribution, link).observed_rows_concave:
         return _fisher_rows(
             distribution=distribution,
             link=link,

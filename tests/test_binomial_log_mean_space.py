@@ -34,6 +34,7 @@ from superglm import (
     Spline,
     SuperGLM,
 )
+from superglm._family_link import pair_of
 from superglm.diagnostics.separation import SeparationWarning
 from superglm.distributions import Binomial, Gamma, Poisson
 from superglm.links import CauchitLink, CloglogLink, LogitLink, LogLink, ProbitLink
@@ -48,7 +49,6 @@ from superglm.solvers.irls_state import (
     mean_space_log_likelihood_rows,
     mean_space_newton_rows,
     mean_space_score_rows,
-    mean_space_violation,
 )
 from superglm.solvers.mode_score import (
     MODE_CERTIFICATION_BAR,
@@ -110,9 +110,9 @@ def test_only_a_link_that_leaves_the_mean_space_declares_a_boundary() -> None:
         (Gamma(), LogLink()),
     ]
     for family, link in contained:
-        assert mean_space_violation(family, link) is None
+        assert pair_of(family, link).mean_space_violation is None
         assert mean_space_boundary_rows(family, link, np.array([5.0]), np.ones(1)) == 0
-    violates = mean_space_violation(Binomial(), LogLink())
+    violates = pair_of(Binomial(), LogLink()).mean_space_violation
     assert violates is not None
     # eta = 0 is mu = 1: outside, unless the row carries no likelihood
     assert violates(np.array([0.0]), np.ones(1))

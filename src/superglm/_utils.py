@@ -9,6 +9,17 @@ import numpy as np
 from numpy.typing import NDArray
 
 
+def declared(obj: object, name: str, default: object = None) -> object:
+    """``obj.name`` where ``obj``'s class declares ``name``, else ``default``.
+
+    A family or link declares a fact on its class, so a subclass inherits it.
+    The class is the one ``isinstance`` reads (``obj.__class__``): a proxy that
+    presents the class it wraps keeps that class's facts, and an object that
+    only forwards attribute reads (``__getattr__``) declares none.
+    """
+    return getattr(obj, name) if hasattr(obj.__class__, name) else default
+
+
 def _validate_strict_prior_weights(weights, n: int) -> NDArray:
     """Return one-dimensional, finite, strictly positive float64 prior weights."""
     message = f"weights must be finite and strictly positive, one-dimensional, and have length {n}"
@@ -51,13 +62,13 @@ def contract_weights(
     other weight is finite and nonnegative, with at least one positive.
     ``finite_sum`` also requires the total to be finite.
     """
-    from superglm.distributions import Tweedie
+    from superglm.distributions import prior_weights_in_normalizer
     from superglm.model.input_validation import _finite_vector
     from superglm.solvers.dispersion import PRIOR_WEIGHTS
 
     if sample_weight is None:
         weights = np.ones(n, dtype=np.float64)
-    elif isinstance(family, Tweedie) and weight_semantics == PRIOR_WEIGHTS:
+    elif prior_weights_in_normalizer(family) and weight_semantics == PRIOR_WEIGHTS:
         weights = _validate_strict_prior_weights(sample_weight, n)
     else:
         weights = _finite_vector(name, sample_weight, n)

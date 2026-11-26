@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import math
 from dataclasses import dataclass, field
 from typing import Any
@@ -13,6 +14,7 @@ from scipy.optimize import brentq
 from scipy.special import digamma, gammaln, polygamma, zeta
 
 from superglm._tweedie import TweedieRows, solve_log_phi
+from superglm._utils import declared
 from superglm.solvers.dispersion import FREQUENCY_WEIGHTS, PRIOR_WEIGHTS
 
 _GAMMA_ASYMPTOTIC_SHAPE = 100.0
@@ -109,6 +111,15 @@ class GammaScaleProfileData:
     _profile_cache: dict = field(default_factory=dict, repr=False, compare=False)
     _warm_history: list = field(default_factory=list, repr=False, compare=False)
     _uniform_multiplicity: bool = field(default=False, repr=False, compare=False)
+
+    def profile(self, penalized_deviance: float, penalty_nullity: float) -> ProfiledScaleTerm:
+        return profile_gamma_reml_scale(self, penalized_deviance, penalty_nullity)
+
+    def phi(self, penalized_deviance: float, penalty_nullity: float) -> float:
+        return self.profile(penalized_deviance, penalty_nullity).phi
+
+    def no_residual_size(self, penalty_nullity: float) -> bool:
+        return 2.0 * self.sum_weight <= penalty_nullity
 
     def __post_init__(self) -> None:
         values = np.asarray(
@@ -266,12 +277,8 @@ def prepare_gamma_reml_scale_data(
     )
 
 
-def gaussian_reml_scale_terms(
-    sample_weight: NDArray,
-    *,
-    weight_semantics: str,
-) -> tuple[float, float]:
-    """Return the Gaussian likelihood size and its weight-only saturated term.
+def gaussian_saturated_log_weight(sample_weight: NDArray, *, weight_semantics: str) -> float:
+    """Return the Gaussian saturated term's weight-only part.
 
     Under ``"prior"`` each row's saturated density is ``N(y_i; y_i, phi/w_i)``,
     whose normalizer is ``0.5 log(w_i / (2 pi phi))``.  The ``0.5 log w_i`` part
@@ -279,19 +286,18 @@ def gaussian_reml_scale_terms(
     dispersion or the selected smoothing parameters; it is returned and applied
     anyway so that the published criterion is the restricted log-likelihood
     rather than the restricted log-likelihood plus an unnamed constant, which
-    is what makes a cross-package comparison meaningful.
+    is what makes a cross-package comparison meaningful.  Under ``"frequency"``
+    a weight replicates a unit-weight row, so the term is zero and no weight is
+    read.  The likelihood size is ``dispersion_likelihood_size``'s.
     """
     if weight_semantics not in (PRIOR_WEIGHTS, FREQUENCY_WEIGHTS):
         raise ValueError(
             f"weight_semantics must be 'prior' or 'frequency', got {weight_semantics!r}",
         )
-    weights = np.asarray(sample_weight, dtype=np.float64)
     if weight_semantics == FREQUENCY_WEIGHTS:
-        return float(np.sum(weights, dtype=np.float64)), 0.0
-    carried = weights > 0.0
-    likelihood_size = float(np.count_nonzero(carried))
-    saturated_log_weight = float(0.5 * np.sum(np.log(weights[carried]), dtype=np.float64))
-    return likelihood_size, saturated_log_weight
+        return 0.0
+    weights = np.asarray(sample_weight, dtype=np.float64)
+    return float(0.5 * np.sum(np.log(weights[weights > 0.0]), dtype=np.float64))
 
 
 def _gaussian_reml_log_phi(
@@ -849,55 +855,97 @@ def profile_tweedie_reml_scale(
     )
 
 
+@dataclass(frozen=True)
+class GaussianScaleProfile:
+    """The Gaussian dispersion's REML profile on one fit's rows.
+
+    A scale profile is what an estimated-scale family's ``scale_profile``
+    returns: ``profile`` is the profiled term a REML criterion reads, ``phi``
+    its dispersion alone, and ``no_residual_size`` whether the profile has no
+    interior optimum at a penalty nullity.
+
+    ``phi`` reads the likelihood size alone. The weights' saturated term only
+    the REML criterion reads, so it is formed the first time ``profile`` needs it;
+    the weights must not change in place while the profile is alive.
+    """
+
+    likelihood_size: float
+    sample_weight: NDArray = field(repr=False, compare=False)
+    weight_semantics: str
+
+    @functools.cached_property
+    def saturated_log_weight(self) -> float:
+        # The likelihood size is already held; only the saturated term is reduced.
+        return gaussian_saturated_log_weight(
+            self.sample_weight, weight_semantics=self.weight_semantics
+        )
+
+    def profile(self, penalized_deviance: float, penalty_nullity: float) -> ProfiledScaleTerm:
+        return profile_gaussian_reml_scale(
+            penalized_deviance,
+            self.likelihood_size,
+            penalty_nullity,
+            saturated_log_weight=self.saturated_log_weight,
+        )
+
+    def phi(self, penalized_deviance: float, penalty_nullity: float) -> float:
+        # The closed form, without the derivative only a REML search reads.
+        return gaussian_reml_scale_phi(penalized_deviance, self.likelihood_size, penalty_nullity)
+
+    def no_residual_size(self, penalty_nullity: float) -> bool:
+        return self.likelihood_size - penalty_nullity <= 0.0
+
+
+@dataclass(frozen=True)
+class TweedieScaleProfile:
+    """The Tweedie dispersion's REML profile on one fit's positive rows."""
+
+    rows: TweedieRows
+
+    def profile(self, penalized_deviance: float, penalty_nullity: float) -> ProfiledScaleTerm:
+        return profile_tweedie_reml_scale(self.rows, penalized_deviance, penalty_nullity)
+
+    def phi(self, penalized_deviance: float, penalty_nullity: float) -> float:
+        return self.profile(penalized_deviance, penalty_nullity).phi
+
+    def no_residual_size(self, penalty_nullity: float) -> bool:
+        return False
+
+
+ScaleProfile = GaussianScaleProfile | GammaScaleProfileData | TweedieScaleProfile
+
+
+def tweedie_rows(scale_profile: ScaleProfile | None) -> TweedieRows | None:
+    """A Tweedie profile's rows, which a REML result keeps for its terminal evaluations."""
+    return scale_profile.rows if isinstance(scale_profile, TweedieScaleProfile) else None
+
+
 def prepare_reml_scale_data(
     distribution: Any,
     y: NDArray,
     sample_weight: NDArray,
     *,
     weight_semantics: str,
-) -> tuple[float | None, float | None, GammaScaleProfileData | None, TweedieRows | None]:
-    """Hoist a fit's scale-profiling state once, under the declared contract.
+) -> ScaleProfile | None:
+    """The family's scale profile on these rows, or ``None`` where it declares none.
 
-    Returns the Gaussian pair and the Gamma and Tweedie prepared states, of
-    which at most one arm is populated.  Every REML optimizer prepares through
-    here so that the contract enters the scale machinery in exactly one place
-    and cannot be re-derived per evaluation.
+    Every REML optimizer prepares through here, once per fit, so that the
+    weight contract enters the scale machinery in exactly one place and
+    cannot be re-derived per evaluation.
     """
-    from superglm.distributions import Gamma, Gaussian, Tweedie
-
-    if isinstance(distribution, Gaussian):
-        likelihood_size, saturated_log_weight = gaussian_reml_scale_terms(
-            sample_weight,
-            weight_semantics=weight_semantics,
-        )
-        return likelihood_size, saturated_log_weight, None, None
-    if isinstance(distribution, Gamma):
-        return (
-            None,
-            None,
-            prepare_gamma_reml_scale_data(y, sample_weight, weight_semantics=weight_semantics),
-            None,
-        )
-    if isinstance(distribution, Tweedie):
-        return (
-            None,
-            None,
-            None,
-            prepare_tweedie_reml_scale_data(
-                y,
-                sample_weight,
-                distribution.p,
-                weight_semantics=weight_semantics,
-            ),
-        )
-    return None, None, None, None
+    prepare = declared(distribution, "scale_profile")
+    if prepare is None:
+        return None
+    return prepare(y, sample_weight, weight_semantics=weight_semantics)
 
 
 __all__ = [
     "GammaScaleProfileData",
+    "GaussianScaleProfile",
     "ProfiledScaleTerm",
+    "TweedieScaleProfile",
     "gaussian_reml_scale_phi",
-    "gaussian_reml_scale_terms",
+    "gaussian_saturated_log_weight",
     "prepare_gamma_reml_scale_data",
     "prepare_reml_scale_data",
     "prepare_tweedie_reml_scale_data",

@@ -16,10 +16,11 @@ import scipy.linalg
 import scipy.optimize
 from numpy.typing import NDArray
 
+from superglm._family_link import pair_of
 from superglm._fit_trace import TraceRun
 from superglm._roundoff import EPS, gamma
 from superglm.diagnostics.convergence import inspect_initial_precision
-from superglm.distributions import Distribution
+from superglm.distributions import Distribution, scale_is_known
 from superglm.group_matrix import (
     DenseGroupMatrix,
     DesignMatrix,
@@ -47,7 +48,6 @@ from superglm.solvers.centered_system import (
 from superglm.solvers.clip_rows import (
     ClipRows,
     count_held_against,
-    declares_tail_rows,
     exported_working_rows,
     likelihood_deviance,
     likelihood_working_rows,
@@ -62,7 +62,6 @@ from superglm.solvers.irls_state import (
     _poisson_sqrt_halving_budget,
     _select_irls_trial,
     _stable_penalized_deviance_delta,
-    link_domain_violation,
     mean_space_boundary_rows,
 )
 from superglm.solvers.mode_score import (
@@ -1213,7 +1212,7 @@ def _fit_pirls_inner(
         family=family,
         link=link,
     )
-    outside_link_domain = link_domain_violation(link, family)
+    outside_link_domain = pair_of(family, link).link_domain_violation
 
     # Initialize intercept
     if intercept_init is not None:
@@ -1809,7 +1808,7 @@ def _fit_pirls_inner(
             moved_to_likelihood = bool(
                 clip_held_rows
                 and outer + 1 < max_iter_outer
-                and declares_tail_rows(family, link)
+                and pair_of(family, link).tail_rows
                 and np.isfinite(likelihood_state_deviance(retained))
             )
             if moved_to_likelihood:
@@ -2115,7 +2114,7 @@ def _fit_pirls_inner(
     W_final = final_working_rows.weights
     z_final = final_working_rows.response
     information_underflowed = False
-    if declares_tail_rows(family, link):
+    if pair_of(family, link).tail_rows:
         # the published rows read the likelihood's information where the clip holds a row
         W_final, z_final, information_underflowed = exported_working_rows(
             family, link, y, weights, eta_new_unclipped, eta_new, mu_new, W_final, z_final
@@ -2243,7 +2242,7 @@ def _fit_pirls_inner(
     # binomial), as the direct solver publishes it. The Pearson numerator has the same
     # form under either weight contract -- both scale a row's squared residual by its
     # weight -- so only the denominator's likelihood size distinguishes them.
-    if getattr(family, "scale_known", True):
+    if scale_is_known(family):
         phi = 1.0
     else:
         pearson_sum = pearson_chi2(distribution=family, y=y, mu=mu_new, sample_weight=weights)

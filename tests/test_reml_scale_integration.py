@@ -353,12 +353,7 @@ def test_direct_gamma_prepares_rows_once_and_reuses_reduced_stats(
     def counted_prepare(distribution, actual_y, actual_weights, *, weight_semantics):
         nonlocal prepare_calls
         prepare_calls += 1
-        return (
-            None,
-            None,
-            real_prepare(actual_y, actual_weights, weight_semantics=weight_semantics),
-            None,
-        )
+        return real_prepare(actual_y, actual_weights, weight_semantics=weight_semantics)
 
     fit_calls = 0
 
@@ -371,7 +366,7 @@ def test_direct_gamma_prepares_rows_once_and_reuses_reduced_stats(
         return result, np.eye(1), np.eye(1)
 
     def captured_objective(*args, **kwargs):
-        forwarded_ids.append(id(kwargs["gamma_scale_data"]))
+        forwarded_ids.append(id(kwargs["scale_profile"]))
         return real_objective(*args, **kwargs)
 
     monkeypatch.setattr(direct, "prepare_reml_scale_data", counted_prepare)
@@ -411,3 +406,186 @@ def test_direct_gamma_prepares_rows_once_and_reuses_reduced_stats(
     assert prepare_calls == 1
     assert len(forwarded_ids) >= 2
     assert len(set(forwarded_ids)) == 1
+
+
+@pytest.mark.pins_behaviour
+def test_gaussian_fit_publishing_its_scale_reads_no_weight_logarithms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pins that a prior-weighted Gaussian ``fit`` publishes both scales without the
+    REML criterion's saturated ``sum(log w)``: its scale reads the likelihood size
+    alone. ``fit_reml``, whose criterion reads that term, forms it, which shows the
+    count sees the call."""
+    import sys
+
+    import pandas as pd
+
+    import superglm.reml.scale as scale
+    from superglm import Spline, SuperGLM
+
+    real_terms = scale.gaussian_saturated_log_weight
+    calls = 0
+
+    def counted_terms(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_terms(*args, **kwargs)
+
+    for module in list(sys.modules.values()):
+        if getattr(module, "gaussian_saturated_log_weight", None) is real_terms:
+            monkeypatch.setattr(module, "gaussian_saturated_log_weight", counted_terms)
+
+    rng = np.random.default_rng(3)
+    x = rng.uniform(-2.0, 2.0, 400)
+    weights = rng.uniform(0.5, 2.0, 400)
+    y = np.sin(x) + rng.normal(0.0, 1.0, 400) / np.sqrt(weights)
+    X = pd.DataFrame({"x": x})
+
+    def fitted(method: str):
+        model = SuperGLM(
+            family="gaussian", features={"x": Spline(n_knots=6)}, weight_semantics="prior"
+        )
+        getattr(model, method)(X, y, sample_weight=weights)
+        return model.result
+
+    result = fitted("fit")
+    assert calls == 0
+    assert np.isfinite(result.phi_likelihood) and result.phi_likelihood > 0.0
+    fitted("fit_reml")
+    assert calls >= 1
+
+
+@pytest.mark.parametrize("semantics", ["prior", "frequency"])
+def test_gaussian_reml_fit_reduces_the_weights_once_for_its_scale(
+    monkeypatch: pytest.MonkeyPatch, semantics: str
+) -> None:
+    """Over a complete Gaussian ``fit_reml``, the scale profile reduces the weights
+    no more than master did: the likelihood size once per profile, where the
+    family prepares it, and the saturated term's ``sum(log w)`` once more under
+    prior weights. ``reml.scale`` reduces no weight to a size, and under
+    frequency weights, whose saturated term is zero, it reads none."""
+    import os
+    import sys
+
+    import pandas as pd
+
+    from superglm import Spline, SuperGLM
+
+    n = 400
+    rng = np.random.default_rng(3)
+    x = rng.uniform(-2.0, 2.0, n)
+    # Replication counts are integral; precisions need not be.
+    if semantics == "prior":
+        weights = rng.uniform(0.5, 2.0, n)
+    else:
+        weights = rng.integers(1, 4, n).astype(np.float64)
+    y = np.sin(x) + rng.normal(0.0, 1.0, n) / np.sqrt(weights)
+    scale_file = os.path.join("superglm", "reml", "scale.py")
+    reductions: list[str] = []
+
+    def counted(name, real):
+        def reduction(a, *args, **kwargs):
+            caller = sys._getframe(1).f_code.co_filename
+            if caller.endswith(scale_file) and np.shape(a) == (n,):
+                reductions.append(name)
+            return real(a, *args, **kwargs)
+
+        return reduction
+
+    monkeypatch.setattr(np, "sum", counted("sum", np.sum))
+    monkeypatch.setattr(np, "count_nonzero", counted("count_nonzero", np.count_nonzero))
+    real_profile = Gaussian.scale_profile
+    profiles = 0
+
+    def counted_profile(self, *args, **kwargs):
+        nonlocal profiles
+        profiles += 1
+        return real_profile(self, *args, **kwargs)
+
+    monkeypatch.setattr(Gaussian, "scale_profile", counted_profile)
+    model = SuperGLM(
+        family="gaussian", features={"x": Spline(n_knots=6)}, weight_semantics=semantics
+    )
+    model.fit_reml(pd.DataFrame({"x": x}), y, sample_weight=weights)
+    assert profiles >= 1
+    assert np.isfinite(model.result.phi) and model.result.phi > 0.0
+    # Under prior weights every reduction left in ``reml.scale`` is a log-weight sum.
+    expected = ["sum"] * profiles if semantics == "prior" else []
+    assert reductions == expected
+
+
+@pytest.mark.pins_behaviour
+def test_a_family_forwarding_to_gamma_publishes_pearsons_scale() -> None:
+    """Pins the likelihood scale of a custom family that forwards its reads to Gamma: Pearson's.
+
+    Such a family is not a Gamma and declares no scale profile of its own, so its
+    fit publishes Pearson's estimate, not Gamma's maximum-likelihood one.
+    """
+    import pandas as pd
+
+    from superglm import Spline, SuperGLM
+
+    class Forwards:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            if name.startswith("__"):
+                raise AttributeError(name)
+            return getattr(self._inner, name)
+
+    n = 100
+    x = np.linspace(0.0, 1.0, n)
+    y = np.random.default_rng(13).gamma(3.0, np.exp(x) / 3.0)
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family=Forwards(Gamma()),
+        link="log",
+        features={"x": Spline(n_knots=5)},
+        weight_semantics="frequency",
+    )
+    model.fit(frame, y, sample_weight=np.ones(n))
+    result = model.result
+    mu = np.asarray(model.predict(frame))
+    pearson = float(np.sum((y - mu) ** 2 / mu**2)) / (n - result.effective_df)
+    assert result.phi_likelihood_method == "pearson"
+    np.testing.assert_allclose(result.phi_likelihood, pearson, rtol=1e-10)
+
+
+@pytest.mark.pins_behaviour
+def test_a_proxy_presenting_gaussian_fits_as_a_gaussian() -> None:
+    """Pins the fit of a family proxy that presents Gaussian's class: least squares.
+
+    ``isinstance`` reads the class the proxy presents, so its means are
+    unbounded and a negative response fits by ordinary least squares.
+    """
+    import pandas as pd
+
+    from superglm import Numeric, SuperGLM
+
+    class Presents:
+        def __init__(self, inner):
+            self._inner = inner
+
+        @property
+        def __class__(self):
+            return type(self._inner)
+
+        def __getattr__(self, name):
+            if name.startswith("__"):
+                raise AttributeError(name)
+            return getattr(self._inner, name)
+
+    x = np.arange(20.0)
+    y = -5.0 + 0.05 * x + 0.1 * np.sin(x)
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family=Presents(Gaussian()),
+        link="identity",
+        features={"x": Numeric()},
+        selection_penalty=0,
+        weight_semantics="frequency",
+    )
+    model.fit(frame, y, sample_weight=np.ones(20))
+    least_squares = np.polyval(np.polyfit(x, y, 1), x)
+    np.testing.assert_allclose(model.predict(frame), least_squares, rtol=1e-9)

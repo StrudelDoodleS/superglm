@@ -55,6 +55,7 @@ import scipy.linalg
 import scipy.linalg.lapack
 import scipy.spatial
 
+from superglm._family_link import pair_of
 from superglm._frame import as_eager_frame
 from superglm._roundoff import UNIT_ROUNDOFF
 from superglm.diagnostics.separation import _separated_flags, response_boundaries
@@ -81,7 +82,6 @@ from superglm.solvers.mode_score import linear_predictor
 from superglm.solvers.working_rows import (
     coefficient_working_rows,
     fisher_working_weights,
-    supports_observed_newton,
 )
 
 # The chance, across all the levels of one term, that no level's interval
@@ -518,7 +518,7 @@ def _observed_curvature(model, mu, eta, prior, fisher) -> np.ndarray | None:
     """
     distribution, link = model._distribution, model._link
     y = np.asarray(model._fit_y_ref, dtype=np.float64).ravel()
-    if supports_observed_newton(distribution, link):
+    if pair_of(distribution, link).observed_newton:
         return coefficient_working_rows(
             distribution=distribution,
             link=link,

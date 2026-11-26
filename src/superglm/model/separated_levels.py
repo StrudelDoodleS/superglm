@@ -28,6 +28,7 @@ from superglm.diagnostics.separation import (
     lines_example,
     take_held_levels,
 )
+from superglm.distributions import scale_is_known
 
 
 def separated_labels(spec: Any) -> tuple:
@@ -762,9 +763,9 @@ def _factor(model, line: SeparatedLine) -> float | None:
     interaction also prices, has no one factor.
     """
     from superglm.inference._term_types import _safe_exp
-    from superglm.links import LogLink
+    from superglm.links import is_multiplicative
 
-    if line.kind != "levels" or not isinstance(model._link, LogLink):
+    if line.kind != "levels" or not is_multiplicative(model._link):
         return None
     crossed = (getattr(spec, "parent_names", ()) for spec in model._interaction_specs.values())
     if any(line.term in parents for parents in crossed):
@@ -854,7 +855,7 @@ def _reml_scale_note(model) -> str | None:
 
     if getattr(model, "_reml_result", None) is None:
         return None
-    if getattr(model._distribution, "scale_known", True):
+    if scale_is_known(model._distribution):
         return None
     re_names = [
         name

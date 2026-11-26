@@ -26,7 +26,11 @@ from superglm._predictor_compiler import (
 )
 from superglm._roundoff import PENALTY_RANK_CUT, UNIT_ROUNDOFF
 from superglm._utils import _validate_strict_prior_weights
-from superglm.distributions import Distribution, Tweedie, resolve_distribution
+from superglm.distributions import (
+    Distribution,
+    prior_weights_in_normalizer,
+    resolve_distribution,
+)
 from superglm.group_matrix import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
@@ -1179,14 +1183,14 @@ def _scan_separation(
             cross_spec._occupied_cells_at_fit = found[0].occupied if found else None
             cross_spec._bounded_groups_at_fit = bounded
     compiled.scan_codes.clear()
-    from superglm.links import LogLink
+    from superglm.links import is_multiplicative
 
     levels = SeparatedLevels(
         findings=findings,
         specs={**compiled.specs, **compiled.interaction_specs},
         sample_weight=sample_weight,
         offset=offset,
-        exposure=offset is not None and isinstance(link, LogLink),
+        exposure=offset is not None and is_multiplicative(link),
         frame=X,
     )
     return levels, curves, level_curves
@@ -1256,7 +1260,7 @@ def build_design_matrix(
     distribution = resolve_distribution(family)
     if sample_weight is None:
         sample_weight = np.ones(n, dtype=np.float64)
-    elif isinstance(distribution, Tweedie) and weight_semantics == PRIOR_WEIGHTS:
+    elif prior_weights_in_normalizer(distribution) and weight_semantics == PRIOR_WEIGHTS:
         # The compound-Poisson normalizer carries ``log w``, so a Tweedie prior
         # weight of zero is not an uninformative row but an unevaluable
         # density.  Read as a replication count the weight never enters that

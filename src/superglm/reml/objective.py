@@ -15,8 +15,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._roundoff import gamma
-from superglm._tweedie import TweedieRows
-from superglm.distributions import Gamma, Gaussian, Poisson, Tweedie, clip_mu
+from superglm.distributions import Poisson, clip_mu, scale_is_known
 from superglm.group_matrix import DesignMatrix
 from superglm.links import stabilize_eta
 from superglm.reml.penalty_algebra import (
@@ -26,16 +25,7 @@ from superglm.reml.penalty_algebra import (
     compute_penalty_nullity,
     total_penalty_quadratic,
 )
-from superglm.reml.scale import (
-    GammaScaleProfileData,
-    ProfiledScaleTerm,
-    gaussian_reml_scale_terms,
-    prepare_gamma_reml_scale_data,
-    prepare_tweedie_reml_scale_data,
-    profile_gamma_reml_scale,
-    profile_gaussian_reml_scale,
-    profile_tweedie_reml_scale,
-)
+from superglm.reml.scale import ProfiledScaleTerm, ScaleProfile, prepare_reml_scale_data
 from superglm.solvers._structured.operators import (
     CompactSymmetricOperator,
 )
@@ -102,13 +92,10 @@ def reml_laml_objective(
     S_override: NDArray | None = None,
     reml_penalties: list[PenaltyComponent] | None = None,
     tensor_pair_evaluations: dict | None = None,
-    likelihood_size: float | None = None,
-    gamma_scale_data: GammaScaleProfileData | None = None,
-    tweedie_scale_data: TweedieRows | None = None,
+    scale_profile: ScaleProfile | None = None,
     return_evaluation: bool = False,
     *,
     weight_semantics: str,
-    saturated_log_weight: float | None = None,
 ) -> float | REMLObjectiveEvaluation:
     """Laplace REML/LAML objective up to additive constants.
 
@@ -142,13 +129,13 @@ def reml_laml_objective(
         sufficient to reconstruct the centered Schur complement when a
         precomputed full determinant is unavailable.
 
-    Gaussian and Gamma use their family-specific Wood Eq. (4) scale
-    profiles. Other estimated-scale families retain the historical reduced
-    criterion until a family-specific scale profile is supplied.
+    An estimated-scale family that declares a scale profile (Gaussian, Gamma,
+    Tweedie) uses its Wood Eq. (4) profile. Another retains the historical
+    reduced criterion.
 
-    ``gamma_scale_data`` and ``likelihood_size`` let optimizers prepare
-    fit-invariant row reductions once. Standalone callers may omit them; the
-    objective then computes the required reduction for that evaluation.
+    ``scale_profile`` lets an optimizer prepare the family's fit-invariant row
+    reductions once. A standalone caller may omit it; the objective then
+    prepares it for that evaluation.
 
     ``weight_semantics`` is required rather than defaulted because there is no
     safe value: it decides the likelihood the criterion is a criterion *for*.
@@ -309,7 +296,7 @@ def reml_laml_objective(
     )
 
     # phi-profiled REML for estimated-scale families
-    scale_known = getattr(distribution, "scale_known", True)
+    scale_known = scale_is_known(distribution)
     if not scale_known:
         # The declared contract's likelihood size, not the row count.  The
         # shipped estimated-scale families reach it through
@@ -346,49 +333,16 @@ def reml_laml_objective(
                 coefficient_width=p,
             )
         profiled_scale: ProfiledScaleTerm | None = None
-        if isinstance(distribution, Gaussian):
-            if likelihood_size is None or saturated_log_weight is None:
-                likelihood_size, saturated_log_weight = gaussian_reml_scale_terms(
-                    sample_weight,
-                    weight_semantics=weight_semantics,
-                )
-            profiled_scale = profile_gaussian_reml_scale(
-                penalized_deviance,
-                likelihood_size,
-                M_p,
-                saturated_log_weight=saturated_log_weight,
+        if scale_profile is None:
+            scale_profile = prepare_reml_scale_data(
+                distribution, y, sample_weight, weight_semantics=weight_semantics
             )
-            scale_term = profiled_scale.criterion
-        elif isinstance(distribution, Gamma):
-            if gamma_scale_data is None:
-                gamma_scale_data = prepare_gamma_reml_scale_data(
-                    y,
-                    sample_weight,
-                    weight_semantics=weight_semantics,
-                )
-            profiled_scale = profile_gamma_reml_scale(
-                gamma_scale_data,
-                penalized_deviance,
-                M_p,
-            )
-            scale_term = profiled_scale.criterion
-        elif isinstance(distribution, Tweedie):
-            if tweedie_scale_data is None:
-                tweedie_scale_data = prepare_tweedie_reml_scale_data(
-                    y,
-                    sample_weight,
-                    distribution.p,
-                    weight_semantics=weight_semantics,
-                )
-            profiled_scale = profile_tweedie_reml_scale(
-                tweedie_scale_data,
-                penalized_deviance,
-                M_p,
-            )
+        if scale_profile is not None:
+            profiled_scale = scale_profile.profile(penalized_deviance, M_p)
             scale_term = profiled_scale.criterion
         else:
-            # Every shipped estimated-scale family now has an exact Wood
-            # Eq. (4) profiler above; only a user-supplied custom distribution
+            # Every shipped estimated-scale family declares an exact Wood
+            # Eq. (4) profile; only a user-supplied custom distribution
             # with scale_known=False can land here. The Gaussian-shaped
             # substitution below is exact only when the family's saturated
             # log-likelihood is -(n/2) log(phi)-shaped, so keep it as a

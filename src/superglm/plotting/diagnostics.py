@@ -157,7 +157,7 @@ def _validate_diagnostic_weights(
     contract puts ``log w`` inside the compound-Poisson normalizer. A
     replication weight of zero is a row that appears no times, as in fitting.
     """
-    from superglm.distributions import Tweedie
+    from superglm.distributions import prior_weights_in_normalizer
 
     if n_rows == 0:
         raise ValueError("y and sample_weight must be non-empty")
@@ -182,7 +182,7 @@ def _validate_diagnostic_weights(
         raise ValueError(message) from exc
     if not np.all(np.isfinite(weights)):
         raise ValueError("sample_weight must contain only finite values")
-    if isinstance(family, Tweedie) and weight_semantics == PRIOR_WEIGHTS:
+    if prior_weights_in_normalizer(family) and weight_semantics == PRIOR_WEIGHTS:
         if np.any(weights <= 0.0):
             raise ValueError("Tweedie sample_weight must be strictly positive")
     else:

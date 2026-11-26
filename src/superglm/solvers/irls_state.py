@@ -10,16 +10,12 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._family_link import pair_of
 from superglm._utils import weighted_row_sum
-from superglm.distributions import Binomial, Distribution, Gaussian, Poisson, clip_mu
+from superglm.distributions import Distribution, clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import (
-    _BINOMIAL_CLIP_MU_EPS,
-    IdentityLink,
     Link,
-    LogLink,
-    SqrtLink,
-    declared_eta_domain,
     stabilize_eta,
 )
 
@@ -141,124 +137,18 @@ def _evaluate_irls_state(
     )
 
 
-def mean_space_violation(
-    family: Distribution, link: Link
-) -> Callable[[NDArray, NDArray], bool] | None:
-    """The test that a linear predictor leaves the family's mean space, or ``None``.
-
-    Declared by the family and link alone: ``None`` when every ``eta`` the
-    link accepts maps into the family's means.  The log link's inverse
-    ``exp(eta)`` covers ``(0, inf)``, which is wider than the binomial
-    probability space ``(0, 1)``: a positive-weight row with ``eta >= 0`` has
-    no binomial likelihood (``log(1 - mu)`` is undefined), so it is not a
-    state at all.  ``clip_mu`` would hide it behind a mean of ``1 - 1e-7``,
-    whose deviance is finite and flat in ``eta`` and whose Fisher weight
-    ``exp(2 eta) / V(mu)`` pins the row where it landed: replacing an
-    out-of-range fitted value instead of the coefficients is Wacholder's
-    (1986) device, which can return estimates whose fitted probabilities are
-    invalid.  The feasible set ``{beta : X beta + offset < 0}`` is convex and
-    the log-likelihood concave, so a line search from a feasible state finds
-    a feasible step by halving, as R's ``glm`` and ``glm2`` do (Donoghoe &
-    Marschner 2018, J. Stat. Softw. 86(9), sections 2 and 3.2).
-    """
-    if isinstance(family, Binomial) and isinstance(link, LogLink):
-
-        def violates(eta_unclipped: NDArray, weights: NDArray) -> bool:
-            return bool(np.any((eta_unclipped >= 0.0) & (weights > 0.0)))
-
-        return violates
-    return None
-
-
-def link_domain_rows(
-    link: Link, family: Distribution | None = None
-) -> Callable[[NDArray], NDArray] | None:
-    """The rows whose linear predictor leaves the link inverse's domain, or ``None``.
-
-    The domain is the one the link declares (``links.declared_eta_domain``).
-    The inverse and inverse-squared links, and every power link of negative
-    power ``p`` (``mu = eta**(1/p)``; ``PowerLink(-1)`` and ``PowerLink(-2)``
-    are those two again), map only ``0 < eta < inf`` to a positive mean.
-    ``stabilize_eta`` clips a non-positive ``eta`` to ``1e-12``, so a
-    row that crosses zero gets a mean of ``1e12`` whose Gamma or inverse
-    Gaussian deviance grows only like ``log mu``: a line search reading that
-    clipped deviance accepts the crossing, and the row is then pinned at the
-    clip with a Fisher weight ``mu^2 = 1e24`` from which no later step moves
-    it.  R's ``glm.fit`` and ``glm2`` halve a step whose linear predictor or
-    mean is invalid for the family (``valideta``, ``validmu``; Marschner
-    2011, R Journal 3(2), "inner loop 2").  The set ``{beta : X beta +
-    offset > 0}`` is convex, so halving from a state inside it finds a step
-    inside it.
-
-    Given ``family``, the identity link on a family whose means are positive
-    (every family ``clip_mu`` floors) is held to a positive mean
-    ``link.inverse(eta) > 0`` as well, through the link's own inverse, so a
-    subclass that shifts it keeps its own domain.  A mean ``mu <= 0`` is
-    invalid (R's ``poisson()$validmu``),
-    and ``glm.fit`` halves a step that produces one.  The floor would take a
-    crossed row as ``mu = 1e-50``, whose Poisson Fisher weight ``1 / mu`` is
-    ``1e50``.  The inverse is evaluated on a copy of ``eta``: a state's
-    ``eta`` is read-only, and a subclass's inverse may write in place.
-    """
-    domain = declared_eta_domain(link)
-    if domain is not None:
-        low, high = domain
-        # An open interval: a NaN predictor is outside it, and so is an overflowed one.
-        return lambda eta_unclipped: (
-            ~((np.asarray(eta_unclipped) > low) & (np.asarray(eta_unclipped) < high))
-        )
-    if family is not None and isinstance(link, IdentityLink) and not isinstance(family, Gaussian):
-        upper = 1.0 if isinstance(family, Binomial) else np.inf
-
-        def mean_outside(eta_unclipped: NDArray) -> NDArray:
-            mean = link.inverse(np.array(eta_unclipped, dtype=float))
-            return (mean <= 0.0) | (mean >= upper)
-
-        return mean_outside
-    return None
-
-
-def link_domain_violation(
-    link: Link, family: Distribution | None = None
-) -> Callable[[NDArray, NDArray], bool] | None:
-    """The test that a positive-weight row is one of ``link_domain_rows``, or ``None``."""
-    rows = link_domain_rows(link, family)
-    if rows is None:
-        return None
-    return lambda eta_unclipped, weights: bool(np.any(rows(eta_unclipped) & (weights > 0.0)))
-
-
-# ``clip_mu`` caps a binomial mean at ``1 - _BINOMIAL_CLIP_MU_EPS``: under the
-# log link that cap is reached at ``eta = log1p(-eps)``.
-_BINOMIAL_LOG_CAP_ETA = math.log1p(-_BINOMIAL_CLIP_MU_EPS)
-
-
 def mean_space_boundary_rows(
     family: Distribution, link: Link, eta_unclipped: NDArray, weights: NDArray
 ) -> int:
     """Positive-weight rows whose mean ``clip_mu`` caps at the mean-space boundary.
 
     Zero for a family and link whose means cannot leave the mean space
-    (``mean_space_violation`` is ``None``).  A binomial/log row with
-    ``exp(eta) >= 1 - 1e-7`` has its mean replaced by the cap, so its deviance
-    is flat in ``eta`` there: the fitted objective is no longer the binomial
-    likelihood, and a state holding such a row is at the boundary of the
-    parameter space ``{beta : X beta + offset < 0}``, where the maximum is
-    not a stationary point (Donoghoe & Marschner 2018, J. Stat. Softw.
-    86(9), sections 2 and 4.1).  A binomial/identity row whose mean
-    ``link.inverse(eta)`` ``clip_mu`` replaces, at either end, is at the boundary of ``{beta : 0 < X beta +
-    offset < 1}`` in the same way (Donoghoe & Marschner 2014, Comput. Stat.
-    Data Anal. 80).
+    (``FamilyLinkPair.mean_space_boundary`` is ``None``).
     """
-    eta = np.asarray(eta_unclipped)
-    if mean_space_violation(family, link) is not None:
-        boundary = eta >= _BINOMIAL_LOG_CAP_ETA
-    elif isinstance(family, Binomial) and isinstance(link, IdentityLink):
-        mean = link.inverse(np.array(eta, dtype=float))
-        boundary = (mean <= _BINOMIAL_CLIP_MU_EPS) | (mean >= 1.0 - _BINOMIAL_CLIP_MU_EPS)
-    else:
+    boundary = pair_of(family, link).mean_space_boundary
+    if boundary is None:
         return 0
-    return int(np.count_nonzero(boundary & (weights > 0.0)))
+    return int(np.count_nonzero(boundary(np.asarray(eta_unclipped)) & (weights > 0.0)))
 
 
 def mean_space_clipped_rows(
@@ -267,13 +157,13 @@ def mean_space_clipped_rows(
     """Positive-weight rows whose mean ``clip_mu`` replaces, for a family with a mean space.
 
     Zero for a family and link whose means cannot leave the mean space
-    (``mean_space_violation`` is ``None``).  ``clip_mu`` holds a binomial mean
+    (``FamilyLinkPair.mean_space_violation`` is ``None``).  ``clip_mu`` holds a binomial mean
     inside ``[1e-7, 1 - 1e-7]``.  A row whose mean leaves that band, event or
     non-event, carries a deviance flat in ``eta`` and a score that is not the
     binomial/log score, so a stop rule read off the clipped objective there
     says nothing about the model's likelihood (``mean_space_score_rows``).
     """
-    if mean_space_violation(family, link) is None:
+    if pair_of(family, link).mean_space_violation is None:
         return 0
     with np.errstate(under="ignore"):
         mean = link.inverse(stabilize_eta(np.asarray(eta_unclipped, dtype=float), link))
@@ -401,13 +291,14 @@ def interior_start_intercept(
     offset starts exactly as before.
     """
     eta = np.asarray(eta_unclipped, dtype=float)
-    violates = mean_space_violation(family, link)
+    pair = pair_of(family, link)
+    violates = pair.mean_space_violation
     if violates is not None and violates(eta, weights):
         top = float(np.max(eta[weights > 0.0]))
         if not math.isfinite(top):
             return float(intercept)
         return float(intercept) - (top - float(level))
-    outside = link_domain_violation(link, family)
+    outside = pair.link_domain_violation
     if (
         outside is not None
         and outside(eta, weights)
@@ -521,7 +412,7 @@ def _irls_objective_scale(
     link: Link,
 ) -> float:
     """Return the natural additive scale for an IRLS objective."""
-    if type(family) is not Poisson or type(link) is not SqrtLink:
+    if not pair_of(family, link).reaches_zero_mean:
         return 1.0
 
     with np.errstate(over="ignore", invalid="ignore"):
@@ -583,7 +474,7 @@ def _poisson_sqrt_halving_budget(
     """
     if default < 1:
         raise ValueError("default halving budget must be at least 1")
-    if type(family) is not Poisson or type(link) is not SqrtLink:
+    if not pair_of(family, link).reaches_zero_mean:
         return default
 
     y_values = np.asarray(y, dtype=np.float64)
@@ -675,7 +566,7 @@ def _mean_space_halving_budget(
     has failed, and ``fit_irls_direct`` asks for it only in a fit whose start
     ``interior_start_intercept`` lowered, so every other fit is unchanged.
     """
-    violates = mean_space_violation(family, link)
+    violates = pair_of(family, link).mean_space_violation
     if violates is None or violates(committed.eta_unclipped, weights):
         return default
     eta = np.asarray(committed.eta_unclipped, dtype=np.float64)
@@ -724,7 +615,7 @@ def mean_space_first_halving(
     skipping only refused evaluations (unlike backing off by a fixed fraction
     ``tau t``, which changes the iterate path).
     """
-    violates = mean_space_violation(family, link)
+    violates = pair_of(family, link).mean_space_violation
     if violates is None or violates(committed.eta_unclipped, weights):
         return 1
     if not violates(proposal.eta_unclipped, weights):

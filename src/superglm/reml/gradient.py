@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.distributions import scale_is_known
 from superglm.reml.penalty_algebra import (
     coerce_reml_penalties,
     compute_logdet_s_derivatives,
@@ -302,7 +303,7 @@ def reml_direct_hessian(
         HinvSbeta = factor.solve(S_beta)
         hess -= inv_phi * (S_beta.T @ HinvSbeta)
 
-    scale_known = getattr(distribution, "scale_known", True)
+    scale_known = scale_is_known(distribution)
     if d_inverse_phi_d_penalized_deviance is not None and pirls_result is not None:
         inverse_phi_derivative = float(d_inverse_phi_d_penalized_deviance)
         if not np.isfinite(inverse_phi_derivative):

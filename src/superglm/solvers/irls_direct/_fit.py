@@ -17,6 +17,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._family_link import pair_of
 from superglm._fit_trace import TraceRun
 from superglm._group_matrix._group_matrix_tabmat import (
     _defer_raw_spline_tabmat_plan,
@@ -29,11 +30,10 @@ from superglm.distributions import (
     Binomial,
     Distribution,
     Gamma,
-    Gaussian,
-    NegativeBinomial,
     Poisson,
     Tweedie,
     clip_mu,
+    scale_is_known,
 )
 from superglm.group_matrix import (
     CategoricalGroupMatrix,
@@ -43,7 +43,7 @@ from superglm.group_matrix import (
     SparseSSPGroupMatrix,
     SupportCompressedSSPGroupMatrix,
 )
-from superglm.links import IdentityLink, Link, LogitLink, LogLink, stabilize_eta
+from superglm.links import Link, LogLink, stabilize_eta
 from superglm.solvers._structured.selection import (
     resolve_structured_backend,
 )
@@ -59,7 +59,7 @@ from superglm.solvers.centered_system import (
     refresh_centered_rhs,
     serves_initial_data,
 )
-from superglm.solvers.clip_rows import ClipRows, clip_can_hold_against
+from superglm.solvers.clip_rows import ClipRows
 from superglm.solvers.constrained_qp import _feasibility_slack
 from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
 from superglm.solvers.irls_direct._clip import _IRLSDirectClipOverlay
@@ -78,9 +78,7 @@ from superglm.solvers.irls_state import (
     _irls_objective_scale,
     _IRLSState,
     interior_start_intercept,
-    link_domain_violation,
     mean_space_boundary_rows,
-    mean_space_violation,
 )
 from superglm.solvers.mode_score import (
     MODE_CERTIFICATION_BAR,
@@ -107,10 +105,8 @@ from superglm.solvers.working_rows import (
     CoefficientWorkingRows,
     coefficient_initial_intercept,
     coefficient_working_rows,
-    concave_observed_rows,
     fisher_working_weights,
     pearson_chi2,
-    supports_observed_newton,
 )
 from superglm.types import GroupSlice, LinearConstraintSet, PenaltyComponent
 
@@ -126,23 +122,6 @@ class _CenteredFactorCertification:
     factor: NDArray
     decomposition: RankDecomposition
     transformed_rhs: NDArray | None
-
-
-def _has_constant_irls_weights(family: Distribution, link: Link) -> bool:
-    """Return True when PIRLS weights are independent of ``mu``.
-
-    The direct solver can reuse X'WX only when
-    ``(dmu/deta)^2 / V(mu)`` is exactly constant.  Keep this deliberately
-    conservative so performance never changes the fitted problem.
-    """
-    from superglm.distributions import Gamma, Gaussian, Poisson
-    from superglm.links import IdentityLink, LogLink, SqrtLink
-
-    return (
-        (type(family) is Gaussian and type(link) is IdentityLink)
-        or (type(family) is Gamma and type(link) is LogLink)
-        or (type(family) is Poisson and type(link) is SqrtLink)
-    )
 
 
 def _separation_weight_ratio(
@@ -503,21 +482,23 @@ class _IRLSDirectCurvaturePolicy:
         # Newton rows when its optimizer asks (``_working_newton``): the discrete
         # route's working model then carries the observed curvature its REML
         # criterion is (``reml.discrete``).
-        constant_weights = _has_constant_irls_weights(family, link)
+        pair = pair_of(family, link)
+        # The solver reuses ``X'WX`` only when the Fisher weights are constant.
+        constant_weights = pair.constant_fisher_weight is not None
         observed = bool(
             use_observed_newton
             and not has_constraints
             and (
-                (working_newton and concave_observed_rows(family, link))
+                (working_newton and pair.observed_rows_concave)
                 if return_working_system
-                else supports_observed_newton(family, link) and not constant_weights
+                else pair.observed_newton and not constant_weights
             )
         )
         stagnation_newton_available = bool(
             use_observed_newton
             and not has_constraints
             and not return_working_system
-            and supports_observed_newton(family, link)
+            and pair.observed_newton
             and not observed
         )
         if stagnation_newton_available and latch is not None and latch[0]:
@@ -533,7 +514,7 @@ class _IRLSDirectCurvaturePolicy:
             use_observed_newton
             and not has_constraints
             and not return_working_system
-            and concave_observed_rows(family, link)
+            and pair.observed_rows_concave
         )
 
     def working_rows(self, mu: NDArray, eta: NDArray) -> CoefficientWorkingRows:
@@ -575,7 +556,7 @@ class _IRLSDirectCurvaturePolicy:
         against ``l1 l0``), so Fisher scoring there contracts linearly at a
         rate the mismatch sets and a deviance stop lands short of the root
         (Green 1984, JRSSB 46, section 2.3).  A pair whose observed rows are
-        never negative (``concave_observed_rows``; Pratt 1981) takes Newton
+        never negative (``FamilyLinkPair.observed_rows_concave``; Pratt 1981) takes Newton
         steps on them instead, off the constrained routes and the fREML
         performance iteration, which keep their own rows.  The logit's
         observed rows are its Fisher rows, and it keeps them.
@@ -611,7 +592,7 @@ class _IRLSDirectFitFields:
         # run
         "recorder"
         # _setup_design
-        " dm n p gms objective_merit_scale structured_decision _use_structured step"
+        " pair dm n p gms objective_merit_scale structured_decision _use_structured step"
         " _direct_fallback_reason _state_center beta intercept _start_lowered S"
         " _penalty_curvature penalty_rows _physical_weights weight_exponent"
         # _setup_routes
@@ -740,7 +721,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         Internal, read only with ``_return_working_system``: the fREML
         performance iteration's update takes observed (Newton) rows instead
         of Fisher's, for a pair whose observed rows are never negative
-        (``working_rows.concave_observed_rows``).  The discrete optimizer
+        (``FamilyLinkPair.observed_rows_concave``).  The discrete optimizer
         asks for it when the pair's binned REML curvature is observed
         (``classify_binned_reml_curvature``), so its working model is the
         criterion it publishes.
@@ -904,6 +885,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
     def _setup_design(self) -> None:
         X, family, link, groups, weights = self.X, self.family, self.link, self.groups, self.weights
         offset, S_override, intercept_init = self.offset, self.S_override, self.intercept_init
+        self.pair = pair = pair_of(family, link)
         if isinstance(X, DesignMatrix):
             dm = X
         else:
@@ -1016,8 +998,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         # (binomial/log; a start raised into an inverse link's domain is not).
         _start_lowered = False
         if intercept_init is None and (
-            mean_space_violation(family, link) is not None
-            or link_domain_violation(link, family) is not None
+            pair.mean_space_violation is not None or pair.link_domain_violation is not None
         ):
             # The domain guards below keep every accepted state inside the mean
             # space and the link's domain only from a start inside them, and the
@@ -1035,8 +1016,8 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             if start_intercept != intercept:
                 intercept = start_intercept
                 self._deviance_init = None
-                _start_lowered = mean_space_violation(family, link) is not None
-        elif link_domain_violation(link, family) is not None:
+                _start_lowered = pair.mean_space_violation is not None
+        elif pair.link_domain_violation is not None:
             # A warm start outside the link's domain is raised the same way, to
             # the default start's level ``g(mean)``. Step halving keeps states
             # inside only from a start inside (Marschner 2011), and a clipped row
@@ -1053,7 +1034,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                 )
             else:
                 start_eta = dm.matvec(beta) + intercept + offset
-            if link_domain_violation(link, family)(start_eta, weights):
+            if pair.link_domain_violation(start_eta, weights):
                 intercept = interior_start_intercept(
                     family,
                     link,
@@ -1370,17 +1351,17 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         # performance iteration.
         self.mean_space = (
             None
-            if mean_space_violation(family, link) is None
+            if self.pair.mean_space_violation is None
             else _IRLSDirectMeanSpaceOverlay(
                 available=not (_use_qr or self._return_working_system),
                 start_lowered=self._start_lowered,
             )
         )
         # The working clip's overlay, ``None`` unless the clip can hold a
-        # binomial row against its outcome (``clip_rows.clip_can_hold_against``).
+        # binomial row against its outcome (``FamilyLinkPair.clip_can_hold_against``).
         self.clip = (
             _IRLSDirectClipOverlay(family, link, self._clip_rows)
-            if clip_can_hold_against(family, link)
+            if self.pair.clip_can_hold_against
             else None
         )
         if self.clip is not None and self.clip.likelihood:
@@ -1434,8 +1415,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             fixed_owners = (
                 (dm, dm.execution_plan, family, link, *gms, *groups)
                 if type(dm) is DesignMatrix
-                and type(family) in (Poisson, Gaussian, Gamma, Binomial, NegativeBinomial, Tweedie)
-                and type(link) in (LogLink, IdentityLink, LogitLink)
+                and self.pair.keys_fixed_caches
                 and all(
                     type(gm)
                     in (
@@ -1766,8 +1746,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             and self._compute_fit_statistics
             and retained.centred_intercept is not None
             and self._state_center is not None
-            and type(family) is Gaussian
-            and type(link) is IdentityLink
+            and self.pair.linear_model
         ):
             contribution = centred_matvec(self.dm, beta, self._state_center)
             centred_intercept_lo = centred_intercept_remainder(
@@ -1874,9 +1853,9 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
                 )
 
         # A returned state with a row outside the link's domain is no fitted model,
-        # whatever stopped the loop (``link_domain_violation``), and its reason
+        # whatever stopped the loop (``FamilyLinkPair.link_domain_violation``), and its reason
         # says so: a caller never reads it as a mode short of its certificate.
-        outside_link_domain = link_domain_violation(link, family)
+        outside_link_domain = self.pair.link_domain_violation
         if outside_link_domain is not None and outside_link_domain(eta_unclipped, weights):
             from superglm.diagnostics.convergence import ConvergenceWarning
 
@@ -1951,7 +1930,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
         # Pearson-based phi for estimated-scale families.  The numerator is the
         # same under either weight contract; only the denominator's likelihood
         # size distinguishes them.
-        if _compute_fit_statistics and not getattr(family, "scale_known", True):
+        if _compute_fit_statistics and not scale_is_known(family):
             pearson_sum = pearson_chi2(distribution=family, y=y, mu=self.mu, sample_weight=weights)
             df_resid = pearson_residual_degrees_of_freedom(
                 self._physical_weights,
@@ -1971,7 +1950,7 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             phi = float("nan")
 
         exponent = self.weight_exponent
-        solver_phi = phi if exponent and not getattr(family, "scale_known", True) else None
+        solver_phi = phi if exponent and not scale_is_known(family) else None
         deviance, log_det_H = self.dev, final.log_det_H
         iteration_log = self.recorder.iteration_log if self.record_diagnostics else None
         if exponent:

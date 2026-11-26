@@ -14,8 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from superglm.distributions import Gaussian
-from superglm.links import IdentityLink
+from superglm._family_link import pair_of
 
 
 class SlowFitWarning(UserWarning):
@@ -52,7 +51,7 @@ def exact_reml_cost_message(
     The caller has established that the fit is on the exact path and that
     its smoothing is being estimated; this decides whether it is slow.
     """
-    if type(distribution) is Gaussian and type(link) is IdentityLink:
+    if pair_of(distribution, link).linear_model:
         return None  # constant working weights: the cross-product is reused
     if float(n_rows) * n_coef * n_coef < EXACT_REML_WORK_WARN:
         return None

@@ -17,7 +17,7 @@ from superglm._reporting_state import (
 )
 from superglm._weight_units import likelihood_scale
 from superglm.diagnostics.separation import refuse_published_separation
-from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu
+from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu, scale_is_known
 from superglm.links import stabilize_eta
 from superglm.model.base import rebuild_dm_with_lambdas
 from superglm.model.reml_setup import restore_qp_constraints
@@ -50,13 +50,7 @@ from superglm.reml.penalty_algebra import (
     total_penalty_quadratic,
 )
 from superglm.reml.result import _map_beta_between_bases, _map_centred_state_between_bases
-from superglm.reml.scale import (
-    GammaScaleProfileData,
-    gaussian_reml_scale_phi,
-    gaussian_reml_scale_terms,
-    prepare_gamma_reml_scale_data,
-    profile_gamma_reml_scale,
-)
+from superglm.reml.scale import TweedieScaleProfile, prepare_reml_scale_data
 from superglm.solvers._structured.balance_tree import (
     ProfiledSumToZeroTreeFactor,
     SumToZeroLeafSystem,
@@ -242,6 +236,33 @@ def restore_qp_group_state(model, qp_saved_state) -> None:
     restore_qp_constraints(model, qp_saved_state)
 
 
+def _penalized_deviance_and_nullity(
+    model, pirls_result, lambdas, reml_penalties, hessian_rank: int | None
+) -> tuple[float, float]:
+    """The penalized deviance at a result and the penalty nullity on its coefficient range.
+
+    ``hessian_rank`` stands for a result that has lost its own certified rank; the
+    coefficient width counts every alias, so it is the last resort.
+    """
+    p_dim = model._dm.p
+    penalized_deviance = float(
+        pirls_result.deviance
+        + total_penalty_quadratic(
+            pirls_result.beta, lambdas, reml_penalties, list(model._dm.group_matrices)
+        )
+    )
+    if hessian_rank is None:
+        hessian_rank = pirls_result.reml_hessian_rank
+    nullity = compute_penalty_nullity(
+        None,
+        hessian_rank=1 + p_dim if hessian_rank is None else hessian_rank,
+        penalties=reml_penalties,
+        lambdas=lambdas,
+        coefficient_width=p_dim,
+    )
+    return penalized_deviance, nullity
+
+
 def compute_profiled_phi(
     model,
     *,
@@ -250,98 +271,31 @@ def compute_profiled_phi(
     lambdas,
     reml_penalties,
     pirls_result,
-    likelihood_size: float | None = None,
-    gamma_scale_data: GammaScaleProfileData | None = None,
-    boundary_phi: float | None = None,
     hessian_rank: int | None = None,
 ) -> float:
     """Return REML-profiled phi for estimated-scale families.
 
-    The Gaussian value is the profile's closed form without the derivative
-    only the REML search reads (``gaussian_reml_scale_phi``).  Where the
-    Gaussian or Gamma profile has no interior optimum, at zero penalized
-    deviance or no residual likelihood size, ``boundary_phi`` is returned
-    when given; otherwise the profiler's ``ValueError`` is raised.
+    Gaussian and Gamma: the phi of their scale profile, whose ``ValueError`` is
+    raised where the profile has no interior optimum (zero penalized deviance
+    or no residual likelihood size). Any other family: the deviance form.
     """
-    scale_known = getattr(model._distribution, "scale_known", True)
-    if scale_known:
-        return 1.0
-
-    p_dim = model._dm.p
-    pq_final = total_penalty_quadratic(
-        pirls_result.beta,
-        lambdas,
-        reml_penalties,
-        list(model._dm.group_matrices),
-    )
-    penalized_deviance = float(pirls_result.deviance + pq_final)
-
     distribution = model._distribution
-    if hessian_rank is None:
-        # A caller's rank (``profiled_likelihood_scale``) stands for a result that has lost
-        # its own; the coefficient width counts every alias, so it is the last resort.
-        hessian_rank = pirls_result.reml_hessian_rank
+    if scale_is_known(distribution):
+        return 1.0
+    penalized_deviance, M_p = _penalized_deviance_and_nullity(
+        model, pirls_result, lambdas, reml_penalties, hessian_rank
+    )
+    weight_semantics = model_weight_semantics(model)
     if isinstance(distribution, Gaussian | Gamma):
-        if hessian_rank is None:
-            hessian_rank = 1 + p_dim
-        M_p = compute_penalty_nullity(
-            None,
-            hessian_rank=hessian_rank,
-            penalties=reml_penalties,
-            lambdas=lambdas,
-            coefficient_width=p_dim,
+        profile = prepare_reml_scale_data(
+            distribution, y, sample_weight, weight_semantics=weight_semantics
         )
-        weight_semantics = model_weight_semantics(model)
-        if isinstance(distribution, Gaussian):
-            if likelihood_size is None:
-                likelihood_size, _ = gaussian_reml_scale_terms(
-                    sample_weight,
-                    weight_semantics=weight_semantics,
-                )
-            assert likelihood_size is not None
-            if boundary_phi is not None and (
-                penalized_deviance <= 0.0 or likelihood_size - M_p <= 0.0
-            ):
-                return float(boundary_phi)
-            return gaussian_reml_scale_phi(penalized_deviance, likelihood_size, M_p)
-        if gamma_scale_data is None:
-            gamma_scale_data = prepare_gamma_reml_scale_data(
-                y,
-                sample_weight,
-                weight_semantics=weight_semantics,
-            )
-        if boundary_phi is not None and (
-            penalized_deviance <= 0.0 or 2.0 * gamma_scale_data.sum_weight <= M_p
-        ):
-            return float(boundary_phi)
-        return profile_gamma_reml_scale(
-            gamma_scale_data,
-            penalized_deviance,
-            M_p,
-        ).phi
-
-    # Reduced profile for estimated-scale families without a Wood Eq. (4)
-    # profiler (Tweedie): the residual likelihood dimension is the penalty
-    # nullity on the identified coefficient range, not the penalty rank.
-    if hessian_rank is None:
-        hessian_rank = 1 + p_dim
-    M_p = compute_penalty_nullity(
-        None,
-        hessian_rank=hessian_rank,
-        penalties=reml_penalties,
-        lambdas=lambdas,
-        coefficient_width=p_dim,
-    )
-    # The declared contract's likelihood size, not the row count; the shape
-    # repair reaches this fallback too.
-    size = (
-        float(likelihood_size)
-        if likelihood_size is not None
-        else dispersion_likelihood_size(
-            sample_weight,
-            weight_semantics=model_weight_semantics(model),
-        )
-    )
+        return profile.phi(penalized_deviance, M_p)
+    # The deviance form (Tweedie's published convention, and a family with no
+    # scale profile): the residual likelihood dimension is the penalty nullity
+    # on the identified coefficient range, not the penalty rank. The size is
+    # the declared contract's, not the row count.
+    size = dispersion_likelihood_size(sample_weight, weight_semantics=weight_semantics)
     return float(max(penalized_deviance / max(size - M_p, 1.0), 1e-10))
 
 
@@ -367,24 +321,11 @@ def profiled_likelihood_scale(
     from superglm.solvers.dispersion import KNOWN, profile_likelihood_scale
 
     distribution = model._distribution
-    if getattr(distribution, "scale_known", True):
+    if scale_is_known(distribution):
         return 1.0, KNOWN
     if isinstance(distribution, Tweedie):
-        p_dim = model._dm.p
-        penalized_deviance = float(
-            pirls_result.deviance
-            + total_penalty_quadratic(
-                pirls_result.beta, lambdas, reml_penalties, list(model._dm.group_matrices)
-            )
-        )
-        if hessian_rank is None:
-            hessian_rank = pirls_result.reml_hessian_rank
-        nullity = compute_penalty_nullity(
-            None,
-            hessian_rank=1 + p_dim if hessian_rank is None else hessian_rank,
-            penalties=reml_penalties,
-            lambdas=lambdas,
-            coefficient_width=p_dim,
+        penalized_deviance, nullity = _penalized_deviance_and_nullity(
+            model, pirls_result, lambdas, reml_penalties, hessian_rank
         )
         phi = profile_likelihood_scale(
             distribution,
@@ -653,7 +594,8 @@ def finalize_reml_fit(
     lambdas = best.lambdas
     # Reuse the optimizer's filled Tweedie saturated-density cache, so the
     # terminal evaluations do not re-solve a (Dp, Mp) the search already solved.
-    terminal_tweedie_scale_data = getattr(best, "tweedie_scale_data", None)
+    terminal_rows = getattr(best, "tweedie_scale_data", None)
+    terminal_scale_profile = None if terminal_rows is None else TweedieScaleProfile(terminal_rows)
     n_reml_iter = best.n_reml_iter
     converged = best.converged
 
@@ -872,7 +814,7 @@ def finalize_reml_fit(
             S_override=S_final,
             reml_penalties=reml_penalties,
             tensor_pair_evaluations=terminal_tensor_pair_evaluations,
-            tweedie_scale_data=terminal_tweedie_scale_data,
+            scale_profile=terminal_scale_profile,
             weight_semantics=model_weight_semantics(model),
             return_evaluation=True,
         )
@@ -994,7 +936,7 @@ def finalize_reml_fit(
             S_override=S_final,
             reml_penalties=reml_penalties,
             tensor_pair_evaluations=terminal_tensor_pair_evaluations,
-            tweedie_scale_data=terminal_tweedie_scale_data,
+            scale_profile=terminal_scale_profile,
             weight_semantics=model_weight_semantics(model),
             return_evaluation=True,
         )
@@ -1041,7 +983,7 @@ def finalize_reml_fit(
             S_override=S_final,
             reml_penalties=reml_penalties,
             tensor_pair_evaluations=terminal_tensor_pair_evaluations,
-            tweedie_scale_data=terminal_tweedie_scale_data,
+            scale_profile=terminal_scale_profile,
             weight_semantics=model_weight_semantics(model),
             return_evaluation=True,
         )
@@ -1066,7 +1008,7 @@ def finalize_reml_fit(
     elif (
         terminal_evaluation is not None
         and not isinstance(model._distribution, Tweedie)
-        and not getattr(model._distribution, "scale_known", True)
+        and not scale_is_known(model._distribution)
     ):
         penalty_nullity = float(terminal_evaluation.penalty_nullity or 0.0)
         likelihood_phi = max(

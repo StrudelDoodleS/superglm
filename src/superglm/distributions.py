@@ -7,12 +7,15 @@ Each distribution provides V(mu) (variance function) and d(y, mu)
 from __future__ import annotations
 
 import warnings
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 from scipy.special import betaln, gammaln
+
+from superglm._utils import declared
 
 # ── Numerical guard constants for positive-mean families ─────────
 _POSITIVE_INIT_MIN = 1e-12  # floor for initial_mean
@@ -165,6 +168,66 @@ def _weighted_residual_square(
     return result
 
 
+@dataclass(frozen=True)
+class MeanDomain:
+    """Where a family's means lie, and the bands that hold a fit inside.
+
+    The means are positive when ``positive`` and lie below ``upper``. ``clip``
+    is the band a fitted mean is held in (``clip_mu``) and ``start`` the band a
+    starting mean is held in (``initial_mean``); ``None`` holds nothing.
+    """
+
+    positive: bool
+    upper: float
+    clip: tuple[float, float] | None
+    start: tuple[float, float] | None
+
+    @property
+    def bounded_above(self) -> bool:
+        return self.upper < np.inf
+
+
+REAL_LINE = MeanDomain(positive=False, upper=np.inf, clip=None, start=None)
+# The clip must be wide enough that IRLS converges for near-separated levels.
+POSITIVE = MeanDomain(
+    positive=True,
+    upper=np.inf,
+    clip=(_POSITIVE_MU_MIN, _POSITIVE_MU_MAX),
+    start=(_POSITIVE_INIT_MIN, np.inf),
+)
+UNIT_INTERVAL = MeanDomain(positive=True, upper=1.0, clip=(1e-7, 1 - 1e-7), start=(1e-3, 1 - 1e-3))
+
+
+@dataclass(frozen=True)
+class ResponseSupport:
+    """The responses a family's density is defined on; ``check`` refuses any other.
+
+    Nonnegative, strictly positive when ``positive``, or 0 and 1 only when
+    ``binary``. ``family`` names the class in the refusal, so a subclass is
+    refused in its parent's words.
+    """
+
+    family: str
+    positive: bool = False
+    binary: bool = False
+
+    def check(self, y: NDArray) -> None:
+        if self.binary:
+            bad = ~np.isin(y, [0, 1])
+            if np.any(bad):
+                n_bad = int(np.sum(bad))
+                vals = np.unique(y[bad])[:5]
+                raise ValueError(
+                    f"{self.family} family requires y in {{0, 1}}, "
+                    f"but found {n_bad} invalid values (e.g. {vals})."
+                )
+        elif self.positive:
+            if np.any(y <= 0.0):
+                raise ValueError(f"{self.family} family requires strictly positive y")
+        elif np.any(y < 0.0):
+            raise ValueError(f"{self.family} family requires nonnegative y")
+
+
 @runtime_checkable
 class Distribution(Protocol):
     """Protocol for exponential dispersion family distributions.
@@ -176,6 +239,19 @@ class Distribution(Protocol):
     if absent, the correction is skipped for custom distribution objects).
     variance_second_derivative (V''(μ), used by second-order W(ρ)
     correction; Wood 2011, Appendix D).
+
+    Optional declarations, each with the default a family that omits it takes:
+    mean_domain (a ``MeanDomain``; positive means), response_support (a
+    ``ResponseSupport``; any finite response), prior_weights_in_normalizer
+    (the density's normalizer carries ``log w``, so a prior weight must be
+    strictly positive; False) and scale_profile (the dispersion's exact REML
+    profile on a fit's rows; a Gaussian-shaped approximation, with a warning).
+    Each is read from the family's class (``_utils.declared``), so an object
+    that forwards attribute reads to a shipped family takes the defaults.
+
+    A class that inherits from more than one shipped family takes each declared
+    fact from the first base in its method resolution order that declares it:
+    ``class F(Gaussian, Binomial)`` has Gaussian's unbounded means and scale profile.
     """
 
     @property
@@ -203,6 +279,9 @@ class Distribution(Protocol):
 
 class Poisson:
     """Poisson distribution. V(mu) = mu."""
+
+    mean_domain = POSITIVE
+    response_support = ResponseSupport("Poisson")
 
     @property
     def scale_known(self) -> bool:
@@ -237,6 +316,8 @@ class Poisson:
 class Gaussian:
     """Gaussian distribution. V(mu) = 1."""
 
+    mean_domain = REAL_LINE
+
     @property
     def scale_known(self) -> bool:
         return False
@@ -261,6 +342,14 @@ class Gaussian:
         """Gaussian unit deviance: (y - μ)^2."""
         return (y - mu) ** 2
 
+    def scale_profile(self, y: NDArray, sample_weight: NDArray, *, weight_semantics: str):
+        """The dispersion's REML profile on these rows (``reml.scale``)."""
+        from superglm.reml.scale import GaussianScaleProfile
+        from superglm.solvers.dispersion import dispersion_likelihood_size
+
+        size = dispersion_likelihood_size(sample_weight, weight_semantics=weight_semantics)
+        return GaussianScaleProfile(size, sample_weight, weight_semantics)
+
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
         """Gaussian log-likelihood with dispersion φ = σ²."""
         # Any normal positive phi is the fitted one; only zero (an exact fit) is floored.
@@ -283,6 +372,9 @@ class Gaussian:
 
 class Gamma:
     """Gamma distribution. V(mu) = mu^2."""
+
+    mean_domain = POSITIVE
+    response_support = ResponseSupport("Gamma", positive=True)
 
     @property
     def scale_known(self) -> bool:
@@ -318,6 +410,12 @@ class Gamma:
         if np.any(close):
             deviance[close] = _vector_deviance_from_t(delta[close])
         return 2.0 * deviance
+
+    def scale_profile(self, y: NDArray, sample_weight: NDArray, *, weight_semantics: str):
+        """The dispersion's REML profile on these rows (``reml.scale``)."""
+        from superglm.reml.scale import prepare_gamma_reml_scale_data
+
+        return prepare_gamma_reml_scale_data(y, sample_weight, weight_semantics=weight_semantics)
 
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
         """Gamma log-likelihood. Shape k = 1/φ."""
@@ -415,6 +513,9 @@ class NegativeBinomial:
         ``fit_reml()``.
     """
 
+    mean_domain = POSITIVE
+    response_support = ResponseSupport("NegativeBinomial")
+
     def __init__(self, theta: float | str):
         if theta != "auto":
             if theta <= 0:
@@ -469,6 +570,9 @@ class Binomial:
     ``sample_weight`` is a case/replication weight.
     """
 
+    mean_domain = UNIT_INTERVAL
+    response_support = ResponseSupport("Binomial", binary=True)
+
     @property
     def scale_known(self) -> bool:
         return True
@@ -514,6 +618,11 @@ class Tweedie:
         p → 1 approaches Poisson, p → 2 approaches Gamma.
     """
 
+    mean_domain = POSITIVE
+    response_support = ResponseSupport("Tweedie")
+    # The compound-Poisson normalizer carries log w.
+    prior_weights_in_normalizer = True
+
     def __init__(self, p: float):
         if not 1 < p < 2:
             raise ValueError(f"Tweedie p must be in (1, 2), got {p}")
@@ -545,6 +654,16 @@ class Tweedie:
 
         return tweedie_unit_deviance(y, mu, self.p)
 
+    def scale_profile(self, y: NDArray, sample_weight: NDArray, *, weight_semantics: str):
+        """The dispersion's REML profile on these rows (``reml.scale``)."""
+        from superglm.reml.scale import TweedieScaleProfile, prepare_tweedie_reml_scale_data
+
+        return TweedieScaleProfile(
+            prepare_tweedie_reml_scale_data(
+                y, sample_weight, self.p, weight_semantics=weight_semantics
+            )
+        )
+
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
         """Tweedie log-likelihood via the Dunn–Smyth series."""
         from superglm._tweedie import tweedie_logpdf
@@ -552,6 +671,10 @@ class Tweedie:
         logpdf = tweedie_logpdf(y, mu, phi, self.p, weights=weights)
         return float(np.sum(logpdf))
 
+
+#: The family classes this module ships. Arithmetic is decided by membership of
+#: the exact type, so a subclass never inherits a closed form.
+SHIPPED_FAMILIES = (Gaussian, Poisson, Binomial, Gamma, NegativeBinomial, Tweedie)
 
 DISTRIBUTION_SHORTCUTS: dict[str, type] = {
     "poisson": Poisson,
@@ -591,35 +714,33 @@ def resolve_distribution(
 # ── Family-aware helpers ───────────────────────────────────────────
 
 
+def mean_domain(family: object) -> MeanDomain:
+    """The family's declared ``mean_domain``; positive means for one that declares none."""
+    return declared(family, "mean_domain", POSITIVE)
+
+
+def scale_is_known(family: object) -> bool:
+    """The family's ``scale_known``; a family that does not say fits with a known dispersion."""
+    return getattr(family, "scale_known", True)
+
+
+def prior_weights_in_normalizer(family: object) -> bool:
+    """Whether a prior weight enters the density's normalizer, so it must be strictly positive."""
+    return declared(family, "prior_weights_in_normalizer", False)
+
+
 def validate_response(y: NDArray, family: Distribution) -> None:
     """Validate the response vector for the given family.
 
-    Raises ValueError for invalid responses (e.g. non-binary for binomial,
-    negative for Poisson/Gamma).
+    Raises ValueError for a response outside the family's declared
+    ``response_support`` (non-binary for binomial, negative for Poisson),
+    then runs the family's own ``validate_response`` hook.
     """
     if not np.all(np.isfinite(y)):
         raise ValueError("Response y must contain only finite values")
-    if isinstance(family, Binomial):
-        bad = ~np.isin(y, [0, 1])
-        if np.any(bad):
-            n_bad = int(np.sum(bad))
-            vals = np.unique(y[bad])[:5]
-            raise ValueError(
-                f"Binomial family requires y in {{0, 1}}, "
-                f"but found {n_bad} invalid values (e.g. {vals})."
-            )
-    elif isinstance(family, Poisson):
-        if np.any(y < 0.0):
-            raise ValueError("Poisson family requires nonnegative y")
-    elif isinstance(family, NegativeBinomial):
-        if np.any(y < 0.0):
-            raise ValueError("NegativeBinomial family requires nonnegative y")
-    elif isinstance(family, Gamma):
-        if np.any(y <= 0.0):
-            raise ValueError("Gamma family requires strictly positive y")
-    elif isinstance(family, Tweedie):
-        if np.any(y < 0.0):
-            raise ValueError("Tweedie family requires nonnegative y")
+    support = declared(family, "response_support")
+    if support is not None:
+        support.check(y)
 
     custom_hook = getattr(family, "validate_response", None)
     hook_function = getattr(custom_hook, "__func__", custom_hook)
@@ -659,24 +780,14 @@ def initial_mean(y: NDArray, weights: NDArray, family: Distribution) -> float:
             exact_total += exact_weight
             exact_numerator += exact_weight * Fraction.from_float(float(value))
         y_bar = float(exact_numerator / exact_total)
-    if isinstance(family, Binomial):
-        return np.clip(y_bar, 1e-3, 1 - 1e-3)
-    if isinstance(family, Gaussian):
-        return y_bar
-    return max(y_bar, _POSITIVE_INIT_MIN)
+    band = mean_domain(family).start
+    return y_bar if band is None else float(np.clip(y_bar, *band))
 
 
 def clip_mu(mu: NDArray, family: Distribution) -> NDArray:
-    """Clip predicted means to a valid range for the family.
-
-    For positive-mean families, the bounds must be wide enough that the
-    IRLS can converge for near-separated categorical levels.
-    """
-    if isinstance(family, Binomial):
-        return np.clip(mu, 1e-7, 1 - 1e-7)
-    if isinstance(family, Gaussian):
-        return mu
-    return np.clip(mu, _POSITIVE_MU_MIN, _POSITIVE_MU_MAX)
+    """Clip predicted means to the band the family's ``mean_domain`` declares."""
+    band = mean_domain(family).clip
+    return mu if band is None else np.clip(mu, *band)
 
 
 def prior_weight_log_density(
