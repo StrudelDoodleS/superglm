@@ -971,7 +971,12 @@ class SuperGLM:
         criterion (returning a coefficient fit at the starting smoothing
         without held-out tables), or an estimated smoothing parameter left on a
         search-range limit returns a fitted model with a
-        ``ConvergenceWarning``. :meth:`ncv_diagnostics` records every verdict,
+        ``ConvergenceWarning``. So does a response that lies very far from
+        zero compared with its spread (less its offset): the coefficient fits
+        then stop at the limit of floating-point accuracy, and the model is
+        returned with the smoothing the search chose, its held-out tables and
+        the advice to subtract a constant from the response.
+        :meth:`ncv_diagnostics` records every verdict,
         :meth:`summary` names ``NCV`` and repeats any convergence or bound
         note, and :meth:`reml_diagnostics` reports ``enabled=False`` with
         ``criterion="ncv"``.
@@ -1444,12 +1449,15 @@ class SuperGLM:
               ``search_converged`` and ``coefficients_converged`` are ``True``.
             - ``"search_converged"`` : bool. Whether the smoothing search met
               its first-order test.
-            - ``"coefficients_converged"`` : bool. Whether the final
-              coefficient fit at the chosen smoothing converged (and was not
-              revised afterwards).
-            - ``"coefficient_termination"`` : str or None. Termination reason
-              of the final coefficient fit when it did not converge, else
-              ``None``.
+            - ``"coefficients_converged"`` : bool. Whether every coefficient
+              fit the result rests on met its convergence test: the final fit
+              at the chosen smoothing and each fit the search took a criterion
+              from (``False`` too after the coefficients were revised).
+            - ``"coefficient_termination"`` : str or None. Why a coefficient
+              fit fell short, else ``None``: the final fit's termination
+              reason, or ``"score_stagnated"`` when fits of the search or the
+              final fit stopped at the limit of floating-point accuracy for
+              the data.
             - ``"heldout_available"`` : bool. Whether :meth:`ncv_heldout` and
               :meth:`ncv_heldout_groups` have results to read.
             - ``"heldout_failure"`` : str or None. Reason held-out results
@@ -1477,7 +1485,7 @@ class SuperGLM:
               start and accepted step.
             - ``"work"`` : dict[str, int or float]. Cumulative work counts of
               the search (``inner_solves``, ``fallback_solves``,
-              ``pirls_iterations``, ``factorisations``,
+              ``stagnated_fits``, ``pirls_iterations``, ``factorisations``,
               ``small_factorisations``, ``solves``, ``rows_read``,
               ``rows_multiplied``, ``kept_fits``).
 

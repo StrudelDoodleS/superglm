@@ -477,6 +477,13 @@ and `criterion="ncv"` (no REML score) and points to `ncv_diagnostics()`.
   `diag["coefficient_termination"]` and raise `max_pirls_iter`); held-out
   tables are then omitted (`heldout_available` is `False` and `heldout_failure`
   records why).
+- **Coefficient fits at the limit of floating-point accuracy
+  (`ConvergenceWarning`)**: when the response, less its offset, lies very far
+  from zero compared with its spread, the coefficient fits cannot meet their
+  convergence test (`diag["coefficient_termination"]` is `"score_stagnated"`).
+  The model is still returned with the smoothing the search chose and its
+  held-out tables, and reads as not converged. Subtract a constant from the
+  response before fitting and add it back to the predictions.
 - **Smoothing parameter on a bound (`ConvergenceWarning`)**: names every
   estimated component sitting at the floor or ceiling of the search box
   (`diag["at_bound"]`), and notes separately if the held-out deviance was still
