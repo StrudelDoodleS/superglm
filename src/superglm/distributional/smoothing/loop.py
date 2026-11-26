@@ -243,13 +243,35 @@ _FINISH_TOLERANCE = 0.1
 _FINISH_ITERATIONS = 16
 
 
+class _OuterMode(NamedTuple):
+    """What a search mode (``DistributionalEFSConfig.outer``) does beside its rounds."""
+
+    has_endgame: bool  # a Newton endgame on the exact gradient can take the search
+    # Fellner--Schall has no exact-gradient test, and its plateau can leave V several
+    # stationarity bars short, so ``"efs+finish"`` ends a practical plateau with Wood,
+    # Pya and Saefken's (2016) Newton iteration on the components off the active face.
+    # A finish that cannot reach stationarity leaves the fit at its plateau.
+    finishes_plateau: bool
+    hands_off: bool  # the rounds hand the search to the endgame where it takes over
+    stationary: bool  # the search ends only where the exact gradient is stationary
+
+
+_OUTER_MODES = {
+    #                            has_endgame  finishes_plateau  hands_off  stationary
+    "efs":            _OuterMode(False,       False,            False,     False),
+    "efs+finish":     _OuterMode(True,        True,             False,     False),
+    "efs+newton":     _OuterMode(True,        False,            True,      False),
+    "efs+stationary": _OuterMode(True,        False,            True,      True),
+}  # fmt: skip
+
+
 def _endgame_config(config: DistributionalEFSConfig) -> DistributionalEFSConfig:
     """The config the Newton endgame runs on.
 
     ``"efs+finish"`` finishes a plateau on the exact gradient, an order tighter
     than the plateau's own bar.
     """
-    if config.outer != "efs+finish":
+    if not _OUTER_MODES[config.outer].finishes_plateau:
         return config
     return replace(config, outer="efs+newton", tolerance=_FINISH_TOLERANCE * config.tolerance)
 
@@ -411,7 +433,7 @@ class _SmoothingSearch:
         # ``fit_start`` sets the start (``initial_lambdas``, ``initial_objective``) and the
         # accepted state (``state``, ``estimated_names``, ``history``, ``coefficient_fits``);
         # ``run`` sets ``endgame_config``, which carries the start's lambda units.
-        self.stationary_search = outer_config.outer == "efs+stationary"
+        self.mode = _OUTER_MODES[outer_config.outer]
         self.accelerator = (
             WindowedTypeIIAnderson(
                 history=outer_config.acceleration_history,
@@ -466,11 +488,7 @@ class _SmoothingSearch:
         self.endgame_stationary = False
         self.pending_cap: NewtonEndgameOutcome | None = None
         self.newton_budget = (
-            (
-                _FINISH_ITERATIONS
-                if outer_config.outer == "efs+finish"
-                else outer_config.max_iterations
-            )
+            (_FINISH_ITERATIONS if self.mode.finishes_plateau else outer_config.max_iterations)
             if outer_config.max_newton_iterations is None
             else outer_config.max_newton_iterations
         )
@@ -565,7 +583,7 @@ class _SmoothingSearch:
                 result = self._strict_stop()
             elif len(self.history) >= self.outer_config.max_iterations:
                 result = self._out_of_rounds()
-            elif self.beyond_cap and self.outer_config.outer in ("efs+newton", "efs+stationary"):
+            elif self.beyond_cap and self.mode.hands_off:
                 # A component released beyond the cap never meets the FS proposal's box.
                 result = self._run_endgame()
             else:
@@ -632,15 +650,12 @@ class _SmoothingSearch:
         """After a refusal: the exact gradient decides first, the caps are held, or the fit ends."""
         if self.handed_over:
             pass  # the endgame's verdict stands, with the refusal recorded
-        elif self.outer_config.outer != "efs" and self.pending_cap is None:
+        elif self.mode.has_endgame and self.pending_cap is None:
             if self._endgame_budget() > 0 and self.estimated_names:
                 # The FS proposal nominated this cap; the exact gradient decides
                 # before a refusal is recorded (these assessment fits are dropped).
                 return self._run_endgame()
-        elif (
-            self.outer_config.outer in ("efs+newton", "efs+stationary")
-            and self.pending_cap is not None
-        ):
+        elif self.mode.hands_off and self.pending_cap is not None:
             bracket = self._bracket_after_refusal(attempt)
             if isinstance(bracket, BracketRelease):
                 self._accept_bracket_release(bracket, attempt)
@@ -657,7 +672,7 @@ class _SmoothingSearch:
                 evidence=replace(self.state.evidence, unresolved_upper_bound=()),
             )
             return None
-        if self.outer_config.outer == "efs" and not self.caps_final:
+        if not self.mode.has_endgame and not self.caps_final:
             self.refused_fit = self.state.fit
             self.cap_held |= frozenset(self.state.evidence.unresolved_upper_bound)
             self.state = replace(self.state, evidence=self._evidence())
@@ -807,7 +822,7 @@ class _SmoothingSearch:
         return bool(
             not self.endgame_stationary
             and self.estimated_names
-            and (self.stationary_search or self._endgame_budget() > 0)
+            and (self.mode.stationary or self._endgame_budget() > 0)
             and should_hand_off(
                 "objective_plateau" if self.windows.plateau_qualified else "lambda_change",
                 max_accepted_step=0.0,
@@ -1288,7 +1303,7 @@ class _SmoothingSearch:
         # a cap an endpoint trial holds, where the finish decides.
         self.unearned = (
             reason == "objective_rejected"
-            and self._plateau_finishes()
+            and self.mode.finishes_plateau
             and not self.endpoint_caps.isdisjoint(self.cap_held)
         )
         if self._endgame_budget() > 0 and (
@@ -1426,8 +1441,8 @@ class _SmoothingSearch:
         outward = self._outward_plateau()
         practical = outward or self.windows.practical_run >= config.plateau_iterations
         interior = not evidence.unresolved_upper_bound and not evidence.working_infinity
-        finishes = self._plateau_finishes() and self._endgame_budget() > 0
-        if self.stationary_search and practical:
+        finishes = self.mode.finishes_plateau and self._endgame_budget() > 0
+        if self.mode.stationary and practical:
             return self._run_endgame()
         if outward and not (finishes and interior):
             return self._plateau_result()
@@ -1435,7 +1450,7 @@ class _SmoothingSearch:
             config.practical_convergence
             # Plain Fellner--Schall has no other exit from a face. A spent finish leaves
             # a face to the strict stop, and a Newton endgame takes it at its hand-off.
-            and (self.state.face is None or finishes or config.outer == "efs")
+            and (self.state.face is None or finishes or not self.mode.has_endgame)
             and practical
             and evidence.maximum > config.tolerance
             and interior
@@ -1593,10 +1608,7 @@ class _SmoothingSearch:
         if self.accelerator is not None:
             return ()
         flat_tail = state.evidence.flat_tail
-        plateau = self.outer_config.practical_convergence and self.outer_config.outer in (
-            "efs",
-            "efs+finish",
-        )
+        plateau = self.outer_config.practical_convergence and not self.mode.hands_off
         resolution = self.outer_config.score_bar(state.objective) if plateau else -math.inf
         # The steps ``_scaled_proposal`` assigns the bound to.
         arriving = [
@@ -1671,16 +1683,6 @@ class _SmoothingSearch:
         self.estimated_names = self.state.evidence.estimated_names
         self._restart_windows()
 
-    def _plateau_finishes(self) -> bool:
-        """Whether a practical plateau hands to the endgame rather than stopping.
-
-        Fellner--Schall has no exact-gradient test, and its plateau can leave V several
-        stationarity bars short, so ``"efs+finish"`` ends with Wood, Pya and Saefken's
-        (2016) Newton iteration on the components off the active face. A finish that
-        cannot reach stationarity leaves the fit at its plateau.
-        """
-        return self.outer_config.outer == "efs+finish"
-
     def _endgame_budget(self) -> int:
         """The endgame iterations left: ``max_iterations`` bounds warm-up and endgame together."""
         return min(self.newton_budget, self.outer_config.max_iterations - len(self.history))
@@ -1745,7 +1747,7 @@ class _SmoothingSearch:
         if self.plateau_earned:
             return "practical_plateau"
         if self.endgame_stationary or (
-            self.stationary_search and not self.state.evidence.estimated_names
+            self.mode.stationary and not self.state.evidence.estimated_names
         ):
             return "stationary"
         return "objective_plateau" if self.windows.plateau_qualified else "lambda_change"
@@ -1780,7 +1782,7 @@ class _SmoothingSearch:
         # exact gradient is taken on the face they belong to. A search handed to the
         # endgame runs it off the face, as it does beside another component's cap, and
         # the gradient decides the caps.
-        pause = self._plateau_finishes() and not self._foreign_cap()
+        pause = self.mode.finishes_plateau and not self._foreign_cap()
         self.endgame_due = self._release_held_caps() and pause
         if self.endgame_due:
             return None
@@ -1792,10 +1794,10 @@ class _SmoothingSearch:
     def _endgame_from_here(self, budget: int) -> tuple[NewtonEndgameOutcome, bool]:
         """Run the endgame and take the state it ends at; whether a plateau's finish stalled."""
         entry = self.state
-        entry_fits = list(self.coefficient_fits) if self._plateau_finishes() else []
+        entry_fits = list(self.coefficient_fits) if self.mode.finishes_plateau else []
         entry_iterations = len(self.history)
         outcome = self._endgame_at(entry, budget)
-        stalled = self._plateau_finishes() and outcome.kind not in ("stationary", "cap_pressure")
+        stalled = self.mode.finishes_plateau and outcome.kind not in ("stationary", "cap_pressure")
         if stalled:
             # The plateau held where the finish started, not where it stalled, so a
             # finish that cannot reach stationarity leaves the search where it was.
@@ -1835,7 +1837,7 @@ class _SmoothingSearch:
     def _after_endgame(self, outcome: NewtonEndgameOutcome) -> DistributionalEFSResult | None:
         """Act on the endgame's verdict: resume, wait on the cap assessment, or end."""
         if outcome.kind == "derivative_unavailable":
-            if self.beyond_cap or self.stationary_search:
+            if self.beyond_cap or self.mode.stationary:
                 # EFS proposals use the original finite box and cannot safely
                 # continue from a component released above that box.
                 self.endgame_outcome = None
