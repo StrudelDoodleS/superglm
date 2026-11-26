@@ -958,6 +958,32 @@ class TestScoreTestZIStatistic:
         mu = np.exp(-1.0 + 1.8 * np.sin(2 * np.pi * X["x"].to_numpy()))
         _assert_chi_square_one(*_null_statistics(rng, 300, mu, fit, X))
 
+    @pytest.mark.slow
+    @pytest.mark.pins_behaviour
+    def test_a_factor_with_many_levels_rejects_too_often_on_rows_it_was_not_fitted_to(self):
+        """Pins the limit the docstring states, which is how the test has behaved since
+        its score took in ``y - mu``: a 30-level factor fitted to 600 Poisson(1) rows
+        and tested on 600 others rejects in 14% of 500 null samples, nearly all of
+        them toward "inflated".  Each level's fitted mean is off by some d, which adds
+        exp(d) - 1 - d, about d**2 / 2, to a row's expected score: 15 over the rows,
+        against the score's standard deviation of 21."""
+        from superglm import Categorical
+
+        rng = np.random.default_rng(88173)
+        X = pd.DataFrame({"g": np.repeat([f"level {k:02d}" for k in range(30)], 20)})
+        rejected = []
+        for _ in range(500):
+            y_fitted, y_tested = rng.poisson(1.0, (2, len(X))).astype(float)
+            model = SuperGLM(
+                family="poisson", features={"g": Categorical(base="first")}, selection_penalty=0.0
+            ).fit(X, y_fitted)
+            result = score_test_zi(model, X, y_tested)
+            if result.p_value < 0.05:
+                rejected.append(result.direction)
+
+        assert len(rejected) / 500 > 0.05 + 3.0 * np.sqrt(0.05 * 0.95 / 500)
+        assert rejected.count("inflated") > 0.8 * len(rejected)
+
     def test_log_variance_of_a_row_matches_a_60_digit_reference(self):
         """log(exp(mu) - 1 - mu) from the smallest float64 mean to 1e300, and on both
         sides of the mean where the series hands over to the subtraction."""

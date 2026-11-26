@@ -401,16 +401,13 @@ def score_test_zi(
     the subtracted term is ``sum(mu)``, and at a maximum-likelihood fit
     ``sum(y - mu)`` is zero, which leaves ``S`` and ``V``.
 
-    The fit enters through ``mu`` alone, so the same statistic holds:
+    The fit enters through ``mu`` alone, so the statistic is the same function
+    of the fitted means:
 
     - for a penalised fit (smooth terms, ``fit_reml``, a selection penalty).
       The penalty leaves the intercept free, and the intercept is the one
-      direction the variance correction removes.
-    - for rows the model was not fitted to, provided it was fitted to at least
-      as many.  ``y - mu`` removes the first-order effect of the error in
-      ``mu`` from the score, as Neyman's C(alpha) construction does for any
-      consistent estimate; what remains grows with the ratio of rows tested to
-      rows fitted and makes the test reject too often.
+      direction the variance correction removes.  The chi-square reference
+      then holds as far as the penalised means are accurate (below).
     - for another link, where ``p`` is the inflation probability with ``mu``
       held as each row's mean.  That is the usual zero-inflated Poisson
       whenever rescaling every mean by one factor stays inside the model: a log
@@ -423,10 +420,27 @@ def score_test_zi(
       fitted means, and the test rejects for that as it does for any other
       overdispersion.  A rejection says the fitted Poisson model does not
       account for the zeros, not that a zero-inflated model should replace it.
+    - The fitted means must be accurate, and the rows should be the ones the
+      model was fitted to.  On a row the model has not seen, an error ``d`` in
+      the fitted mean raises the expected score by ``exp(d) - 1 - d``, about
+      ``d**2 / 2``, whichever way the error goes; ``y - mu`` in ``S`` removes
+      the first-order effect of the error and not this one.  On a row the
+      model was fitted to, whose own count pulled its fitted mean toward it,
+      the expected score falls by about as much.  ``V`` allows for neither.
+      Summed over the rows passed, the shift is about half the squared error
+      of the fitted means: for an unpenalised fit tested on its own rows, half
+      its number of coefficients times a typical mean.  The test keeps its
+      stated rejection rate only while that is small beside ``sqrt(V)``.  A
+      model with many coefficients for its rows, such as a factor with many
+      levels, rejects too often on its own rows (toward ``"deflated"``) and
+      more often on other rows (toward ``"inflated"``), where the excess also
+      grows with the number of rows tested.  A rejection on held-out rows from
+      a flexible model is therefore not evidence of zero inflation.
     - The chi-square reference is a large-sample one.  A row weighs in
-      proportion to ``exp(mu)``, so the reference is accurate when the rows
-      with the largest means still expect zeros between them, and the test is
-      conservative when a few rows with large means carry the variance.
+      proportion to ``exp(mu)``, so a few rows with large means can carry the
+      variance, and the test is then conservative: in simulation it kept its
+      rate with means up to about 4, and rejected 0.2% of null samples with
+      means from 0.3 to 12.
 
     Parameters
     ----------
