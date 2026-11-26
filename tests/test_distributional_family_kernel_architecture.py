@@ -218,12 +218,18 @@ def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
             "weights",
             "likelihood_identity",
         },
-        ADAPTERS / "lomax.py": {"families._declared", "families._predictors", "family"},
+        ADAPTERS / "lomax.py": {
+            "families._declared",
+            "families._predictors",
+            "family",
+            "kernels._mean_excess",
+        },
         ADAPTERS / "log_logistic.py": {
             "families._declared",
             "families._predictors",
             "family",
             "likelihood_identity",
+            "kernels._mean_excess",
         },
         ROOT / "observation.py": set(),
         ROOT / "weights.py": set(),
@@ -248,6 +254,7 @@ def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
             "families._base",
             "families._predictors",
             "families._variance",
+            "kernels._mean_excess",
         },
         ADAPTERS / "gamma.py": {
             "family",
@@ -259,6 +266,7 @@ def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
             "families._base",
             "families._predictors",
             "families._variance",
+            "kernels._mean_excess",
         },
         ADAPTERS / "_variance.py": {"kernels._common", "kernels.gamma"},
         ADAPTERS / "generalized_gamma.py": {
@@ -272,6 +280,7 @@ def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
             "families._base",
             "families._predictors",
             "families.gaussian",
+            "kernels._mean_excess",
         },
         ADAPTERS / "negative_binomial.py": {
             "family",
@@ -310,6 +319,7 @@ def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
             "families._base",
             "families._predictors",
             "families._links",
+            "kernels._mean_excess",
         },
         ADAPTERS / "two_piece.py": {
             "family",
@@ -322,6 +332,7 @@ def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
             "families._predictors",
             "families._links",
             "families.gaussian",
+            "kernels._mean_excess",
         },
         ADAPTERS / "log_normal.py": {
             "family",
@@ -334,6 +345,7 @@ def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
             "families._predictors",
             "families._variance",
             "families.gaussian",
+            "kernels._mean_excess",
         },
         ADAPTERS / "_links.py": set(),
     }
