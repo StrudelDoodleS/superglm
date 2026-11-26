@@ -231,34 +231,6 @@ def _backtracked_rate_cannot_finish(
     return math.log(score_bar / gradient_norm) / math.log(1.0 - step) > iterations_left
 
 
-def _mean_space_boundary_message(rows: int, *, estimated: bool, unresolved: bool = False) -> str:
-    """Why a fit whose maximum stays at the mean-space boundary has no REML criterion.
-
-    ``unresolved``: the rows rise towards the boundary along a direction the
-    factorization truncates (``TruncatedDirection.boundary``) rather than
-    being fitted at it.
-    """
-    where = (
-        "even with every estimated smoothing parameter at its upper bound"
-        if estimated
-        else "at the fixed smoothing parameters"
-    )
-    fitted = (
-        "rise towards probability 1 along a direction float64 cannot resolve"
-        if unresolved
-        else "are fitted at probability 1"
-    )
-    return (
-        f"The binomial/log model has no interior maximum: {rows} row(s) {fitted}, the "
-        f"boundary of its parameter space, {where}. The maximum "
-        "is constrained there rather than stationary, so the Laplace-approximate REML "
-        "criterion is not defined at it. The unpenalized part of the model fits these "
-        "rows at probability one (for example a categorical level or parametric term "
-        "whose rows all have y = 1); a logit link, merging that level, or a Poisson/log "
-        "risk-ratio fit with robust standard errors (Zou 2004) avoids the boundary."
-    )
-
-
 def optimize_direct_reml(
     dm: DesignMatrix,
     distribution: Any,
@@ -887,16 +859,8 @@ def optimize_direct_reml(
             and pair.mean_space_violation is not None
         ):
             if not bool(np.any(estimated_mask & (rho_clipped < log_hi))):
-                raise ObservedModeNotConvergedError(
-                    _mean_space_boundary_message(
-                        int(pirls_result.mean_space_boundary_rows),
-                        estimated=bool(np.any(estimated_mask)),
-                        unresolved=bool(pirls_result.mean_space_boundary_unresolved),
-                    ),
-                    infeasible_detail=(
-                        "the penalized maximum lies on the boundary of the binomial mean space"
-                    ),
-                )
+                termination_reason = "mean_space_boundary"
+                break
             rho_clipped = np.where(
                 estimated_mask,
                 np.clip(rho_at_boundary + restoration_step, log_lo, log_hi),
@@ -915,6 +879,18 @@ def optimize_direct_reml(
             pirls_result, XtWX_S_inv, XtWX, S_cand, cand_dense = fit_candidate(
                 cand_lambdas, None, None, n_iter
             )
+        if termination_reason == "mean_space_boundary":
+            # No penalty can move the rows: the unpenalized part holds them at
+            # the boundary, where the criterion is undefined. Published, disclosed.
+            best_pirls, best_obj, best_lambdas = pirls_result, np.nan, cand_lambdas.copy()
+            stop_evidence = {
+                "test": "mean_space_boundary",
+                "iter": n_iter,
+                "boundary_row_count": int(pirls_result.mean_space_boundary_rows),
+                "unresolved_direction": bool(pirls_result.mean_space_boundary_unresolved),
+                "estimated_at_upper_bound": bool(np.any(estimated_mask)),
+            }
+            break
         warm_beta = pirls_result.beta.copy()
         warm_intercept = float(pirls_result.intercept)
         warm_centred = centred_warm_start(pirls_result)

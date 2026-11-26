@@ -248,6 +248,11 @@ _REML_REASON_TEXT = {
     "max_reml_iter": "it reached the max_reml_iter limit",
     "line_search_failed": "no smoothing step improved the REML score",
     "line_search_stalled": "no smoothing step improved the REML score",
+    "mean_space_boundary": (
+        "the penalized maximum holds fitted means on the boundary of the family's mean "
+        "space at every smoothing parameter the search can reach, and the REML score is "
+        "not defined there"
+    ),
 }
 
 # Termination reasons of a smoothing search that met its convergence test. A
