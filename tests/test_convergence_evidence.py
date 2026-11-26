@@ -12,22 +12,31 @@ from superglm.diagnostics.separation import SeparationWarning
 from superglm.group_matrix import DenseGroupMatrix
 
 
+@pytest.mark.parametrize("weight", [1.0, 1e5], ids=["relative_bar", "capped_bar"])
 @pytest.mark.parametrize("discrete", [False, True], ids=["exact", "binned"])
-def test_iteration_cap_reports_the_budget_and_last_test(discrete):
+def test_iteration_cap_reports_the_budget_and_last_test(discrete, weight):
+    """The gradient bar is the one the stop compared: relative, capped at ``1e5 * tol``."""
     rng = np.random.default_rng(284)
     x = np.linspace(0, 1, 128)
     y = rng.poisson(np.exp(np.sin(6 * x)))
     model = SuperGLM(family="poisson", features={"x": Spline(k=6)}, discrete=discrete)
     with pytest.warns(ConvergenceWarning, match=r"max_reml_iter.*model\.diagnostics\("):
-        model.fit_reml(pd.DataFrame({"x": x}), y, max_reml_iter=1, reml_tol=1e-8)
+        model.fit_reml(
+            pd.DataFrame({"x": x}),
+            y,
+            sample_weight=np.full(x.size, weight),
+            max_reml_iter=1,
+            reml_tol=1e-8,
+        )
     report = model.diagnostics()["_model"]["convergence"]
     smoothing = report["smoothing"]
     assert smoothing["reason"] == "max_reml_iter"
     assert smoothing["iterations"] == smoothing["evidence"]["iteration_limit"] == 1
     evidence = smoothing["evidence"]
     assert evidence["test"] == "iteration_limit"
-    assert evidence["gradient_norm"] > evidence["gradient_bar"]
-    assert evidence["gradient_bar"] == pytest.approx(1e-8 * (1 + abs(evidence["objective"])))
+    relative = 1e-8 * (1 + abs(evidence["objective"]))
+    assert (relative < 1e-3) == (weight == 1.0)
+    assert evidence["gradient_bar"] == pytest.approx(min(relative, 1e-3))
     assert evidence["objective_change"] is None
     assert evidence["objective_roundoff"] is None
     assert report["coefficients"]["converged"]
