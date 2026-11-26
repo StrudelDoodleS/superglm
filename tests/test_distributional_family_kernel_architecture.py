@@ -4,6 +4,8 @@ import ast
 from collections.abc import Iterator
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).parents[1] / "src/superglm/distributional"
 KERNELS = ROOT / "kernels"
 ADAPTERS = ROOT / "families"
@@ -207,7 +209,9 @@ def test_kernels_share_their_primitive_helpers() -> None:
     assert offenders == {}
 
 
+@pytest.mark.pins_behaviour
 def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
+    """Pins the import edges family adapters and contracts may use; a new edge is listed here."""
     allowed = {
         ROOT / "family.py": {"weights", "observation", "response"},
         ROOT / "response.py": set(),
