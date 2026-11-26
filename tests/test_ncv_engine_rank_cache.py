@@ -686,6 +686,24 @@ def lone_column() -> Apart:
     return numeric_columns(frame, rng.normal(size=n), np.ones(n), columns)
 
 
+@cache
+def marginal_alias() -> Apart:
+    """Columns ``x`` and ``z`` 3e-7 of their size apart, 1e-3 apart at row 0, on 20 rows.
+
+    Row 0's margin, 7.2e-7, is just above the 6.6e-7 its leverages are known to: its sign is
+    certain and its size is not, so the step it divides could be off by as much as the margin.
+    Its kept rows have a condition of 1e7.
+    """
+    rng = np.random.default_rng(6)
+    n = 20
+    x = rng.normal(size=n)
+    z = x + 3e-7 * rng.normal(size=n)
+    z[0] += 1e-3
+    frame = pd.DataFrame({"x": x, "z": z})
+    columns = np.column_stack([np.ones(n), x, (z - x) / 3e-7])
+    return numeric_columns(frame, rng.normal(size=n), np.ones(n), columns)
+
+
 def blocks(n, size):
     """Consecutive rows ``size`` at a time: single rows, or groups whose first holds rows 0 and 1."""
     return single_rows(n) if size == 1 else from_groups(np.arange(n) // size, n)
@@ -739,6 +757,21 @@ def test_margin_the_inverse_does_not_resolve_is_fitted_from_its_kept_rows(size, 
     assert got.work.kept_fits == 1
     if route is None and size == 2:
         assert (got.work.stacked, got.work.small_factorisations) == (nb.m - 1, 0)
+
+
+@pytest.mark.parametrize("route", [None, "woodbury"], ids=["cost-rule", "alone"])
+def test_margin_just_above_its_error_is_not_solved_from_the_inverse(route):
+    """A margin that only fixes its sign does not set its step: row 0 is fitted from its kept rows.
+
+    From the inverse its held-out prediction is 1.4% off the least-squares fit of the rows it
+    keeps; the margin has to clear its error :data:`engine.RESOLVED` times over to be used.
+    """
+    design = marginal_alias()
+    nb = single_rows(design.problem.n)
+    got = evaluate(design.problem, nb, np.zeros(0), gradient=False, route=route)
+    assert got.feasible
+    assert_kept_rows_fits(design, nb, got, from_rows=(0,))
+    assert got.work.kept_fits == 1
 
 
 @pytest.mark.parametrize("route", [None, "woodbury"], ids=["cost-rule", "alone"])

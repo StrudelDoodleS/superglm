@@ -159,11 +159,14 @@ iterative refinement", arXiv:2510.01696: a backward error of order ``u kappa(H)`
 from the inverse of a Gram is therefore known to ``u`` times the Gram's condition, the
 square of the rows' own, where the leverage itself is conditioned by the rows' (Holodnak,
 Ipsen and Wentworth, "Conditioning of leverage scores and computation by QR decomposition",
-arXiv:1402.0957, Theorem 2.4).  A system is solved on this route only when its margin
-exceeds ``2 P gamma_n ||(D H D)^-1||_1``: the Gram's term twice over, which is at least
-``eta / (1 - eta)`` wherever it is below one and leaves the other terms as much again while
-``eta`` is small.  The 1-norm is at least the 2-norm and is ``O(P^2)`` to read from the
-Hessian's diagonal and the solver's inverse.  The product of the system's margin and the
+arXiv:1402.0957, Theorem 2.4).  The margin is known to ``2 P gamma_n ||(D H D)^-1||_1``: the
+Gram's term twice over, which is at least ``eta / (1 - eta)`` wherever it is below one and
+leaves the other terms as much again while ``eta`` is small.  A margin only above that bound
+fixes its sign and not its size, and the step it divides carries the margin's relative error:
+``U / m`` for a margin ``m`` known to ``U``.  A system is therefore solved on this route
+only when its margin exceeds :data:`RESOLVED` times the bound, which leaves the step within
+1/63 of the exact one at worst.  The 1-norm is at least the 2-norm and is ``O(P^2)`` to read
+from the Hessian's diagonal and the solver's inverse.  The product of the system's margin and the
 full fit's own, which bounds the smallest eigenvalue of its Jacobi-scaled leave-out Hessian
 from below, then clears the error of that Hessian's two Grams.  A system at or below the
 level, and above the flag level, is formed and factored instead, where the margin is read
@@ -264,6 +267,14 @@ KEPT_FITS = 8
 
 Each is a pass of the solver's row factor over the design, so an evaluation that needs more
 is an infeasible trial: a limit on cost, not a tolerance.
+"""
+
+RESOLVED = 64.0
+"""How many times the error bound of its leverages a margin solved from ``H^-1`` must exceed.
+
+The margin is then known to a sixty-fourth of itself, so the leave-out step is within 1/63
+of the exact one at worst.  A margin at or below that level is decided by the system's own
+factorisation (module docstring, "A margin the inverse does not resolve").
 """
 
 _POCON = get_lapack_funcs("pocon", dtype=np.float64)
@@ -1055,12 +1066,14 @@ class _Trial:
         ``D = diag(H)^(-1/2)`` (module docstring): the error of the Hessian's Gram, twice
         over, times the 1-norm of the inverse of the Jacobi-scaled Hessian.  That norm is
         read from the solver's own inverse in the design's columns, where the intercept's
-        entry is one.  Never below :attr:`questionable`.
+        entry is one.  A margin is resolved at :data:`RESOLVED` times that error.  Never
+        below :attr:`questionable`.
         """
         fit = self.fit
         root = np.sqrt(np.maximum(np.diag(fit.slope_hessian), 0.0))
         inverse = float(np.max(root * (np.abs(fit.slope_inverse) @ root), initial=1.0))
-        return max(self.questionable, 2.0 * self.width * gamma(self.problem.n) * inverse)
+        error = 2.0 * self.width * gamma(self.problem.n) * inverse
+        return max(self.questionable, RESOLVED * error)
 
     def raw(self, rows: NDArray[np.intp]) -> NDArray[np.float64]:
         """The augmented centred rows of ``rows`` in the design's own columns.
