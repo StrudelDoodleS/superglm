@@ -60,6 +60,18 @@ def fit_refit_model(
     return resolved_method
 
 
+def holds_searched_smoothing(model) -> bool:
+    """Whether an ``"auto"`` refit of ``model`` holds smoothing a search chose.
+
+    True for a ``fit_ncv`` fit, whose refit is a ``fit``, and for a refit that held such
+    smoothing; false where the refit replays the search (``fit_reml``) or nothing searched.
+    """
+    traits = fit_method.traits_of(model)
+    if fit_method.FIT_METHODS[traits.refit_as].criterion is not None:
+        return False
+    return traits.criterion is not None or fit_method.smoothing_held_from(model) is not None
+
+
 def _record_held_smoothing(source_model, refit_model, resolved_method: str) -> None:
     """Record which search chose the smoothing a refit holds, where the source's own refit holds it.
 

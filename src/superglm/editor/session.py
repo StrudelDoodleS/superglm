@@ -1966,8 +1966,9 @@ class EditorSession:
                 **fit_kwargs,
             )
             return refit_model, refit_model._fit_settings["method"]
-        # A ``fit`` at the source's smoothing holds each lambda policy's resolved value.
-        held = lambda2 is ... and resolve_refit_method(self.model, method) == "fit"
+        # A ``fit`` carries no lambda policy: its lambda2, the source's resolved smoothing or
+        # the analyst's, holds every term's value.
+        held = resolve_refit_method(self.model, method) == "fit"
         refit_model = clone_with_replaced_features(
             self.model, drafts, lambda1=lambda1, lambda2=lambda2, smoothing_resolved=held
         )

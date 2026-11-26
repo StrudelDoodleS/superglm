@@ -31,6 +31,7 @@ from superglm.diagnostics.convergence import ncv_bound_message, ncv_nonconvergen
 from superglm.diagnostics.fit_report import status_sentence
 from superglm.editor import EditorSession
 from superglm.editor import free_levels as free_levels_module
+from superglm.editor.cv import capture_final_fit, run_final_fit
 from superglm.editor.diagnose import fit_trace
 from superglm.editor.refit import fit_refit_model
 from superglm.features.rebuild import clone_with_replaced_features
@@ -40,6 +41,7 @@ from superglm.model.telemetry_ops import metrics_for_logging
 from superglm.ncv import engine
 from superglm.ncv import search as search_module
 from superglm.types import LambdaPolicy
+from tests.test_editor_cv import _Context
 from tests.test_fit_ncv import curve_book, curve_fit, curve_model, run
 from tests.test_ncv_engine import always, solver_short
 from tests.test_ncv_search import NarrowBox
@@ -417,6 +419,54 @@ def test_an_editor_refit_of_drafts_holds_a_fixed_lambda_policy_at_the_chosen_smo
     assert refit._editor_step["method"] == "fit_reml" and refit._reml_result is not None
     assert fitted_lambda2(refit)["x:wiggle"] == 3.0
     assert refit._specs["x"]._lambda_policy == LambdaPolicy.fixed(3.0)
+
+
+def test_an_editor_refit_at_the_analysts_smoothing_drops_a_lambda_policy():
+    """A drafts refit of a fit_ncv model given ``lambda2`` is a ``fit`` at that smoothing, x's policy dropped.
+
+    The reference is a ``fit`` of the same drafted terms without the policy at ``lambda2 = 1``.
+    """
+    rng = np.random.default_rng(41)
+    frame = pd.DataFrame({"x": rng.uniform(size=400), "z": rng.uniform(size=400)})
+    y = np.sin(6 * frame.x.to_numpy()) + np.cos(4 * frame.z.to_numpy()) + rng.normal(0, 0.3, 400)
+    features = {
+        "x": Spline(kind="ps", n_knots=8, lambda_policy=LambdaPolicy.fixed(3.0)),
+        "z": Spline(kind="ps", n_knots=6),
+    }
+    model = SuperGLM(family="gaussian", features=features)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_ncv(frame, y)
+        session = EditorSession.from_model(model, terms=["x", "z"], train_data=(frame, y))
+        session.stage_structural("knots", "x", {"count": 6, "strategy": "quantile_rows"})
+        drafts = {term: copy.deepcopy(session.draft_spec(term)) for term in ("x", "z")}
+        session.refit_pending(lambda2=1.0)
+    refit = session.model
+    assert refit._editor_step["method"] == "fit" and refit._specs["x"]._lambda_policy is None
+    drafts["x"]._lambda_policy = None
+    reference = SuperGLM(family="gaussian", features=drafts)
+    reference.lambda2 = 1.0
+    reference.fit(frame, y)
+    np.testing.assert_allclose(refit.predict(frame), reference.predict(frame), rtol=1e-10)
+
+
+def test_the_editors_final_fit_of_a_fit_ncv_model_holds_the_chosen_smoothing():
+    """Final fit on the rows fit_ncv chose its smoothing on, with no edit, gives back the same model.
+
+    A ``fit`` refit holds the smoothing, so its fitted values are the source's to the solve's rounding.
+    """
+    rng = np.random.default_rng(41)
+    frame = pd.DataFrame({"x": rng.uniform(size=400)})
+    y = np.sin(6 * frame.x.to_numpy()) + rng.normal(0, 1, 400)
+    model = SuperGLM(family="gaussian", features={"x": Spline(kind="ps", n_knots=12)})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_ncv(frame, y)
+        session = EditorSession.from_model(model, train_data=(frame, y))
+        final = run_final_fit(capture_final_fit(session), _Context())
+    chosen = model.ncv_diagnostics()["lambdas"]
+    assert fitted_lambda2(final.model) == chosen
+    np.testing.assert_allclose(final.model.predict(frame), model.predict(frame), rtol=1e-10)
 
 
 def test_compare_with_free_levels_holds_a_fixed_lambda_policy_at_the_chosen_smoothing(monkeypatch):
