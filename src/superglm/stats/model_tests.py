@@ -354,14 +354,14 @@ _ZI_SERIES_BELOW = (25200.0 * UNIT_ROUNDOFF) ** (1.0 / 6.0)
 
 
 def _log_zi_information(mu: NDArray) -> NDArray:
-    """``log(exp(mu) - 1 - mu)`` for ``mu >= 0``, ``-inf`` at zero.
+    """Compute ``log(exp(mu) - 1 - mu)`` for ``mu >= 0`` (``-inf`` at zero).
 
-    ``mu + log(1 - exp(-mu) - mu exp(-mu))`` overflows at no mean, but it
-    subtracts two terms near ``mu`` that differ by ``mu**2 / 2``, which costs
-    about ``10 u / mu`` of the difference.  Below ``(25200 u)**(1/6)``, about
-    0.012, the series through ``mu**4`` takes over: its first dropped term,
-    ``mu**5 / 2520`` of the value, is the smaller error there.  The two meet
-    at ``1e-13``, the most either adds to the log.
+    For ``mu >= _ZI_SERIES_BELOW`` (``(25200 u)**(1/6)``, about 0.012),
+    ``mu + log(-expm1(-mu) - mu * exp(-mu))`` never overflows; at small ``mu`` it subtracts two
+    terms near ``mu`` differing by ``mu**2 / 2``, with relative error about ``10 u / mu``.  Below
+    that threshold, ``2 * log(mu)`` plus the log of the series through ``mu**4`` takes over
+    (avoiding ``mu**2`` underflow); its first omitted term is ``mu**5 / 2520`` of the value.  The
+    two errors meet near ``1e-13``, the most either adds to the log.
     """
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
         series = 2.0 * np.log(mu) + np.log(
@@ -380,67 +380,36 @@ def score_test_zi(
 ) -> ScoreTestZIResult:
     """Score test for zero inflation in a fitted Poisson model.
 
-    Tests H0, that every count is Poisson with its fitted mean, against a
-    zero-inflated Poisson in which a constant share ``p`` of the rows is zero
-    whatever its mean.  The statistic is the squared score for ``p`` at
-    ``p = 0`` over the score's variance::
+    Tests H0, that every count is Poisson with its fitted mean ``mu``, against a zero-inflated
+    Poisson where a constant share ``p`` of rows is zero whatever its mean.  Because ``p`` may be
+    negative, zero is not on its boundary and the test is two-sided: too few zeros reject as well
+    as too many.  ``p_value`` is the upper tail of ``statistic`` under chi-square with one degree
+    of freedom; ``direction`` is the sign of the score ``S`` (``"inflated"`` when ``S > 0``,
+    ``"deflated"`` otherwise).
 
-        S = sum((1{y = 0} - p0) / p0 + (y - mu)),    p0 = exp(-mu)
-        V = sum((1 - p0) / p0 - mu)
-        statistic = S**2 / V
+    A rejection says the fitted Poisson model does not account for the zeros, not that a
+    zero-inflated model should replace it; a wrong mean or other overdispersion makes it reject.
 
-    ``p_value`` is its upper tail under chi-square with one degree of freedom.
-    The test is two-sided: too few zeros reject as well as too many, and
-    ``direction`` is the sign of ``S``.  ``p`` may be negative under this
-    alternative, so zero is not on its boundary.
+    **When the result can be trusted**
 
-    With a log link this is van den Broek's (1995) score test in its regression
-    form (Jansakul and Hinde, 2002, with a constant inflation probability; Deng
-    and Paul, 2005).  Their variance is ``sum((1 - p0) / p0) - mu' D (D' diag(mu)
-    D)^-1 D' mu`` for the design ``D`` of the mean; with an intercept in ``D``
-    the subtracted term is ``sum(mu)``, and at a maximum-likelihood fit
-    ``sum(y - mu)`` is zero, which leaves ``S`` and ``V``.
+    - **Many coefficients or a flexible model.**  Errors in ``mu`` shift the expected score without
+      entering ``V``, so a model with many coefficients for its rows (such as a factor with many
+      levels) rejects too often: toward ``"deflated"`` on its own fitted rows, and more often
+      toward ``"inflated"`` on other rows.
+    - **Rows the model was not fitted to.**  The rows should be the ones the model was fitted to.
+      On unseen rows, errors in ``mu`` push the expected score upward whichever way they go and
+      the excess rejection rate grows with the number of rows tested; a rejection on held-out rows
+      from a flexible model is therefore not evidence of zero inflation.
+    - **A misspecified or over-smoothed mean.**  The mean must be right.  A missing term, or one
+      smoothed or shrunk further than the data support, leaves counts more spread than their
+      fitted means, and the test rejects for that as it does for any other overdispersion.
+    - **Large fitted means.**  The chi-square reference is a large-sample one.  Each row weighs
+      in proportion to ``exp(mu)``, so a few rows with large means can carry the variance and make
+      the test conservative: in simulation it kept its rate with means up to about 4, and rejected
+      0.2% of null samples with means from 0.3 to 12.
 
-    The fit enters through ``mu`` alone, so the statistic is the same function
-    of the fitted means:
-
-    - for a penalised fit (smooth terms, ``fit_reml``, a selection penalty).
-      The penalty leaves the intercept free, and the intercept is the one
-      direction the variance correction removes.  The chi-square reference
-      then holds as far as the penalised means are accurate (below).
-    - for another link, where ``p`` is the inflation probability with ``mu``
-      held as each row's mean.  That is the usual zero-inflated Poisson
-      whenever rescaling every mean by one factor stays inside the model: a log
-      link with an intercept, or a power link without an offset.
-
-    What the test relies on:
-
-    - The mean must be right.  A missing term, or one smoothed or shrunk
-      further than the data support, leaves the counts more spread than their
-      fitted means, and the test rejects for that as it does for any other
-      overdispersion.  A rejection says the fitted Poisson model does not
-      account for the zeros, not that a zero-inflated model should replace it.
-    - The fitted means must be accurate, and the rows should be the ones the
-      model was fitted to.  On a row the model has not seen, an error ``d`` in
-      the fitted mean raises the expected score by ``exp(d) - 1 - d``, about
-      ``d**2 / 2``, whichever way the error goes; ``y - mu`` in ``S`` removes
-      the first-order effect of the error and not this one.  On a row the
-      model was fitted to, whose own count pulled its fitted mean toward it,
-      the expected score falls by about as much.  ``V`` allows for neither.
-      Summed over the rows passed, the shift is about half the squared error
-      of the fitted means: for an unpenalised fit tested on its own rows, half
-      its number of coefficients times a typical mean.  The test keeps its
-      stated rejection rate only while that is small beside ``sqrt(V)``.  A
-      model with many coefficients for its rows, such as a factor with many
-      levels, rejects too often on its own rows (toward ``"deflated"``) and
-      more often on other rows (toward ``"inflated"``), where the excess also
-      grows with the number of rows tested.  A rejection on held-out rows from
-      a flexible model is therefore not evidence of zero inflation.
-    - The chi-square reference is a large-sample one.  A row weighs in
-      proportion to ``exp(mu)``, so a few rows with large means can carry the
-      variance, and the test is then conservative: in simulation it kept its
-      rate with means up to about 4, and rejected 0.2% of null samples with
-      means from 0.3 to 12.
+    Penalised fits (smooth terms, ``fit_reml``, a selection penalty), offsets and other links use
+    the same statistic, subject to the same accuracy requirements on ``mu`` (see *Notes*).
 
     Parameters
     ----------
@@ -451,42 +420,71 @@ def score_test_zi(
     y : array-like
         Observed response values.
     sample_weight : array-like or None
-        Observation weights. Currently unsupported.
+        Observation weights.  Currently unsupported.
     offset : array-like or None
         Optional offset.  It enters through ``mu`` only.
 
     Returns
     -------
     ScoreTestZIResult
-        ``statistic`` is infinite and ``p_value`` 0 where the statistic is
-        beyond float64's largest number: a zero observed at a fitted mean above
-        about 355 plus half the largest fitted mean.
+        ``statistic`` is infinite and ``p_value`` is 0 when the statistic exceeds float64's limit:
+        a zero observed at a fitted mean above about 355 plus half the largest fitted mean.
 
     Raises
     ------
     NoPredictedMeanError
-        Where the model gives a row no predicted mean: the statistic would be
-        read from a mean that does not exist.
+        If the model gives a row no predicted mean: no mean exists to read the statistic from.
     ValueError
-        Where the statistic is undefined: a predicted mean is not finite, or
-        every predicted mean is zero.
+        If ``model`` is not Poisson, or the statistic is undefined (a predicted mean is not
+        finite, or every predicted mean is zero).
+    NotImplementedError
+        If ``sample_weight`` is provided.
+
+    Notes
+    -----
+    The statistic is the squared score for ``p`` at ``p = 0`` over the score's variance::
+
+        S = sum((1{y = 0} - p0) / p0 + (y - mu)),    p0 = exp(-mu)
+        V = sum((1 - p0) / p0 - mu)
+        statistic = S**2 / V
+
+    With a log link this is van den Broek's (1995) score test in its regression form (Jansakul and
+    Hinde, 2002, with a constant inflation probability; Deng and Paul, 2005).  Their variance is
+    ``sum((1 - p0) / p0) - mu' D (D' diag(mu) D)^-1 D' mu`` for the design ``D`` of the mean;
+    with an intercept in ``D`` the subtracted term is ``sum(mu)``, and at a maximum-likelihood fit
+    ``sum(y - mu) = 0``, leaving ``S`` and ``V``.
+
+    The fit enters through ``mu`` alone, so ``S`` and ``V`` take the same form for a penalised fit:
+    the penalty leaves the intercept free, the one direction the variance correction removes, so
+    the chi-square reference holds as far as the penalised means are accurate.  They also take the
+    same form for another link, where ``p`` is the inflation probability with ``mu`` held as each
+    row's mean; this is the usual zero-inflated Poisson whenever rescaling every mean by one factor
+    stays inside the model (a log link with an intercept, or a power link without an offset).
+
+    **Fitted-mean error.**  On an unseen row, an error ``d`` in the fitted mean raises the expected
+    score by ``exp(d) - 1 - d``, about ``d**2 / 2``, whichever way ``d`` goes; ``y - mu`` in ``S``
+    removes the first-order effect of ``d`` and not this one.  On a fitted row, whose own count
+    pulled its fitted mean toward it, the expected score falls by about as much.  ``V`` allows for
+    neither.  Summed over the rows passed, the shift's size is about half the summed squared error
+    of ``mu`` (for an unpenalised fit on its own rows, half its number of coefficients times a
+    typical mean); the stated rejection rate holds only while that is small beside ``sqrt(V)``.
 
     References
     ----------
-    Deng, D. and Paul, S. R. (2005). Score tests for zero-inflation and
-    over-dispersion in generalized linear models. Statistica Sinica 15, 257-276.
+    Deng, D. and Paul, S. R. (2005). Score tests for zero-inflation and over-dispersion in
+    generalized linear models. *Statistica Sinica* 15, 257-276.
 
-    Hsu, W.-W., Todem, D., Mawella, N. R., Kim, K. and Rosenkranz, R. R. (2020).
-    A robust score test of homogeneity for zero-inflated count data.
-    Statistical Methods in Medical Research 29(12), 3653-3665.
+    Hsu, W.-W., Todem, D., Mawella, N. R., Kim, K. and Rosenkranz, R. R. (2020). A robust score
+    test of homogeneity for zero-inflated count data. *Statistical Methods in Medical Research*
+    29(12), 3653-3665.
 
-    Baillo, A., Berrendero, J. R. and Carcamo, J. (2008). Tests for
-    zero-inflation and overdispersion. arXiv:0809.4205.
+    Baillo, A., Berrendero, J. R. and Carcamo, J. (2008). Tests for zero-inflation and
+    overdispersion. arXiv:0809.4205.
 
-    van den Broek, J. (1995), Biometrics 51, 738-743, and Jansakul, N. and
-    Hinde, J. P. (2002), Computational Statistics and Data Analysis 40, 75-96,
-    are the original papers; the statement here follows the three above and the
-    documentation of statsmodels' ``test_poisson_zeroinflation_jh``.
+    van den Broek, J. (1995), *Biometrics* 51, 738-743, and Jansakul, N. and Hinde, J. P. (2002),
+    *Computational Statistics and Data Analysis* 40, 75-96, are the original papers; they were not
+    read directly, and the statement here follows the three references above and the documentation
+    of statsmodels' ``test_poisson_zeroinflation_jh``.
     """
     import scipy.spatial
     from scipy import stats
