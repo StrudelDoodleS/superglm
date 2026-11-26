@@ -272,14 +272,16 @@ class TestFitRemlLambdaPolicy:
 
     @pytest.mark.parametrize("route", ["fit", "fit_path"])
     def test_fit_rejects_lambda_policy(self, poisson_data, route):
-        """fit() and fit_path() refuse lambda_policy, naming the route and fit_reml()."""
+        """fit() and fit_path() refuse lambda_policy, naming the route and the two methods that read one."""
         X, y, w = poisson_data
         model = SuperGLM(
             family="poisson",
             selection_penalty=0.01,
             features={"x": Spline(kind="cr", n_knots=8, lambda_policy=LambdaPolicy.fixed(1.0))},
         )
-        with pytest.raises(NotImplementedError, match=rf"fit_reml\(\), not {route}\(\)"):
+        with pytest.raises(
+            NotImplementedError, match=rf"fit_reml\(\) and fit_ncv\(\), not {route}\(\)"
+        ):
             getattr(model, route)(X, y, sample_weight=w)
 
     @pytest.mark.parametrize("route", ["fit", "fit_path"])
@@ -293,7 +295,9 @@ class TestFitRemlLambdaPolicy:
             selection_penalty=0.01,
             features={"grade": OrderedCategorical(order=levels, basis=basis)},
         )
-        with pytest.raises(NotImplementedError, match=rf"'grade'.*fit_reml\(\), not {route}\(\)"):
+        with pytest.raises(
+            NotImplementedError, match=rf"'grade'.*fit_reml\(\) and fit_ncv\(\), not {route}\(\)"
+        ):
             getattr(model, route)(pd.DataFrame({"grade": np.asarray(levels)[codes]}), np.sin(codes))
 
     @pytest.mark.parametrize("route", ["fit", "fit_path"])
@@ -309,7 +313,9 @@ class TestFitRemlLambdaPolicy:
             features={"x": Spline(kind="ps", n_knots=6, lambda_policy=LambdaPolicy.fixed(1000.0))},
         )
         applied = Structure(features={}).apply(declared)
-        with pytest.raises(NotImplementedError, match=rf"'x'.*fit_reml\(\), not {route}\(\)"):
+        with pytest.raises(
+            NotImplementedError, match=rf"'x'.*fit_reml\(\) and fit_ncv\(\), not {route}\(\)"
+        ):
             getattr(applied, route)(pd.DataFrame({"x": x}), np.sin(6.0 * x))
 
     def test_a_refit_keeps_a_policy_term_smoothing_beside_its_interaction(self):

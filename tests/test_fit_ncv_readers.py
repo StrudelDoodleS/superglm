@@ -22,10 +22,8 @@ from dataclasses import replace
 from functools import cache
 
 import numpy as np
-import pandas as pd
 import pytest
 
-from superglm import Spline, SuperGLM
 from superglm.diagnostics.convergence import ncv_bound_message, ncv_nonconvergence_message
 from superglm.diagnostics.fit_report import status_sentence
 from superglm.editor import EditorSession
@@ -36,7 +34,6 @@ from superglm.model import ncv_ops
 from superglm.model.fit_state import fitted_lambda2
 from superglm.model.telemetry_ops import metrics_for_logging
 from superglm.ncv import search as search_module
-from superglm.types import LambdaPolicy
 from tests.test_fit_ncv import curve_book, curve_fit, curve_model, run
 from tests.test_ncv_search import NarrowBox
 
@@ -373,13 +370,3 @@ def test_an_edit_withdraws_the_held_out_results_and_the_criterion():
     summary = model.summary()
     assert summary._info["method"] == "NCV" and "convergence_note" not in summary._info
     assert "still falling" not in summary._info["smoothing_bound_note"]
-
-
-def test_fit_refusing_a_held_smoothing_names_both_methods_that_take_one():
-    """``fit`` reads no smoothing policy; its refusal names the two methods that do."""
-    rng = np.random.default_rng(7)
-    frame = pd.DataFrame({"x": rng.uniform(size=40)})
-    held = Spline(kind="ps", n_knots=6, lambda_policy=LambdaPolicy.fixed(3.0))
-    model = SuperGLM(family="gaussian", features={"x": held})
-    with pytest.raises(NotImplementedError, match=r"fit_reml\(\) and fit_ncv\(\), not fit\(\)"):
-        model.fit(frame, rng.normal(size=40))
