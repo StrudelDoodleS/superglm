@@ -51,6 +51,12 @@ from superglm.distributional.family import (
     _validated_derivative_order,
     _validated_parameter_matrix,
 )
+from superglm.distributional.kernels._mean_excess import (
+    finite_amounts,
+    on_positive_support,
+    two_piece_log_normal_mean_excess,
+    two_piece_normal_mean_excess,
+)
 from superglm.distributional.kernels._two_piece_windows import (
     mean_coordinate_jets,
     two_piece_narrow_rows,
@@ -641,6 +647,8 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
 
     # Its curvature directions take stacked (m, n, K) directions on one state evaluation.
     stacked_curvature_directions: ClassVar[bool] = True
+    # The response is strictly positive.
+    response_support: ClassVar[ParameterSupport] = ParameterSupport(lower=0.0)
 
     parametrisation: Parametrisation = "mean"
     scale_floor: float = 0.01
@@ -1013,6 +1021,19 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
             )
         return readonly(out)
 
+    def mean_excess(self, v: NDArray, theta: NDArray) -> NDArray[np.float64]:
+        """``E[Y - v | Y > v]`` per row in either natural parametrisation."""
+        values = self._theta(theta, None)
+        amount = finite_amounts(v, len(values))
+        location = self._location_coordinates(values)
+        return on_positive_support(
+            amount,
+            lambda rows: self.default_prediction(values[rows]),
+            lambda rows: two_piece_log_normal_mean_excess(
+                amount[rows], location[rows], values[rows, 1], values[rows, 2]
+            ),
+        )
+
     def log_window_probability(
         self, lower: NDArray, upper: NDArray, theta: NDArray, weights: NDArray | None = None
     ) -> NDArray[np.float64]:
@@ -1061,6 +1082,8 @@ class TwoPieceNormalLSS(LocationPredictor, ScalePredictor, SkewPredictor):
 
     # Its curvature directions take stacked (m, n, K) directions on one state evaluation.
     stacked_curvature_directions: ClassVar[bool] = True
+    # The response is any finite number.
+    response_support: ClassVar[ParameterSupport] = ParameterSupport()
 
     scale_floor: float = 0.01
     skew_bound: float = 0.9
@@ -1342,6 +1365,14 @@ class TwoPieceNormalLSS(LocationPredictor, ScalePredictor, SkewPredictor):
         values = self._theta(theta, None)
         response = np.broadcast_to(np.asarray(y, dtype=np.float64), (len(values),))
         return two_piece_cdf(response, values[:, 0], values[:, 1], values[:, 2])
+
+    def mean_excess(self, v: NDArray, theta: NDArray) -> NDArray[np.float64]:
+        """``E[Y - v | Y > v]`` per row from ``(location, scale, skew)``."""
+        values = self._theta(theta, None)
+        amount = finite_amounts(v, len(values))
+        return readonly(
+            two_piece_normal_mean_excess(amount, values[:, 0], values[:, 1], values[:, 2])
+        )
 
     def log_window_probability(
         self, lower: NDArray, upper: NDArray, theta: NDArray, weights: NDArray | None = None

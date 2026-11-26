@@ -131,6 +131,27 @@ BOUNDED_FIT_NOT_REPLAYED = (
 )
 
 
+def unfitted_clone(source: Any, templates: tuple[Predictor, ...] | None = None) -> Any:
+    """An unfitted model with ``source``'s family and constructor settings.
+
+    Its predictors are ``templates``, or ``source``'s own. It carries no fit and no
+    recorded fit settings, whatever rows ``source`` was fitted on.
+    """
+    family = source._family
+    return type(source)(
+        family,
+        *(
+            _bind_predictor_template(family, template)
+            for template in (source.predictors if templates is None else templates)
+        ),
+        weight_semantics=source._weight_contract.semantics,
+        discrete=source._discrete,
+        n_bins=source._n_bins_config(),
+        separation=source._separation,
+        coefficient_curvature=source._coefficient_curvature,
+    )
+
+
 def clone_with_replaced_terms(source: Any, replacements: Mapping[str, Any]) -> Any:
     """An unfitted copy of ``source`` with the named terms' specs replaced.
 
@@ -140,17 +161,7 @@ def clone_with_replaced_terms(source: Any, replacements: Mapping[str, Any]) -> A
     state = None if source._model is None else source._model.fit_state
     if state is not None and (state.truncated_row_count or state.censored_row_count):
         raise ValueError(BOUNDED_FIT_NOT_REPLAYED)
-    templates = _replaced_templates(source, replacements)
-    family = source._family
-    clone = type(source)(
-        family,
-        *(_bind_predictor_template(family, template) for template in templates),
-        weight_semantics=source._weight_contract.semantics,
-        discrete=source._discrete,
-        n_bins=source._n_bins_config(),
-        separation=source._separation,
-        coefficient_curvature=source._coefficient_curvature,
-    )
+    clone = unfitted_clone(source, _replaced_templates(source, replacements))
     clone._fit_settings = _filtered_settings(source._fit_settings, replacements)
     return clone
 

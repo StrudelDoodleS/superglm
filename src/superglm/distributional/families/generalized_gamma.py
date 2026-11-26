@@ -54,6 +54,11 @@ from superglm.distributional.family import (
     _validated_parameter_matrix,
 )
 from superglm.distributional.kernels._declared_bounds import gg_window_jets
+from superglm.distributional.kernels._mean_excess import (
+    finite_amounts,
+    generalized_gamma_mean_excess,
+    on_positive_support,
+)
 from superglm.distributional.kernels.generalized_gamma import (
     GeneralizedGammaDomainError as GeneralizedGammaDomainError,
 )
@@ -69,6 +74,7 @@ from superglm.distributional.kernels.generalized_gamma import (
     location_of_mean,
     location_rows,
     location_third_fourth,
+    log_mean_loading,
     mean_exists,
     mean_expected_information,
     mean_hessian_direction,
@@ -261,6 +267,8 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
     stacked_curvature_directions: ClassVar[bool] = True
     # The compiled row kernels run on the pool, so the chunk stream stays on one thread.
     pools_rows: ClassVar[bool] = True
+    # The response is strictly positive.
+    response_support: ClassVar[ParameterSupport] = ParameterSupport(lower=0.0)
 
     parametrisation: Parametrisation = "mean"
     scale_floor: float = 0.01
@@ -747,6 +755,54 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
         probabilities = np.broadcast_to(np.asarray(p, dtype=np.float64), (len(values),))
         return generalized_gamma_quantile(
             probabilities, self._location_coordinates(values), values[:, 1], values[:, 2]
+        )
+
+    def mean_excess(self, v: NDArray, theta: NDArray) -> NDArray[np.float64]:
+        """Return ``E[Y - v | Y > v]`` per row; ``inf`` where the location form has no mean.
+
+        The law weighted by ``y`` is evaluated in location coordinates directly by the
+        window kernel, so its smaller scale is not held to ``scale_floor``. Non-finite
+        amounts are refused with ``ValueError``; in the mean parametrisation, any row
+        without a finite mean raises ``GeneralizedGammaDomainError``.
+
+        Accuracy on ordinary laws is about ``2e-14`` in the tail and ``1.4e-12`` in the
+        body at ``scale = 0.01`` (``1e-13`` at ``scale = 0.05``). For negative shape
+        ``Q``, the tail branch uses a continued fraction for the gamma mean deficit
+        derived by this project and checked against high-precision arithmetic
+        (``mpmath``) to ``0.3 u``; it is not formally proved.
+        """
+        values = self._theta(theta, None)
+        sigma, q = values[:, 1], values[:, 2]
+        exists = mean_exists(sigma, q)
+        mean_form = self.parametrisation == "mean"
+        if mean_form and not np.all(exists):
+            raise GeneralizedGammaDomainError("generalized gamma mean does not exist for every row")
+        amount = finite_amounts(v, len(values))
+        location = self._location_coordinates(values)
+        log_mean = np.full(len(values), np.inf)
+        if mean_form:
+            log_mean = np.log(values[:, 0])
+        elif np.any(exists):
+            log_mean[exists] = location[exists] + log_mean_loading(sigma[exists], q[exists])[0]
+
+        def inside(rows: NDArray[np.intp]) -> NDArray[np.float64]:
+            at_amount = amount[rows]
+
+            def log_survival(at: NDArray[np.intp], mu: NDArray, scale: NDArray, shape: NDArray):
+                return gg_window_jets(
+                    at_amount[at],
+                    np.full(len(at), np.inf),
+                    np.column_stack((mu, scale, shape)),
+                    order=0,
+                    mean_form=False,
+                )[0]
+
+            return generalized_gamma_mean_excess(
+                at_amount, location[rows], sigma[rows], q[rows], log_mean[rows], log_survival
+            )
+
+        return on_positive_support(
+            amount, lambda rows: self.default_prediction(values[rows]), inside
         )
 
     def expected_shortfall(self, p: NDArray, theta: NDArray) -> NDArray[np.float64]:

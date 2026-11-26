@@ -589,6 +589,28 @@ class ExpectedShortfallFamily(Protocol):
 
 
 @runtime_checkable
+class MeanExcessFamily(Protocol):
+    """Optional row-wise mean excess ``E[Y - v | Y > v]`` from natural parameters.
+
+    ``mean_excess(v, theta)`` returns the expected amount by which a row's
+    response exceeds ``v``, given that it exceeds ``v``. ``v`` is a finite scalar
+    or one finite amount per row (broadcast to ``theta``); missing or infinite
+    amounts are refused with ``ValueError``. At or below the lower end of the
+    response support, survival is one and the result is ``E[Y] - v``. Where a
+    row's mean is infinite (such as ``LomaxLSS`` or ``LogLogisticLSS`` with
+    shape at most one, or location-form ``GeneralizedGammaLSS`` without a finite
+    mean), the result is ``inf``.
+
+    A family that implements this protocol also declares ``response_support``,
+    the response's :class:`ParameterSupport`. Implementations evaluate the mean
+    excess directly from tail-safe forms rather than ``expected_shortfall(F(v))
+    - v``, which loses accuracy once ``F(v)`` rounds to one.
+    """
+
+    def mean_excess(self, v: NDArray, theta: NDArray) -> NDArray: ...
+
+
+@runtime_checkable
 class PriorWeightedExpectedShortfallFamily(Protocol):
     """Optional upper conditional tail mean under non-unit prior weights.
 

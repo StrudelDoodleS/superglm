@@ -56,6 +56,7 @@ from superglm.distributional.kernels._declared_bounds import (
     normal_predictor_jets,
     normal_window_jets,
 )
+from superglm.distributional.kernels._mean_excess import finite_amounts, normal_mean_excess
 from superglm.distributional.kernels.gaussian import (
     evaluate_gaussian_rows,
     gaussian_expected_information,
@@ -448,6 +449,8 @@ class GaussianLS(LocationPredictor, ScalePredictor):
 
     # Its curvature directions take stacked (m, n, K) directions on one state evaluation.
     stacked_curvature_directions: ClassVar[bool] = True
+    # The response is any finite number.
+    response_support: ClassVar[ParameterSupport] = ParameterSupport()
 
     scale_floor: float = 0.01
 
@@ -832,6 +835,14 @@ class GaussianLS(LocationPredictor, ScalePredictor):
         )
         probabilities = np.broadcast_to(np.asarray(p, dtype=np.float64), (len(values),))
         return _normal_expected_shortfall(probabilities, values[:, 0], values[:, 1])
+
+    def mean_excess(self, v: NDArray, theta: NDArray) -> NDArray[np.float64]:
+        """``E[Y - v | Y > v] = sigma (phi(z)/Q(z) - z)`` per row, ``z = (v - mu)/sigma``."""
+        values = _validated_parameter_matrix(
+            theta, n_observations=None, parameters=self.parameters, family_name="GaussianLS"
+        )
+        amount = finite_amounts(v, len(values))
+        return readonly(normal_mean_excess(amount, values[:, 0], values[:, 1]))
 
     def variance(self, theta: NDArray) -> NDArray[np.float64]:
         """``Var(Y) = sigma^2`` per row at unit prior weight."""

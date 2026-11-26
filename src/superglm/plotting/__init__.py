@@ -14,6 +14,8 @@ if _typing.TYPE_CHECKING:
         plot_comparison,
         plot_density_fan,
         plot_diagnostics_figure,
+        plot_distribution_curve,
+        plot_mean_excess_figure,
         plot_pit,
         plot_portfolio,
         plot_qq,
@@ -21,6 +23,7 @@ if _typing.TYPE_CHECKING:
         plot_spread,
         plot_term_effect,
         plot_term_grid,
+        plot_threshold_stability_figure,
         plot_worm,
     )
     from superglm.plotting.interactions import plot_interaction
@@ -40,6 +43,8 @@ _LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
         "plot_comparison",
         "plot_density_fan",
         "plot_diagnostics_figure",
+        "plot_distribution_curve",
+        "plot_mean_excess_figure",
         "plot_pit",
         "plot_portfolio",
         "plot_qq",
@@ -47,6 +52,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
         "plot_spread",
         "plot_term_effect",
         "plot_term_grid",
+        "plot_threshold_stability_figure",
         "plot_worm",
     ),
     "superglm.plotting.interactions": ("plot_interaction",),
@@ -67,6 +73,8 @@ _PLOTLY_EXPORTS = (
     "plotly_comparison",
     "plotly_density_fan",
     "plotly_diagnostics_figure",
+    "plotly_distribution_curve",
+    "plotly_mean_excess_figure",
     "plotly_pit",
     "plotly_portfolio",
     "plotly_qq",
@@ -74,6 +82,7 @@ _PLOTLY_EXPORTS = (
     "plotly_spread",
     "plotly_term_effect",
     "plotly_term_grid",
+    "plotly_threshold_stability_figure",
     "plotly_worm",
 )
 
@@ -85,8 +94,10 @@ __all__ = [
     "plot_comparison",
     "plot_density_fan",
     "plot_diagnostics_figure",
+    "plot_distribution_curve",
     "plot_interaction",
     "plot_main_effects_plotly",
+    "plot_mean_excess_figure",
     "plot_pit",
     "plot_portfolio",
     "plot_qq",
@@ -97,6 +108,7 @@ __all__ = [
     "plot_term_comparison",
     "plot_term_effect",
     "plot_term_grid",
+    "plot_threshold_stability_figure",
     "plot_worm",
 ]
 

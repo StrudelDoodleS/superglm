@@ -30,6 +30,7 @@ from superglm._lazy import attach as _attach
 
 if _typing.TYPE_CHECKING:
     from superglm import families
+    from superglm._experimental import ExperimentalWarning
     from superglm._tweedie import NearPoissonDispersionError, generate_tweedie_cpg, tweedie_logpdf
     from superglm.constraints import (
         MonotoneRepairer as MonotoneRepairer,
@@ -61,6 +62,14 @@ if _typing.TYPE_CHECKING:
     )
     from superglm.distributional.predictor import Predictor
     from superglm.distributional.splice import SplitSplice
+    from superglm.distributional.thresholds import (
+        MeanExcessResult,
+        ThresholdStabilityResult,
+        mean_excess,
+        plot_mean_excess,
+        plot_threshold_stability,
+        threshold_stability,
+    )
     from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
     from superglm.export import RatingTableBaseNotRepresentableError, export_rating_tables
     from superglm.features._spline_config import SCOPRetiredWarning, SplineOptionWarning
@@ -203,6 +212,7 @@ if _typing.TYPE_CHECKING:
 # does not load plotting, diagnostics or scikit-learn. ``__all__`` and every importable name are as
 # before; tests/test_import_compat.py keeps this table equal to the imports above.
 _LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
+    "superglm._experimental": ("ExperimentalWarning",),
     "superglm._tweedie": ("NearPoissonDispersionError", "generate_tweedie_cpg", "tweedie_logpdf"),
     "superglm.constraints": ("MonotoneRepairResult", "MonotoneRepairer"),
     "superglm.diagnostics.convergence": ("ConvergenceWarning", "FitPrecisionWarning"),
@@ -226,6 +236,14 @@ _LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
     "superglm.distributional.families.two_piece": ("TwoPieceLogNormalLSS", "TwoPieceNormalLSS"),
     "superglm.distributional.predictor": ("Predictor",),
     "superglm.distributional.splice": ("SplitSplice",),
+    "superglm.distributional.thresholds": (
+        "MeanExcessResult",
+        "ThresholdStabilityResult",
+        "mean_excess",
+        "plot_mean_excess",
+        "plot_threshold_stability",
+        "threshold_stability",
+    ),
     "superglm.distributions": (
         "Binomial",
         "Gamma",
@@ -475,6 +493,13 @@ __all__ = [
     "SuperGLM",
     "SuperLSS",
     "SplitSplice",
+    # Choosing a tail threshold (experimental)
+    "mean_excess",
+    "MeanExcessResult",
+    "plot_mean_excess",
+    "threshold_stability",
+    "ThresholdStabilityResult",
+    "plot_threshold_stability",
     "BoundPredictor",
     "bind_predictor",
     "BoundInteraction",
@@ -573,6 +598,7 @@ __all__ = [
     "TermInference",
     "InteractionInference",
     "ConvergenceWarning",
+    "ExperimentalWarning",
     "FitPrecisionWarning",
     "FactorSmoothGroupTermWarning",
     "InteractionCellLabelWarning",

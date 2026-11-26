@@ -43,7 +43,14 @@ offsets included. `predict_link(book, se_fit=True)` also returns each column's
 standard error: exact, with no simulation, and quick enough to price a whole
 book row by row. {py:meth}`~superglm.SuperLSS.predict_cdf` and
 {py:meth}`~superglm.SuperLSS.predict_quantile` evaluate the fitted law per
-row. For uncertainty by simulation,
+row. On continuous scalar families (and on {py:class}`~superglm.SplitSplice`),
+the experimental methods {py:meth}`~superglm.SuperLSS.predict_pdf` and
+{py:meth}`~superglm.SuperLSS.predict_mean_excess` add each row's fitted
+density and its expected excess $E[Y - v \mid Y > v]$ above an amount $v$
+(their spelling may change in a minor release without deprecation, emitting one
+{py:class}`~superglm.ExperimentalWarning` per session; see
+[Seeing the fitted law of one row](../../how-to/fit-a-distributional-model.md#seeing-the-fitted-law-of-one-row)).
+For uncertainty by simulation,
 {py:meth}`~superglm.SuperLSS.posterior_draws` draws coefficients from the
 fit's Bayesian posterior, {py:meth}`~superglm.SuperLSS.posterior_bounds`
 pushes them through a parameter, a predictive quantile, an exceedance
@@ -59,6 +66,8 @@ probability or an expected shortfall to give per-row intervals, and
    ~superglm.SuperLSS.predict_parameters
    ~superglm.SuperLSS.predict_link
    ~superglm.SuperLSS.predict_cdf
+   ~superglm.SuperLSS.predict_pdf
+   ~superglm.SuperLSS.predict_mean_excess
    ~superglm.SuperLSS.predict_quantile
    ~superglm.SuperLSS.posterior_predictive
    ~superglm.SuperLSS.posterior_draws
