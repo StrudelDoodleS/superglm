@@ -9,7 +9,199 @@ from __future__ import annotations
 
 import os
 import warnings
+from contextlib import contextmanager
+from contextvars import ContextVar
+from math import frexp, inf
 from typing import Any
+
+import numpy as np
+
+from superglm._roundoff import TINY, UNIT_ROUNDOFF
+from superglm._warn import warn_caller
+from superglm.links import LogLink
+
+
+class FitPrecisionWarning(UserWarning):
+    """Some rows of a fit's first working system lie beyond what binary64 carries.
+
+    Issued once by a published ``fit``, ``fit_reml`` or profiled refit, or
+    before the error of one that raises (a fit refused as separated says
+    nothing), when a row of positive sample weight has a subnormal weight or
+    initial working information, information that rounds to zero, a weight or
+    information at least 2**49 (about 5.6e14) times another row's, or, under a
+    log link, an initial mean that underflows or overflows before clipping.
+    Rows of weight zero contribute nothing to the fit and are not read. A
+    spread compares all rows, so the two it names may inform separate
+    coefficients and lose nothing. The
+    check only reports: the fit is the same with or without it. Check the
+    sample_weight units and the offsets on the rows it names;
+    ``model.diagnostics()['_model']['initial_precision']``
+    holds the counts, example rows and values.
+    """
+
+
+_PRECISION_BLOCK_SIZE = 8192
+# Binary64 round-to-nearest breakpoints in eta for exp(eta): half the least
+# subnormal, the midpoint below the least normal, and the overflow midpoint.
+_LOG_MEAN_ZERO = -745.1332191019412
+_LOG_MEAN_NORMAL = -708.3964185322641
+_LOG_MEAN_LIMIT = 709.782712893384
+# Within a factor of sixteen of 1/u, small contributions can be comparable to
+# rounding in a shared sum. A row spread alone does not determine rank.
+_SPREAD_BITS = frexp(1.0 / (16.0 * UNIT_ROUNDOFF))[1] - 1
+
+_PRECISION_MESSAGES = {
+    "subnormal_sample_weight": "Subnormal sample weight",
+    "sample_weight_spread": "Large sample-weight spread",
+    "zero_information": "Zero initial {source} information on positive-weight rows",
+    "subnormal_information": "Subnormal initial {source} information",
+    "information_spread": "Large initial {source} information spread",
+    "log_mean_zero": "Initial log-link mean rounds to zero before clipping",
+    "log_mean_subnormal": "Subnormal initial log-link mean before clipping",
+    "log_mean_overflow": "Initial log-link mean overflows before clipping",
+}
+
+_CHECK_WEIGHTS = "Check the sample_weight units."
+_CHECK_WEIGHTS_AND_OFFSETS = "Check the sample_weight units and offsets on these rows."
+
+# The fit attempt owns this scope. Match its group list by identity so that
+# intercept-only solves inside setup cannot consume the advisory.
+_INITIAL_PRECISION: ContextVar[tuple[Any, dict] | None] = ContextVar(
+    "initial_fit_precision", default=None
+)
+
+
+@contextmanager
+def initial_precision_advisory(model, *, enabled: bool):
+    """Collect one fit's entry findings without retaining the working rows."""
+    findings: dict = {}
+    token = _INITIAL_PRECISION.set((model, findings) if enabled else None)
+    try:
+        yield findings
+    except Exception as exc:
+        from superglm.diagnostics.separation import SeparationError
+
+        # A fit that raises is never published, so it states its findings
+        # here; a fit refused as separated says nothing beyond its refusal.
+        if enabled and findings and not isinstance(exc, SeparationError):
+            warn_initial_precision(findings)
+        raise
+    finally:
+        _INITIAL_PRECISION.reset(token)
+
+
+def inspect_initial_precision(groups, rows, eta_unclipped, link) -> None:
+    """Inspect the first working-row carrier of the active scalar fit."""
+    capture = _INITIAL_PRECISION.get()
+    if capture is None or groups is not capture[0]._groups:
+        return
+    model, findings = capture
+    _INITIAL_PRECISION.set(None)
+    findings.update(_scan_initial_precision(model._fit_weights, rows.weights, eta_unclipped, link))
+    for kind, finding in findings.items():
+        if kind.endswith("information") or kind == "information_spread":
+            finding["curvature_source"] = rows.curvature_source
+
+
+def warn_initial_precision(findings: dict) -> None:
+    """Disclose one fit's findings: at publication, or as a fit that raises leaves."""
+    parts = []
+    checks = {}
+    for kind, finding in findings.items():
+        reason = _PRECISION_MESSAGES[kind]
+        if "curvature_source" in finding:
+            source = "Fisher" if finding["curvature_source"] == "fisher" else "observed"
+            reason = reason.format(source=source)
+            checks[_CHECK_WEIGHTS_AND_OFFSETS] = None
+        elif kind.startswith("log_mean_"):
+            checks["Check the offsets on these rows."] = None
+        else:
+            checks[_CHECK_WEIGHTS] = None
+        positions = ", ".join(str(row) for row in finding["rows"])
+        count = finding.get("count", len(finding["rows"]))
+        examples = " e.g." if count > len(finding["rows"]) else ""
+        parts.append(f"{reason} at row positions{examples} {positions}.")
+    if _CHECK_WEIGHTS_AND_OFFSETS in checks:
+        checks.pop(_CHECK_WEIGHTS, None)
+    warn_caller(
+        "SuperGLM binary64 precision advisory, with zero-based row positions. "
+        + " ".join([*parts, *checks])
+        + " See model.diagnostics()['_model']['initial_precision'] for details.",
+        FitPrecisionWarning,
+    )
+
+
+def _scan_initial_precision(weights, information, eta, link) -> dict:
+    """One sweep in fixed-size blocks. Keep counts and up to three row examples.
+
+    A row of weight zero is exact in binary64 and contributes nothing, so it
+    is not an event: padding a fit with such rows changes no finding. Nor is
+    information that is zero analytically, where the inverse link's derivative
+    has an isolated zero (a square-root link at eta = 0), not rounding.
+    """
+    findings: dict = {}
+    extrema = [[(inf, -1), (0.0, -1)] for _ in range(2)]
+    log_link = isinstance(link, LogLink)
+
+    def record(kind, mask, start):
+        count = int(np.count_nonzero(mask))
+        if count:
+            finding = findings.setdefault(kind, {"count": 0, "rows": ()})
+            finding["count"] += count
+            remaining = 3 - len(finding["rows"])
+            if remaining:
+                finding["rows"] += tuple(int(i) + start for i in np.flatnonzero(mask)[:remaining])
+
+    for start in range(0, weights.size, _PRECISION_BLOCK_SIZE):
+        block = slice(start, start + _PRECISION_BLOCK_SIZE)
+        weight, info = weights[block], information[block]
+        active = weight > 0.0
+        record("subnormal_sample_weight", active & (weight < TINY), start)
+        zero_information = active & (info == 0.0)
+        if zero_information.any():
+            zero_information[zero_information] = ~_isolated_zero_slope(
+                link, eta[block][zero_information]
+            )
+        record("zero_information", zero_information, start)
+        finite_positive_info = active & (info > 0.0) & np.isfinite(info)
+        record("subnormal_information", finite_positive_info & (info < TINY), start)
+        for values, positive, pair in zip((weight, info), (active, finite_positive_info), extrema):
+            low = int(np.argmin(np.where(positive, values, inf)))
+            high = int(np.argmax(np.where(positive, values, 0.0)))
+            if positive[low] and values[low] < pair[0][0]:
+                pair[0] = (float(values[low]), start + low)
+            if positive[high] and values[high] > pair[1][0]:
+                pair[1] = (float(values[high]), start + high)
+        if log_link:
+            raw_eta = eta[block]
+            record("log_mean_zero", active & (raw_eta <= _LOG_MEAN_ZERO), start)
+            record(
+                "log_mean_subnormal",
+                active & (raw_eta > _LOG_MEAN_ZERO) & (raw_eta < _LOG_MEAN_NORMAL),
+                start,
+            )
+            record("log_mean_overflow", active & (raw_eta > _LOG_MEAN_LIMIT), start)
+
+    for kind, ((low, low_row), (high, high_row)) in zip(
+        ("sample_weight_spread", "information_spread"), extrema
+    ):
+        lo_mantissa, lo_exponent = frexp(low)
+        hi_mantissa, hi_exponent = frexp(high)
+        spread = hi_exponent - lo_exponent - (hi_mantissa < lo_mantissa)
+        if low_row >= 0 and spread >= _SPREAD_BITS:
+            findings[kind] = {"rows": (low_row, high_row), "values": (low, high)}
+    return findings
+
+
+def _isolated_zero_slope(link, eta):
+    """Where d(mu)/d(eta) is zero at eta but not at either neighbouring float.
+
+    Such a zero is the derivative's own, not an underflow: one that rounded
+    to zero is still zero a float away.
+    """
+    with np.errstate(all="ignore"):
+        slopes = [np.abs(link.deriv_inverse(np.nextafter(eta, toward))) for toward in (-inf, inf)]
+        return (np.abs(link.deriv_inverse(eta)) == 0.0) & (slopes[0] > 0.0) & (slopes[1] > 0.0)
 
 
 class ConvergenceWarning(UserWarning):

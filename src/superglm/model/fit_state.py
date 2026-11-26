@@ -1232,6 +1232,7 @@ def capture_fit_state(
     discloses nothing.
     """
     if not getattr(public_model, "_discarded_fit", False):
+        from superglm.diagnostics.convergence import warn_initial_precision
         from superglm.diagnostics.separation import (
             disclose_runtime_separation,
             restates_separated_level,
@@ -1249,6 +1250,9 @@ def capture_fit_state(
             disclose_runtime_separation(
                 separation_statement, getattr(workspace.model, "_separation", "warn")
             )
+        precision = (workspace.model._last_fit_meta or {}).get("initial_precision")
+        if precision:
+            warn_initial_precision(precision)
     design = getattr(workspace.model, "_dm", None)
     release_raw_splines = getattr(design, "release_raw_spline_tabmat_plan", None)
     if release_raw_splines is not None:

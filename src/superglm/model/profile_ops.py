@@ -10,6 +10,7 @@ from functools import partial
 
 import numpy as np
 
+from superglm.diagnostics.convergence import initial_precision_advisory
 from superglm.distributions import NegativeBinomial, Tweedie
 from superglm.model.fit_state import configured_family
 from superglm.model.input_validation import THETA_ESTIMATED
@@ -318,20 +319,26 @@ def _publish_profiled_family(
         validated_inputs=validated,
         config_overrides={"family": family, "retain_fit_state": True},
     )
+    final_model = final_workspace.model
     try:
-        debug_recorder = _refit_selected(
-            final_workspace.model,
-            validated,
-            references,
-            fit_mode,
-            max_reml_iter,
-            model._retain_fit_state,
-        )
+        with initial_precision_advisory(
+            final_model, enabled=not getattr(model, "_discarded_fit", False)
+        ) as precision:
+            debug_recorder = _refit_selected(
+                final_model,
+                validated,
+                references,
+                fit_mode,
+                max_reml_iter,
+                model._retain_fit_state,
+            )
     except ObservedModeNotCertifiedError as exc:
         raise _publication_mode_failure(
             exc, parameter=parameter, value=float(value), decoupled=decoupled
         ) from exc
-    published = synchronize(final_workspace.model)
+    if precision:
+        final_model._last_fit_meta["initial_precision"] = precision
+    published = synchronize(final_model)
     _install_refit(model, final_workspace, family)
     from superglm.model import fit_ops
 

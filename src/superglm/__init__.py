@@ -37,7 +37,7 @@ if _typing.TYPE_CHECKING:
     from superglm.constraints import (
         MonotoneRepairResult as MonotoneRepairResult,
     )
-    from superglm.diagnostics.convergence import ConvergenceWarning
+    from superglm.diagnostics.convergence import ConvergenceWarning, FitPrecisionWarning
     from superglm.diagnostics.discretize import DiscretizationResult, discretization_impact
     from superglm.diagnostics.fit_cost import SlowFitWarning
     from superglm.diagnostics.fit_report import FitDiagnosticReport
@@ -205,7 +205,7 @@ if _typing.TYPE_CHECKING:
 _LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
     "superglm._tweedie": ("NearPoissonDispersionError", "generate_tweedie_cpg", "tweedie_logpdf"),
     "superglm.constraints": ("MonotoneRepairResult", "MonotoneRepairer"),
-    "superglm.diagnostics.convergence": ("ConvergenceWarning",),
+    "superglm.diagnostics.convergence": ("ConvergenceWarning", "FitPrecisionWarning"),
     "superglm.diagnostics.discretize": ("DiscretizationResult", "discretization_impact"),
     "superglm.diagnostics.fit_cost": ("SlowFitWarning",),
     "superglm.diagnostics.fit_report": ("FitDiagnosticReport",),
@@ -573,6 +573,7 @@ __all__ = [
     "TermInference",
     "InteractionInference",
     "ConvergenceWarning",
+    "FitPrecisionWarning",
     "FactorSmoothGroupTermWarning",
     "InteractionCellLabelWarning",
     "NonEstimablePredictionWarning",

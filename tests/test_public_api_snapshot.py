@@ -41,6 +41,7 @@ PUBLIC_API = [
     "FactorSmoothResult",
     "FeatureStructure",
     "FitDiagnosticReport",
+    "FitPrecisionWarning",
     "FractionalFrequencyWeightWarning",
     "Gamma",
     "GammaLS",

@@ -24,6 +24,7 @@ from superglm._group_matrix._group_matrix_tabmat import (
 )
 from superglm._utils import weighted_row_sum
 from superglm._weight_units import objective_weight_exponent, scale_penalties
+from superglm.diagnostics.convergence import inspect_initial_precision
 from superglm.distributions import (
     Binomial,
     Distribution,
@@ -1703,6 +1704,8 @@ class _IRLSDirectFit(_IRLSDirectFitFields):
             )
         else:
             working_rows = self.curvature.working_rows(self.mu, self.working_response_eta)
+        if it == 0:
+            inspect_initial_precision(self.groups, working_rows, self.eta_unclipped, link)
         W = working_rows.weights
         z = working_rows.response
         # the mean space's Newton rows once engaged, in score form
