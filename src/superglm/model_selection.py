@@ -490,6 +490,18 @@ def _scored_mean(model, X_val, sample_weight, offset, what: str) -> NDArray:
     return predict_priced(model, X_val, offset, sample_weight, what)
 
 
+def _scored_rows(model, X_val, y_val, sample_weight, offset, what: str):
+    """The validation rows as a deviance or likelihood reads them (``base.scored_rows``).
+
+    ``_scored_mean`` as the score's sums read it, and the binomial rows past the
+    solver's clip, which are read from the likelihood at their own predictor.
+    """
+    from superglm.model.base import score_rows
+
+    mu = _scored_mean(model, X_val, sample_weight, offset, what)
+    return score_rows(model, X_val, offset, y_val, sample_weight, mu)
+
+
 def refusal_in_frame(
     refused: NoPredictedMeanError, model, X_val, offset, sample_weight, rows, n_rows: int, fold: int
 ) -> NoPredictedMeanError:
@@ -541,35 +553,18 @@ def _held_out_without_value(model, X_val, offset, weights) -> NDArray[np.bool_] 
 
 def _score_deviance(model, X_val, y_val, *, sample_weight=None, offset=None):
     """Mean unit deviance under the family's sample-weight contract."""
-    mu = _scored_mean(model, X_val, sample_weight, offset, "the deviance")
-    weights, denominator = _scoring_weights(model, sample_weight, len(y_val))
-    return weighted_row_sum(weights, model._distribution.deviance_unit, y_val, mu) / denominator
+    total, denominator = _pooled_deviance_parts(
+        model, X_val, y_val, sample_weight=sample_weight, offset=offset
+    )
+    return total / denominator
 
 
 def _score_nll(model, X_val, y_val, *, sample_weight=None, offset=None):
     """Mean negative log-likelihood under the family's weight contract."""
-    mu = _scored_mean(model, X_val, sample_weight, offset, "the negative log-likelihood")
-    weights, denominator = _scoring_weights(model, sample_weight, len(y_val))
-    # A predefined or custom split can put an off-lattice row only in
-    # validation, so no fold's fit ever warns while both the per-fold and the
-    # pooled NLL quietly use an interpolated pseudo-density.
-    from superglm.model.input_validation import check_weight_contract
-
-    check_weight_contract(
-        np.asarray(y_val, dtype=np.float64),
-        weights,
-        model._distribution,
-        model_weight_semantics(model),
+    total, denominator = _pooled_nll_parts(
+        model, X_val, y_val, sample_weight=sample_weight, offset=offset
     )
-    ll = unit_log_likelihood(
-        model._distribution,
-        y_val,
-        mu,
-        weights,
-        model.result,
-        weight_semantics=model_weight_semantics(model),
-    )
-    return float(-ll / denominator)
+    return float(total / denominator)
 
 
 def _score_gini(model, X_val, y_val, *, sample_weight=None, offset=None):
@@ -580,14 +575,17 @@ def _score_gini(model, X_val, y_val, *, sample_weight=None, offset=None):
 
 def _pooled_deviance_parts(model, X_val, y_val, *, sample_weight=None, offset=None):
     """Return numerator and denominator for pooled deviance aggregation."""
-    mu = _scored_mean(model, X_val, sample_weight, offset, "the deviance")
+    mu, held = _scored_rows(model, X_val, y_val, sample_weight, offset, "the deviance")
     weights, denominator = _scoring_weights(model, sample_weight, len(y_val))
-    return weighted_row_sum(weights, model._distribution.deviance_unit, y_val, mu), denominator
+    total = weighted_row_sum(weights, model._distribution.deviance_unit, y_val, mu)
+    return total if held is None else total + held.deviance_gap(weights), denominator
 
 
 def _pooled_nll_parts(model, X_val, y_val, *, sample_weight=None, offset=None):
     """Return numerator and denominator for pooled negative log-likelihood."""
-    mu = _scored_mean(model, X_val, sample_weight, offset, "the negative log-likelihood")
+    mu, held = _scored_rows(
+        model, X_val, y_val, sample_weight, offset, "the negative log-likelihood"
+    )
     weights, denominator = _scoring_weights(model, sample_weight, len(y_val))
     # A predefined or custom split can put an off-lattice row only in
     # validation, so no fold's fit ever warns while both the per-fold and the
@@ -608,6 +606,8 @@ def _pooled_nll_parts(model, X_val, y_val, *, sample_weight=None, offset=None):
         model.result,
         weight_semantics=model_weight_semantics(model),
     )
+    if held is not None:
+        ll -= 0.5 * held.deviance_gap(weights)
     return float(-ll), denominator
 
 
@@ -763,10 +763,12 @@ class _GLMFolds:
 
     def row_costs(self, est, X, y, sample_weight, offset) -> NDArray[np.float64]:
         """Each row's weighted unit deviance; NaN for a row with no mean, which ranks it."""
-        from superglm.model.base import predict_priced
+        from superglm.model.base import predict_priced, score_rows
 
-        mu = predict_priced(est, X, offset)
+        mu, held = score_rows(est, X, offset, y, sample_weight, predict_priced(est, X, offset))
         unit = est._distribution.deviance_unit(np.asarray(y, dtype=np.float64), mu)
+        if held is not None:
+            unit = held.patched(unit, held.deviance)
         return unit if sample_weight is None else np.asarray(sample_weight) * unit
 
     def predict(self, est, X, offset) -> NDArray[np.float64]:

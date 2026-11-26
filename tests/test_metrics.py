@@ -1502,7 +1502,7 @@ class TestNullModel:
         return ("binomial", "cauchit", y, offset), best.fun, 1e-9
 
     @staticmethod
-    def _missed_binomial_cloglog_offsets_40_apart():
+    def _missed_binomial_cloglog_offsets_40_apart(clipped: bool = False):
         from scipy.optimize import minimize_scalar
 
         from superglm.links import _CLOGLOG_LINK_ETA_MAX
@@ -1511,11 +1511,22 @@ class TestNullModel:
         offset = np.repeat([-20.0, 20.0], 200)
         y = (rng.random(400) < np.where(offset > 0, 0.865, 0.0)).astype(float)
 
-        def deviance(b):
+        def clipped_deviance(b):
             # The package's clips: eta into [-20, its cap], the probability into 1e-7.
             eta = np.clip(np.atleast_1d(b)[:, None] + offset, -20.0, _CLOGLOG_LINK_ETA_MAX)
             mu = np.clip(-np.expm1(-np.exp(eta)), 1e-7, 1.0 - 1e-7)
             return -2.0 * np.sum(y * np.log(mu) + (1.0 - y) * np.log1p(-mu), axis=1)
+
+        def likelihood_deviance(b):
+            # The likelihood in the predictor, 1 - p = exp(-exp(eta)): the scored model
+            # holds non-events past the cloglog cap, so its null is the likelihood's (#743).
+            t = np.exp(np.atleast_1d(b)[:, None] + offset)
+            with np.errstate(divide="ignore"):
+                log_p = np.where(t > np.log(2.0), np.log1p(-np.exp(-t)), np.log(-np.expm1(-t)))
+            # each term only where the response carries it: 0 * inf is not a row
+            return -2.0 * np.sum(np.where(y > 0.0, log_p, 0.0) - (1.0 - y) * t, axis=1)
+
+        deviance = clipped_deviance if clipped else likelihood_deviance
 
         grid = np.linspace(-80.0, 80.0, 160001)
         start = grid[
@@ -1571,11 +1582,33 @@ class TestNullModel:
         - Binomial/cloglog with offsets 40 apart: Brent's bounded method, given
           the bracket around the best candidate, settled on another plateau of
           the clipped deviance, 647.85 against 134.37; it now starts from the
-          best candidate.
+          best candidate. The rows hold non-events past the cap, so the null
+          read is the likelihood's (#743), 4e-5 below the clipped one.
         """
         (family, link, y, offset), reference, rel = getattr(self, f"_missed_{case}")()
         metrics = self._null_metrics(family, y, offset, link=link)
         assert metrics.null_deviance == pytest.approx(reference, rel=rel, abs=1e-8)
+
+    @pytest.mark.pins_behaviour
+    def test_clipped_cloglog_null_starts_from_the_best_candidate(self):
+        """Pins: the clipped null search reaches its own minimum under cloglog offsets 40 apart.
+
+        ``metrics()`` on those rows reads the likelihood's null since #743 (the
+        case above).  A model that holds no row against its outcome still reads
+        the clipped null, whose search is held to its minimum here: 134.37293,
+        where Brent's bounded method once settled on a plateau at 647.85.
+        """
+        from superglm.links import CloglogLink
+        from superglm.model.fit_ops import _compute_null_mu
+
+        (_, _, y, offset), reference, rel = self._missed_binomial_cloglog_offsets_40_apart(
+            clipped=True
+        )
+        mu = _compute_null_mu(
+            y, np.ones(len(y)), offset, Binomial(), CloglogLink(), weight_semantics="frequency"
+        )
+        deviance = float(np.sum(Binomial().deviance_unit(y, mu)))
+        assert deviance == pytest.approx(reference, rel=rel, abs=1e-8)
 
     @pytest.mark.pins_behaviour
     @pytest.mark.parametrize("family", ["binomial", "nb2", "nb2_wide"])

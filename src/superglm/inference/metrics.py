@@ -501,10 +501,14 @@ class ModelMetrics:
     on whether ``X``, ``y``, ``sample_weight`` and ``offset`` are the objects
     the model was fitted on: a discrete fit's own mean belongs to its binned
     design, which ``predict`` does not reproduce.  ``SuperGLM.summary``
-    reports the fit's own statistics instead.  One exception: a binomial fit
-    that converged on the likelihood in the linear predictor, because the
-    solver's clip held a row against its outcome, reads every row past that
-    clip from the likelihood there, where ``predict`` floors the mean at 1e-7.
+    reports the fit's own statistics instead.  One kind of row is not read
+    at ``predict``'s mean: a logit, probit or cloglog binomial row priced
+    below 1e-7 or above 1 - 1e-7, the range the solver works in.  Where a
+    row of positive weight out there contradicts its outcome, on these rows
+    or at the end of the fit, every such row is read from the likelihood at
+    its own linear predictor.  Where none does, they are read at the edge of
+    that range, as the fit's own statistics read them: at most 4e-7 of
+    deviance a unit of weight above the likelihood's.
 
     On the frame a model was fitted on, leverage and effective degrees of
     freedom come from the fit itself, and so do the standardized residuals
@@ -635,9 +639,15 @@ class ModelMetrics:
                 f"y has {len(self._y)} rows but X predicts {len(self._mu)}; "
                 "they must describe the same observations"
             )
-        from superglm.model.base import require_priced_rows
+        from superglm.model.base import require_priced_rows, score_rows
 
         require_priced_rows(model, self._mu, self._weights, "the deviance and likelihood")
+        if _mu is None:
+            # a binomial row past the solver's clip is read from the likelihood (``_held``)
+            frame = cast("FrameLike | EagerFrame", self._X)  # validated by predict()
+            self._mu, self.__dict__["_held"] = score_rows(
+                model, frame, offset, self._y, self._weights, self._mu
+            )
 
         # `explain_ops.metrics` sets `_contract_checked` when the caller passed the verified
         # training arrays: the fit already checked them, so do not report the condition twice.
@@ -771,11 +781,13 @@ class ModelMetrics:
 
     @cached_property
     def _held(self) -> HeldRows | None:
-        """These rows the working clip holds, for a fit on the likelihood's rows; else ``None``.
+        """These rows the working clip holds, where they are read from the likelihood; else ``None``.
 
-        Such a fit converged on the likelihood in the unclipped predictor
-        (``solvers.clip_rows``), so its deviance, likelihoods, Pearson statistic
-        and residuals read the held rows there, not at ``predict``'s floored mean.
+        The deviance, likelihoods, Pearson statistic and residuals read such a
+        row in the unclipped predictor (``solvers.clip_rows``), not at the
+        clipped mean the sums hold.  ``base.score_rows`` gives them for
+        ``predict``'s means; a mean the caller passed is read from the
+        likelihood only by a fit that ended on its rows.
         """
         if not on_likelihood_rows(self._result):
             return None
@@ -819,7 +831,7 @@ class ModelMetrics:
             self._family,
             self._link,
             weight_semantics=self._weight_semantics,
-            likelihood_rows=on_likelihood_rows(self._result),
+            likelihood_rows=on_likelihood_rows(self._result) or self._held is not None,
         )
 
     @property

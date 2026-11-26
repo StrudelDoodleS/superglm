@@ -923,6 +923,27 @@ def rescored_held_rows(
     return held
 
 
+def scored_held_rows(
+    result: object,
+    family: Distribution,
+    link: Link,
+    y: NDArray,
+    weights: NDArray,
+    eta_unclipped: NDArray,
+) -> HeldRows | None:
+    """The held rows a fitted model's score on any rows reads from the likelihood, or ``None``.
+
+    The rows may be the fit's own or others, with other responses.  A fit on
+    the likelihood's rows (``on_likelihood_rows``) reads every held row there;
+    any other reads them as a fit ending on these rows would
+    (``rescored_held_rows``), so a new row held against its outcome is scored
+    at its own predictor and not at the clip.
+    """
+    if on_likelihood_rows(result):
+        return held_likelihood_rows(family, link, y, eta_unclipped)
+    return rescored_held_rows(family, link, y, weights, eta_unclipped)
+
+
 # the null intercept's bracket doubles this many times about the offsets' median
 _NULL_BRACKET_DOUBLINGS = 64
 _NULL_SCORE_BOUND = 2.0**1000
