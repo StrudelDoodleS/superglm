@@ -1178,6 +1178,29 @@ def reference(sample_data):
             np.einsum("ij,jk,ik->i", contrast, cov[spline, spline], contrast)
         )
 
+    def age_critical_value(x, alpha=0.05, n_draws=40_000, library_draws=10_000):
+        """The simultaneous band's critical value, the 1 - alpha quantile of
+        max_x |f(x)| / se(x) with f ~ N(0, the contrast covariance above), by simulation,
+        and the tolerance a simulated library value is held to.
+
+        A sample quantile's Monte Carlo standard error is s sqrt(p (1 - p) / n), with
+        s = 1/g(q) the sparsity at the quantile, estimated here from the 0.94 and 0.96
+        sample quantiles (about 6.9 on this fixture). At 40,000 draws that is about
+        0.0075; term_inference's 10,000 draws carry about 0.015. The two simulations
+        are independent, so the tolerance is 4 of their combined standard errors,
+        about 0.067.
+        """
+        contrast = age_basis(x) - centre
+        se_x = np.sqrt(np.einsum("ij,jk,ik->i", contrast, cov[spline, spline], contrast))
+        root = np.linalg.cholesky(cov[spline, spline])
+        draws = np.random.default_rng(0).standard_normal((n_draws, root.shape[0])) @ root.T
+        t_max = np.max(np.abs(draws @ contrast.T) / se_x, axis=1)
+        p = 1.0 - alpha
+        low, c, high = np.quantile(t_max, [p - 0.01, p, p + 0.01])
+        sparsity = (high - low) / 0.02
+        mc_se = sparsity * np.sqrt(p * (1.0 - p) * (1.0 / n_draws + 1.0 / library_draws))
+        return float(c), 4.0 * float(mc_se)
+
     # A fit stopped at relative deviance change tol lies within about
     # sqrt(tol * deviance) of the optimum in the Fisher-information norm (the
     # deviance is quadratic there), so any contrast is off by that many of its
@@ -1189,6 +1212,7 @@ def reference(sample_data):
     row_se = np.sqrt(np.einsum("ij,jk,ik->i", design, cov, design))
     return {
         "age": age,
+        "age_critical_value": age_critical_value,
         "region": {"A": (0.0, 0.0), "B": (beta[i_b], se[i_b]), "C": (beta[i_b + 1], se[i_b + 1])},
         "density": (np.array([beta[-1]]), np.array([se[-1]])),
         "drift": drift,
@@ -1286,6 +1310,8 @@ class TestDrawnValuesMatchFit:
         from scipy.stats import norm
 
         assert _Z_95 < c <= norm.ppf(1.0 - 0.025 / len(x))
+        c_ref, c_tol = reference["age_critical_value"](x)
+        assert abs(c - c_ref) <= c_tol, f"critical value {c!r}, simulated {c_ref!r} +/- {c_tol:.3g}"
 
         ax = unpenalised_model.plot("age", ci="both").axes[0]
         line = _line_by_label(ax, "Relativity")
@@ -1366,6 +1392,8 @@ class TestDrawnValuesMatchFit:
         eta, se = _eta_se(ti)
         _assert_matches_reference(eta, se, *reference["age"](x), reference)
         c = float(ti.critical_value_simultaneous)
+        c_ref, c_tol = reference["age_critical_value"](x)
+        assert abs(c - c_ref) <= c_tol, f"critical value {c!r}, simulated {c_ref!r} +/- {c_tol:.3g}"
         fig = unpenalised_model.plot(engine="plotly", ci="both")
 
         (curve,) = [
