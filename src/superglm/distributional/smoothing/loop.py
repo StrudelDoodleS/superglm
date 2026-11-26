@@ -1112,17 +1112,7 @@ class _SmoothingSearch:
             self.state, fit=endpoint_fit, objective=indexed_direction.endpoint_objective
         )
         terminal_endpoint_directions = dict(indexed_direction.component_directions)
-        with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-            self.state = replace(
-                self.state,
-                evidence=_fresh_raw_evidence(
-                    self.layout,
-                    self.state.lambdas,
-                    self.state.fit,
-                    self.outer_config,
-                    face=self.state.face,
-                ),
-            )
+        self.state = replace(self.state, evidence=self._evidence())
         return self._stop_after_revalidation(terminal_endpoint_directions)
 
     def _joint_retraction(
@@ -1231,17 +1221,7 @@ class _SmoothingSearch:
             )
         )
         self.state = replace(self.state, fit=check.endpoint_fit, objective=check.endpoint_objective)
-        with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-            self.state = replace(
-                self.state,
-                evidence=_fresh_raw_evidence(
-                    self.layout,
-                    self.state.lambdas,
-                    self.state.fit,
-                    self.outer_config,
-                    face=self.state.face,
-                ),
-            )
+        self.state = replace(self.state, evidence=self._evidence())
         return direction
 
     def _scalar_retraction(
@@ -1287,17 +1267,7 @@ class _SmoothingSearch:
         if _direction_leaves_face(retraction.direction):
             self._active_set_changed()
             return None
-        with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-            self.state = replace(
-                self.state,
-                evidence=_fresh_raw_evidence(
-                    self.layout,
-                    self.state.lambdas,
-                    self.state.fit,
-                    self.outer_config,
-                    face=self.state.face,
-                ),
-            )
+        self.state = replace(self.state, evidence=self._evidence())
         return self._result(converged=False, reason="endpoint_revalidation_failed")
 
     def _stop_after_revalidation(
