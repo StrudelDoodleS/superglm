@@ -205,7 +205,8 @@ class TestSeamPlumbing:
     def test_the_builder_validates_and_prices_in_one_place(self):
         """Direct callers of the builder get the same validation, and the one
         decision function emits weight dimension and stamp together."""
-        from superglm.dm_builder import _priced_group_dimension, _validate_group_pricing
+        from superglm._predictor_compiler import _priced_group_dimension
+        from superglm.dm_builder import _validate_group_pricing
         from superglm.types import GroupInfo
 
         with pytest.raises(ValueError, match="group_pricing"):
