@@ -672,8 +672,9 @@ def test_single_rows_the_level_may_not_clear_are_decided_on_their_dense_rows(whe
     """Forced: the level the inverse resolves moved inside one margin's band, or up to half the margins.
 
     A row whose margin from the tables clears the level by no more than ``W`` times their
-    bound, or not at all, is read densely and decided on that row: below the level it is
-    factored alone, as the dense rows' route factors it.
+    bound, or not at all, is read densely and decided on that row: below the level it goes
+    on to the fit's Cholesky factor and is factored alone only where that does not resolve
+    it, as on the dense rows' route.
     """
     p = book("poisson").problem
     nb = single_rows(p.n)
@@ -686,8 +687,38 @@ def test_single_rows_the_level_may_not_clear_are_decided_on_their_dense_rows(whe
         compact = evaluate_fit(rebuilt(p), nb, fit)
     assert compact.work.rows_read == int(np.count_nonzero(margin - band <= level)) > 0
     below = int(np.count_nonzero(margin <= level))
-    assert compact.work.factorisations == dense.work.factorisations == below
+    assert compact.work.factorisations == dense.work.factorisations
+    assert compact.work.resolved_by_factor == dense.work.resolved_by_factor
+    assert compact.work.factorisations + compact.work.resolved_by_factor == below
     assert compact.work.kept_fits == dense.work.kept_fits == 0
+    assert_same_evaluation(p, compact, dense, condition(p, nb, rho_of(p), fit))
+
+
+@pytest.mark.parametrize("family", ["gaussian", "poisson"])
+def test_single_rows_from_tables_past_the_inverse_take_the_factor_as_dense_rows_do(
+    family, monkeypatch
+):
+    """Forced: the level the inverse resolves above every margin, on rows served from the tables.
+
+    Every row is in doubt, is read densely and goes to the fit's Cholesky factor as the
+    dense rows' route sends it: the same rows resolved there, none factored alone or fitted
+    from its kept rows, and the dense rows' evaluation.
+    """
+    p = book(family).problem
+    nb = single_rows(p.n)
+    fit = solve_mode(p, rho_of(p))
+    monkeypatch.setattr(engine._Trial, "unresolved", property(lambda self: 2.0))
+    with row_work(DENSE):
+        dense = evaluate_fit(rebuilt(p), nb, fit)
+    with row_work(COMPACT):
+        compact = evaluate_fit(rebuilt(p), nb, fit)
+    weighted = int(p.active.sum())
+    assert compact.work.rows_streamed > 0 == dense.work.rows_streamed
+    assert compact.work.resolved_by_factor == dense.work.resolved_by_factor == weighted
+    for count in ("factorisations", "small_factorisations", "kept_fits", "stacks", "solves"):
+        assert getattr(compact.work, count) == getattr(dense.work, count), count
+    assert compact.work.factorisations == compact.work.kept_fits == 0
+    assert compact.work.rows_read == weighted
     assert_same_evaluation(p, compact, dense, condition(p, nb, rho_of(p), fit))
 
 

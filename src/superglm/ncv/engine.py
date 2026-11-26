@@ -82,7 +82,9 @@ cross-products, its scores and its third-derivative term.  A set of rows of at l
   Gram, where the blocks multiply every row with ``H^-1`` and with itself, matrix-vector work
   that Wood's appendix C counts against NCV.  A margin ``1 - W h`` whose distance from the
   dense rows' (the bound ``CentredRows.leverages`` gives) could carry it across the level the
-  inverse resolves is read from its dense row instead, so every decision is the dense rows'.
+  inverse resolves is read from its dense row instead, so every decision is the dense rows':
+  one the inverse does not resolve there goes on, with its dense row, to the fit's Cholesky
+  factor as any single row does ("A single row the inverse does not resolve" below).
 
 The neighbourhood-sized system multiplies each row with the rows of its own neighbourhood,
 and keeps its dense blocks.  The compact products and the blocks give the same numbers to
@@ -201,7 +203,8 @@ at most one an entry on a unit diagonal.  With ``||E||_2 <= P gamma_(n + 3P + 6)
 two together and the computed ``x``, the leverage is known to
 ``|w| (||E|| ||x||^2 (1 + eta)^2 / (1 - eta) + gamma_(P+2) h)`` while ``eta <= 1/2``.  A single row whose margin ``1 - w h`` from the factor clears
 :data:`RESOLVED` times that is solved by the scalar form on the factor's leverage and solved
-row (:func:`_through_factor`); the bound's own roundings leave its step within 1/63.  The
+row (:func:`_through_factor`), whether or not the design's tables gave its first
+leverage; the bound's own roundings leave its step within 1/63.  The
 Rayleigh quotient of ``A - w s s'`` at ``x`` is ``h (1 - w h) / ||x||^2``, so a row it leaves
 has a leave-out Hessian whose smallest eigenvalue on a unit diagonal is below
 ``RESOLVED (||E|| (1 + eta)^2 / (1 - eta) + P gamma_(P+2))``, about ``64 P gamma_n``: near the
@@ -1814,24 +1817,39 @@ def _lean_stack(
     ks: NDArray[np.intp],
     rows: NDArray[np.intp],
     slots: NDArray[np.intp],
-) -> _Stack:
-    """A stack of single rows whose leverages the design's tables gave (:meth:`_Trial.lean`).
+) -> list[_Stack]:
+    """Stacks of single rows whose leverages the design's tables gave (:meth:`_Trial.lean`).
 
     A row whose margin ``1 - W h`` clears the level the inverse resolves by ``W`` times
     the tables' bound, and by the margin's own rounding, clears it on its dense row too: it
     is solved together, as :func:`_stack` would solve it.  Every other row's leverage is
-    read from its dense row, as :func:`_stack` reads it, and decided there.
+    read from its dense row, as :func:`_stack` reads it, and decided there: one whose margin
+    then clears the level joins the first stack, and the rest are a stack of their dense
+    rows (:func:`_stack`), which takes them to the fit's Cholesky factor as it takes any
+    single row the inverse does not resolve.
     """
     held, bound = lean
     at = rows[:, 0]
     curvature = trial.curvature[at]
     leverage = held[at]
     clear = 1.0 - curvature * leverage - (curvature * bound + 2.0 * EPS) > trial.unresolved
+    stacks = []
     if not clear.all():
-        block = trial.read(at[~clear])
-        leverage[~clear] = np.einsum("ij,ij->i", trial.solved(block), block)
-    sound = clear | (1.0 - curvature * leverage > trial.unresolved)
-    return _Stack(ks, rows, slots, None, None, leverage[:, None, None], sound)
+        doubt = np.flatnonzero(~clear)
+        block = trial.read(at[doubt])
+        solved = trial.solved(block)
+        leverage[doubt] = np.einsum("ij,ij->i", solved, block)
+        dense = 1.0 - curvature[doubt] * leverage[doubt] <= trial.unresolved
+        clear[doubt[~dense]] = True
+        if dense.any():
+            these = doubt[dense]
+            Z, Y = block[dense][:, None], solved[dense][:, None]
+            stacks.append(_stack(trial, True, ks[these], rows[these], slots[these], Z, Y))
+    keep = np.flatnonzero(clear)
+    lean_rows = _Stack(
+        ks[keep], rows[keep], slots[keep], None, None, leverage[keep, None, None], clear[keep]
+    )
+    return [lean_rows, *stacks]
 
 
 def _alone(trial: _Trial, nb: Neighbourhoods, stack: _Stack, at: int, stacked: bool) -> None:
@@ -2035,7 +2053,8 @@ def _small_route(trial: _Trial, nb: Neighbourhoods, ks: NDArray[np.intp], stacke
     member is decided one at a time (:func:`_alone`), in the order of ``ks`` and before the
     block's stacks are solved.  ``stacked`` False is a forced route: every neighbourhood
     one at a time.  Single rows that need no dense rows (:meth:`_Trial.lean`) are left out
-    of the blocks and stacked from their leverages (:func:`_lean_stack`).
+    of the blocks and stacked from their leverages (:func:`_lean_stack`), which reads the
+    dense rows of those its tables leave in doubt.
     """
     sizes = nb.sizes()[ks]
     lean = None
@@ -2059,7 +2078,7 @@ def _small_route(trial: _Trial, nb: Neighbourhoods, ks: NDArray[np.intp], stacke
             these = members[inside]
             held, at = rows[start:stop].reshape(shape), slots[start:stop].reshape(shape)
             if lean is not None and removed == 1:
-                stacks.append(_lean_stack(trial, lean, these, held, at))
+                stacks.extend(_lean_stack(trial, lean, these, held, at))
                 continue
             stack = _stack(
                 trial,
