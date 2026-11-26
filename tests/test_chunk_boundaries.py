@@ -642,6 +642,9 @@ BOUNDARY_TESTS: dict[str, str | tuple[str, ...]] = {
     "model/runtime_canonicalize.py::_runtime_training_feature_column_means": (
         "test_discretize_fit.py::test_binned_fit_predicts_what_it_fitted_on_a_skewed_column"
     ),
+    "ncv/rows.py::row_chunks": (
+        "test_ncv_engine.py::test_large_neighbourhoods_are_read_in_bounded_blocks"
+    ),
     "reml/_leverage_rows.py::_support_block.pieces": (
         "test_reml_leverage_hessian.py::test_a_pooled_block_forms_its_solved_rows_a_piece_at_a_time"
     ),
