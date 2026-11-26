@@ -30,7 +30,7 @@ from superglm.distributions import Binomial, clip_mu
 from superglm.editor.evaluation import EvaluationDataset
 from superglm.editor.metrics import compute_dataset_metrics
 from superglm.links import stabilize_eta
-from superglm.model_selection import cross_validate
+from superglm.model_selection import cross_validate, fold_adapter
 from superglm.stats.model_tests import _per_obs_log_likelihood
 
 _RTOL = 1e-10
@@ -234,6 +234,16 @@ def test_cross_validation_scores_read_the_likelihood(rows):
     np.testing.assert_allclose(scores["deviance"], mean_deviance, rtol=_RTOL)
     np.testing.assert_allclose(scores["nll"], 0.5 * mean_deviance, rtol=_RTOL)
     np.testing.assert_allclose(result.pooled_scores["deviance"], mean_deviance, rtol=_RTOL)
+
+
+def test_row_costs_read_the_likelihood(rows):
+    """Each row's cost, which ranks the editor's worst rows, is its weighted ``-2 log L``.
+
+    The unfixed cost of an event priced at ``1e-16`` was the floor's 32.2 a
+    unit of weight, below an ordinary row's share of a larger weight.
+    """
+    costs = fold_adapter(rows.model).row_costs(rows.model, rows.frame, _Y, _WEIGHTS, rows.offset)
+    np.testing.assert_allclose(costs, -2.0 * _WEIGHTS * rows.log_likelihood_rows(), rtol=_RTOL)
 
 
 def test_editor_metrics_read_the_likelihood(rows):
