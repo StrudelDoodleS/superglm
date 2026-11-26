@@ -126,10 +126,12 @@ Three things stand out:
   keeps 129.1 EDF, Tweedie $p = 1.2$ improves all 5 folds (−0.012483), Tweedie
   $p = 1.5$ is mixed (3 of 5 folds), and negative binomial is worse on 4 of 5
   folds (+0.009688).
-- **`fit_ncv` declares no overdispersion law and predicts unseen policies best
-  of the seven.** With policies held out it lands at 73.2 EDF and lowers
-  held-out deviance by −0.015310 (−0.063%, SD 0.008494), winning on all 5 of 5
-  folds while removing the single-age wiggles.
+- **`fit_ncv` declares no overdispersion law and predicts unseen policies as
+  well as the best declared law, without your having to find it.** With
+  policies held out it lands at 73.2 EDF and lowers held-out deviance by
+  0.015310 (0.063%, SD 0.008494) against Poisson `fit_reml`, on all 5 of 5
+  folds, while removing the single-age wiggles. Its margin over the best
+  declared law, Tweedie $p = 1.2$, is smaller than the spread between folds.
 - **On this book, single rows already get most of the gain.** Holding out
   single rows alone reaches −0.014494 (−0.060%, 5 of 5 folds, 78.1 EDF).
   Holding out whole policies instead of single rows changes deviance by
