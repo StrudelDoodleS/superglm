@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
 import numpy as np
@@ -54,6 +54,7 @@ from superglm.distributional.smoothing.faces import (
     _face_revalidation_iteration,
     _face_transition_iteration,
     _FaceDirectionAttempt,
+    _FacePromotion,
     _FaceRetraction,
     _indexed_direction,
     _indexed_joint_direction,
@@ -508,25 +509,17 @@ class _SmoothingSearch:
                 converged=False,
                 reason="max_iterations" if unjudged else "lambda_cap_unresolved",
             )
-        promotion, assessment_attempt = _try_joint_exact_face(
-            self.family,
-            self.layout,
-            self.y,
-            self.likelihood_plan,
-            lambdas=self.state.lambdas,
-            current_face=self.state.face,
-            current_fit=self.state.fit,
-            current_objective=self.state.objective,
-            terminal_evidence=self.state.evidence,
-            solver_config=self.inner_config,
-            efs_config=self.outer_config,
-            chunk_size=self.chunk_size,
-            phase_recorder=self.phase_recorder,
-            _reuse_session=self.reuse_session,
-            derivatives=self.endpoint_derivatives,
-        )
-        if promotion is None and assessment_attempt is None:
-            promotion, assessment_attempt = _try_exact_face(
+        promotion, attempt = self._assess_caps()
+        if promotion is None:
+            return self._caps_refused(attempt)
+        return self._promote(promotion, attempt)
+
+    def _assess_caps(
+        self,
+    ) -> tuple[_FacePromotion | None, _FaceDirectionAttempt | _JointFaceDirectionAttempt | None]:
+        """Assess the pressed caps jointly, or one by one when the joint assessor has no answer."""
+        for assess in (_try_joint_exact_face, _try_exact_face):
+            promotion, attempt = assess(
                 self.family,
                 self.layout,
                 self.y,
@@ -543,90 +536,105 @@ class _SmoothingSearch:
                 _reuse_session=self.reuse_session,
                 derivatives=self.endpoint_derivatives,
             )
-        if promotion is None:
-            if self.handed_over:
-                pass  # the endgame's verdict stands, with the refusal recorded
-            elif self.outer_config.outer != "efs" and self.pending_cap is None:
-                if self._endgame_budget() > 0 and self.estimated_names:
-                    # The FS proposal nominated this cap; the exact gradient decides
-                    # before a refusal is recorded (these assessment fits are dropped).
-                    return self._run_endgame()
-            elif (
-                self.outer_config.outer in ("efs+newton", "efs+stationary")
-                and self.pending_cap is not None
-            ):
-                bracket = self._bracket_after_refusal(assessment_attempt)
-                if isinstance(bracket, BracketRelease):
-                    self._accept_bracket_release(bracket, assessment_attempt)
-                    self.pending_cap = None
-                    return self._run_endgame()
-                if isinstance(bracket, BracketAttempt):
-                    self._record_bracket_attempt(bracket)
-            if assessment_attempt is not None and assessment_attempt.assessment_fits:
-                first_assessment_index = len(self.coefficient_fits)
-                self.coefficient_fits.extend(assessment_attempt.assessment_fits)
-                assessment_indices = tuple(
-                    range(first_assessment_index, len(self.coefficient_fits))
+            if promotion is not None or attempt is not None:
+                return promotion, attempt
+        return None, None
+
+    def _caps_refused(
+        self, attempt: _FaceDirectionAttempt | _JointFaceDirectionAttempt | None
+    ) -> DistributionalEFSResult | None:
+        """After a refusal: the exact gradient decides first, the caps are held, or the fit ends."""
+        if self.handed_over:
+            pass  # the endgame's verdict stands, with the refusal recorded
+        elif self.outer_config.outer != "efs" and self.pending_cap is None:
+            if self._endgame_budget() > 0 and self.estimated_names:
+                # The FS proposal nominated this cap; the exact gradient decides
+                # before a refusal is recorded (these assessment fits are dropped).
+                return self._run_endgame()
+        elif (
+            self.outer_config.outer in ("efs+newton", "efs+stationary")
+            and self.pending_cap is not None
+        ):
+            bracket = self._bracket_after_refusal(attempt)
+            if isinstance(bracket, BracketRelease):
+                self._accept_bracket_release(bracket, attempt)
+                self.pending_cap = None
+                return self._run_endgame()
+            if isinstance(bracket, BracketAttempt):
+                self._record_bracket_attempt(bracket)
+        self._record_refusal(attempt)
+        if self.handed_over:
+            self.endpoint_caps.difference_update(self.state.evidence.unresolved_upper_bound)
+            self.endgame_due = self.handed_over = False
+            self.state = replace(
+                self.state,
+                evidence=replace(self.state.evidence, unresolved_upper_bound=()),
+            )
+            return None
+        if self.outer_config.outer == "efs" and not self.caps_final:
+            self.refused_fit = self.state.fit
+            self.cap_held |= frozenset(self.state.evidence.unresolved_upper_bound)
+            self.state = replace(self.state, evidence=self._evidence())
+            return None
+        return self._result(converged=False, reason="lambda_cap_unresolved")
+
+    def _record_refusal(
+        self, attempt: _FaceDirectionAttempt | _JointFaceDirectionAttempt | None
+    ) -> None:
+        """Record a refused assessment that made fits as one history row."""
+        if attempt is None or not attempt.assessment_fits:
+            return
+        assessment_indices = self._append_fits(attempt.assessment_fits)
+        if isinstance(attempt, _JointFaceDirectionAttempt):
+            component_names = attempt.component_names
+            refusal_direction = (
+                None
+                if attempt.direction is None
+                else _indexed_joint_direction(
+                    attempt.direction,
+                    assessment_indices,
+                    attempt.coefficient_tolerance,
                 )
-                if isinstance(assessment_attempt, _JointFaceDirectionAttempt):
-                    component_names = assessment_attempt.component_names
-                    refusal_direction = (
-                        None
-                        if assessment_attempt.direction is None
-                        else _indexed_joint_direction(
-                            assessment_attempt.direction,
-                            assessment_indices,
-                            assessment_attempt.coefficient_tolerance,
-                        )
-                    )
-                else:
-                    component_names = (self.state.evidence.unresolved_upper_bound[0],)
-                    refusal_direction = (
-                        None
-                        if assessment_attempt.check is None
-                        else _indexed_direction(
-                            assessment_attempt.check.direction,
-                            assessment_indices,
-                            assessment_attempt.coefficient_tolerance,
-                        )
-                    )
-                self.history.append(
-                    _face_assessment_refusal_iteration(
-                        iteration=len(self.history) + 1,
-                        source_fit_index=self.state.terminal_fit_index,
-                        coefficient_fit_indices=assessment_indices,
-                        coefficient_tolerance=assessment_attempt.coefficient_tolerance,
-                        component_names=component_names,
-                        direction=refusal_direction,
-                        failure_reason=assessment_attempt.failure_reason,
-                        lambdas=self.state.lambdas,
-                        objective=self.state.objective,
-                        evidence=self.state.evidence,
-                        source_fit=self.state.fit,
-                    )
+            )
+        else:
+            component_names = (self.state.evidence.unresolved_upper_bound[0],)
+            refusal_direction = (
+                None
+                if attempt.check is None
+                else _indexed_direction(
+                    attempt.check.direction,
+                    assessment_indices,
+                    attempt.coefficient_tolerance,
                 )
-            if self.handed_over:
-                self.endpoint_caps.difference_update(self.state.evidence.unresolved_upper_bound)
-                self.endgame_due = self.handed_over = False
-                self.state = replace(
-                    self.state,
-                    evidence=replace(self.state.evidence, unresolved_upper_bound=()),
-                )
-                return None
-            if self.outer_config.outer == "efs" and not self.caps_final:
-                self.refused_fit = self.state.fit
-                self.cap_held |= frozenset(self.state.evidence.unresolved_upper_bound)
-                self.state = replace(self.state, evidence=self._evidence())
-                return None
-            return self._result(converged=False, reason="lambda_cap_unresolved")
+            )
+        self.history.append(
+            _face_assessment_refusal_iteration(
+                iteration=len(self.history) + 1,
+                source_fit_index=self.state.terminal_fit_index,
+                coefficient_fit_indices=assessment_indices,
+                coefficient_tolerance=attempt.coefficient_tolerance,
+                component_names=component_names,
+                direction=refusal_direction,
+                failure_reason=attempt.failure_reason,
+                lambdas=self.state.lambdas,
+                objective=self.state.objective,
+                evidence=self.state.evidence,
+                source_fit=self.state.fit,
+            )
+        )
+
+    def _promote(
+        self,
+        promotion: _FacePromotion,
+        attempt: _FaceDirectionAttempt | _JointFaceDirectionAttempt | None,
+    ) -> DistributionalEFSResult | None:
+        """Take the assessed exact face: record the promotion and adopt its fit."""
         source_fit_index = self.state.terminal_fit_index
-        first_assessment_index = len(self.coefficient_fits)
-        self.coefficient_fits.extend(promotion.assessment_fits)
-        assessment_indices = tuple(range(first_assessment_index, len(self.coefficient_fits)))
+        assessment_indices = self._append_fits(promotion.assessment_fits)
         self.state = replace(self.state, terminal_fit_index=assessment_indices[-1])
-        if assessment_attempt is None:
+        if attempt is None:
             raise RuntimeError("an accepted exact face requires an authority assessment")
-        coefficient_tolerance = assessment_attempt.coefficient_tolerance
+        coefficient_tolerance = attempt.coefficient_tolerance
         indexed_direction = (
             _indexed_joint_direction(
                 promotion.direction,
@@ -673,6 +681,12 @@ class _SmoothingSearch:
         if resume:
             return self._run_endgame()
         return None
+
+    def _append_fits(self, fits: Sequence[DenseSolverResult]) -> tuple[int, ...]:
+        """Append ``fits`` to the search's coefficient fits and return their indices."""
+        first = len(self.coefficient_fits)
+        self.coefficient_fits.extend(fits)
+        return tuple(range(first, len(self.coefficient_fits)))
 
     def _stop_earned(self) -> bool:
         """Whether a stationary endgame or an earned plateau has stopped the search."""
@@ -1915,10 +1929,7 @@ class _SmoothingSearch:
         """Record the released component as one accepted bracket iteration."""
         assert self.pending_cap is not None and self.pending_cap.derivatives is not None
         assessment_fits = () if attempt is None else tuple(attempt.assessment_fits)
-        first = len(self.coefficient_fits)
-        self.coefficient_fits.extend(assessment_fits)
-        self.coefficient_fits.extend(release.fits)
-        indices = tuple(range(first, len(self.coefficient_fits)))
+        indices = self._append_fits((*assessment_fits, *release.fits))
         tolerances = (
             *(() if attempt is None else (attempt.coefficient_tolerance,) * len(assessment_fits)),
             *((release.tolerance,) * len(release.fits)),
@@ -1958,9 +1969,7 @@ class _SmoothingSearch:
     def _record_bracket_attempt(self, attempt: BracketAttempt) -> None:
         """Record a search that found no root as one rejected bracket iteration."""
         assert self.pending_cap is not None and self.pending_cap.derivatives is not None
-        first = len(self.coefficient_fits)
-        self.coefficient_fits.extend(attempt.fits)
-        indices = tuple(range(first, len(self.coefficient_fits)))
+        indices = self._append_fits(attempt.fits)
         self.history.append(
             newton_iteration_record(
                 iteration=len(self.history) + 1,
