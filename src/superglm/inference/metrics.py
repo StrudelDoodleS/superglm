@@ -490,14 +490,16 @@ def _large_shape_gamma_rows(probability, shape, log_ratio, *, upper=False):
     Above :data:`LARGE_GAMMA_SHAPE` SciPy sums the series of ``P`` for at most
     2,000 terms, too few more than 4.5 standard deviations below the mean from
     shape about 1e6, so those rows read the generalised gamma log tail at
-    ``Q = a**-0.5``, as ``GammaLS``'s CDF does. Other rows keep SciPy's values.
+    ``Q = a**-0.5``, as ``GammaLS``'s CDF does. Other rows keep SciPy's values,
+    as do rows whose shape overflowed (a prior weight past the float64 range),
+    where SciPy's value is the saturated one.
     """
     from superglm.distributional.kernels.generalized_gamma import (
         LARGE_GAMMA_SHAPE,
         log_tail_cdf,
     )
 
-    large = shape > LARGE_GAMMA_SHAPE
+    large = np.isfinite(shape) & (shape > LARGE_GAMMA_SHAPE)
     if np.any(large):
         root = np.sqrt(shape[large])
         probability[large] = log_tail_cdf(root * log_ratio[large], 1.0 / root, upper=upper)

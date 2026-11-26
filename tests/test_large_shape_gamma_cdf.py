@@ -234,6 +234,26 @@ def test_poisson_glm_quantile_residuals_match_the_density_integral_at_large_coun
 
 
 @pytest.mark.pins_behaviour
+@pytest.mark.parametrize("family", ["gamma", "poisson"])
+def test_glm_residual_at_an_overflowing_prior_weight_stays_saturated(family):
+    """Pins master's behaviour where ``w / phi`` or the weighted count ``w y`` overflows.
+
+    At prior weight 1e308 a response twice its mean is far above the law, so the residual
+    is the cap ``Phi^-1(1 - 1e-10)``. Mutation check: sending a row whose shape is
+    infinite to the log tail makes the Poisson endpoints NaN and the draw raise.
+    """
+    rng = np.random.default_rng(5)
+    frame = pd.DataFrame({"x": rng.standard_normal(60)})
+    y = rng.gamma(4.0, 0.25, 60) if family == "gamma" else rng.poisson(1.0, 60).astype(float)
+    model = SuperGLM(family=family, selection_penalty=0.0, features={"x": Numeric()})
+    model.fit(frame, y)
+    row = frame.iloc[:1]
+    response = 2.0 * model.predict(row)
+    residual = model.metrics(row, response, sample_weight=np.array([1e308])).residuals("quantile")
+    assert residual == pytest.approx([special.ndtri(1.0 - 1e-10)], rel=1e-12)
+
+
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("q", [1e-155, -1e-155, 0.0])
 def test_generalized_gamma_near_zero_shape_raises_no_overflow(q):
     """Pins master's behaviour at a tiny Q (the log-normal limit): no overflow, no warning.
