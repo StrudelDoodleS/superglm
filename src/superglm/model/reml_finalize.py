@@ -996,8 +996,8 @@ def finalize_reml_fit(
     # stationary, so the Laplace criterion is undefined there; its evaluation
     # still supplies the scale state. A binomial/identity boundary state is a
     # feasible mode and keeps its score.
-    if best.termination_reason == "mean_space_boundary" or (
-        final_pirls.termination_reason == "mean_space_boundary"
+    if getattr(best, "termination_reason", None) == "mean_space_boundary" or (
+        getattr(final_pirls, "termination_reason", None) == "mean_space_boundary"
         and pair_of(model._distribution, model._link).mean_space_violation is not None
     ):
         best.objective = None
