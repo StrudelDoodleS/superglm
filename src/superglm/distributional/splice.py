@@ -14,8 +14,9 @@ import scipy.linalg
 from numpy.typing import ArrayLike, NDArray
 from scipy import integrate, optimize, special
 
+from superglm._experimental import warn_experimental
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
-from superglm.distributional.api import SuperLSS
+from superglm.distributional.api import SuperLSS, _renderer
 from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
 from superglm.distributional.families.log_normal import LogNormalLS
@@ -23,6 +24,15 @@ from superglm.distributional.kernels._gamma_windows import gamma_shape_scale_win
 from superglm.distributional.kernels._severity_primitives import logratio
 from superglm.distributional.offsets import shape_fit_offsets, sources_of, take_offset
 from superglm.distributional.response import unvalidated_response, validated_response_array
+from superglm.distributional.row_law import (
+    LEVELS,
+    DistributionCurve,
+    check_curve_request,
+    curve_grid,
+    finite_amounts,
+    refuse_missing,
+    row_log_density,
+)
 from superglm.distributional.weights import WeightContract, _weight_values
 from superglm.distributions import Binomial, resolve_distribution
 from superglm.model.api import SuperGLM
@@ -313,6 +323,31 @@ def _restore_splice(version: int, models: _Components) -> SplitSplice:
     return SplitSplice(*models)
 
 
+def _window_probability(u: float, y: NDArray, survival: bool, law: tuple) -> NDArray:
+    """``P(Y > y)`` or ``P(Y <= y)`` per row of predicted components ``law``."""
+    family, tail_family, body, tail, q, valid = law
+    out = np.full(len(q), np.nan)
+    out[valid & (y <= 0.0)] = float(survival)
+    boundary = valid & (y == u)
+    out[boundary] = q[boundary] if survival else 1.0 - q[boundary]
+    below = valid & (y > 0.0) & (y < u)
+    if np.any(below):
+        params, z, p = body[below], y[below], q[below]
+        log_norm = _log_window(family, 0.0, u, params)
+        lo, hi = (z, u) if survival else (0.0, z)
+        log_ratio = _log_window(family, lo, hi, params) - log_norm
+        conditional = np.exp(np.minimum(log_ratio, 0.0))
+        out[below] = (1.0 - p) * conditional + (p if survival else 0.0)
+    above = valid & (y > u) & np.isfinite(y) & (q > 0.0)
+    if np.any(above):
+        log_sf = np.log(q[above]) + tail_family.log_window_probability(
+            y[above] - u, np.inf, tail[above]
+        )
+        out[above] = np.exp(log_sf) if survival else -np.expm1(log_sf)
+    out[valid & (y > u) & ((q == 0.0) | (y == np.inf))] = float(not survival)
+    return out
+
+
 @dataclass(frozen=True, init=False)
 class SplitSplice:
     """A fixed-threshold loss law with verified body, exceedance and excess fits.
@@ -531,28 +566,9 @@ class SplitSplice:
         self, X: FrameLike, y: ArrayLike, survival: bool, offsets: _Offsets
     ) -> NDArray:
         y = _row_values(X, y, "y")
-        family, tail_family, body, tail, q, valid = self._predict_components(X, offsets)
-        u = self.threshold
-        out = np.full(len(q), np.nan)
-        out[valid & (y <= 0.0)] = float(survival)
-        boundary = valid & (y == u)
-        out[boundary] = q[boundary] if survival else 1.0 - q[boundary]
-        below = valid & (y > 0.0) & (y < u)
-        if np.any(below):
-            params, z, p = body[below], y[below], q[below]
-            log_norm = _log_window(family, 0.0, u, params)
-            lo, hi = (z, u) if survival else (0.0, z)
-            log_ratio = _log_window(family, lo, hi, params) - log_norm
-            conditional = np.exp(np.minimum(log_ratio, 0.0))
-            out[below] = (1.0 - p) * conditional + (p if survival else 0.0)
-        above = valid & (y > u) & np.isfinite(y) & (q > 0.0)
-        if np.any(above):
-            log_sf = np.log(q[above]) + tail_family.log_window_probability(
-                y[above] - u, np.inf, tail[above]
-            )
-            out[above] = np.exp(log_sf) if survival else -np.expm1(log_sf)
-        out[valid & (y > u) & ((q == 0.0) | (y == np.inf))] = float(not survival)
-        return out
+        return _window_probability(
+            self.threshold, y, survival, self._predict_components(X, offsets)
+        )
 
     def predict_cdf(self, X: FrameLike, y: ArrayLike, **offsets: Unpack[_Offsets]) -> NDArray:
         """Return P(Y <= y) per row for a scalar or row-aligned y."""
@@ -643,3 +659,176 @@ class SplitSplice:
                 tail_family, np.maximum(a[above] - u, 0.0), tail_width[above], tail[above], q[above]
             )
         return np.minimum(out, w)
+
+    def predict_pdf(self, X: FrameLike, y: ArrayLike, **offsets: Unpack[_Offsets]) -> NDArray:
+        """Return each row's density at ``y``: ``(1 - q) f_body / F_body(u)`` up to the threshold
+        ``u``, ``q g(y - u)`` above it.
+
+        A loss equal to the threshold is a body loss, so the density there is the body's left
+        limit. An amount at or below 0 or infinite reads 0; a missing amount is refused.
+        Experimental: the name, the arguments and the layout of the result may change in a
+        minor release.
+        """
+        warn_experimental("predict_pdf")
+        y = _row_values(X, y, "y")
+        return self._density(y, y > self.threshold, self._predict_components(X, offsets))
+
+    def predict_mean_excess(
+        self, X: FrameLike, v: ArrayLike, **offsets: Unpack[_Offsets]
+    ) -> NDArray:
+        """Return ``E[Y - v | Y > v]`` per row for a finite scalar or row-aligned ``v``.
+
+        At or above the threshold it is the tail's ``(scale + shape (v - u)) / (1 - shape)``.
+        Experimental: the name, the arguments and the layout of the result may change in a
+        minor release.
+        """
+        warn_experimental("predict_mean_excess")
+        v = finite_amounts(_row_values(X, v, "v"), "predict_mean_excess")
+        return self._mean_excess(v, self._predict_components(X, offsets))
+
+    def distribution_curve(
+        self,
+        row: FrameLike,
+        *,
+        kind: str = "density",
+        y: ArrayLike | None = None,
+        n_points: int = 200,
+        **offsets: Unpack[_Offsets],
+    ) -> DistributionCurve:
+        """Return one row's law on a grid that holds the threshold twice, once per piece.
+
+        ``kind`` is ``"density"``, ``"survival"`` or ``"mean_excess"``. Without ``y`` the body
+        and the tail each get half of ``n_points``: the body from its own 0.001 quantile (0.01
+        for the survival) up to the threshold, the tail from the threshold to its own 0.999
+        quantile (``1 - 1e-6`` for the survival), so a rare tail is still drawn. The body's
+        point at the threshold is its left limit and the tail's its right limit.
+        Experimental: the name, the arguments and the layout of the result may change in a
+        minor release.
+        """
+        warn_experimental("distribution_curve")
+        return self._curve(row, kind, y, n_points, offsets, "distribution_curve")
+
+    def plot_distribution(
+        self,
+        row: FrameLike,
+        *,
+        kind: str = "density",
+        engine: str = "matplotlib",
+        y: ArrayLike | None = None,
+        n_points: int = 200,
+        **offsets: Unpack[_Offsets],
+    ) -> Any:
+        """Draw one row's law from :meth:`distribution_curve`: body and tail, and the step.
+
+        Experimental: the name, the arguments and the layout of the result may change in a
+        minor release.
+        """
+        warn_experimental("plot_distribution")
+        curve = self._curve(row, kind, y, n_points, offsets, "plot_distribution")
+        return _renderer(engine, "distribution")(curve)
+
+    def _density(self, y: NDArray, in_tail: NDArray, law: tuple) -> NDArray:
+        """The density at ``y``, read from the tail where ``in_tail`` and the body elsewhere."""
+        family, tail_family, body, tail, q, valid = law
+        u = self.threshold
+        refuse_missing(y, "predict_pdf")
+        out = np.where(valid, 0.0, np.nan)
+        below = valid & ~in_tail & (y > 0.0)
+        if np.any(below):
+            rows = np.flatnonzero(below)
+            log_f = row_log_density(family, y[rows], body[rows], positions=rows)
+            log_body = log_f - _log_window(family, 0.0, u, body[rows])
+            with np.errstate(over="ignore"):
+                out[rows] = (1.0 - q[rows]) * np.exp(log_body)
+        above = valid & in_tail & np.isfinite(y)
+        if np.any(above):
+            rows = np.flatnonzero(above)
+            log_g = row_log_density(tail_family, y[rows] - u, tail[rows], positions=rows)
+            with np.errstate(over="ignore"):
+                out[rows] = q[rows] * np.exp(log_g)
+        return out
+
+    def _mean_excess(self, v: NDArray, law: tuple) -> NDArray:
+        """``E[Y - v | Y > v]``: the tail's line from the threshold, a ratio of positive terms below."""
+        family, _, body, tail, q, valid = law
+        u = self.threshold
+        scale, shape = tail.T
+        out = np.full(len(q), np.nan)
+        above = valid & (v >= u)
+        with np.errstate(over="ignore"):
+            out[above] = (scale[above] + shape[above] * (v[above] - u)) / (1.0 - shape[above])
+        below = valid & (v < u)
+        if np.any(below):
+            # S(v) = 1 for v below 0, so e(v) = e(0) - v there.
+            a = np.maximum(v[below], 0.0)
+            params, p = body[below], q[below]
+            log_ratio = _log_window(family, a, u, params) - _log_window(family, 0.0, u, params)
+            survival = (1.0 - p) * np.exp(np.minimum(log_ratio, 0.0)) + p
+            layer = (
+                (1.0 - p) * _body_layer(family, a, u - a, u, params)
+                + p * (u - a)
+                + p * scale[below] / (1.0 - shape[below])
+            )
+            out[below] = layer / survival + np.maximum(-v[below], 0.0)
+        return out
+
+    def _curve(
+        self,
+        row: FrameLike,
+        kind: str,
+        y: ArrayLike | None,
+        n_points: int,
+        offsets: _Offsets,
+        caller: str,
+    ) -> DistributionCurve:
+        grid = check_curve_request(len(as_eager_frame(row)), kind, y, n_points, caller)
+        law = self._predict_components(row, offsets)
+        family, tail_family, body, tail, q, valid = law
+        u = self.threshold
+        empty = np.empty(0)
+        if grid is None:
+            p_low, p_high = LEVELS[kind]
+            low = _body_quantile(
+                family, np.log([p_low]) + _log_window(family, 0.0, u, body), body, u
+            )
+            high = u + tail_family.quantile(np.array([p_high]), tail)
+            n_body = max(n_points // 2, 2)
+            body_grid = curve_grid(kind, n_body, low[0], u, positive=True)
+            tail_grid = curve_grid(kind, max(n_points - n_body, 2), u, high[0], positive=True)
+        elif grid[0] <= u < grid[-1]:
+            body_grid = np.append(grid[grid < u], u)
+            tail_grid = np.insert(grid[grid > u], 0, u)
+        else:
+            body_grid, tail_grid = (grid, empty) if grid[-1] <= u else (empty, grid)
+        points = np.concatenate([body_grid, tail_grid])
+        in_tail = np.arange(len(points)) >= len(body_grid)
+        take = np.zeros(len(points), dtype=np.intp)
+        rows = (family, tail_family, body[take], tail[take], q[take], valid[take])
+        if kind == "density":
+            values = self._density(points, in_tail, rows)
+        elif kind == "survival":
+            values = _window_probability(u, points, True, rows)
+        else:
+            values = self._mean_excess(points, rows)
+        parameters = {
+            **{
+                f"body_{name}": float(value)
+                for name, value in zip(self.body.parameter_names_, body[0])
+            },
+            "exceedance": float(q[0]),
+            **{
+                f"tail_{name}": float(value)
+                for name, value in zip(self.tail.parameter_names_, tail[0])
+            },
+        }
+        return DistributionCurve(
+            kind=kind,
+            y=points,
+            values=values,
+            piece=("body",) * len(body_grid) + ("tail",) * len(tail_grid),
+            threshold=u,
+            mean=float(self.predict(row, **offsets)[0]),
+            family=f"SplitSplice({type(family).__name__}, {type(tail_family).__name__})",
+            parameters=parameters,
+            amount_scale="log" if kind == "survival" else "linear",
+        )
