@@ -1731,12 +1731,12 @@ def generalized_gamma_cdf(
         sigma_inside = sigma_values[interior]
         q_inside = q[interior]
         w = (np.log(y_inside) - mu_inside) / sigma_inside
-        with np.errstate(divide="ignore"):
-            k = 1.0 / (q_inside * q_inside)
-        large = k > LARGE_GAMMA_SHAPE
+        # Gamma shape 1/Q^2 above the switch, compared as Q^2 so a tiny Q cannot overflow.
+        large = q_inside * q_inside < 1.0 / LARGE_GAMMA_SHAPE
         inside_cdf = np.empty_like(w)
         inside_cdf[large] = log_tail_cdf(w[large], q_inside[large])
-        k, w, q_inside = k[~large], w[~large], q_inside[~large]
+        w, q_inside = w[~large], q_inside[~large]
+        k = 1.0 / (q_inside * q_inside)
         with np.errstate(over="ignore", invalid="ignore"):
             argument = k * np.exp(q_inside * w)
             lower = special.gammainc(k, argument)
@@ -1770,12 +1770,11 @@ def generalized_gamma_quantile(
     zero = np.abs(q) < _ZERO_SHAPE
     z = special.ndtri(probabilities)
     w = z - q * (z * z + 2.0) / 6.0
-    with np.errstate(divide="ignore"):
-        k = 1.0 / (q * q)
-    large = ~zero & (k > LARGE_GAMMA_SHAPE)
+    large = ~zero & (q * q < 1.0 / LARGE_GAMMA_SHAPE)
     w[large] = log_tail_quantile(probabilities[large], q[large])
     rest = ~zero & ~large
-    k, safe, level = k[rest], q[rest], probabilities[rest]
+    safe, level = q[rest], probabilities[rest]
+    k = 1.0 / (safe * safe)
     gamma_quantile = np.where(
         safe > 0.0, special.gammaincinv(k, level), special.gammainccinv(k, level)
     )

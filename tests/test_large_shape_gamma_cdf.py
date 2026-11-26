@@ -159,3 +159,20 @@ def test_gamma_distribution_functions_stay_probabilities_at_any_concentration(cv
         # Six standard deviations out the law is the normal in log amount to O(cv).
         w = np.log1p((y[[1, 3]] - mean) / mean) / cv
         assert cdf[[1, 3]] == pytest.approx(special.ndtr(w), rel=1e-6)
+
+
+@pytest.mark.parametrize("q", [1e-155, -1e-155, 0.0])
+def test_generalized_gamma_near_zero_shape_raises_no_overflow(q):
+    """A tiny Q is the log-normal limit; choosing the branch must not form ``1/Q^2``.
+
+    Mutation check: testing ``1/Q^2 > 1e4`` overflows at ``Q = 1e-155``.
+    """
+    family = GeneralizedGammaLSS(parametrisation="location")
+    theta = np.array([[0.0, 1.0, q]] * 3)
+    with warnings.catch_warnings(), np.errstate(over="raise", divide="raise", invalid="raise"):
+        warnings.simplefilter("error")
+        cdf = family.cdf(np.array([0.5, 1.0, 2.0]), theta)
+        quantile = family.quantile(np.array([1e-6, 0.5, 1.0 - 1e-6]), theta)
+    assert cdf == pytest.approx(special.ndtr(np.log([0.5, 1.0, 2.0])), rel=1e-12)
+    assert quantile[1] == pytest.approx(1.0, rel=1e-14)
+    assert np.all(np.diff(quantile) > 0.0)
