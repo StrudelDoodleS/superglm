@@ -2,8 +2,8 @@
 
 The table is walked three ways: every method has a row with the traits its readers
 need; every declared move is made on a real model (a successful ``fit``,
-``fit_path`` or ``fit_reml`` from each prior state, a failed fit that leaves the
-state, an ``estimate_theta`` publication refit); and a source scan finds no writer
+``fit_path``, ``fit_reml`` or ``fit_ncv`` from each prior state, a failed fit that
+leaves the state, an ``estimate_theta`` publication refit); and a source scan finds no writer
 of ``_last_fit_meta`` and no comparison of the recorded method outside the owner.
 """
 
@@ -28,8 +28,7 @@ from superglm.model.report_ops import rules_enforced
 SOURCE = Path(__file__).parents[1] / "src" / "superglm"
 OWNER = "model/fit_method.py"
 ALL_METHODS = ("fit", "fit_path", "fit_reml", "fit_ncv")
-# The methods a model can be fitted with today; ``fit_ncv`` has a row and no entry point yet.
-FITTED_METHODS = ("fit", "fit_path", "fit_reml")
+FITTED_METHODS = ALL_METHODS
 
 
 def _owner():

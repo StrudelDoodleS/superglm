@@ -255,13 +255,16 @@ class KeptRows:
 
     Rows are centred about the plain working-weight mean of every row, an exact
     reparametrisation that owes nothing to the engine's centre, and each Hessian and score is
-    summed from its kept rows alone.
+    summed from its kept rows alone.  The full fit is the library's at ``rho``, or the one a
+    caller hands over as ``at``: its predictor on every row and its slopes.
     """
 
-    def __init__(self, problem, rho):
+    def __init__(self, problem, rho, at=None):
         lambdas = problem.lambdas(rho)
-        self.full = library_fit(problem, lambdas)
-        self.eta = linear_predictor(problem.dm, self.full, problem.offset)
+        if at is None:
+            full = library_fit(problem, lambdas)
+            at = linear_predictor(problem.dm, full, problem.offset), full.beta
+        self.eta, slopes = at
         mean, _ = mean_and_deviance(problem, np.arange(problem.n), self.eta)
         w, dm = problem.weights, problem.dm
         self.curvature = w * mean if problem.loss.log_mean else w
@@ -272,7 +275,7 @@ class KeptRows:
         self.S[1:, 1:] = build_penalty_matrix(
             list(dm.group_matrices), problem.groups, lambdas, dm.p, reml_penalties=problem.penalties
         )
-        self.penalty_score = self.S @ np.concatenate(([0.0], self.full.beta))
+        self.penalty_score = self.S @ np.concatenate(([0.0], slopes))
         self.full_score = self.Z.T @ self.pull - self.penalty_score
 
     def solver(self, removed):

@@ -62,8 +62,8 @@ TRIAL_FAILURES: dict[TrialFailure, str] = {
         "the coefficient fit was rank deficient and kept no coordinates to evaluate it in"
     ),
     "kept_rows_limit": (
-        "more neighbourhoods needed their held-out fit made from the rows that remain than one "
-        "trial makes"
+        "too many held-out neighbourhoods each needed a fit of their own from the rows that "
+        "remain, more than one trial makes"
     ),
     "leave_out_refused": (
         "with one neighbourhood held out, the rows that remain did not identify the model, "
@@ -122,6 +122,8 @@ class NCVResult(REMLResult):
     work: dict[str, float] = field(default_factory=dict)
     #: The held-out results at ``lambdas``.
     heldout: Any | None = None
+    #: Why the criterion gave no held-out results at the published fit, where it gave none.
+    heldout_failure: TrialFailure | None = None
 
 
 __all__ = ["STOP_REASONS", "TRIAL_FAILURES", "NCVResult", "StopReason", "TrialFailure"]

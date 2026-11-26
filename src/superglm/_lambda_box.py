@@ -183,14 +183,22 @@ def glm_lambda_box(
     return LambdaBox(information_unit(information, size))
 
 
+_REML_BOUND_LEAD = (
+    "Smoothing-parameter selection stopped with the REML score still asking for "
+    "more than its limits allow on "
+)
+
+
 def bound_warning_message(
     hits: Sequence[tuple[str, str, float, float, float | None]],
+    lead: str = _REML_BOUND_LEAD,
 ) -> str | None:
-    """One warning naming each term whose smoothing a bound held back.
+    """One warning naming each term whose smoothing sits on a bound of its search.
 
     ``hits`` holds ``(term, side, lambda, bound, unit)``, ``side`` being
-    ``"floor"`` or ``"ceiling"``: terms whose REML score still pointed past
-    ``bound`` when the search stopped. ``unit`` is the term's information unit
+    ``"floor"`` or ``"ceiling"``. ``lead`` opens the sentence that lists them; the
+    default is REML's, whose hits are the terms its score still pointed past
+    ``bound`` for when the search stopped. ``unit`` is the term's information unit
     in a relative box, and None in an absolute one (an explicit ``max_lambda``),
     whose bounds say nothing about the term's own information.
     """
@@ -235,7 +243,4 @@ def bound_warning_message(
             "scale: raise it, or leave it unset so each term's limits are relative to "
             "its own information."
         )
-    return (
-        "Smoothing-parameter selection stopped with the REML score still asking for "
-        "more than its limits allow on " + "; ".join(parts) + ". " + " ".join(advice)
-    )
+    return lead + "; ".join(parts) + ". " + " ".join(advice)

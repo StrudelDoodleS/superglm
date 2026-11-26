@@ -77,6 +77,7 @@ _LAZY_PACKAGES = (
     "superglm.inference",
     "superglm.features",
     "superglm.model",
+    "superglm.ncv",
     "superglm.reml",
     "superglm.solvers",
     "superglm.solvers.irls_direct",
