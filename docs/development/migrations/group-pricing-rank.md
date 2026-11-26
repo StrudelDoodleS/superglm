@@ -20,7 +20,7 @@ rank — unless you opt out:
    with it.
 
 Both sites read one build-time decision
-(`dm_builder._priced_group_dimension`), so they cannot disagree.
+(`_predictor_compiler._priced_group_dimension`), so they cannot disagree.
 
 The new constructor parameter is the seam:
 

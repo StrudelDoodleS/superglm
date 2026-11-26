@@ -1633,7 +1633,7 @@ class CategoricalInteraction:
         # Report the width this term spans alongside the emitted width (the
         # identifiable rank).  Whether the group-lasso ``sqrt(p_g)`` weight and the df
         # ledger price the rank (``group_pricing="rank"``, default) or the spanned width
-        # is the builder's decision (``dm_builder._priced_group_dimension``).
+        # is the builder's decision (``_predictor_compiler._priced_group_dimension``).
         return GroupInfo(
             columns=None,
             n_cols=n_pairs,
