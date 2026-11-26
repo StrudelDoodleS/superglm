@@ -1251,11 +1251,6 @@ def capture_fit_state(
         )
         from superglm.model.separated_levels import disclose_held_levels, separated_terms
 
-        # The precision advisory reads the first working rows, so it precedes
-        # any separation disclosure the fit's mode may raise.
-        precision = (workspace.model._last_fit_meta or {}).get("initial_precision")
-        if precision:
-            warn_initial_precision(precision)
         disclose_held_levels(workspace.model)
         named: tuple[str, ...] = ()
         if separation_statement is None:
@@ -1267,6 +1262,9 @@ def capture_fit_state(
             disclose_runtime_separation(
                 separation_statement, getattr(workspace.model, "_separation", "warn")
             )
+        precision = (workspace.model._last_fit_meta or {}).get("initial_precision")
+        if precision:
+            warn_initial_precision(precision)
     design = getattr(workspace.model, "_dm", None)
     release_raw_splines = getattr(design, "release_raw_spline_tabmat_plan", None)
     if release_raw_splines is not None:

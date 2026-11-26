@@ -99,17 +99,24 @@ def _offset_fit(**kwargs):
     return model, (pd.DataFrame({"x": np.arange(8.0)}), np.full(8, 2.0))
 
 
-def test_the_advisory_precedes_a_separation_error():
-    """Mutation: the advisory followed the separation disclosure, so a
-    ``SeparationError`` left the caller without the offsets' diagnosis."""
+@pytest.mark.pins_behaviour
+def test_a_refused_separated_fit_emits_no_advisory():
+    """Pins master's contract (``test_separation.py``): a fit refused under
+    ``separation="error"`` raises ``SeparationError`` and says nothing else, though
+    the same rows under ``"warn"`` carry the offsets' advisory."""
+    model, (X, y) = _offset_fit(separation="warn")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(X, y, offset=_SEPARATED_OFFSETS, max_iter=1)
+    assert len(_advisories(caught)) == 1
+
     model, (X, y) = _offset_fit(separation="error")
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         with pytest.raises(SeparationError):
             model.fit(X, y, offset=_SEPARATED_OFFSETS, max_iter=1)
 
-    (advisory,) = _advisories(caught)
-    assert "rounds to zero" in str(advisory.message) and "overflows" in str(advisory.message)
+    assert _advisories(caught) == []
 
 
 @pytest.mark.parametrize("discarded", [False, True])

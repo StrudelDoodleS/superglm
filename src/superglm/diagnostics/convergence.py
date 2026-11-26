@@ -24,9 +24,9 @@ from superglm.links import LogLink
 class FitPrecisionWarning(UserWarning):
     """Some rows of a fit's first working system lie beyond what binary64 carries.
 
-    Issued once by a published ``fit``, ``fit_reml`` or profiled refit, after
-    the fit or before its error if it raises, when a row of positive sample
-    weight has a subnormal weight or
+    Issued once by a published ``fit``, ``fit_reml`` or profiled refit, or
+    before the error of one that raises (a fit refused as separated says
+    nothing), when a row of positive sample weight has a subnormal weight or
     initial working information, information that rounds to zero, a weight or
     information at least 2**49 (about 5.6e14) times another row's, or, under a
     log link, an initial mean that underflows or overflows before clipping.
@@ -78,9 +78,12 @@ def initial_precision_advisory(model, *, enabled: bool):
     token = _INITIAL_PRECISION.set((model, findings) if enabled else None)
     try:
         yield findings
-    except Exception:
-        # A fit that raises is never published, so it states its findings here.
-        if enabled and findings:
+    except Exception as exc:
+        from superglm.diagnostics.separation import SeparationError
+
+        # A fit that raises is never published, so it states its findings
+        # here; a fit refused as separated says nothing beyond its refusal.
+        if enabled and findings and not isinstance(exc, SeparationError):
             warn_initial_precision(findings)
         raise
     finally:
