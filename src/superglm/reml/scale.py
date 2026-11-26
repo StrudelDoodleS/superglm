@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import math
 from dataclasses import dataclass, field
 from typing import Any
@@ -866,10 +867,22 @@ class GaussianScaleProfile:
     returns: ``profile`` is the profiled term a REML criterion reads, ``phi``
     its dispersion alone, and ``no_residual_size`` whether the profile has no
     interior optimum at a penalty nullity.
+
+    ``phi`` reads the likelihood size alone. The weights' saturated term only
+    the REML criterion reads, so it is formed the first time ``profile`` needs it;
+    the weights must not change in place while the profile is alive.
     """
 
     likelihood_size: float
-    saturated_log_weight: float
+    sample_weight: NDArray = field(repr=False, compare=False)
+    weight_semantics: str
+
+    @functools.cached_property
+    def saturated_log_weight(self) -> float:
+        _, saturated_log_weight = gaussian_reml_scale_terms(
+            self.sample_weight, weight_semantics=self.weight_semantics
+        )
+        return saturated_log_weight
 
     def profile(self, penalized_deviance: float, penalty_nullity: float) -> ProfiledScaleTerm:
         return profile_gaussian_reml_scale(

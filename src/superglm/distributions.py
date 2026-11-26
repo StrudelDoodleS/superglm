@@ -336,11 +336,11 @@ class Gaussian:
 
     def scale_profile(self, y: NDArray, sample_weight: NDArray, *, weight_semantics: str):
         """The dispersion's REML profile on these rows (``reml.scale``)."""
-        from superglm.reml.scale import GaussianScaleProfile, gaussian_reml_scale_terms
+        from superglm.reml.scale import GaussianScaleProfile
+        from superglm.solvers.dispersion import dispersion_likelihood_size
 
-        return GaussianScaleProfile(
-            *gaussian_reml_scale_terms(sample_weight, weight_semantics=weight_semantics)
-        )
+        size = dispersion_likelihood_size(sample_weight, weight_semantics=weight_semantics)
+        return GaussianScaleProfile(size, sample_weight, weight_semantics)
 
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
         """Gaussian log-likelihood with dispersion φ = σ²."""

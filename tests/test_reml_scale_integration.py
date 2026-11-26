@@ -406,3 +406,50 @@ def test_direct_gamma_prepares_rows_once_and_reuses_reduced_stats(
     assert prepare_calls == 1
     assert len(forwarded_ids) >= 2
     assert len(set(forwarded_ids)) == 1
+
+
+@pytest.mark.pins_behaviour
+def test_gaussian_fit_publishing_its_scale_reads_no_weight_logarithms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pins that a prior-weighted Gaussian ``fit`` publishes both scales without the
+    REML criterion's saturated ``sum(log w)``: its scale reads the likelihood size
+    alone. ``fit_reml``, whose criterion reads that term, forms it, which shows the
+    count sees the call."""
+    import sys
+
+    import pandas as pd
+
+    import superglm.reml.scale as scale
+    from superglm import Spline, SuperGLM
+
+    real_terms = scale.gaussian_reml_scale_terms
+    calls = 0
+
+    def counted_terms(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_terms(*args, **kwargs)
+
+    for module in list(sys.modules.values()):
+        if getattr(module, "gaussian_reml_scale_terms", None) is real_terms:
+            monkeypatch.setattr(module, "gaussian_reml_scale_terms", counted_terms)
+
+    rng = np.random.default_rng(3)
+    x = rng.uniform(-2.0, 2.0, 400)
+    weights = rng.uniform(0.5, 2.0, 400)
+    y = np.sin(x) + rng.normal(0.0, 1.0, 400) / np.sqrt(weights)
+    X = pd.DataFrame({"x": x})
+
+    def fitted(method: str):
+        model = SuperGLM(
+            family="gaussian", features={"x": Spline(n_knots=6)}, weight_semantics="prior"
+        )
+        getattr(model, method)(X, y, sample_weight=weights)
+        return model.result
+
+    result = fitted("fit")
+    assert calls == 0
+    assert np.isfinite(result.phi_likelihood) and result.phi_likelihood > 0.0
+    fitted("fit_reml")
+    assert calls >= 1
