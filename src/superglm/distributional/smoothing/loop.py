@@ -54,6 +54,7 @@ from superglm.distributional.smoothing.faces import (
     _face_revalidation_iteration,
     _face_transition_iteration,
     _FaceDirectionAttempt,
+    _FaceDirectionCheck,
     _FacePromotion,
     _FaceRetraction,
     _indexed_direction,
@@ -694,12 +695,31 @@ class _SmoothingSearch:
 
     def _strict_stop(self) -> DistributionalEFSResult | None:
         """The free components have stopped: judge held caps, hand off, revalidate the face."""
-        stopped = self._stop_earned()
         if self.cap_held:
             # The free terms have stopped: judge the stop again with the caps in it.
             self._release_held_caps()
             return None
+        if self._stop_hands_off():
+            return self._run_endgame()
+        face = self.state.face
+        if face is None:
+            return self._converged({})
+        revalidation_events = 1 if len(face.component_names) > 1 else len(face.component_names)
+        # Revalidating the face of a stationary endgame or an earned plateau is
+        # its terminal check, not a search step, so the iteration budget does not
+        # refuse it.
         if (
+            not self._stop_earned()
+            and len(self.history) + revalidation_events > self.outer_config.max_iterations
+        ):
+            return self._result(converged=False, reason="max_iterations")
+        if len(face.component_names) > 1:
+            return self._revalidate_joint_face(face)
+        return self._revalidate_scalar_face(face)
+
+    def _stop_hands_off(self) -> bool:
+        """Whether the stop goes to the endgame, whose exact gradient has not judged it."""
+        return bool(
             not self.endgame_stationary
             and self.estimated_names
             and (self.stationary_search or self._endgame_budget() > 0)
@@ -709,339 +729,311 @@ class _SmoothingSearch:
                 iterations=len(self.history),
                 config=self.outer_config,
             )
-        ):
-            return self._run_endgame()
-        terminal_endpoint_directions: Mapping[str, EndpointDirectionEvidence] = {}
-        face = self.state.face
-        if face is not None:
-            revalidation_events = 1 if len(face.component_names) > 1 else len(face.component_names)
-            # Revalidating the face of a stationary endgame or an earned plateau is
-            # its terminal check, not a search step, so the iteration budget does not
-            # refuse it.
-            if (
-                not stopped
-                and len(self.history) + revalidation_events > self.outer_config.max_iterations
-            ):
-                return self._result(converged=False, reason="max_iterations")
-            if len(face.component_names) > 1:
-                authority_config = _face_authority_config(self.inner_config)
-                try:
-                    finite_faces = tuple(
-                        (
-                            name,
-                            _optional_penalty_face(
-                                self.layout,
-                                tuple(item for item in face.component_names if item != name),
-                            ),
-                        )
-                        for name in face.component_names
-                    )
-                except PenaltyFaceError:
-                    joint_attempt = _JointFaceDirectionAttempt(
-                        component_names=face.component_names,
-                        direction=None,
-                        assessment_fits=(),
-                        coefficient_tolerance=authority_config.tolerance,
-                        failure_reason="joint_analytic_unavailable",
-                    )
-                else:
-                    joint_attempt = _assess_joint_face_directions(
-                        self.family,
+        )
+
+    def _revalidate_joint_face(self, face: PenaltyFace) -> DistributionalEFSResult | None:
+        """Keep a joint face whose direction is still its endpoint's, or release it."""
+        authority_config = _face_authority_config(self.inner_config)
+        joint_attempt = self._assess_joint_face(face, authority_config)
+        if _joint_direction_is_endpoint(joint_attempt):
+            return self._keep_joint_face(face, joint_attempt)
+        return self._retract(*self._joint_retraction(face, joint_attempt, authority_config))
+
+    def _assess_joint_face(
+        self, face: PenaltyFace, authority_config: DenseSolverConfig
+    ) -> _JointFaceDirectionAttempt:
+        """The joint face's direction at the accepted fit, or why it cannot be had."""
+        try:
+            finite_faces = tuple(
+                (
+                    name,
+                    _optional_penalty_face(
                         self.layout,
-                        self.y,
-                        self.likelihood_plan,
-                        lambdas=self.state.lambdas,
-                        component_names=face.component_names,
-                        joint_face=face,
-                        finite_faces=finite_faces,
-                        source_fit=self.state.fit,
-                        source_objective=self.state.objective,
-                        endpoint_fit=self.state.fit,
-                        solver_config=self.inner_config,
-                        efs_config=self.outer_config,
-                        chunk_size=self.chunk_size,
-                        phase_recorder=self.phase_recorder,
-                        _reuse_session=self.reuse_session,
-                        derivatives=self.endpoint_derivatives,
-                    )
-                if _joint_direction_is_endpoint(joint_attempt):
-                    source_fit_index = self.state.terminal_fit_index
-                    source_fit = self.state.fit
-                    objective_before = self.state.objective
-                    first_assessment_index = len(self.coefficient_fits)
-                    self.coefficient_fits.extend(joint_attempt.assessment_fits)
-                    assessment_indices = tuple(
-                        range(first_assessment_index, len(self.coefficient_fits))
-                    )
-                    self.state = replace(self.state, terminal_fit_index=assessment_indices[0])
-                    endpoint_fit = joint_attempt.assessment_fits[0]
-                    direction = joint_attempt.direction
-                    assert direction is not None
-                    indexed_direction = _indexed_joint_direction(
-                        direction,
-                        assessment_indices,
-                        joint_attempt.coefficient_tolerance,
-                    )
-                    self.history.append(
-                        _joint_face_revalidation_iteration(
-                            iteration=len(self.history) + 1,
-                            source_fit_index=source_fit_index,
-                            accepted_fit_index=self.state.terminal_fit_index,
-                            coefficient_fit_indices=assessment_indices,
-                            component_names=face.component_names,
-                            lambdas=self.state.lambdas,
-                            objective_before=objective_before,
-                            endpoint_fit=endpoint_fit,
-                            direction=indexed_direction,
-                            coefficient_tolerance=joint_attempt.coefficient_tolerance,
-                            evidence=self.state.evidence,
-                            source_fit=source_fit,
-                        )
-                    )
-                    self.state = replace(
-                        self.state,
-                        fit=endpoint_fit,
-                        objective=indexed_direction.endpoint_objective,
-                    )
-                    terminal_endpoint_directions = dict(indexed_direction.component_directions)
-                    with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-                        self.state = replace(
-                            self.state,
-                            evidence=_fresh_raw_evidence(
-                                self.layout,
-                                self.state.lambdas,
-                                self.state.fit,
-                                self.outer_config,
-                                face=self.state.face,
-                            ),
-                        )
-                    if not stopped and (
-                        self.state.evidence.working_infinity
-                        or self.state.evidence.maximum > self.outer_config.tolerance
-                    ):
-                        return None
-                    return self._result(
-                        converged=True,
-                        reason=self._strict_reason(),
-                        terminal_endpoint_directions=terminal_endpoint_directions,
-                    )
-                else:
-                    rollback_initial = (
-                        self.state.fit.coefficients
-                        if not joint_attempt.assessment_fits
-                        else joint_attempt.assessment_fits[-1].coefficients
-                    )
-                    rollback_fit = _fit_endpoint_authority_stationary(
-                        self.family,
-                        self.layout,
-                        self.y,
-                        self.likelihood_plan,
-                        lambdas=self.state.lambdas,
-                        face=None,
-                        initial=rollback_initial,
-                        config=authority_config,
-                        chunk_size=self.chunk_size,
-                        phase_recorder=self.phase_recorder,
-                        _reuse_session=self.reuse_session,
-                    )
-                    rollback_objective = _laplace_objective(
-                        rollback_fit,
-                        layout=self.layout,
-                        lambdas=self.state.lambdas,
-                        face=None,
-                        objective_tolerance=self.outer_config.objective_tolerance,
-                    )
-                    source_fit_index = self.state.terminal_fit_index
-                    source_fit = self.state.fit
-                    objective_before = self.state.objective
-                    first_assessment_index = len(self.coefficient_fits)
-                    rollback_fits = (*joint_attempt.assessment_fits, rollback_fit)
-                    self.coefficient_fits.extend(rollback_fits)
-                    assessment_indices = tuple(
-                        range(first_assessment_index, len(self.coefficient_fits))
-                    )
-                    self.state = replace(self.state, terminal_fit_index=assessment_indices[-1])
-                    retraction_direction = joint_attempt.direction
-                    if retraction_direction is not None:
-                        retraction_direction = _indexed_joint_direction(
-                            retraction_direction,
-                            assessment_indices[:1],
-                            joint_attempt.coefficient_tolerance,
-                        )
-                    retraction = _FaceRetraction(
-                        component_names=face.component_names,
-                        fit=rollback_fit,
-                        objective=rollback_objective,
-                        direction=retraction_direction,
-                        failure_reason=(
-                            joint_attempt.failure_reason if joint_attempt.assessment_fits else None
-                        ),
-                        coefficient_tolerance=joint_attempt.coefficient_tolerance,
-                        assessment_fits=rollback_fits,
-                    )
-                    self.history.append(
-                        _face_retraction_iteration(
-                            iteration=len(self.history) + 1,
-                            source_fit_index=source_fit_index,
-                            accepted_fit_index=self.state.terminal_fit_index,
-                            coefficient_fit_indices=assessment_indices,
-                            lambdas=self.state.lambdas,
-                            objective_before=objective_before,
-                            retraction=retraction,
-                            evidence=self.state.evidence,
-                            source_fit=source_fit,
-                        )
-                    )
-                    self.state = replace(
-                        self.state,
-                        face=None,
-                        fit=rollback_fit,
-                        objective=rollback_objective,
-                    )
-                    if _direction_leaves_face(retraction.direction):
-                        self._active_set_changed()
-                        return None
-                    with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-                        self.state = replace(
-                            self.state,
-                            evidence=_fresh_raw_evidence(
-                                self.layout,
-                                self.state.lambdas,
-                                self.state.fit,
-                                self.outer_config,
-                                face=self.state.face,
-                            ),
-                        )
-                    return self._result(converged=False, reason="endpoint_revalidation_failed")
-            recheck = _recheck_exact_face(
-                self.family,
-                self.layout,
-                self.y,
-                self.likelihood_plan,
-                lambdas=self.state.lambdas,
-                face=face,
-                current_fit=self.state.fit,
-                current_objective=self.state.objective,
-                solver_config=self.inner_config,
-                efs_config=self.outer_config,
-                chunk_size=self.chunk_size,
-                phase_recorder=self.phase_recorder,
-                _reuse_session=self.reuse_session,
-                derivatives=self.endpoint_derivatives,
-                other_caps_stationary=self.endgame_stationary,
+                        tuple(item for item in face.component_names if item != name),
+                    ),
+                )
+                for name in face.component_names
             )
-            resolved_directions: dict[str, EndpointDirectionEvidence] = {}
-            for component_name, check in recheck.checks:
-                source_fit_index = self.state.terminal_fit_index
-                source_fit = self.state.fit
-                objective_before = self.state.objective
-                first_assessment_index = len(self.coefficient_fits)
-                self.coefficient_fits.extend(check.assessment_fits)
-                assessment_indices = tuple(
-                    range(first_assessment_index, len(self.coefficient_fits))
-                )
-                self.state = replace(self.state, terminal_fit_index=assessment_indices[-1])
-                direction = _indexed_direction(
-                    check.direction,
-                    assessment_indices,
-                    check.coefficient_tolerance,
-                )
-                self.history.append(
-                    _face_revalidation_iteration(
-                        iteration=len(self.history) + 1,
-                        source_fit_index=source_fit_index,
-                        accepted_fit_index=self.state.terminal_fit_index,
-                        coefficient_fit_indices=assessment_indices,
-                        component_name=component_name,
-                        lambdas=self.state.lambdas,
-                        objective_before=objective_before,
-                        check=check,
-                        direction=direction,
-                        evidence=self.state.evidence,
-                        source_fit=source_fit,
-                    )
-                )
-                self.state = replace(
-                    self.state, fit=check.endpoint_fit, objective=check.endpoint_objective
-                )
-                resolved_directions[component_name] = direction
-                with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-                    self.state = replace(
-                        self.state,
-                        evidence=_fresh_raw_evidence(
-                            self.layout,
-                            self.state.lambdas,
-                            self.state.fit,
-                            self.outer_config,
-                            face=self.state.face,
-                        ),
-                    )
-            if recheck.retraction is not None:
-                retraction = recheck.retraction
-                source_fit_index = self.state.terminal_fit_index
-                source_fit = self.state.fit
-                objective_before = self.state.objective
-                first_assessment_index = len(self.coefficient_fits)
-                self.coefficient_fits.extend(retraction.assessment_fits)
-                assessment_indices = tuple(
-                    range(first_assessment_index, len(self.coefficient_fits))
-                )
-                self.state = replace(self.state, terminal_fit_index=assessment_indices[-1])
-                if retraction.direction is not None:
-                    if not isinstance(retraction.direction, EndpointDirectionEvidence):
-                        raise RuntimeError("scalar revalidation produced joint evidence")
-                    retraction = replace(
-                        retraction,
-                        direction=_indexed_direction(
-                            retraction.direction,
-                            assessment_indices[:2],
-                            retraction.coefficient_tolerance,
-                        ),
-                    )
-                self.history.append(
-                    _face_retraction_iteration(
-                        iteration=len(self.history) + 1,
-                        source_fit_index=source_fit_index,
-                        accepted_fit_index=self.state.terminal_fit_index,
-                        coefficient_fit_indices=assessment_indices,
-                        lambdas=self.state.lambdas,
-                        objective_before=objective_before,
-                        retraction=retraction,
-                        evidence=self.state.evidence,
-                        source_fit=source_fit,
-                    )
-                )
-                self.state = replace(
-                    self.state,
-                    face=None,
-                    fit=retraction.fit,
-                    objective=retraction.objective,
-                )
-                if _direction_leaves_face(retraction.direction):
-                    self._active_set_changed()
-                    return None
-                with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-                    self.state = replace(
-                        self.state,
-                        evidence=_fresh_raw_evidence(
-                            self.layout,
-                            self.state.lambdas,
-                            self.state.fit,
-                            self.outer_config,
-                            face=self.state.face,
-                        ),
-                    )
-                return self._result(converged=False, reason="endpoint_revalidation_failed")
-            terminal_endpoint_directions = resolved_directions
-            if not stopped and (
-                self.state.evidence.working_infinity
-                or self.state.evidence.maximum > self.outer_config.tolerance
-            ):
-                return None
+        except PenaltyFaceError:
+            return _JointFaceDirectionAttempt(
+                component_names=face.component_names,
+                direction=None,
+                assessment_fits=(),
+                coefficient_tolerance=authority_config.tolerance,
+                failure_reason="joint_analytic_unavailable",
+            )
+        return _assess_joint_face_directions(
+            self.family,
+            self.layout,
+            self.y,
+            self.likelihood_plan,
+            lambdas=self.state.lambdas,
+            component_names=face.component_names,
+            joint_face=face,
+            finite_faces=finite_faces,
+            source_fit=self.state.fit,
+            source_objective=self.state.objective,
+            endpoint_fit=self.state.fit,
+            solver_config=self.inner_config,
+            efs_config=self.outer_config,
+            chunk_size=self.chunk_size,
+            phase_recorder=self.phase_recorder,
+            _reuse_session=self.reuse_session,
+            derivatives=self.endpoint_derivatives,
+        )
+
+    def _keep_joint_face(
+        self, face: PenaltyFace, joint_attempt: _JointFaceDirectionAttempt
+    ) -> DistributionalEFSResult | None:
+        """Keep the joint face at its endpoint fit and record the revalidation."""
+        source_fit_index = self.state.terminal_fit_index
+        source_fit = self.state.fit
+        objective_before = self.state.objective
+        assessment_indices = self._append_fits(joint_attempt.assessment_fits)
+        self.state = replace(self.state, terminal_fit_index=assessment_indices[0])
+        endpoint_fit = joint_attempt.assessment_fits[0]
+        direction = joint_attempt.direction
+        assert direction is not None
+        indexed_direction = _indexed_joint_direction(
+            direction,
+            assessment_indices,
+            joint_attempt.coefficient_tolerance,
+        )
+        self.history.append(
+            _joint_face_revalidation_iteration(
+                iteration=len(self.history) + 1,
+                source_fit_index=source_fit_index,
+                accepted_fit_index=self.state.terminal_fit_index,
+                coefficient_fit_indices=assessment_indices,
+                component_names=face.component_names,
+                lambdas=self.state.lambdas,
+                objective_before=objective_before,
+                endpoint_fit=endpoint_fit,
+                direction=indexed_direction,
+                coefficient_tolerance=joint_attempt.coefficient_tolerance,
+                evidence=self.state.evidence,
+                source_fit=source_fit,
+            )
+        )
+        self.state = replace(
+            self.state,
+            fit=endpoint_fit,
+            objective=indexed_direction.endpoint_objective,
+        )
+        terminal_endpoint_directions = dict(indexed_direction.component_directions)
+        with measure_phase(self.phase_recorder, "efs_update_backtracking"):
+            self.state = replace(
+                self.state,
+                evidence=_fresh_raw_evidence(
+                    self.layout,
+                    self.state.lambdas,
+                    self.state.fit,
+                    self.outer_config,
+                    face=self.state.face,
+                ),
+            )
+        return self._stop_after_revalidation(terminal_endpoint_directions)
+
+    def _joint_retraction(
+        self,
+        face: PenaltyFace,
+        joint_attempt: _JointFaceDirectionAttempt,
+        authority_config: DenseSolverConfig,
+    ) -> tuple[_FaceRetraction, tuple[int, ...]]:
+        """Refit off a joint face that did not hold: the retraction and its fits' indices."""
+        rollback_initial = (
+            self.state.fit.coefficients
+            if not joint_attempt.assessment_fits
+            else joint_attempt.assessment_fits[-1].coefficients
+        )
+        rollback_fit = _fit_endpoint_authority_stationary(
+            self.family,
+            self.layout,
+            self.y,
+            self.likelihood_plan,
+            lambdas=self.state.lambdas,
+            face=None,
+            initial=rollback_initial,
+            config=authority_config,
+            chunk_size=self.chunk_size,
+            phase_recorder=self.phase_recorder,
+            _reuse_session=self.reuse_session,
+        )
+        rollback_objective = _laplace_objective(
+            rollback_fit,
+            layout=self.layout,
+            lambdas=self.state.lambdas,
+            face=None,
+            objective_tolerance=self.outer_config.objective_tolerance,
+        )
+        rollback_fits = (*joint_attempt.assessment_fits, rollback_fit)
+        assessment_indices = self._append_fits(rollback_fits)
+        retraction_direction = joint_attempt.direction
+        if retraction_direction is not None:
+            retraction_direction = _indexed_joint_direction(
+                retraction_direction,
+                assessment_indices[:1],
+                joint_attempt.coefficient_tolerance,
+            )
+        retraction = _FaceRetraction(
+            component_names=face.component_names,
+            fit=rollback_fit,
+            objective=rollback_objective,
+            direction=retraction_direction,
+            failure_reason=(
+                joint_attempt.failure_reason if joint_attempt.assessment_fits else None
+            ),
+            coefficient_tolerance=joint_attempt.coefficient_tolerance,
+            assessment_fits=rollback_fits,
+        )
+        return retraction, assessment_indices
+
+    def _revalidate_scalar_face(self, face: PenaltyFace) -> DistributionalEFSResult | None:
+        """Recheck the face one component at a time; release it where one turns finite."""
+        recheck = _recheck_exact_face(
+            self.family,
+            self.layout,
+            self.y,
+            self.likelihood_plan,
+            lambdas=self.state.lambdas,
+            face=face,
+            current_fit=self.state.fit,
+            current_objective=self.state.objective,
+            solver_config=self.inner_config,
+            efs_config=self.outer_config,
+            chunk_size=self.chunk_size,
+            phase_recorder=self.phase_recorder,
+            _reuse_session=self.reuse_session,
+            derivatives=self.endpoint_derivatives,
+            other_caps_stationary=self.endgame_stationary,
+        )
+        resolved_directions: dict[str, EndpointDirectionEvidence] = {}
+        for component_name, check in recheck.checks:
+            resolved_directions[component_name] = self._keep_face_component(component_name, check)
+        if recheck.retraction is not None:
+            return self._retract(*self._scalar_retraction(recheck.retraction))
+        return self._stop_after_revalidation(resolved_directions)
+
+    def _keep_face_component(
+        self, component_name: str, check: _FaceDirectionCheck
+    ) -> EndpointDirectionEvidence:
+        """Keep one component on the face at its endpoint fit and record the revalidation."""
+        source_fit_index = self.state.terminal_fit_index
+        source_fit = self.state.fit
+        objective_before = self.state.objective
+        assessment_indices = self._append_fits(check.assessment_fits)
+        self.state = replace(self.state, terminal_fit_index=assessment_indices[-1])
+        direction = _indexed_direction(
+            check.direction,
+            assessment_indices,
+            check.coefficient_tolerance,
+        )
+        self.history.append(
+            _face_revalidation_iteration(
+                iteration=len(self.history) + 1,
+                source_fit_index=source_fit_index,
+                accepted_fit_index=self.state.terminal_fit_index,
+                coefficient_fit_indices=assessment_indices,
+                component_name=component_name,
+                lambdas=self.state.lambdas,
+                objective_before=objective_before,
+                check=check,
+                direction=direction,
+                evidence=self.state.evidence,
+                source_fit=source_fit,
+            )
+        )
+        self.state = replace(self.state, fit=check.endpoint_fit, objective=check.endpoint_objective)
+        with measure_phase(self.phase_recorder, "efs_update_backtracking"):
+            self.state = replace(
+                self.state,
+                evidence=_fresh_raw_evidence(
+                    self.layout,
+                    self.state.lambdas,
+                    self.state.fit,
+                    self.outer_config,
+                    face=self.state.face,
+                ),
+            )
+        return direction
+
+    def _scalar_retraction(
+        self, retraction: _FaceRetraction
+    ) -> tuple[_FaceRetraction, tuple[int, ...]]:
+        """The scalar recheck's retraction, with its fits appended and its direction indexed."""
+        assessment_indices = self._append_fits(retraction.assessment_fits)
+        if retraction.direction is not None:
+            if not isinstance(retraction.direction, EndpointDirectionEvidence):
+                raise RuntimeError("scalar revalidation produced joint evidence")
+            retraction = replace(
+                retraction,
+                direction=_indexed_direction(
+                    retraction.direction,
+                    assessment_indices[:2],
+                    retraction.coefficient_tolerance,
+                ),
+            )
+        return retraction, assessment_indices
+
+    def _retract(
+        self, retraction: _FaceRetraction, assessment_indices: tuple[int, ...]
+    ) -> DistributionalEFSResult | None:
+        """Leave a face that did not hold; the search goes on if its direction leaves the face."""
+        self.history.append(
+            _face_retraction_iteration(
+                iteration=len(self.history) + 1,
+                source_fit_index=self.state.terminal_fit_index,
+                accepted_fit_index=assessment_indices[-1],
+                coefficient_fit_indices=assessment_indices,
+                lambdas=self.state.lambdas,
+                objective_before=self.state.objective,
+                retraction=retraction,
+                evidence=self.state.evidence,
+                source_fit=self.state.fit,
+            )
+        )
+        self.state = replace(
+            self.state,
+            terminal_fit_index=assessment_indices[-1],
+            face=None,
+            fit=retraction.fit,
+            objective=retraction.objective,
+        )
+        if _direction_leaves_face(retraction.direction):
+            self._active_set_changed()
+            return None
+        with measure_phase(self.phase_recorder, "efs_update_backtracking"):
+            self.state = replace(
+                self.state,
+                evidence=_fresh_raw_evidence(
+                    self.layout,
+                    self.state.lambdas,
+                    self.state.fit,
+                    self.outer_config,
+                    face=self.state.face,
+                ),
+            )
+        return self._result(converged=False, reason="endpoint_revalidation_failed")
+
+    def _stop_after_revalidation(
+        self, directions: Mapping[str, EndpointDirectionEvidence]
+    ) -> DistributionalEFSResult | None:
+        """End on the revalidated face, unless its fresh evidence sends the search on."""
+        if not self._stop_earned() and (
+            self.state.evidence.working_infinity
+            or self.state.evidence.maximum > self.outer_config.tolerance
+        ):
+            return None
+        return self._converged(directions)
+
+    def _converged(
+        self, directions: Mapping[str, EndpointDirectionEvidence]
+    ) -> DistributionalEFSResult:
+        """The strict stop's converged result, with the directions that kept its face."""
         return self._result(
             converged=True,
             reason=self._strict_reason(),
-            terminal_endpoint_directions=terminal_endpoint_directions,
+            terminal_endpoint_directions=directions,
         )
 
     def _out_of_rounds(self) -> DistributionalEFSResult | None:
