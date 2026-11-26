@@ -71,6 +71,10 @@ model = SuperGLM(
 model.fit_ncv(X, y, offset=np.log(exposure), groups=df["ID_policy"])
 ```
 
+`ID_policy` is not a term of the model and never enters a prediction. It only
+tells `fit_ncv` which rows leave the fit together: every insured-year of a
+policy is held out at once.
+
 Fitting the same model with `fit_reml` and with `fit_ncv(..., groups=df["ID_policy"])`
 produces very different age curves:
 
