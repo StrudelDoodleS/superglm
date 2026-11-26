@@ -596,8 +596,9 @@ def test_link_facts_hold_for_every_link(fact):
 def test_pair_facts_hold_for_every_family_and_link(fact):
     """Pins what each family-and-link decision answers today, before one object resolves it.
 
-    Every family against every link: 612 pairs. An exact fact is false for any
-    subclass or user-defined object; an inherited one follows the parent class.
+    Every family against every link: 648 pairs (18 families, 36 links). An exact
+    fact is false for any subclass or user-defined object; an inherited one
+    follows the parent class.
     """
     wrong = []
     for family, link in PAIRS:
