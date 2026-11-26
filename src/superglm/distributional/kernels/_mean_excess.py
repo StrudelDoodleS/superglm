@@ -432,7 +432,9 @@ def generalized_gamma_mean_excess(
         own = np.sign(q) * k * np.expm1(qw)
         tilted_shape = k + np.sign(q) * r
         tilted = own - r
-        upper = (q > 0.0) & gamma_in_tail(tilted_shape, tilted)
+        # x = k e^(Q w) can pass the largest float only far beyond any claim (Q > 0)
+        huge = (q > 0.0) & ~np.isfinite(x)
+        upper = (q > 0.0) & ~huge & gamma_in_tail(tilted_shape, tilted)
         lower = (q < 0.0) & (
             (tilted > _TAIL_SD * np.sqrt(tilted_shape)) | ((tilted > 0.0) & (x < 8.0))
         )
@@ -446,7 +448,11 @@ def generalized_gamma_mean_excess(
         ratio = (r[tail] - (outer[tail] - inner[tail])) / (tilted[tail] + outer[tail])
         excess = np.empty_like(amount)
         excess[tail] = amount[tail] * ratio
-        body = np.flatnonzero(~tail)
+        # There the hazard rules: e(v) = v sigma / (Q x) to a relative 1/x, read in logs.
+        excess[huge] = np.exp(
+            np.log(amount[huge]) + np.log(sigma[huge] / q[huge]) - np.log(k[huge]) - qw[huge]
+        )
+        body = np.flatnonzero(~(tail | huge))
         if body.size:
             sq = sigma[body] * q[body]
             root = np.sqrt(1.0 + sq)

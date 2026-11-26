@@ -525,6 +525,22 @@ def test_a_generalised_gamma_without_a_mean_reads_infinity_in_location_form():
         GeneralizedGammaLSS().mean_excess(np.array([2.0]), np.array([[1.0, 2.0, -0.6]]))
 
 
+def test_a_generalised_gamma_whose_gamma_variate_overflows_keeps_its_mean_excess():
+    """At Q = sigma the law is a gamma, so its mean excess near the largest float is the gamma's.
+
+    Q = sigma = 2, mu = -1 is the gamma with shape 1/4 and scale 4/e; at these amounts
+    ``k e^(Q w)`` overflows. Mutation check: reading the overflowed variate gives 0.
+    """
+    amount = np.array([5e307, 8e307, 1e308, 1.7e308])
+    theta = np.tile([-1.0, 2.0, 2.0], (4, 1))
+    got = _LOCATION_FORM.mean_excess(amount, theta)
+    expected = GammaLS().mean_excess(amount, np.tile([math.exp(-1.0), 2.0], (4, 1)))
+    # overflowed rows read the hazard, exact to a relative 1/x; 5e307 still takes the
+    # tail fractions, whose log ratio is conditioned by |log S| there
+    np.testing.assert_allclose(got[1:], expected[1:], rtol=64 * 2.0**-53)
+    np.testing.assert_allclose(got[0], expected[0], rtol=1e-12)
+
+
 def test_the_generalised_gamma_mean_form_agrees_with_its_location_form():
     theta = np.array([[0.2, 0.4, 0.7], [0.2, 0.4, -0.7], [-1.0, 0.1, 1.0]])
     amount = np.array([3.0, 3.0, 0.9])
