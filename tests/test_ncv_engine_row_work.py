@@ -49,7 +49,7 @@ from tests.test_ncv_engine_rank_cache import (
     twin_neighbourhoods,
     twin_reference,
 )
-from tests.test_ncv_search import TOL, fitted
+from tests.test_ncv_search import TOL, fitted, sizing
 from tests.test_ncv_search import Case as SearchCase
 
 DENSE, COMPACT = 1 << 62, 1
@@ -236,10 +236,11 @@ def test_compact_rows_are_the_dense_blocks(family, exposure, form, zero_weights)
     dense, compact = both(c.problem, nb, RHO)
     assert_same_evaluation(c.problem, compact, dense, condition(c.problem, nb, RHO, dense.fit))
     if form == "cv":
-        # every row scored once; its weighted rows in the Gram and, for Poisson, the two third-derivative sums
-        passes = 3 if family == "poisson" else 1
-        rows = c.problem.n + passes * int(c.problem.active.sum())
-        assert dense.work.rows_read == compact.work.rows_streamed == rows
+        # blocks: every fold once and, for Poisson, the weighted rows' third pass; compact
+        # products: every row scored, its weighted rows in the Gram and in two third-derivative sums
+        n, weighted, poisson = c.problem.n, int(c.problem.active.sum()), family == "poisson"
+        assert dense.work.rows_read == n + poisson * weighted
+        assert compact.work.rows_streamed == n + (3 if poisson else 1) * weighted
     if form != "groups":
         assert compact.work.rows_read == 0
 
@@ -444,8 +445,8 @@ def test_rows_go_compact_from_the_threshold_on():
 def test_cost_rule_serves_large_folds_compact_and_small_groups_dense():
     """At the library's threshold: two folds of 12,000 rows read no dense block, 200 groups keep theirs.
 
-    The third pass of the two folds is their pairs' own; that of the 200 groups, whose
-    ``M`` has rank 200 on a design without tables, is read in blocks.
+    The third pass of the two folds is their pairs' own.  The 200 groups are read once each,
+    and their third pass, whose ``M`` has rank 200 on a design without tables, once more.
     """
     p = searching(case("poisson", 24_000).problem)
     n = p.n
@@ -456,7 +457,7 @@ def test_cost_rule_serves_large_folds_compact_and_small_groups_dense():
     assert folds.work.rows_multiplied == 2
     groups = evaluate_fit(p, from_groups(np.arange(n) % 200, n), folds.fit)
     assert groups.feasible and groups.work.factorisations == 200
-    assert (groups.work.rows_read, groups.work.rows_streamed) == (4 * n, 0)
+    assert (groups.work.rows_read, groups.work.rows_streamed) == (2 * n, 0)
 
 
 def test_third_pass_keeps_the_pairs_forms_while_they_are_fewer_than_half_the_width():
@@ -466,9 +467,34 @@ def test_third_pass_keeps_the_pairs_forms_while_they_are_fewer_than_half_the_wid
     fit = solve_mode(p, RHO)
     assert not serves_compact(n // few, p.width) and serves_compact(n, p.width)
     kept = evaluate_fit(p, from_groups(np.arange(n) % few, n), fit)
-    assert (kept.work.rows_read, kept.work.rows_streamed) == (3 * n, n)
+    assert (kept.work.rows_read, kept.work.rows_streamed) == (n, n)
     formed = evaluate_fit(p, from_groups(np.arange(n) % (few + 1), n), fit)
-    assert (formed.work.rows_read, formed.work.rows_streamed) == (4 * n, 0)
+    assert (formed.work.rows_read, formed.work.rows_streamed) == (2 * n, 0)
+
+
+def test_sizing_case_reads_each_group_once(monkeypatch):
+    """The search's sizing case, 200 groups of about 100 rows on four continuous P-splines.
+
+    A group is below the compact threshold and within one block: its cross-products, scores
+    and third-derivative term share one read, made in blocks of whole groups.  The third
+    pass needs ``z' M z`` with ``M`` of rank 200 on a design without tables, a second read.
+    """
+    c = sizing("poisson", "groups")
+    p, n = c.problem, c.problem.n
+    fit = solve_mode(p, np.zeros(len(p.names)))
+    reads = []
+
+    def recorded(dm, rows, centre_hi, centre_lo):
+        reads.append(len(rows))
+        return augmented_rows(dm, rows, centre_hi, centre_lo)
+
+    monkeypatch.setattr(engine, "augmented_rows", recorded)
+    got = evaluate_fit(p, c.nb, fit, heldout=False)
+    block = ncv_rows.chunk_rows(p.width)
+    assert got.feasible and got.work.factorisations == c.nb.m == 200
+    assert (got.work.rows_read, got.work.rows_streamed) == (2 * n, 0)
+    # two blocks of whole groups and two of the third pass, where a read a pass a group made 602
+    assert max(reads) <= block < n and len(reads) == 4
 
 
 def test_lookup_design_reads_single_rows_third_pass_from_tables_at_the_threshold():

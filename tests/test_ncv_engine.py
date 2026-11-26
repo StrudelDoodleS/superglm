@@ -1059,13 +1059,16 @@ def test_cost_rule_sends_each_neighbourhood_to_the_cheaper_solve():
         ("gaussian", "rows", True, (0, 0, 0, 1, 2, 0)),
         ("gaussian", "rows", False, (0, 0, 0, 1, 1, 0)),
         ("poisson", "rows", True, (0, 0, 0, 2, 3, 0)),
-        ("gaussian", "cv", True, (5, 0, 10, 2, 1, 5)),
-        ("gaussian", "cv", False, (5, 0, 5, 2, 1, 0)),
-        ("poisson", "cv", True, (5, 0, 10, 4, 2, 5)),
+        ("gaussian", "cv", True, (5, 0, 10, 1, 1, 5)),
+        ("gaussian", "cv", False, (5, 0, 5, 1, 1, 0)),
+        ("poisson", "cv", True, (5, 0, 10, 2, 2, 5)),
     ],
 )
 def test_work_counts_per_evaluation(family, form, gradient, expected):
-    """One inner solve; single rows factor nothing; ``K`` large folds take ``K`` factorisations and ``2 K`` solves."""
+    """One inner solve; single rows factor nothing; ``K`` large folds take ``K`` factorisations and ``2 K`` solves.
+
+    A fold within one block is read once for its cross-products, scores and third-derivative term.
+    """
     c = case(family, 300)
     n = c.problem.n
     work = evaluate(c.problem, neighbourhoods(form, c), RHO, gradient=gradient).work
@@ -1141,7 +1144,10 @@ def test_large_neighbourhoods_are_read_in_bounded_blocks(monkeypatch):
             got = evaluate_fit(c.problem, neighbourhoods(form, c), whole[form].fit)
         assert limit == 256 < int(neighbourhoods("forward", c).sizes().max())
         assert max(reads) <= limit + over and len(reads) > 2
-        assert sum(reads) == got.work.rows_read == whole[form].work.rows_read
+        assert sum(reads) == got.work.rows_read
+        # a neighbourhood past one block is read pass by pass, one within a block once
+        assert (got.work.rows_read > whole[form].work.rows_read) == (form == "forward")
+        assert got.work.rows_read >= whole[form].work.rows_read
         assert_same_criterion(c.problem, got, whole[form], kappa)
 
 

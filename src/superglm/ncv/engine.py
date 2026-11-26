@@ -29,7 +29,9 @@ Jacobi-scaled ``H - Z_a' W_a Z_a``.  Beyond the row product both share, the firs
 rows take the scalar form ``1 - W_i h_i`` in blocks of rows, with no factorisation.
 
 **Row work.**  Rows enter through four products, ``Z v``, ``Z' v``, ``Z' W Z`` and ``z' M z``,
-and dense blocks of ``rows.chunk_rows(P)`` rows serve all four.  A set of rows of at least
+and dense blocks of ``rows.chunk_rows(P)`` rows serve all four.  A form-and-factor
+neighbourhood within one block is read once, in a block of whole neighbourhoods, for its
+cross-products, its scores and its third-derivative term.  A set of rows of at least
 ``rows.COMPACT_ENTRIES`` dense entries is served by the design's stored form instead
 (``rows.CentredRows``, ``rows.serves_compact``), and no row of it is made dense:
 
@@ -131,8 +133,9 @@ cancels nowhere.  ``V_k`` gives no prediction per pair: an evaluation asked for 
 pairs reads the scored rows.
 
 **Memory.**  No ``rows x P`` array of the whole design is formed.  Rows are read in blocks of
-``rows.chunk_rows(P)``; a form-and-factor neighbourhood is streamed through such blocks, and a
-neighbourhood on the neighbourhood-sized route is held whole (under the cost rule it has fewer
+``rows.chunk_rows(P)``; a form-and-factor neighbourhood within one block is held from a block
+of whole neighbourhoods while it is solved, a larger one is streamed through such blocks pass
+by pass, and a neighbourhood on the neighbourhood-sized route is held whole (under the cost rule it has fewer
 than ``0.54 P`` weighted rows).  An evaluation holds a block, its two products and two blocks of
 ``(u, Delta)`` pairs, a handful of ``P x P`` matrices, and row-length vectors: the mode's rows
 and five entries per scored pair.  A neighbourhood served as a row subset holds that subset's
@@ -908,6 +911,7 @@ class _Trial:
     _right: NDArray[np.float64] = field(default_factory=lambda: np.empty((0, 0)))
     _held: int = 0
     _subset: tuple[NDArray[np.intp], CentredRows] | None = None
+    _block: tuple[NDArray[np.intp], NDArray[np.float64]] | None = None
 
     @classmethod
     def start(
@@ -980,9 +984,31 @@ class _Trial:
         return max(SHARED_RANK_POLICY.factor_rcond, 2.0 * self.width * gamma(self.problem.n))
 
     def raw(self, rows: NDArray[np.intp]) -> NDArray[np.float64]:
-        """The augmented centred rows of ``rows`` in the design's own columns."""
+        """The augmented centred rows of ``rows`` in the design's own columns.
+
+        Taken from the block held for their neighbourhood (:func:`_factor_routes`), which
+        lists its rows in ascending order, else read.
+        """
+        if self._block is not None:
+            held, block = self._block
+            return block if len(rows) == len(held) else block[np.searchsorted(held, rows)]
         self.work.rows_read += len(rows)
         return augmented_rows(self.problem.dm, rows, self.fit.centre_hi, self.fit.centre_lo)
+
+    def reads_twice(self, nb: Neighbourhoods, k: int) -> bool:
+        """Whether at least two passes read form-and-factor neighbourhood ``k``'s rows in blocks.
+
+        Its cross-products, unless the cache holds them; its scores, unless they come from
+        cached cross-products; its third-derivative term.  A neighbourhood served by compact
+        products is read by none.
+        """
+        if serves_compact(len(nb.drop(k)), self.problem.width):
+            return False
+        cache = self.cache
+        kept = cache is not None and bool(cache.afforded[k])
+        held = cache is not None and k in cache.held
+        third = self.gradient and self.problem.loss.has_third_derivative
+        return int(not held) + int(not kept or self.heldout) + int(third) >= 2
 
     def read(self, rows: NDArray[np.intp]) -> NDArray[np.float64]:
         """The augmented centred rows ``Z`` of ``rows``."""
@@ -1454,8 +1480,7 @@ def _neighbourhoods(trial: _Trial, nb: Neighbourhoods, route: Route | None) -> N
     trial.reserve(int(np.count_nonzero(weighted)))
     trial.keep_forms(int(np.count_nonzero(weighted)))
     _woodbury_route(trial, nb, np.flatnonzero(small & (weighted > 0)))
-    for k in np.flatnonzero(~small & (weighted > 0)).tolist():
-        _factor_route(trial, nb, k)
+    _factor_routes(trial, nb, np.flatnonzero(~small & (weighted > 0)))
 
 
 def _batches(sizes: NDArray[np.intp], limit: int) -> Iterator[tuple[int, int]]:
@@ -1468,6 +1493,45 @@ def _batches(sizes: NDArray[np.intp], limit: int) -> Iterator[tuple[int, int]]:
         np.concatenate(([0], np.searchsorted(ends, marks, side="right"), [len(sizes)]))
     )
     return zip(cuts[:-1].tolist(), cuts[1:].tolist(), strict=True)
+
+
+def _runs(sizes: list[int], limit: int) -> Iterator[tuple[int, int]]:
+    """Consecutive runs ``[first, last)`` of items, each of at most ``limit`` in total size or of one item."""
+    first = total = 0
+    for index, size in enumerate(sizes):
+        if index > first and total + size > limit:
+            yield first, index
+            first = index
+            total = 0
+        total += size
+    if sizes:
+        yield first, len(sizes)
+
+
+def _factor_routes(trial: _Trial, nb: Neighbourhoods, ks: NDArray[np.intp]) -> None:
+    """Neighbourhoods ``ks`` by forming their leave-out Hessians, in order.
+
+    A neighbourhood that fits in one block and is read by at least two of its passes
+    (:meth:`_Trial.reads_twice`) is read once: its rows come in a block shared with the
+    neighbourhoods beside it, of at most ``rows.chunk_rows`` rows in all, and every pass
+    takes them from it.  Any other reads its rows pass by pass.
+    """
+    limit = chunk_rows(trial.problem.width)
+    members = ks.tolist()
+    shared = [
+        len(nb.drop(k)) if len(nb.drop(k)) <= limit and trial.reads_twice(nb, k) else 0
+        for k in members
+    ]
+    for first, last in _runs(shared, limit):
+        sizes = shared[first:last]
+        rows = [nb.drop(k) for k, size in zip(members[first:last], sizes, strict=True) if size]
+        block = trial.raw(np.concatenate(rows)) if rows else None
+        stops = np.cumsum(sizes).tolist()
+        for k, size, stop in zip(members[first:last], sizes, stops, strict=True):
+            if block is not None and size:
+                trial._block = (nb.drop(k), block[stop - size : stop])
+            _factor_route(trial, nb, k)
+            trial._block = None
 
 
 def _woodbury_route(trial: _Trial, nb: Neighbourhoods, ks: NDArray[np.intp]) -> None:

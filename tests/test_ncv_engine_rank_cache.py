@@ -462,13 +462,13 @@ def test_more_groups_than_the_cache_affords():
     assert afforded.sum() == 5 == len(own.cache.held)
     assert sizes[afforded].min() >= sizes[~afforded].max()
     assert own.cache.nbytes == reference + 5 * entry <= allowance
-    assert again.work.rows_read == 2 * int(sizes[~afforded].sum())
+    assert again.work.rows_read == int(sizes[~afforded].sum())
     assert_same_criterion(problem, first, by_rows, kappa)
     assert_same_criterion(problem, again, by_rows, kappa)
     with parallel_config(max_memory=4 * (reference + entry) - 8):
         first, again, own = cached_twice(problem, nb, ZERO, route="factor")
     assert own.cache.nbytes == 0 and not own.cache.held
-    assert again.work.rows_read == first.work.rows_read == 2 * problem.n
+    assert again.work.rows_read == first.work.rows_read == problem.n
     assert_same_criterion(problem, again, by_rows, kappa)
 
 
