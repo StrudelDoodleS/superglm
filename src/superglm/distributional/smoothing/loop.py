@@ -477,48 +477,272 @@ class _SmoothingSearch:
                 terminal_fit_index=self.state.terminal_fit_index,
                 config=self.outer_config,
             )
-            if self.state.evidence.unresolved_upper_bound:
-                if (
-                    len(self.history) >= self.outer_config.max_iterations
-                    and not self.plateau_earned
-                ) or (self.caps_final and self.state.fit is self.refused_fit):
-                    # No round is left, or these caps were refused at this very fit. Held caps
-                    # no assessment has refused were never judged: the search ran out of rounds.
-                    # Judging the caps of a plateau already earned is its terminal check, not a
-                    # search step, so the round limit does not refuse it.
-                    unjudged = self.caps_final and self.refused_fit is None
-                    return self._result(
-                        converged=False,
-                        reason="max_iterations" if unjudged else "lambda_cap_unresolved",
-                    )
-                promotion, assessment_attempt = _try_joint_exact_face(
-                    self.family,
-                    self.layout,
-                    self.y,
-                    self.likelihood_plan,
-                    lambdas=self.state.lambdas,
-                    current_face=self.state.face,
-                    current_fit=self.state.fit,
-                    current_objective=self.state.objective,
-                    terminal_evidence=self.state.evidence,
-                    solver_config=self.inner_config,
-                    efs_config=self.outer_config,
-                    chunk_size=self.chunk_size,
-                    phase_recorder=self.phase_recorder,
-                    _reuse_session=self.reuse_session,
-                    derivatives=self.endpoint_derivatives,
+            evidence = self.state.evidence
+            if evidence.unresolved_upper_bound:
+                result = self._decide_caps()
+            elif self._stop_earned() or (
+                not evidence.working_infinity and evidence.maximum <= self.outer_config.tolerance
+            ):
+                result = self._strict_stop()
+            elif len(self.history) >= self.outer_config.max_iterations:
+                result = self._out_of_rounds()
+            elif self.beyond_cap and self.outer_config.outer in ("efs+newton", "efs+stationary"):
+                # A component released beyond the cap never meets the FS proposal's box.
+                result = self._run_endgame()
+            else:
+                result = self._fellner_schall_round()
+            if result is not None:
+                return result
+
+    def _decide_caps(self) -> DistributionalEFSResult | None:
+        """A cap is pressed outward: promote it to an exact face, or answer for the refusal."""
+        if (len(self.history) >= self.outer_config.max_iterations and not self.plateau_earned) or (
+            self.caps_final and self.state.fit is self.refused_fit
+        ):
+            # No round is left, or these caps were refused at this very fit. Held caps
+            # no assessment has refused were never judged: the search ran out of rounds.
+            # Judging the caps of a plateau already earned is its terminal check, not a
+            # search step, so the round limit does not refuse it.
+            unjudged = self.caps_final and self.refused_fit is None
+            return self._result(
+                converged=False,
+                reason="max_iterations" if unjudged else "lambda_cap_unresolved",
+            )
+        promotion, assessment_attempt = _try_joint_exact_face(
+            self.family,
+            self.layout,
+            self.y,
+            self.likelihood_plan,
+            lambdas=self.state.lambdas,
+            current_face=self.state.face,
+            current_fit=self.state.fit,
+            current_objective=self.state.objective,
+            terminal_evidence=self.state.evidence,
+            solver_config=self.inner_config,
+            efs_config=self.outer_config,
+            chunk_size=self.chunk_size,
+            phase_recorder=self.phase_recorder,
+            _reuse_session=self.reuse_session,
+            derivatives=self.endpoint_derivatives,
+        )
+        if promotion is None and assessment_attempt is None:
+            promotion, assessment_attempt = _try_exact_face(
+                self.family,
+                self.layout,
+                self.y,
+                self.likelihood_plan,
+                lambdas=self.state.lambdas,
+                current_face=self.state.face,
+                current_fit=self.state.fit,
+                current_objective=self.state.objective,
+                terminal_evidence=self.state.evidence,
+                solver_config=self.inner_config,
+                efs_config=self.outer_config,
+                chunk_size=self.chunk_size,
+                phase_recorder=self.phase_recorder,
+                _reuse_session=self.reuse_session,
+                derivatives=self.endpoint_derivatives,
+            )
+        if promotion is None:
+            if self.handed_over:
+                pass  # the endgame's verdict stands, with the refusal recorded
+            elif self.outer_config.outer != "efs" and self.pending_cap is None:
+                if self._endgame_budget() > 0 and self.estimated_names:
+                    # The FS proposal nominated this cap; the exact gradient decides
+                    # before a refusal is recorded (these assessment fits are dropped).
+                    return self._run_endgame()
+            elif (
+                self.outer_config.outer in ("efs+newton", "efs+stationary")
+                and self.pending_cap is not None
+            ):
+                bracket = self._bracket_after_refusal(assessment_attempt)
+                if isinstance(bracket, BracketRelease):
+                    self._accept_bracket_release(bracket, assessment_attempt)
+                    self.pending_cap = None
+                    return self._run_endgame()
+                if isinstance(bracket, BracketAttempt):
+                    self._record_bracket_attempt(bracket)
+            if assessment_attempt is not None and assessment_attempt.assessment_fits:
+                first_assessment_index = len(self.coefficient_fits)
+                self.coefficient_fits.extend(assessment_attempt.assessment_fits)
+                assessment_indices = tuple(
+                    range(first_assessment_index, len(self.coefficient_fits))
                 )
-                if promotion is None and assessment_attempt is None:
-                    promotion, assessment_attempt = _try_exact_face(
+                if isinstance(assessment_attempt, _JointFaceDirectionAttempt):
+                    component_names = assessment_attempt.component_names
+                    refusal_direction = (
+                        None
+                        if assessment_attempt.direction is None
+                        else _indexed_joint_direction(
+                            assessment_attempt.direction,
+                            assessment_indices,
+                            assessment_attempt.coefficient_tolerance,
+                        )
+                    )
+                else:
+                    component_names = (self.state.evidence.unresolved_upper_bound[0],)
+                    refusal_direction = (
+                        None
+                        if assessment_attempt.check is None
+                        else _indexed_direction(
+                            assessment_attempt.check.direction,
+                            assessment_indices,
+                            assessment_attempt.coefficient_tolerance,
+                        )
+                    )
+                self.history.append(
+                    _face_assessment_refusal_iteration(
+                        iteration=len(self.history) + 1,
+                        source_fit_index=self.state.terminal_fit_index,
+                        coefficient_fit_indices=assessment_indices,
+                        coefficient_tolerance=assessment_attempt.coefficient_tolerance,
+                        component_names=component_names,
+                        direction=refusal_direction,
+                        failure_reason=assessment_attempt.failure_reason,
+                        lambdas=self.state.lambdas,
+                        objective=self.state.objective,
+                        evidence=self.state.evidence,
+                        source_fit=self.state.fit,
+                    )
+                )
+            if self.handed_over:
+                self.endpoint_caps.difference_update(self.state.evidence.unresolved_upper_bound)
+                self.endgame_due = self.handed_over = False
+                self.state = replace(
+                    self.state,
+                    evidence=replace(self.state.evidence, unresolved_upper_bound=()),
+                )
+                return None
+            if self.outer_config.outer == "efs" and not self.caps_final:
+                self.refused_fit = self.state.fit
+                self.cap_held |= frozenset(self.state.evidence.unresolved_upper_bound)
+                self.state = replace(self.state, evidence=self._evidence())
+                return None
+            return self._result(converged=False, reason="lambda_cap_unresolved")
+        source_fit_index = self.state.terminal_fit_index
+        first_assessment_index = len(self.coefficient_fits)
+        self.coefficient_fits.extend(promotion.assessment_fits)
+        assessment_indices = tuple(range(first_assessment_index, len(self.coefficient_fits)))
+        self.state = replace(self.state, terminal_fit_index=assessment_indices[-1])
+        if assessment_attempt is None:
+            raise RuntimeError("an accepted exact face requires an authority assessment")
+        coefficient_tolerance = assessment_attempt.coefficient_tolerance
+        indexed_direction = (
+            _indexed_joint_direction(
+                promotion.direction,
+                assessment_indices,
+                coefficient_tolerance,
+            )
+            if isinstance(promotion.direction, JointEndpointDirectionEvidence)
+            else _indexed_direction(
+                promotion.direction,
+                assessment_indices,
+                coefficient_tolerance,
+            )
+        )
+        promotion = replace(
+            promotion,
+            direction=indexed_direction,
+        )
+        self.history.append(
+            _face_transition_iteration(
+                iteration=len(self.history) + 1,
+                source_fit_index=source_fit_index,
+                accepted_fit_index=self.state.terminal_fit_index,
+                coefficient_fit_indices=assessment_indices,
+                lambdas=self.state.lambdas,
+                objective_before=self.state.objective,
+                promotion=promotion,
+                evidence=self.state.evidence,
+                coefficient_tolerance=coefficient_tolerance,
+                source_fit=self.state.fit,
+            )
+        )
+        self.state = replace(
+            self.state,
+            face=promotion.face,
+            fit=promotion.fit,
+            objective=promotion.objective,
+        )
+        self._active_set_changed(held_promoted=True)
+        resume = self.endgame_due and bool(self.estimated_names)
+        # A stationary verdict whose handed caps were all that was left to estimate
+        # stands: there is no gradient to take again.
+        self.endgame_stationary = self.handed_over and not self.estimated_names
+        self.endgame_due = self.handed_over = False
+        if resume:
+            return self._run_endgame()
+        return None
+
+    def _stop_earned(self) -> bool:
+        """Whether a stationary endgame or an earned plateau has stopped the search."""
+        return self.endgame_stationary or self.plateau_earned
+
+    def _strict_stop(self) -> DistributionalEFSResult | None:
+        """The free components have stopped: judge held caps, hand off, revalidate the face."""
+        stopped = self._stop_earned()
+        if self.cap_held:
+            # The free terms have stopped: judge the stop again with the caps in it.
+            self._release_held_caps()
+            return None
+        if (
+            not self.endgame_stationary
+            and self.estimated_names
+            and (self.stationary_search or self._endgame_budget() > 0)
+            and should_hand_off(
+                "objective_plateau" if self.plateau_qualified else "lambda_change",
+                max_accepted_step=0.0,
+                iterations=len(self.history),
+                config=self.outer_config,
+            )
+        ):
+            return self._run_endgame()
+        terminal_endpoint_directions: Mapping[str, EndpointDirectionEvidence] = {}
+        face = self.state.face
+        if face is not None:
+            revalidation_events = 1 if len(face.component_names) > 1 else len(face.component_names)
+            # Revalidating the face of a stationary endgame or an earned plateau is
+            # its terminal check, not a search step, so the iteration budget does not
+            # refuse it.
+            if (
+                not stopped
+                and len(self.history) + revalidation_events > self.outer_config.max_iterations
+            ):
+                return self._result(converged=False, reason="max_iterations")
+            if len(face.component_names) > 1:
+                authority_config = _face_authority_config(self.inner_config)
+                try:
+                    finite_faces = tuple(
+                        (
+                            name,
+                            _optional_penalty_face(
+                                self.layout,
+                                tuple(item for item in face.component_names if item != name),
+                            ),
+                        )
+                        for name in face.component_names
+                    )
+                except PenaltyFaceError:
+                    joint_attempt = _JointFaceDirectionAttempt(
+                        component_names=face.component_names,
+                        direction=None,
+                        assessment_fits=(),
+                        coefficient_tolerance=authority_config.tolerance,
+                        failure_reason="joint_analytic_unavailable",
+                    )
+                else:
+                    joint_attempt = _assess_joint_face_directions(
                         self.family,
                         self.layout,
                         self.y,
                         self.likelihood_plan,
                         lambdas=self.state.lambdas,
-                        current_face=self.state.face,
-                        current_fit=self.state.fit,
-                        current_objective=self.state.objective,
-                        terminal_evidence=self.state.evidence,
+                        component_names=face.component_names,
+                        joint_face=face,
+                        finite_faces=finite_faces,
+                        source_fit=self.state.fit,
+                        source_objective=self.state.objective,
+                        endpoint_fit=self.state.fit,
                         solver_config=self.inner_config,
                         efs_config=self.outer_config,
                         chunk_size=self.chunk_size,
@@ -526,686 +750,483 @@ class _SmoothingSearch:
                         _reuse_session=self.reuse_session,
                         derivatives=self.endpoint_derivatives,
                     )
-                if promotion is None:
-                    if self.handed_over:
-                        pass  # the endgame's verdict stands, with the refusal recorded
-                    elif self.outer_config.outer != "efs" and self.pending_cap is None:
-                        if self._endgame_budget() > 0 and self.estimated_names:
-                            # The FS proposal nominated this cap; the exact gradient decides
-                            # before a refusal is recorded (these assessment fits are dropped).
-                            endgame_result = self._run_endgame()
-                            if endgame_result is not None:
-                                return endgame_result
-                            continue
-                    elif (
-                        self.outer_config.outer in ("efs+newton", "efs+stationary")
-                        and self.pending_cap is not None
-                    ):
-                        bracket = self._bracket_after_refusal(assessment_attempt)
-                        if isinstance(bracket, BracketRelease):
-                            self._accept_bracket_release(bracket, assessment_attempt)
-                            self.pending_cap = None
-                            endgame_result = self._run_endgame()
-                            if endgame_result is not None:
-                                return endgame_result
-                            continue
-                        if isinstance(bracket, BracketAttempt):
-                            self._record_bracket_attempt(bracket)
-                    if assessment_attempt is not None and assessment_attempt.assessment_fits:
-                        first_assessment_index = len(self.coefficient_fits)
-                        self.coefficient_fits.extend(assessment_attempt.assessment_fits)
-                        assessment_indices = tuple(
-                            range(first_assessment_index, len(self.coefficient_fits))
+                if _joint_direction_is_endpoint(joint_attempt):
+                    source_fit_index = self.state.terminal_fit_index
+                    source_fit = self.state.fit
+                    objective_before = self.state.objective
+                    first_assessment_index = len(self.coefficient_fits)
+                    self.coefficient_fits.extend(joint_attempt.assessment_fits)
+                    assessment_indices = tuple(
+                        range(first_assessment_index, len(self.coefficient_fits))
+                    )
+                    self.state = replace(self.state, terminal_fit_index=assessment_indices[0])
+                    endpoint_fit = joint_attempt.assessment_fits[0]
+                    direction = joint_attempt.direction
+                    assert direction is not None
+                    indexed_direction = _indexed_joint_direction(
+                        direction,
+                        assessment_indices,
+                        joint_attempt.coefficient_tolerance,
+                    )
+                    self.history.append(
+                        _joint_face_revalidation_iteration(
+                            iteration=len(self.history) + 1,
+                            source_fit_index=source_fit_index,
+                            accepted_fit_index=self.state.terminal_fit_index,
+                            coefficient_fit_indices=assessment_indices,
+                            component_names=face.component_names,
+                            lambdas=self.state.lambdas,
+                            objective_before=objective_before,
+                            endpoint_fit=endpoint_fit,
+                            direction=indexed_direction,
+                            coefficient_tolerance=joint_attempt.coefficient_tolerance,
+                            evidence=self.state.evidence,
+                            source_fit=source_fit,
                         )
-                        if isinstance(assessment_attempt, _JointFaceDirectionAttempt):
-                            component_names = assessment_attempt.component_names
-                            refusal_direction = (
-                                None
-                                if assessment_attempt.direction is None
-                                else _indexed_joint_direction(
-                                    assessment_attempt.direction,
-                                    assessment_indices,
-                                    assessment_attempt.coefficient_tolerance,
-                                )
-                            )
-                        else:
-                            component_names = (self.state.evidence.unresolved_upper_bound[0],)
-                            refusal_direction = (
-                                None
-                                if assessment_attempt.check is None
-                                else _indexed_direction(
-                                    assessment_attempt.check.direction,
-                                    assessment_indices,
-                                    assessment_attempt.coefficient_tolerance,
-                                )
-                            )
-                        self.history.append(
-                            _face_assessment_refusal_iteration(
-                                iteration=len(self.history) + 1,
-                                source_fit_index=self.state.terminal_fit_index,
-                                coefficient_fit_indices=assessment_indices,
-                                coefficient_tolerance=assessment_attempt.coefficient_tolerance,
-                                component_names=component_names,
-                                direction=refusal_direction,
-                                failure_reason=assessment_attempt.failure_reason,
-                                lambdas=self.state.lambdas,
-                                objective=self.state.objective,
-                                evidence=self.state.evidence,
-                                source_fit=self.state.fit,
-                            )
-                        )
-                    if self.handed_over:
-                        self.endpoint_caps.difference_update(
-                            self.state.evidence.unresolved_upper_bound
-                        )
-                        self.endgame_due = self.handed_over = False
+                    )
+                    self.state = replace(
+                        self.state,
+                        fit=endpoint_fit,
+                        objective=indexed_direction.endpoint_objective,
+                    )
+                    terminal_endpoint_directions = dict(indexed_direction.component_directions)
+                    with measure_phase(self.phase_recorder, "efs_update_backtracking"):
                         self.state = replace(
                             self.state,
-                            evidence=replace(self.state.evidence, unresolved_upper_bound=()),
+                            evidence=_fresh_raw_evidence(
+                                self.layout,
+                                self.state.lambdas,
+                                self.state.fit,
+                                self.outer_config,
+                                face=self.state.face,
+                            ),
                         )
-                        continue
-                    if self.outer_config.outer == "efs" and not self.caps_final:
-                        self.refused_fit = self.state.fit
-                        self.cap_held |= frozenset(self.state.evidence.unresolved_upper_bound)
-                        self.state = replace(self.state, evidence=self._evidence())
-                        continue
-                    return self._result(converged=False, reason="lambda_cap_unresolved")
+                    if not stopped and (
+                        self.state.evidence.working_infinity
+                        or self.state.evidence.maximum > self.outer_config.tolerance
+                    ):
+                        return None
+                    return self._result(
+                        converged=True,
+                        reason=self._strict_reason(),
+                        terminal_endpoint_directions=terminal_endpoint_directions,
+                    )
+                else:
+                    rollback_initial = (
+                        self.state.fit.coefficients
+                        if not joint_attempt.assessment_fits
+                        else joint_attempt.assessment_fits[-1].coefficients
+                    )
+                    rollback_fit = _fit_endpoint_authority_stationary(
+                        self.family,
+                        self.layout,
+                        self.y,
+                        self.likelihood_plan,
+                        lambdas=self.state.lambdas,
+                        face=None,
+                        initial=rollback_initial,
+                        config=authority_config,
+                        chunk_size=self.chunk_size,
+                        phase_recorder=self.phase_recorder,
+                        _reuse_session=self.reuse_session,
+                    )
+                    rollback_objective = _laplace_objective(
+                        rollback_fit,
+                        layout=self.layout,
+                        lambdas=self.state.lambdas,
+                        face=None,
+                        objective_tolerance=self.outer_config.objective_tolerance,
+                    )
+                    source_fit_index = self.state.terminal_fit_index
+                    source_fit = self.state.fit
+                    objective_before = self.state.objective
+                    first_assessment_index = len(self.coefficient_fits)
+                    rollback_fits = (*joint_attempt.assessment_fits, rollback_fit)
+                    self.coefficient_fits.extend(rollback_fits)
+                    assessment_indices = tuple(
+                        range(first_assessment_index, len(self.coefficient_fits))
+                    )
+                    self.state = replace(self.state, terminal_fit_index=assessment_indices[-1])
+                    retraction_direction = joint_attempt.direction
+                    if retraction_direction is not None:
+                        retraction_direction = _indexed_joint_direction(
+                            retraction_direction,
+                            assessment_indices[:1],
+                            joint_attempt.coefficient_tolerance,
+                        )
+                    retraction = _FaceRetraction(
+                        component_names=face.component_names,
+                        fit=rollback_fit,
+                        objective=rollback_objective,
+                        direction=retraction_direction,
+                        failure_reason=(
+                            joint_attempt.failure_reason if joint_attempt.assessment_fits else None
+                        ),
+                        coefficient_tolerance=joint_attempt.coefficient_tolerance,
+                        assessment_fits=rollback_fits,
+                    )
+                    self.history.append(
+                        _face_retraction_iteration(
+                            iteration=len(self.history) + 1,
+                            source_fit_index=source_fit_index,
+                            accepted_fit_index=self.state.terminal_fit_index,
+                            coefficient_fit_indices=assessment_indices,
+                            lambdas=self.state.lambdas,
+                            objective_before=objective_before,
+                            retraction=retraction,
+                            evidence=self.state.evidence,
+                            source_fit=source_fit,
+                        )
+                    )
+                    self.state = replace(
+                        self.state,
+                        face=None,
+                        fit=rollback_fit,
+                        objective=rollback_objective,
+                    )
+                    if _direction_leaves_face(retraction.direction):
+                        self._active_set_changed()
+                        return None
+                    with measure_phase(self.phase_recorder, "efs_update_backtracking"):
+                        self.state = replace(
+                            self.state,
+                            evidence=_fresh_raw_evidence(
+                                self.layout,
+                                self.state.lambdas,
+                                self.state.fit,
+                                self.outer_config,
+                                face=self.state.face,
+                            ),
+                        )
+                    return self._result(converged=False, reason="endpoint_revalidation_failed")
+            recheck = _recheck_exact_face(
+                self.family,
+                self.layout,
+                self.y,
+                self.likelihood_plan,
+                lambdas=self.state.lambdas,
+                face=face,
+                current_fit=self.state.fit,
+                current_objective=self.state.objective,
+                solver_config=self.inner_config,
+                efs_config=self.outer_config,
+                chunk_size=self.chunk_size,
+                phase_recorder=self.phase_recorder,
+                _reuse_session=self.reuse_session,
+                derivatives=self.endpoint_derivatives,
+                other_caps_stationary=self.endgame_stationary,
+            )
+            resolved_directions: dict[str, EndpointDirectionEvidence] = {}
+            for component_name, check in recheck.checks:
                 source_fit_index = self.state.terminal_fit_index
+                source_fit = self.state.fit
+                objective_before = self.state.objective
                 first_assessment_index = len(self.coefficient_fits)
-                self.coefficient_fits.extend(promotion.assessment_fits)
+                self.coefficient_fits.extend(check.assessment_fits)
                 assessment_indices = tuple(
                     range(first_assessment_index, len(self.coefficient_fits))
                 )
                 self.state = replace(self.state, terminal_fit_index=assessment_indices[-1])
-                if assessment_attempt is None:
-                    raise RuntimeError("an accepted exact face requires an authority assessment")
-                coefficient_tolerance = assessment_attempt.coefficient_tolerance
-                indexed_direction = (
-                    _indexed_joint_direction(
-                        promotion.direction,
-                        assessment_indices,
-                        coefficient_tolerance,
-                    )
-                    if isinstance(promotion.direction, JointEndpointDirectionEvidence)
-                    else _indexed_direction(
-                        promotion.direction,
-                        assessment_indices,
-                        coefficient_tolerance,
-                    )
-                )
-                promotion = replace(
-                    promotion,
-                    direction=indexed_direction,
+                direction = _indexed_direction(
+                    check.direction,
+                    assessment_indices,
+                    check.coefficient_tolerance,
                 )
                 self.history.append(
-                    _face_transition_iteration(
+                    _face_revalidation_iteration(
+                        iteration=len(self.history) + 1,
+                        source_fit_index=source_fit_index,
+                        accepted_fit_index=self.state.terminal_fit_index,
+                        coefficient_fit_indices=assessment_indices,
+                        component_name=component_name,
+                        lambdas=self.state.lambdas,
+                        objective_before=objective_before,
+                        check=check,
+                        direction=direction,
+                        evidence=self.state.evidence,
+                        source_fit=source_fit,
+                    )
+                )
+                self.state = replace(
+                    self.state, fit=check.endpoint_fit, objective=check.endpoint_objective
+                )
+                resolved_directions[component_name] = direction
+                with measure_phase(self.phase_recorder, "efs_update_backtracking"):
+                    self.state = replace(
+                        self.state,
+                        evidence=_fresh_raw_evidence(
+                            self.layout,
+                            self.state.lambdas,
+                            self.state.fit,
+                            self.outer_config,
+                            face=self.state.face,
+                        ),
+                    )
+            if recheck.retraction is not None:
+                retraction = recheck.retraction
+                source_fit_index = self.state.terminal_fit_index
+                source_fit = self.state.fit
+                objective_before = self.state.objective
+                first_assessment_index = len(self.coefficient_fits)
+                self.coefficient_fits.extend(retraction.assessment_fits)
+                assessment_indices = tuple(
+                    range(first_assessment_index, len(self.coefficient_fits))
+                )
+                self.state = replace(self.state, terminal_fit_index=assessment_indices[-1])
+                if retraction.direction is not None:
+                    if not isinstance(retraction.direction, EndpointDirectionEvidence):
+                        raise RuntimeError("scalar revalidation produced joint evidence")
+                    retraction = replace(
+                        retraction,
+                        direction=_indexed_direction(
+                            retraction.direction,
+                            assessment_indices[:2],
+                            retraction.coefficient_tolerance,
+                        ),
+                    )
+                self.history.append(
+                    _face_retraction_iteration(
                         iteration=len(self.history) + 1,
                         source_fit_index=source_fit_index,
                         accepted_fit_index=self.state.terminal_fit_index,
                         coefficient_fit_indices=assessment_indices,
                         lambdas=self.state.lambdas,
-                        objective_before=self.state.objective,
-                        promotion=promotion,
+                        objective_before=objective_before,
+                        retraction=retraction,
                         evidence=self.state.evidence,
-                        coefficient_tolerance=coefficient_tolerance,
-                        source_fit=self.state.fit,
+                        source_fit=source_fit,
                     )
                 )
                 self.state = replace(
                     self.state,
-                    face=promotion.face,
-                    fit=promotion.fit,
-                    objective=promotion.objective,
+                    face=None,
+                    fit=retraction.fit,
+                    objective=retraction.objective,
                 )
-                self._active_set_changed(held_promoted=True)
-                resume = self.endgame_due and bool(self.estimated_names)
-                # A stationary verdict whose handed caps were all that was left to estimate
-                # stands: there is no gradient to take again.
-                self.endgame_stationary = self.handed_over and not self.estimated_names
-                self.endgame_due = self.handed_over = False
-                if resume:
-                    endgame_result = self._run_endgame()
-                    if endgame_result is not None:
-                        return endgame_result
-                continue
-            stopped = self.endgame_stationary or self.plateau_earned
-            if stopped or (
-                not self.state.evidence.working_infinity
-                and self.state.evidence.maximum <= self.outer_config.tolerance
-            ):
-                if self.cap_held:
-                    # The free terms have stopped: judge the stop again with the caps in it.
-                    self._release_held_caps()
-                    continue
-                if (
-                    not self.endgame_stationary
-                    and self.estimated_names
-                    and (self.stationary_search or self._endgame_budget() > 0)
-                    and should_hand_off(
-                        "objective_plateau" if self.plateau_qualified else "lambda_change",
-                        max_accepted_step=0.0,
-                        iterations=len(self.history),
-                        config=self.outer_config,
-                    )
-                ):
-                    endgame_result = self._run_endgame()
-                    if endgame_result is not None:
-                        return endgame_result
-                    continue
-                terminal_endpoint_directions: Mapping[str, EndpointDirectionEvidence] = {}
-                face = self.state.face
-                if face is not None:
-                    revalidation_events = (
-                        1 if len(face.component_names) > 1 else len(face.component_names)
-                    )
-                    # Revalidating the face of a stationary endgame or an earned plateau is
-                    # its terminal check, not a search step, so the iteration budget does not
-                    # refuse it.
-                    if (
-                        not stopped
-                        and len(self.history) + revalidation_events
-                        > self.outer_config.max_iterations
-                    ):
-                        return self._result(converged=False, reason="max_iterations")
-                    if len(face.component_names) > 1:
-                        authority_config = _face_authority_config(self.inner_config)
-                        try:
-                            finite_faces = tuple(
-                                (
-                                    name,
-                                    _optional_penalty_face(
-                                        self.layout,
-                                        tuple(
-                                            item for item in face.component_names if item != name
-                                        ),
-                                    ),
-                                )
-                                for name in face.component_names
-                            )
-                        except PenaltyFaceError:
-                            joint_attempt = _JointFaceDirectionAttempt(
-                                component_names=face.component_names,
-                                direction=None,
-                                assessment_fits=(),
-                                coefficient_tolerance=authority_config.tolerance,
-                                failure_reason="joint_analytic_unavailable",
-                            )
-                        else:
-                            joint_attempt = _assess_joint_face_directions(
-                                self.family,
-                                self.layout,
-                                self.y,
-                                self.likelihood_plan,
-                                lambdas=self.state.lambdas,
-                                component_names=face.component_names,
-                                joint_face=face,
-                                finite_faces=finite_faces,
-                                source_fit=self.state.fit,
-                                source_objective=self.state.objective,
-                                endpoint_fit=self.state.fit,
-                                solver_config=self.inner_config,
-                                efs_config=self.outer_config,
-                                chunk_size=self.chunk_size,
-                                phase_recorder=self.phase_recorder,
-                                _reuse_session=self.reuse_session,
-                                derivatives=self.endpoint_derivatives,
-                            )
-                        if _joint_direction_is_endpoint(joint_attempt):
-                            source_fit_index = self.state.terminal_fit_index
-                            source_fit = self.state.fit
-                            objective_before = self.state.objective
-                            first_assessment_index = len(self.coefficient_fits)
-                            self.coefficient_fits.extend(joint_attempt.assessment_fits)
-                            assessment_indices = tuple(
-                                range(first_assessment_index, len(self.coefficient_fits))
-                            )
-                            self.state = replace(
-                                self.state, terminal_fit_index=assessment_indices[0]
-                            )
-                            endpoint_fit = joint_attempt.assessment_fits[0]
-                            direction = joint_attempt.direction
-                            assert direction is not None
-                            indexed_direction = _indexed_joint_direction(
-                                direction,
-                                assessment_indices,
-                                joint_attempt.coefficient_tolerance,
-                            )
-                            self.history.append(
-                                _joint_face_revalidation_iteration(
-                                    iteration=len(self.history) + 1,
-                                    source_fit_index=source_fit_index,
-                                    accepted_fit_index=self.state.terminal_fit_index,
-                                    coefficient_fit_indices=assessment_indices,
-                                    component_names=face.component_names,
-                                    lambdas=self.state.lambdas,
-                                    objective_before=objective_before,
-                                    endpoint_fit=endpoint_fit,
-                                    direction=indexed_direction,
-                                    coefficient_tolerance=joint_attempt.coefficient_tolerance,
-                                    evidence=self.state.evidence,
-                                    source_fit=source_fit,
-                                )
-                            )
-                            self.state = replace(
-                                self.state,
-                                fit=endpoint_fit,
-                                objective=indexed_direction.endpoint_objective,
-                            )
-                            terminal_endpoint_directions = dict(
-                                indexed_direction.component_directions
-                            )
-                            with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-                                self.state = replace(
-                                    self.state,
-                                    evidence=_fresh_raw_evidence(
-                                        self.layout,
-                                        self.state.lambdas,
-                                        self.state.fit,
-                                        self.outer_config,
-                                        face=self.state.face,
-                                    ),
-                                )
-                            if not stopped and (
-                                self.state.evidence.working_infinity
-                                or self.state.evidence.maximum > self.outer_config.tolerance
-                            ):
-                                continue
-                            return self._result(
-                                converged=True,
-                                reason=self._strict_reason(),
-                                terminal_endpoint_directions=terminal_endpoint_directions,
-                            )
-                        else:
-                            rollback_initial = (
-                                self.state.fit.coefficients
-                                if not joint_attempt.assessment_fits
-                                else joint_attempt.assessment_fits[-1].coefficients
-                            )
-                            rollback_fit = _fit_endpoint_authority_stationary(
-                                self.family,
-                                self.layout,
-                                self.y,
-                                self.likelihood_plan,
-                                lambdas=self.state.lambdas,
-                                face=None,
-                                initial=rollback_initial,
-                                config=authority_config,
-                                chunk_size=self.chunk_size,
-                                phase_recorder=self.phase_recorder,
-                                _reuse_session=self.reuse_session,
-                            )
-                            rollback_objective = _laplace_objective(
-                                rollback_fit,
-                                layout=self.layout,
-                                lambdas=self.state.lambdas,
-                                face=None,
-                                objective_tolerance=self.outer_config.objective_tolerance,
-                            )
-                            source_fit_index = self.state.terminal_fit_index
-                            source_fit = self.state.fit
-                            objective_before = self.state.objective
-                            first_assessment_index = len(self.coefficient_fits)
-                            rollback_fits = (*joint_attempt.assessment_fits, rollback_fit)
-                            self.coefficient_fits.extend(rollback_fits)
-                            assessment_indices = tuple(
-                                range(first_assessment_index, len(self.coefficient_fits))
-                            )
-                            self.state = replace(
-                                self.state, terminal_fit_index=assessment_indices[-1]
-                            )
-                            retraction_direction = joint_attempt.direction
-                            if retraction_direction is not None:
-                                retraction_direction = _indexed_joint_direction(
-                                    retraction_direction,
-                                    assessment_indices[:1],
-                                    joint_attempt.coefficient_tolerance,
-                                )
-                            retraction = _FaceRetraction(
-                                component_names=face.component_names,
-                                fit=rollback_fit,
-                                objective=rollback_objective,
-                                direction=retraction_direction,
-                                failure_reason=(
-                                    joint_attempt.failure_reason
-                                    if joint_attempt.assessment_fits
-                                    else None
-                                ),
-                                coefficient_tolerance=joint_attempt.coefficient_tolerance,
-                                assessment_fits=rollback_fits,
-                            )
-                            self.history.append(
-                                _face_retraction_iteration(
-                                    iteration=len(self.history) + 1,
-                                    source_fit_index=source_fit_index,
-                                    accepted_fit_index=self.state.terminal_fit_index,
-                                    coefficient_fit_indices=assessment_indices,
-                                    lambdas=self.state.lambdas,
-                                    objective_before=objective_before,
-                                    retraction=retraction,
-                                    evidence=self.state.evidence,
-                                    source_fit=source_fit,
-                                )
-                            )
-                            self.state = replace(
-                                self.state,
-                                face=None,
-                                fit=rollback_fit,
-                                objective=rollback_objective,
-                            )
-                            if _direction_leaves_face(retraction.direction):
-                                self._active_set_changed()
-                                continue
-                            with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-                                self.state = replace(
-                                    self.state,
-                                    evidence=_fresh_raw_evidence(
-                                        self.layout,
-                                        self.state.lambdas,
-                                        self.state.fit,
-                                        self.outer_config,
-                                        face=self.state.face,
-                                    ),
-                                )
-                            return self._result(
-                                converged=False, reason="endpoint_revalidation_failed"
-                            )
-                    recheck = _recheck_exact_face(
-                        self.family,
-                        self.layout,
-                        self.y,
-                        self.likelihood_plan,
-                        lambdas=self.state.lambdas,
-                        face=face,
-                        current_fit=self.state.fit,
-                        current_objective=self.state.objective,
-                        solver_config=self.inner_config,
-                        efs_config=self.outer_config,
-                        chunk_size=self.chunk_size,
-                        phase_recorder=self.phase_recorder,
-                        _reuse_session=self.reuse_session,
-                        derivatives=self.endpoint_derivatives,
-                        other_caps_stationary=self.endgame_stationary,
-                    )
-                    resolved_directions: dict[str, EndpointDirectionEvidence] = {}
-                    for component_name, check in recheck.checks:
-                        source_fit_index = self.state.terminal_fit_index
-                        source_fit = self.state.fit
-                        objective_before = self.state.objective
-                        first_assessment_index = len(self.coefficient_fits)
-                        self.coefficient_fits.extend(check.assessment_fits)
-                        assessment_indices = tuple(
-                            range(first_assessment_index, len(self.coefficient_fits))
-                        )
-                        self.state = replace(self.state, terminal_fit_index=assessment_indices[-1])
-                        direction = _indexed_direction(
-                            check.direction,
-                            assessment_indices,
-                            check.coefficient_tolerance,
-                        )
-                        self.history.append(
-                            _face_revalidation_iteration(
-                                iteration=len(self.history) + 1,
-                                source_fit_index=source_fit_index,
-                                accepted_fit_index=self.state.terminal_fit_index,
-                                coefficient_fit_indices=assessment_indices,
-                                component_name=component_name,
-                                lambdas=self.state.lambdas,
-                                objective_before=objective_before,
-                                check=check,
-                                direction=direction,
-                                evidence=self.state.evidence,
-                                source_fit=source_fit,
-                            )
-                        )
-                        self.state = replace(
-                            self.state, fit=check.endpoint_fit, objective=check.endpoint_objective
-                        )
-                        resolved_directions[component_name] = direction
-                        with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-                            self.state = replace(
-                                self.state,
-                                evidence=_fresh_raw_evidence(
-                                    self.layout,
-                                    self.state.lambdas,
-                                    self.state.fit,
-                                    self.outer_config,
-                                    face=self.state.face,
-                                ),
-                            )
-                    if recheck.retraction is not None:
-                        retraction = recheck.retraction
-                        source_fit_index = self.state.terminal_fit_index
-                        source_fit = self.state.fit
-                        objective_before = self.state.objective
-                        first_assessment_index = len(self.coefficient_fits)
-                        self.coefficient_fits.extend(retraction.assessment_fits)
-                        assessment_indices = tuple(
-                            range(first_assessment_index, len(self.coefficient_fits))
-                        )
-                        self.state = replace(self.state, terminal_fit_index=assessment_indices[-1])
-                        if retraction.direction is not None:
-                            if not isinstance(retraction.direction, EndpointDirectionEvidence):
-                                raise RuntimeError("scalar revalidation produced joint evidence")
-                            retraction = replace(
-                                retraction,
-                                direction=_indexed_direction(
-                                    retraction.direction,
-                                    assessment_indices[:2],
-                                    retraction.coefficient_tolerance,
-                                ),
-                            )
-                        self.history.append(
-                            _face_retraction_iteration(
-                                iteration=len(self.history) + 1,
-                                source_fit_index=source_fit_index,
-                                accepted_fit_index=self.state.terminal_fit_index,
-                                coefficient_fit_indices=assessment_indices,
-                                lambdas=self.state.lambdas,
-                                objective_before=objective_before,
-                                retraction=retraction,
-                                evidence=self.state.evidence,
-                                source_fit=source_fit,
-                            )
-                        )
-                        self.state = replace(
-                            self.state,
-                            face=None,
-                            fit=retraction.fit,
-                            objective=retraction.objective,
-                        )
-                        if _direction_leaves_face(retraction.direction):
-                            self._active_set_changed()
-                            continue
-                        with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-                            self.state = replace(
-                                self.state,
-                                evidence=_fresh_raw_evidence(
-                                    self.layout,
-                                    self.state.lambdas,
-                                    self.state.fit,
-                                    self.outer_config,
-                                    face=self.state.face,
-                                ),
-                            )
-                        return self._result(converged=False, reason="endpoint_revalidation_failed")
-                    terminal_endpoint_directions = resolved_directions
-                    if not stopped and (
-                        self.state.evidence.working_infinity
-                        or self.state.evidence.maximum > self.outer_config.tolerance
-                    ):
-                        continue
-                return self._result(
-                    converged=True,
-                    reason=self._strict_reason(),
-                    terminal_endpoint_directions=terminal_endpoint_directions,
-                )
-            if len(self.history) >= self.outer_config.max_iterations:
-                if self._release_held_caps() and self.state.fit is self.refused_fit:
-                    continue
-                # The other components ran out of rounds; the result names the held caps.
-                return self._result(converged=False, reason="max_iterations")
-            if self.beyond_cap and self.outer_config.outer in ("efs+newton", "efs+stationary"):
-                # A component released beyond the cap never meets the FS proposal's box.
-                endgame_result = self._run_endgame()
-                if endgame_result is not None:
-                    return endgame_result
-                continue
-
-            iteration_number = len(self.history) + 1
-            source_fit_index = self.state.terminal_fit_index
-            with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-                plain_update = self.state.evidence.update
-                if plain_update is None:
-                    raise RuntimeError("estimated smoothing components require a raw EFS update")
-                max_proposed_step = _maximum_step(plain_update, self.estimated_names)
-            acceleration_outcome = "disabled"
-            acceleration_refusal_reason = None
-            accelerated_proposal = None
-            if self.accelerator is not None:
-                if not all(
-                    plain_update.proposal_kinds[name] == "gfs" for name in self.estimated_names
-                ):
-                    self.accelerator.reset()
-                    acceleration_outcome = "refused"
-                    acceleration_refusal_reason = "non_gfs_proposal"
-                else:
-                    with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-                        provenance = _acceleration_provenance(self.estimated_names, self.state.fit)
-                        self.accelerator.record_accepted(
-                            log_lambdas=_ordered_log_lambdas(
-                                self.state.lambdas, self.estimated_names
-                            ),
-                            raw_residual=_ordered_steps(
-                                plain_update.raw_log_steps,
-                                self.estimated_names,
-                            ),
-                            provenance=provenance,
-                        )
-                        decision = self.accelerator.propose(
-                            max_log_step=self.outer_config.max_log_step,
-                            minimum_log_lambda=np.array(
-                                [
-                                    math.log(self.outer_config.lower(name))
-                                    for name in self.estimated_names
-                                ]
-                            ),
-                            maximum_log_lambda=np.array(
-                                [
-                                    math.log(self.outer_config.upper(name))
-                                    for name in self.estimated_names
-                                ]
-                            ),
-                        )
-                    accelerated_proposal = decision.proposal
-                    if accelerated_proposal is None:
-                        if decision.refusal_reason == "warming":
-                            acceleration_outcome = "warming"
-                        elif decision.refusal_reason is None:
-                            raise RuntimeError("multisecant refusal must identify its reason")
-                        else:
-                            acceleration_outcome = "refused"
-                            acceleration_refusal_reason = decision.refusal_reason
-
-            self.attempted_fit_indices: list[int] = []
-            self.attempted_tolerances: list[float] = []
-            accepted_fit: DenseSolverResult | None = None
-            accepted_fit_index: int | None = None
-            accepted_lambdas: dict[str, float] | None = None
-            accepted_log_steps: dict[str, float] | None = None
-            accepted_objective: float | None = None
-            self.any_converged_trial = False
-            plateau_eligible = True
-            accelerated_fit_index: int | None = None
-            raw_backtracks = 0
-            proposed_lambdas: Mapping[str, float] = _complete_mapping(
-                self.state.lambdas,
-                plain_update.lambdas,
-                missing=self.state.lambdas,
-            )
-            proposed_log_steps: Mapping[str, float] = _complete_mapping(
-                self.state.lambdas,
-                plain_update.log_steps,
-                missing=0.0,
-            )
-            quadratic_forms = _complete_mapping(
-                self.state.lambdas,
-                plain_update.quadratic_forms,
-                missing=0.0,
-            )
-            trace_terms = _complete_mapping(
-                self.state.lambdas,
-                plain_update.trace_terms,
-                missing=0.0,
-            )
-
-            endpoint_names = self._endpoint_names(
-                self.state, plain_update.log_steps, self.estimated_names
-            )
-            accepted_evidence: _FreshRawEvidence | None = None
-            if endpoint_names:
+                if _direction_leaves_face(retraction.direction):
+                    self._active_set_changed()
+                    return None
                 with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-                    trial_lambdas, trial_log_steps = _endpoint_proposal(
+                    self.state = replace(
+                        self.state,
+                        evidence=_fresh_raw_evidence(
+                            self.layout,
+                            self.state.lambdas,
+                            self.state.fit,
+                            self.outer_config,
+                            face=self.state.face,
+                        ),
+                    )
+                return self._result(converged=False, reason="endpoint_revalidation_failed")
+            terminal_endpoint_directions = resolved_directions
+            if not stopped and (
+                self.state.evidence.working_infinity
+                or self.state.evidence.maximum > self.outer_config.tolerance
+            ):
+                return None
+        return self._result(
+            converged=True,
+            reason=self._strict_reason(),
+            terminal_endpoint_directions=terminal_endpoint_directions,
+        )
+
+    def _out_of_rounds(self) -> DistributionalEFSResult | None:
+        """No round is left: the held caps go back to the evidence and the fit ends."""
+        if self._release_held_caps() and self.state.fit is self.refused_fit:
+            return None
+        # The other components ran out of rounds; the result names the held caps.
+        return self._result(converged=False, reason="max_iterations")
+
+    def _fellner_schall_round(self) -> DistributionalEFSResult | None:
+        """One round: propose, try the bound, the accelerated point and shorter steps."""
+        iteration_number = len(self.history) + 1
+        source_fit_index = self.state.terminal_fit_index
+        with measure_phase(self.phase_recorder, "efs_update_backtracking"):
+            plain_update = self.state.evidence.update
+            if plain_update is None:
+                raise RuntimeError("estimated smoothing components require a raw EFS update")
+            max_proposed_step = _maximum_step(plain_update, self.estimated_names)
+        acceleration_outcome = "disabled"
+        acceleration_refusal_reason = None
+        accelerated_proposal = None
+        if self.accelerator is not None:
+            if not all(plain_update.proposal_kinds[name] == "gfs" for name in self.estimated_names):
+                self.accelerator.reset()
+                acceleration_outcome = "refused"
+                acceleration_refusal_reason = "non_gfs_proposal"
+            else:
+                with measure_phase(self.phase_recorder, "efs_update_backtracking"):
+                    provenance = _acceleration_provenance(self.estimated_names, self.state.fit)
+                    self.accelerator.record_accepted(
+                        log_lambdas=_ordered_log_lambdas(self.state.lambdas, self.estimated_names),
+                        raw_residual=_ordered_steps(
+                            plain_update.raw_log_steps,
+                            self.estimated_names,
+                        ),
+                        provenance=provenance,
+                    )
+                    decision = self.accelerator.propose(
+                        max_log_step=self.outer_config.max_log_step,
+                        minimum_log_lambda=np.array(
+                            [
+                                math.log(self.outer_config.lower(name))
+                                for name in self.estimated_names
+                            ]
+                        ),
+                        maximum_log_lambda=np.array(
+                            [
+                                math.log(self.outer_config.upper(name))
+                                for name in self.estimated_names
+                            ]
+                        ),
+                    )
+                accelerated_proposal = decision.proposal
+                if accelerated_proposal is None:
+                    if decision.refusal_reason == "warming":
+                        acceleration_outcome = "warming"
+                    elif decision.refusal_reason is None:
+                        raise RuntimeError("multisecant refusal must identify its reason")
+                    else:
+                        acceleration_outcome = "refused"
+                        acceleration_refusal_reason = decision.refusal_reason
+
+        self.attempted_fit_indices: list[int] = []
+        self.attempted_tolerances: list[float] = []
+        accepted_fit: DenseSolverResult | None = None
+        accepted_fit_index: int | None = None
+        accepted_lambdas: dict[str, float] | None = None
+        accepted_log_steps: dict[str, float] | None = None
+        accepted_objective: float | None = None
+        self.any_converged_trial = False
+        plateau_eligible = True
+        accelerated_fit_index: int | None = None
+        raw_backtracks = 0
+        proposed_lambdas: Mapping[str, float] = _complete_mapping(
+            self.state.lambdas,
+            plain_update.lambdas,
+            missing=self.state.lambdas,
+        )
+        proposed_log_steps: Mapping[str, float] = _complete_mapping(
+            self.state.lambdas,
+            plain_update.log_steps,
+            missing=0.0,
+        )
+        quadratic_forms = _complete_mapping(
+            self.state.lambdas,
+            plain_update.quadratic_forms,
+            missing=0.0,
+        )
+        trace_terms = _complete_mapping(
+            self.state.lambdas,
+            plain_update.trace_terms,
+            missing=0.0,
+        )
+
+        endpoint_names = self._endpoint_names(
+            self.state, plain_update.log_steps, self.estimated_names
+        )
+        accepted_evidence: _FreshRawEvidence | None = None
+        if endpoint_names:
+            with measure_phase(self.phase_recorder, "efs_update_backtracking"):
+                trial_lambdas, trial_log_steps = _endpoint_proposal(
+                    self.state.lambdas,
+                    plain_update.log_steps,
+                    self.estimated_names,
+                    endpoint_names,
+                    self.outer_config,
+                )
+            trial_fit, fit_index, trial_objective = self._trial(trial_lambdas)
+            if trial_objective is not None and _within_ceiling(
+                self.state.fit,
+                self.state.objective,
+                trial_fit,
+                trial_objective,
+                self.outer_config,
+            ):
+                accepted_evidence = self._evidence_at(
+                    trial_lambdas,
+                    trial_fit,
+                    self.penalty_memo,
+                    self.cap_held | frozenset(endpoint_names),
+                )
+                if not frozenset(endpoint_names) <= frozenset(accepted_evidence.cap_held):
+                    # A bound overshoots: the evidence there asks for a finite value.
+                    accepted_evidence = None
+            if accepted_evidence is not None:
+                self.endpoint_caps.update(endpoint_names)
+                accepted_fit = trial_fit
+                accepted_fit_index = fit_index
+                accepted_lambdas = trial_lambdas
+                accepted_log_steps = trial_log_steps
+                accepted_objective = trial_objective
+                proposed_lambdas = trial_lambdas
+                proposed_log_steps = trial_log_steps
+                max_proposed_step = max(abs(trial_log_steps[name]) for name in self.estimated_names)
+
+        accelerated_values = None
+        if accelerated_proposal is not None:
+            with measure_phase(self.phase_recorder, "efs_update_backtracking"):
+                accelerated_values = _accelerated_proposal(
+                    self.state.lambdas,
+                    self.estimated_names,
+                    accelerated_proposal.log_lambdas,
+                    accelerated_proposal.log_step,
+                    self.outer_config,
+                )
+            if accelerated_values is None:
+                acceleration_outcome = "refused"
+                acceleration_refusal_reason = "box_blocked"
+
+        if accelerated_values is not None:
+            acceleration_outcome = "rejected"
+            trial_lambdas, trial_log_steps = accelerated_values
+            trial_fit, fit_index, trial_objective = self._trial(trial_lambdas)
+            accelerated_fit_index = fit_index
+            if (
+                trial_objective is None
+                or _acceleration_provenance(self.estimated_names, trial_fit) != provenance
+            ):
+                plateau_eligible = False
+            elif _within_ceiling(
+                self.state.fit,
+                self.state.objective,
+                trial_fit,
+                trial_objective,
+                self.outer_config,
+            ):
+                accepted_fit = trial_fit
+                accepted_fit_index = fit_index
+                accepted_lambdas = trial_lambdas
+                accepted_log_steps = trial_log_steps
+                accepted_objective = trial_objective
+                acceleration_outcome = "accepted"
+                proposed_lambdas = trial_lambdas
+                proposed_log_steps = trial_log_steps
+                max_proposed_step = max(
+                    (abs(trial_log_steps[name]) for name in self.estimated_names),
+                    default=0.0,
+                )
+            if accepted_fit is None:
+                assert self.accelerator is not None
+                self.accelerator.reject()
+
+        if accepted_fit is None:
+            for raw_backtrack in range(self.outer_config.max_backtracks + 1):
+                step_scale = self.outer_config.backtrack_factor**raw_backtrack
+                with measure_phase(self.phase_recorder, "efs_update_backtracking"):
+                    trial_lambdas, trial_log_steps = _scaled_proposal(
                         self.state.lambdas,
                         plain_update.log_steps,
                         self.estimated_names,
-                        endpoint_names,
+                        step_scale,
                         self.outer_config,
                     )
                 trial_fit, fit_index, trial_objective = self._trial(trial_lambdas)
-                if trial_objective is not None and _within_ceiling(
-                    self.state.fit,
-                    self.state.objective,
-                    trial_fit,
-                    trial_objective,
-                    self.outer_config,
-                ):
-                    accepted_evidence = self._evidence_at(
-                        trial_lambdas,
-                        trial_fit,
-                        self.penalty_memo,
-                        self.cap_held | frozenset(endpoint_names),
-                    )
-                    if not frozenset(endpoint_names) <= frozenset(accepted_evidence.cap_held):
-                        # A bound overshoots: the evidence there asks for a finite value.
-                        accepted_evidence = None
-                if accepted_evidence is not None:
-                    self.endpoint_caps.update(endpoint_names)
-                    accepted_fit = trial_fit
-                    accepted_fit_index = fit_index
-                    accepted_lambdas = trial_lambdas
-                    accepted_log_steps = trial_log_steps
-                    accepted_objective = trial_objective
-                    proposed_lambdas = trial_lambdas
-                    proposed_log_steps = trial_log_steps
-                    max_proposed_step = max(
-                        abs(trial_log_steps[name]) for name in self.estimated_names
-                    )
-
-            accelerated_values = None
-            if accelerated_proposal is not None:
-                with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-                    accelerated_values = _accelerated_proposal(
-                        self.state.lambdas,
-                        self.estimated_names,
-                        accelerated_proposal.log_lambdas,
-                        accelerated_proposal.log_step,
-                        self.outer_config,
-                    )
-                if accelerated_values is None:
-                    acceleration_outcome = "refused"
-                    acceleration_refusal_reason = "box_blocked"
-
-            if accelerated_values is not None:
-                acceleration_outcome = "rejected"
-                trial_lambdas, trial_log_steps = accelerated_values
-                trial_fit, fit_index, trial_objective = self._trial(trial_lambdas)
-                accelerated_fit_index = fit_index
-                if (
-                    trial_objective is None
-                    or _acceleration_provenance(self.estimated_names, trial_fit) != provenance
-                ):
+                raw_backtracks = raw_backtrack
+                if trial_objective is None:
                     plateau_eligible = False
-                elif _within_ceiling(
+                    continue
+                if _within_ceiling(
                     self.state.fit,
                     self.state.objective,
                     trial_fit,
@@ -1217,303 +1238,245 @@ class _SmoothingSearch:
                     accepted_lambdas = trial_lambdas
                     accepted_log_steps = trial_log_steps
                     accepted_objective = trial_objective
-                    acceleration_outcome = "accepted"
-                    proposed_lambdas = trial_lambdas
-                    proposed_log_steps = trial_log_steps
-                    max_proposed_step = max(
-                        (abs(trial_log_steps[name]) for name in self.estimated_names),
-                        default=0.0,
-                    )
-                if accepted_fit is None:
-                    assert self.accelerator is not None
-                    self.accelerator.reject()
+                    break
 
-            if accepted_fit is None:
-                for raw_backtrack in range(self.outer_config.max_backtracks + 1):
-                    step_scale = self.outer_config.backtrack_factor**raw_backtrack
-                    with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-                        trial_lambdas, trial_log_steps = _scaled_proposal(
-                            self.state.lambdas,
-                            plain_update.log_steps,
-                            self.estimated_names,
-                            step_scale,
-                            self.outer_config,
-                        )
-                    trial_fit, fit_index, trial_objective = self._trial(trial_lambdas)
-                    raw_backtracks = raw_backtrack
-                    if trial_objective is None:
-                        plateau_eligible = False
-                        continue
-                    if _within_ceiling(
-                        self.state.fit,
-                        self.state.objective,
-                        trial_fit,
-                        trial_objective,
-                        self.outer_config,
-                    ):
-                        accepted_fit = trial_fit
-                        accepted_fit_index = fit_index
-                        accepted_lambdas = trial_lambdas
-                        accepted_log_steps = trial_log_steps
-                        accepted_objective = trial_objective
-                        break
-
-            if accepted_fit is None:
-                zero_steps = {name: 0.0 for name in self.state.lambdas}
-                self.history.append(
-                    DistributionalEFSIteration(
-                        iteration=iteration_number,
-                        source_fit_index=source_fit_index,
-                        lambdas_before=self.state.lambdas,
-                        proposed_lambdas=proposed_lambdas,
-                        lambdas_after=self.state.lambdas,
-                        proposed_log_steps=proposed_log_steps,
-                        accepted_log_steps=zero_steps,
-                        quadratic_forms=quadratic_forms,
-                        trace_terms=trace_terms,
-                        objective_before=self.state.objective,
-                        objective_after=self.state.objective,
-                        objective_relative_change=0.0,
-                        max_proposed_log_step=max_proposed_step,
-                        max_accepted_log_step=0.0,
-                        accepted=False,
-                        acceleration_outcome=acceleration_outcome,
-                        acceleration_refusal_reason=acceleration_refusal_reason,
-                        accelerated_fit_index=accelerated_fit_index,
-                        backtracks=len(self.attempted_fit_indices) - 1,
-                        raw_backtracks=raw_backtracks,
-                        coefficient_fit_indices=tuple(self.attempted_fit_indices),
-                        accepted_fit_index=None,
-                        coefficient_tolerances=tuple(self.attempted_tolerances),
-                        update_curvature=self.state.fit.terminal_curvature,
-                        accepted_curvature=None,
-                        endpoint_components=endpoint_names,
-                    )
-                )
-                reason: EFSConvergenceReason = (
-                    "objective_rejected"
-                    if self.any_converged_trial
-                    else "coefficient_not_converged"
-                )
-                # A step rejected at every length is the default search's stop, but beside
-                # a cap an endpoint trial holds, where the finish decides.
-                self.unearned = (
-                    reason == "objective_rejected"
-                    and self._plateau_finishes()
-                    and not self.endpoint_caps.isdisjoint(self.cap_held)
-                )
-                if self._endgame_budget() > 0 and (
-                    self.unearned
-                    or should_hand_off(
-                        reason,
-                        max_accepted_step=0.0,
-                        iterations=len(self.history),
-                        config=self.outer_config,
-                    )
-                ):
-                    endgame_result = self._run_endgame()
-                    if endgame_result is not None:
-                        return endgame_result
-                    continue
-                if self._release_held_caps():
-                    continue
-                return self._result(converged=False, reason=reason)
-
-            assert accepted_fit_index is not None
-            assert accepted_lambdas is not None
-            assert accepted_log_steps is not None
-            assert accepted_objective is not None
-            objective_change = abs(accepted_objective - self.state.objective) / (
-                1.0 + abs(self.state.objective)
-            )
-            max_accepted_step = max(
-                (abs(accepted_log_steps[name]) for name in self.estimated_names),
-                default=0.0,
-            )
-            # A component taken to its bound has no next step to judge the search by: the
-            # hand-off reads the ordinary steps of the others.
-            ordinary_step = (
-                max_accepted_step
-                if accepted_evidence is None
-                else max(
-                    (
-                        abs(accepted_log_steps[name])
-                        for name in self.estimated_names
-                        if name not in endpoint_names
-                    ),
-                    default=0.0,
-                )
-            )
-            practical_parameter_change = (
-                _maximum_relative_natural_parameter_change(
-                    self.state.fit.theta,
-                    accepted_fit.theta,
-                )
-                if self.outer_config.practical_convergence
-                else math.inf
-            )
+        if accepted_fit is None:
+            zero_steps = {name: 0.0 for name in self.state.lambdas}
             self.history.append(
                 DistributionalEFSIteration(
                     iteration=iteration_number,
                     source_fit_index=source_fit_index,
                     lambdas_before=self.state.lambdas,
                     proposed_lambdas=proposed_lambdas,
-                    lambdas_after=accepted_lambdas,
+                    lambdas_after=self.state.lambdas,
                     proposed_log_steps=proposed_log_steps,
-                    accepted_log_steps=accepted_log_steps,
+                    accepted_log_steps=zero_steps,
                     quadratic_forms=quadratic_forms,
                     trace_terms=trace_terms,
                     objective_before=self.state.objective,
-                    objective_after=accepted_objective,
-                    objective_relative_change=objective_change,
+                    objective_after=self.state.objective,
+                    objective_relative_change=0.0,
                     max_proposed_log_step=max_proposed_step,
-                    max_accepted_log_step=max_accepted_step,
-                    accepted=True,
+                    max_accepted_log_step=0.0,
+                    accepted=False,
                     acceleration_outcome=acceleration_outcome,
                     acceleration_refusal_reason=acceleration_refusal_reason,
                     accelerated_fit_index=accelerated_fit_index,
                     backtracks=len(self.attempted_fit_indices) - 1,
                     raw_backtracks=raw_backtracks,
                     coefficient_fit_indices=tuple(self.attempted_fit_indices),
-                    accepted_fit_index=accepted_fit_index,
+                    accepted_fit_index=None,
                     coefficient_tolerances=tuple(self.attempted_tolerances),
                     update_curvature=self.state.fit.terminal_curvature,
-                    accepted_curvature=accepted_fit.terminal_curvature,
-                    step_source="efs" if accepted_evidence is None else "endpoint",
+                    accepted_curvature=None,
                     endpoint_components=endpoint_names,
                 )
             )
-            self.previous_fall, self.fall = self.fall, self.state.objective - accepted_objective
-            self.state = replace(
-                self.state,
-                lambdas=accepted_lambdas,
-                fit=accepted_fit,
-                objective=accepted_objective,
-                terminal_fit_index=accepted_fit_index,
+            reason: EFSConvergenceReason = (
+                "objective_rejected" if self.any_converged_trial else "coefficient_not_converged"
             )
-            self.state = replace(
-                self.state,
-                evidence=self._evidence(self.penalty_memo)
-                if accepted_evidence is None
-                else self._adopt(accepted_evidence),
+            # A step rejected at every length is the default search's stop, but beside
+            # a cap an endpoint trial holds, where the finish decides.
+            self.unearned = (
+                reason == "objective_rejected"
+                and self._plateau_finishes()
+                and not self.endpoint_caps.isdisjoint(self.cap_held)
             )
-            if self.state.evidence.estimated_names != self.estimated_names:
-                raise RuntimeError("estimated smoothing names changed inside one EFS fit")
-            # The step test alone is first-order on a harmonic tail, so require both
-            # a flat objective and a contracting step before nominating a plateau.
-            # The practical policy below accepts its own sustained plateau and keeps
-            # the larger strict residual in the result.
-            # An unusable trial can force a tiny accepted step while leaving the
-            # objective at the longer step unknown. It breaks both windows.
-            comparable_flat_step = (
-                plateau_eligible and objective_change <= self.outer_config.plateau_tolerance
-            )
-            self.plateau_run = self.plateau_run + 1 if comparable_flat_step else 0
-            self.plateau_qualified = (
-                self.plateau_run >= self.outer_config.plateau_iterations
-                and max_accepted_step <= self.previous_accepted_step
-            )
-            if self.outer_config.practical_convergence:
-                assert self.state.evidence.update is not None
-                lower_pressure = _lower_bound_pressure(
-                    self.state.evidence,
-                    self.state.lambdas,
-                    self.state.evidence.update.raw_log_steps,
-                    self.outer_config,
-                )
-                self.practical_run = (
-                    self.practical_run + 1
-                    if comparable_flat_step
-                    and practical_parameter_change
-                    <= self.outer_config.practical_parameter_tolerance
-                    and max_accepted_step <= self.previous_accepted_step
-                    and not lower_pressure
-                    else 0
-                )
-            self.previous_accepted_step = max_accepted_step if plateau_eligible else math.inf
-
-            # A finite profile can also settle while a penalty continues moving
-            # outward. Require substantial accepted probes before this policy may
-            # preempt the next cap or endpoint decision; retain the raw pressure.
-            outward_plateau = (
-                self.outer_config.practical_convergence
-                and self.plateau_run >= self.outer_config.plateau_iterations
-                and self.state.face is None
-                and self.state.evidence.maximum > self.outer_config.tolerance
-                and self.state.evidence.update is not None
-                and _practical_outward_window(
-                    history=self.history,
-                    coefficient_fits=self.coefficient_fits,
-                    terminal_raw_log_steps={
-                        name: (
-                            self.state.evidence.update.raw_log_steps[name]
-                            if name in self.state.evidence.estimated_names
-                            else 0.0
-                        )
-                        for name in self.state.lambdas
-                    },
+            if self._endgame_budget() > 0 and (
+                self.unearned
+                or should_hand_off(
+                    reason,
+                    max_accepted_step=0.0,
+                    iterations=len(self.history),
                     config=self.outer_config,
                 )
-            )
-            # A practical plateau is an interior stop of the components off the active
-            # face: while one sits at the cap with outward pressure or is a working
-            # infinity, an outward plateau stops here and otherwise the top of the loop
-            # decides (promote an exact face, or refuse with a named reason). A promotion
-            # restarts the plateau's count. Off the cap, either plateau hands to a finish
-            # where one is available, so which of the two a fit meets first does not
-            # decide its outcome.
-            interior = (
-                not self.state.evidence.unresolved_upper_bound
-                and not self.state.evidence.working_infinity
-            )
-            finishes = self._plateau_finishes() and self._endgame_budget() > 0
-            if self.stationary_search and (
-                outward_plateau or self.practical_run >= self.outer_config.plateau_iterations
             ):
-                endgame_result = self._run_endgame()
-                if endgame_result is not None:
-                    return endgame_result
-                continue
-            if outward_plateau and not (finishes and interior):
-                plateau_result = self._plateau_result()
-                if plateau_result is not None:
-                    return plateau_result
-                continue
-            if (
-                self.outer_config.practical_convergence
-                # Plain Fellner--Schall has no other exit from a face. A spent finish leaves
-                # a face to the strict stop, and a Newton endgame takes it at its hand-off.
-                and (self.state.face is None or finishes or self.outer_config.outer == "efs")
-                and (outward_plateau or self.practical_run >= self.outer_config.plateau_iterations)
-                and self.state.evidence.maximum > self.outer_config.tolerance
-                and interior
-            ):
-                if self._endgame_budget() > 0 and (
-                    finishes
-                    or should_hand_off(
-                        "practical_plateau",
-                        max_accepted_step=ordinary_step,
-                        iterations=len(self.history),
-                        config=self.outer_config,
+                return self._run_endgame()
+            if self._release_held_caps():
+                return None
+            return self._result(converged=False, reason=reason)
+
+        assert accepted_fit_index is not None
+        assert accepted_lambdas is not None
+        assert accepted_log_steps is not None
+        assert accepted_objective is not None
+        objective_change = abs(accepted_objective - self.state.objective) / (
+            1.0 + abs(self.state.objective)
+        )
+        max_accepted_step = max(
+            (abs(accepted_log_steps[name]) for name in self.estimated_names),
+            default=0.0,
+        )
+        # A component taken to its bound has no next step to judge the search by: the
+        # hand-off reads the ordinary steps of the others.
+        ordinary_step = (
+            max_accepted_step
+            if accepted_evidence is None
+            else max(
+                (
+                    abs(accepted_log_steps[name])
+                    for name in self.estimated_names
+                    if name not in endpoint_names
+                ),
+                default=0.0,
+            )
+        )
+        practical_parameter_change = (
+            _maximum_relative_natural_parameter_change(
+                self.state.fit.theta,
+                accepted_fit.theta,
+            )
+            if self.outer_config.practical_convergence
+            else math.inf
+        )
+        self.history.append(
+            DistributionalEFSIteration(
+                iteration=iteration_number,
+                source_fit_index=source_fit_index,
+                lambdas_before=self.state.lambdas,
+                proposed_lambdas=proposed_lambdas,
+                lambdas_after=accepted_lambdas,
+                proposed_log_steps=proposed_log_steps,
+                accepted_log_steps=accepted_log_steps,
+                quadratic_forms=quadratic_forms,
+                trace_terms=trace_terms,
+                objective_before=self.state.objective,
+                objective_after=accepted_objective,
+                objective_relative_change=objective_change,
+                max_proposed_log_step=max_proposed_step,
+                max_accepted_log_step=max_accepted_step,
+                accepted=True,
+                acceleration_outcome=acceleration_outcome,
+                acceleration_refusal_reason=acceleration_refusal_reason,
+                accelerated_fit_index=accelerated_fit_index,
+                backtracks=len(self.attempted_fit_indices) - 1,
+                raw_backtracks=raw_backtracks,
+                coefficient_fit_indices=tuple(self.attempted_fit_indices),
+                accepted_fit_index=accepted_fit_index,
+                coefficient_tolerances=tuple(self.attempted_tolerances),
+                update_curvature=self.state.fit.terminal_curvature,
+                accepted_curvature=accepted_fit.terminal_curvature,
+                step_source="efs" if accepted_evidence is None else "endpoint",
+                endpoint_components=endpoint_names,
+            )
+        )
+        self.previous_fall, self.fall = self.fall, self.state.objective - accepted_objective
+        self.state = replace(
+            self.state,
+            lambdas=accepted_lambdas,
+            fit=accepted_fit,
+            objective=accepted_objective,
+            terminal_fit_index=accepted_fit_index,
+        )
+        self.state = replace(
+            self.state,
+            evidence=self._evidence(self.penalty_memo)
+            if accepted_evidence is None
+            else self._adopt(accepted_evidence),
+        )
+        if self.state.evidence.estimated_names != self.estimated_names:
+            raise RuntimeError("estimated smoothing names changed inside one EFS fit")
+        # The step test alone is first-order on a harmonic tail, so require both
+        # a flat objective and a contracting step before nominating a plateau.
+        # The practical policy below accepts its own sustained plateau and keeps
+        # the larger strict residual in the result.
+        # An unusable trial can force a tiny accepted step while leaving the
+        # objective at the longer step unknown. It breaks both windows.
+        comparable_flat_step = (
+            plateau_eligible and objective_change <= self.outer_config.plateau_tolerance
+        )
+        self.plateau_run = self.plateau_run + 1 if comparable_flat_step else 0
+        self.plateau_qualified = (
+            self.plateau_run >= self.outer_config.plateau_iterations
+            and max_accepted_step <= self.previous_accepted_step
+        )
+        if self.outer_config.practical_convergence:
+            assert self.state.evidence.update is not None
+            lower_pressure = _lower_bound_pressure(
+                self.state.evidence,
+                self.state.lambdas,
+                self.state.evidence.update.raw_log_steps,
+                self.outer_config,
+            )
+            self.practical_run = (
+                self.practical_run + 1
+                if comparable_flat_step
+                and practical_parameter_change <= self.outer_config.practical_parameter_tolerance
+                and max_accepted_step <= self.previous_accepted_step
+                and not lower_pressure
+                else 0
+            )
+        self.previous_accepted_step = max_accepted_step if plateau_eligible else math.inf
+
+        # A finite profile can also settle while a penalty continues moving
+        # outward. Require substantial accepted probes before this policy may
+        # preempt the next cap or endpoint decision; retain the raw pressure.
+        outward_plateau = (
+            self.outer_config.practical_convergence
+            and self.plateau_run >= self.outer_config.plateau_iterations
+            and self.state.face is None
+            and self.state.evidence.maximum > self.outer_config.tolerance
+            and self.state.evidence.update is not None
+            and _practical_outward_window(
+                history=self.history,
+                coefficient_fits=self.coefficient_fits,
+                terminal_raw_log_steps={
+                    name: (
+                        self.state.evidence.update.raw_log_steps[name]
+                        if name in self.state.evidence.estimated_names
+                        else 0.0
                     )
-                ):
-                    endgame_result = self._run_endgame()
-                    if endgame_result is not None:
-                        return endgame_result
-                    continue
-                plateau_result = self._plateau_result()
-                if plateau_result is not None:
-                    return plateau_result
-                continue
-            if self._endgame_budget() > 0 and should_hand_off(
-                None,
-                max_accepted_step=ordinary_step,
-                iterations=len(self.history),
+                    for name in self.state.lambdas
+                },
                 config=self.outer_config,
+            )
+        )
+        # A practical plateau is an interior stop of the components off the active
+        # face: while one sits at the cap with outward pressure or is a working
+        # infinity, an outward plateau stops here and otherwise the top of the loop
+        # decides (promote an exact face, or refuse with a named reason). A promotion
+        # restarts the plateau's count. Off the cap, either plateau hands to a finish
+        # where one is available, so which of the two a fit meets first does not
+        # decide its outcome.
+        interior = (
+            not self.state.evidence.unresolved_upper_bound
+            and not self.state.evidence.working_infinity
+        )
+        finishes = self._plateau_finishes() and self._endgame_budget() > 0
+        if self.stationary_search and (
+            outward_plateau or self.practical_run >= self.outer_config.plateau_iterations
+        ):
+            return self._run_endgame()
+        if outward_plateau and not (finishes and interior):
+            return self._plateau_result()
+        if (
+            self.outer_config.practical_convergence
+            # Plain Fellner--Schall has no other exit from a face. A spent finish leaves
+            # a face to the strict stop, and a Newton endgame takes it at its hand-off.
+            and (self.state.face is None or finishes or self.outer_config.outer == "efs")
+            and (outward_plateau or self.practical_run >= self.outer_config.plateau_iterations)
+            and self.state.evidence.maximum > self.outer_config.tolerance
+            and interior
+        ):
+            if self._endgame_budget() > 0 and (
+                finishes
+                or should_hand_off(
+                    "practical_plateau",
+                    max_accepted_step=ordinary_step,
+                    iterations=len(self.history),
+                    config=self.outer_config,
+                )
             ):
-                endgame_result = self._run_endgame()
-                if endgame_result is not None:
-                    return endgame_result
+                return self._run_endgame()
+            return self._plateau_result()
+        if self._endgame_budget() > 0 and should_hand_off(
+            None,
+            max_accepted_step=ordinary_step,
+            iterations=len(self.history),
+            config=self.outer_config,
+        ):
+            return self._run_endgame()
+        return None
 
     def _evidence_at(
         self,
