@@ -150,13 +150,9 @@ def _population_curve_se(
 ) -> NDArray | None:
     """The errors of a main-effect curve on its ``sz`` population curve (``_population_curve_map``).
 
-    The curve is a report of the terms its ``sz`` smooths bind
-    (``population_curve_family``), which hold between them what a left-out level's rows
-    leave open: the population offset, the levels they share, and the smooths' penalty.
-    So ``determines`` decides the curve whole, as that family's fitted function
-    (``function_determined``): every error is NaN where a null direction of the data
-    trades the family against another term's coefficients.  ``groups`` are the fitted
-    model's.
+    Every null direction touching the curve's own ``(main, sz)`` terms must split into
+    group-level constant sharing (free against ``sz`` levels) and internal ``sz`` variance,
+    leaving no direction coupling the curve's shape to any external term.
     """
     x_grid = np.linspace(spline_spec._lo, spline_spec._hi, n_points)
     mapped = _population_curve_map(
@@ -174,13 +170,26 @@ def _population_curve_se(
     se = cast(NDArray, np.sqrt(np.maximum(np.diag(mapped[1]), 0.0)))
     if determines is None:
         return se
-    from superglm.features.factor_smooth import population_curve_family
+    from superglm.features.factor_smooth import (
+        population_curve_level_constants,
+        population_curve_terms,
+    )
 
-    family = population_curve_family(name, interaction_specs)
-    columns = np.zeros(len(determines.coefficient_estimable), dtype=bool)
+    terms = population_curve_terms(name, interaction_specs)
+    own_names = {name, *(key for key, _ in terms)}
+    width = len(determines.coefficient_estimable)
+    columns = np.zeros(width, dtype=bool)
     for group in groups:
-        columns[group.sl] = group.feature_name in family
-    return se if function_determined(columns, *determines) else np.full(len(se), np.nan)
+        columns[group.sl] = group.feature_name in own_names
+    if np.all(determines.coefficient_estimable[columns]):
+        return se
+    group_names = {spec.group for _, spec in terms}
+    group_columns = np.zeros(width, dtype=bool)
+    for group in groups:
+        group_columns[group.sl] = group.feature_name in group_names
+    shared = population_curve_level_constants(terms, groups, width, x_grid)
+    ok = function_determined(columns, *determines, shared=shared, group_columns=group_columns)
+    return se if ok else np.full(len(se), np.nan)
 
 
 def _held_levels(spec, name, interaction_specs):
@@ -302,7 +311,12 @@ def as_determinacy(determines: Any, width: int) -> Determinacy | None:
     if determines is None or isinstance(determines, Determinacy):
         return determines
 
-    def decide(contrast: NDArray, design_rows: bool = False) -> bool:
+    def decide(
+        contrast: NDArray,
+        design_rows: bool = False,
+        shared: NDArray | None = None,
+        group_columns: NDArray | None = None,
+    ) -> bool:
         return design_rows or bool(determines(contrast))
 
     return Determinacy(np.zeros(width, dtype=bool), decide)
@@ -335,6 +349,9 @@ def function_determined(
     columns: NDArray,
     coefficient_estimable: NDArray,
     contrast_estimable: Callable[..., bool] | None,
+    *,
+    shared: NDArray | None = None,
+    group_columns: NDArray | None = None,
 ) -> bool:
     """Whether a covariance determines each design row's part on the coefficients ``columns`` marks.
 
@@ -345,7 +362,13 @@ def function_determined(
     """
     if np.all(coefficient_estimable[columns]):
         return True
-    return contrast_estimable is not None and bool(contrast_estimable(columns, design_rows=True))
+    if contrast_estimable is None:
+        return False
+    if shared is None and group_columns is None:
+        return bool(contrast_estimable(columns, design_rows=True))
+    return bool(
+        contrast_estimable(columns, design_rows=True, shared=shared, group_columns=group_columns)
+    )
 
 
 def withhold_undetermined(

@@ -1381,15 +1381,13 @@ def test_a_population_curve_keeps_its_errors_beside_the_terms_its_smooth_shares(
 
 @pytest.mark.pins_behaviour
 def test_a_population_curve_closes_its_family_across_connected_sz_groups() -> None:
-    """Control (pins): a curve's ``sz`` family closes transitively over connected groups (#752).
+    """Control (pins): connected ``sz`` groups keep an unaliased curve's errors (#752).
 
     ``sz(x, g)``, ``sz(w, g)``, and ``sz(w, h)`` with thin levels in both ``g`` and ``h``
-    chain ``x`` through ``w`` onto ``w:h:sz`` and ``h``.  Closing the family over
-    connected ``sz`` smooths keeps ``x``'s curve determined instead of reading ``w:h:sz`` as
-    external aliasing.
+    couple ``sz(x, g)``'s level constants to ``sz(w, g)`` and ``sz(w, h)``.  Because all
+    null directions split cleanly into those level constants plus the other terms' blocks,
+    ``x``'s curve stays determined and keeps its SEs, band, and summary range.
     """
-    from superglm.features.factor_smooth import population_curve_family
-
     x = np.r_[np.tile(np.linspace(0.0, 1.0, 30), 3), 0.4]
     g = np.array([*np.repeat(["a", "b", "c"], 30), "d"])
     row = np.arange(float(len(x)))
@@ -1416,21 +1414,160 @@ def test_a_population_curve_closes_its_family_across_connected_sz_groups() -> No
             direct_solve="gram",
         ).fit_reml(X, y)
     assert model._interaction_specs["w:h:sz"]._has_population_offset
-    assert population_curve_family("x", model._interaction_specs) == {
-        "x",
-        "w",
-        "g",
-        "h",
-        "x:g:sz",
-        "w:g:sz",
-        "w:h:sz",
-    }
     native = _assert_population_errors_are_the_contrasts(model)
     banded = model.term_inference("x", simultaneous=True, n_sim=200)
     assert np.all(banded.ci_upper_simultaneous >= banded.ci_upper)
     row_x = _numeric_test_rows(model.summary(), ("x",))["x"]
     np.testing.assert_allclose(
         [row_x.curve_se_min, row_x.curve_se_max], [native.min(), native.max()], rtol=1e-9
+    )
+
+
+@pytest.mark.parametrize("chained", [False, True], ids=["two-smooth", "three-smooth-chain"])
+def test_a_population_curve_keeps_its_errors_when_only_a_sibling_sz_term_is_aliased(
+    chained: bool,
+) -> None:
+    """An alias confined to sibling term ``w`` leaves ``x``'s population curve determined (#752).
+
+    ``x`` and ``w`` each carry a thin-level ``sz`` smooth on group ``g`` (and ``sz(w, h)`` when
+    ``chained``), while ``z = w`` aliases only ``w``'s linear component.  Previously, closing
+    over ``population_curve_family`` pulled ``w`` into ``x``'s test and blanked ``x``; now
+    ``x`` keeps all 200 errors, band, and summary range while ``w`` is blanked.
+    """
+    x = np.r_[np.tile(np.linspace(0.0, 1.0, 30), 3), 0.4]
+    g = np.array([*np.repeat(["a", "b", "c"], 30), "d"])
+    row = np.arange(float(len(x)))
+    h = np.where(row == 17, "r", np.where(row % 2 == 0, "p", "q"))
+    w = np.cos(1.7 * row)
+    y = np.sin(3.0 * x) + 0.3 * (g == "b") * x + 0.2 * np.sin(2.5 * w) + 0.1 * np.cos(row)
+    wiggle = {"wiggle": LambdaPolicy.fixed(1.0)}
+    fixed = LambdaPolicy.fixed(1.2)
+    interactions = [
+        FactorSmooth("x", group="g", basis="sz", k=5, lambda_policy=wiggle),
+        FactorSmooth("w", group="g", basis="sz", k=5, lambda_policy=wiggle),
+    ]
+    base_data = {"x": x, "w": w, "g": g}
+    if chained:
+        interactions.append(FactorSmooth("w", group="h", basis="sz", k=5, lambda_policy=wiggle))
+        base_data["h"] = h
+    base_features = {
+        "x": Spline(n_knots=5, lambda_policy=fixed),
+        "w": Spline(n_knots=5, lambda_policy=fixed),
+    }
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ref = SuperGLM(
+            family="gaussian",
+            features=base_features,
+            interactions=interactions,
+            selection_penalty=0,
+            direct_solve="gram",
+        ).fit_reml(pd.DataFrame(base_data), y)
+        model = SuperGLM(
+            family="gaussian",
+            features={**base_features, "z": Numeric()},
+            interactions=interactions,
+            selection_penalty=0,
+            direct_solve="gram",
+        ).fit_reml(pd.DataFrame({**base_data, "z": w}), y)
+
+    native = _assert_population_errors_are_the_contrasts(model)
+    ref_ti = ref.term_inference("x", centering="mean")
+    mod_ti = model.term_inference("x", centering="mean")
+    np.testing.assert_allclose(mod_ti.log_relativity, ref_ti.log_relativity, rtol=1e-10, atol=1e-12)
+    np.testing.assert_allclose(
+        mod_ti.se_log_relativity, ref_ti.se_log_relativity, rtol=1e-10, atol=1e-12
+    )
+    banded_x = model.term_inference("x", simultaneous=True, n_sim=200)
+    assert np.all(banded_x.ci_upper_simultaneous >= banded_x.ci_upper)
+    row_x = _numeric_test_rows(model.summary(), ("x",))["x"]
+    np.testing.assert_allclose(
+        [row_x.curve_se_min, row_x.curve_se_max], [native.min(), native.max()], rtol=1e-9
+    )
+
+    for centering in ("native", "mean"):
+        inf_w = model.term_inference("w", centering=centering)
+        assert np.all(np.isnan(inf_w.se_log_relativity))
+        frame_w = model.relativities(with_se=True, centering=centering)["w"]
+        assert frame_w["se_log_relativity"].isna().all()
+    banded_w = model.term_inference("w", simultaneous=True, n_sim=200)
+    assert banded_w.ci_lower_simultaneous is None and banded_w.critical_value_simultaneous is None
+    row_w = _numeric_test_rows(model.summary(), ("w",))["w"]
+    assert np.isnan(row_w.curve_se_min) and np.isnan(row_w.curve_se_max)
+
+
+def test_a_population_curve_blanks_twin_variables_sharing_an_sz_group() -> None:
+    """Mixed/twin external aliases blank population curves while pure group constants do not (#752).
+
+    - Twin variables ``w = x`` with ``sz(x, g)`` + ``sz(w, g)`` leave both curves open -> both blank.
+    - Mixed alias ``z = x + 1_{g=='a'}`` beside ``x + sz(x, g)`` couples ``x`` to ``z`` -> blank.
+    - Pure group constant ``z = 1_{g=='a'}`` couples only to level constants -> keeps ``x``'s errors.
+    """
+    x = np.r_[np.tile(np.linspace(0.0, 1.0, 30), 3), 0.4]
+    g = np.array([*np.repeat(["a", "b", "c"], 30), "d"])
+    row = np.arange(float(len(x)))
+    y = np.sin(3.0 * x) + 0.3 * (g == "b") * x + 0.1 * np.cos(row)
+    wiggle = {"wiggle": LambdaPolicy.fixed(1.0)}
+    fixed = LambdaPolicy.fixed(1.2)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        twin = SuperGLM(
+            family="gaussian",
+            features={
+                "x": Spline(n_knots=5, lambda_policy=fixed),
+                "w": Spline(n_knots=5, lambda_policy=fixed),
+            },
+            interactions=[
+                FactorSmooth("x", group="g", basis="sz", k=5, lambda_policy=wiggle),
+                FactorSmooth("w", group="g", basis="sz", k=5, lambda_policy=wiggle),
+            ],
+            selection_penalty=0,
+            direct_solve="gram",
+        ).fit_reml(pd.DataFrame({"x": x, "w": x, "g": g}), y)
+        mixed = SuperGLM(
+            family="gaussian",
+            features={"x": Spline(n_knots=5, lambda_policy=fixed), "z": Numeric()},
+            interactions=[FactorSmooth("x", group="g", basis="sz", k=5, lambda_policy=wiggle)],
+            selection_penalty=0,
+            direct_solve="gram",
+        ).fit_reml(pd.DataFrame({"x": x, "z": x + (g == "a").astype(float), "g": g}), y)
+        base = SuperGLM(
+            family="gaussian",
+            features={"x": Spline(n_knots=5, lambda_policy=fixed)},
+            interactions=[FactorSmooth("x", group="g", basis="sz", k=5, lambda_policy=wiggle)],
+            selection_penalty=0,
+            direct_solve="gram",
+        ).fit_reml(pd.DataFrame({"x": x, "g": g}), y)
+        pure_g = SuperGLM(
+            family="gaussian",
+            features={"x": Spline(n_knots=5, lambda_policy=fixed), "z": Numeric()},
+            interactions=[FactorSmooth("x", group="g", basis="sz", k=5, lambda_policy=wiggle)],
+            selection_penalty=0,
+            direct_solve="gram",
+        ).fit_reml(pd.DataFrame({"x": x, "z": (g == "a").astype(float), "g": g}), y)
+
+    for model, names in ((twin, ("x", "w")), (mixed, ("x",))):
+        rows = _numeric_test_rows(model.summary(), names)
+        for name in names:
+            for centering in ("native", "mean"):
+                assert np.all(
+                    np.isnan(model.term_inference(name, centering=centering).se_log_relativity)
+                )
+                assert (
+                    model.relativities(with_se=True, centering=centering)[name]["se_log_relativity"]
+                    .isna()
+                    .all()
+                )
+            assert np.isnan(rows[name].curve_se_min) and np.isnan(rows[name].curve_se_max)
+
+    native = _assert_population_errors_are_the_contrasts(pure_g)
+    ref_ti = base.term_inference("x", centering="mean")
+    got_ti = pure_g.term_inference("x", centering="mean")
+    np.testing.assert_allclose(got_ti.log_relativity, ref_ti.log_relativity, rtol=1e-10, atol=1e-12)
+    row_g = _numeric_test_rows(pure_g.summary(), ("x",))["x"]
+    np.testing.assert_allclose(
+        [row_g.curve_se_min, row_g.curve_se_max], [native.min(), native.max()], rtol=1e-9
     )
 
 

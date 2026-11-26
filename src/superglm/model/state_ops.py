@@ -725,7 +725,13 @@ def fit_intercept_centre(model, inference: dict) -> NDArray | None:
 
 
 def _structured_contrast_estimable(
-    inference: dict, state, contrast: NDArray, intercept: float = 0.0, design_rows: bool = False
+    inference: dict,
+    state,
+    contrast: NDArray,
+    intercept: float = 0.0,
+    design_rows: bool = False,
+    shared: NDArray | None = None,
+    group_columns: NDArray | None = None,
 ) -> bool:
     """Whether a structured fit's data determine ``contrast``, by its coefficient mask's rule.
 
@@ -749,7 +755,11 @@ def _structured_contrast_estimable(
         )
         inference["contrast_estimability"] = decision
     if design_rows:
-        return decision.function_estimable(np.asarray(contrast, dtype=bool))
+        if isinstance(decision, BorderNullSpace):
+            return decision.function_estimable(
+                np.asarray(contrast, dtype=bool), group_columns=group_columns
+            )
+        return decision.function_estimable(np.asarray(contrast, dtype=bool), shared=shared)
     if isinstance(decision, RankDecomposition):
         return decision.is_estimable(contrast, abs(intercept) / math.sqrt(factor.sum_w))
     return decision.is_estimable(contrast, intercept)

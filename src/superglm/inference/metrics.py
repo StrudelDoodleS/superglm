@@ -415,6 +415,8 @@ def _active_contrast_estimable(
     intercept: float = 0.0,
     design_rows: bool = False,
     sum_w=None,
+    shared: NDArray | None = None,
+    group_columns: NDArray | None = None,
 ) -> bool:
     """Whether ``data_rank`` determines ``contrast``, whose active coordinates sit at ``columns``.
 
@@ -422,7 +424,12 @@ def _active_contrast_estimable(
     without ``sum_w`` decides the contrast alone.
     """
     if design_rows:
-        return bool(data_rank.function_estimable(np.asarray(contrast, dtype=bool)[columns]))
+        return bool(
+            data_rank.function_estimable(
+                np.asarray(contrast, dtype=bool)[columns],
+                shared=None if shared is None else np.asarray(shared, dtype=float)[columns],
+            )
+        )
     outside = np.ones(len(contrast), dtype=bool)
     outside[columns] = False
     if np.any(contrast[outside] != 0.0):

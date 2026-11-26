@@ -105,7 +105,12 @@ class BorderNullSpace:
         tolerance = SHARED_RANK_POLICY.factor_rcond * max(size, tiny)
         return bool(np.linalg.norm(projection) <= tolerance)
 
-    def function_estimable(self, columns: NDArray) -> bool:
+    def function_estimable(
+        self,
+        columns: NDArray,
+        shared: NDArray | None = None,
+        group_columns: NDArray | None = None,
+    ) -> bool:
         """``RankDecomposition.function_estimable`` for coefficients on the border.
 
         With every structured coordinate marked too, the marked coordinates are all but
@@ -114,6 +119,8 @@ class BorderNullSpace:
         not determined, as in ``is_estimable``.
         """
         marked = np.asarray(columns, dtype=bool)
+        if group_columns is not None:
+            marked = marked | np.asarray(group_columns, dtype=bool)
         outside = np.ones(len(marked), dtype=bool)
         outside[self.indices] = False
         rows = marked[self.indices]

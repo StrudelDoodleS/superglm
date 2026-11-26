@@ -1437,38 +1437,37 @@ def population_curve_terms(name: Any, interaction_specs: Any) -> list[tuple[Any,
     ]
 
 
-def population_curve_family(name: Any, interaction_specs: Any) -> set:
-    """Feature names of the terms bound to feature ``name``'s population curve, itself included.
-
-    The ``sz`` terms that move the curve (``population_curve_terms``) share their group's
-    levels with every other ``sz`` term on it and with a main term on the group
-    (``share_group_levels``), and each ``sz`` term shares a thin level's open directions
-    with the main term on its variable.  The family closes transitively over connected
-    ``sz`` variables and groups whose population offsets bind them.  Empty when no ``sz``
-    term moves the curve.
-    """
-    groups = {spec.group for _, spec in population_curve_terms(name, interaction_specs)}
-    if not groups:
-        return set()
-    variables = {name}
-    family = {name, *groups}
-    sz_terms = [
-        (key, spec)
-        for key, spec in (interaction_specs or {}).items()
-        if isinstance(spec, FactorSmooth) and spec.basis == "sz"
-    ]
-    changed = True
-    while changed:
-        changed = False
-        for key, spec in sz_terms:
-            if spec.group in groups or (spec.variable in variables and spec._has_population_offset):
-                before = (len(family), len(groups), len(variables))
-                family.update((key, spec.variable, spec.group))
-                variables.add(spec.variable)
-                groups.add(spec.group)
-                if (len(family), len(groups), len(variables)) != before:
-                    changed = True
-    return family
+def population_curve_level_constants(
+    terms: list[tuple[Any, FactorSmooth]], groups: Any, width: int, x_grid: NDArray
+) -> NDArray[np.float64]:
+    """Basis of level-constant directions in the ``sz`` blocks moving a population curve."""
+    columns: list[NDArray[np.float64]] = []
+    for key, spec in terms:
+        term_groups = [group for group in groups if group.feature_name == key]
+        if not term_groups:
+            continue
+        term_cols = np.concatenate([np.arange(group.start, group.end) for group in term_groups])
+        if len(term_cols) != (len(spec._levels) - 1) * spec.k:
+            continue
+        if len(x_grid) >= spec.k:
+            eval_x = np.asarray(x_grid, dtype=np.float64)
+        elif len(x_grid) >= 2 and float(np.max(x_grid)) > float(np.min(x_grid)):
+            eval_x = np.linspace(float(np.min(x_grid)), float(np.max(x_grid)), max(2 * spec.k, 10))
+        else:
+            continue
+        basis = np.asarray(spec.marginal_basis(eval_x), dtype=np.float64)
+        const_vec, *_ = np.linalg.lstsq(basis, np.ones(len(basis), dtype=np.float64), rcond=None)
+        if not basis.size or float(np.max(np.abs(basis @ const_vec - 1.0))) > 1e-10:
+            continue
+        norm = float(np.linalg.norm(const_vec))
+        if norm <= 0.0:
+            continue
+        unit = const_vec / norm
+        for level in range(len(spec._levels) - 1):
+            column = np.zeros(width, dtype=np.float64)
+            column[term_cols[level * spec.k : (level + 1) * spec.k]] = unit
+            columns.append(column)
+    return np.column_stack(columns) if columns else np.zeros((width, 0), dtype=np.float64)
 
 
 def share_group_levels(specs: Any) -> None:
