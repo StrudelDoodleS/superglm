@@ -430,6 +430,10 @@ class SplineCategorical:
     is absorbed into the main spline term.
     """
 
+    # The weights its build learns from (``_predictor_compiler._Build.weight``).
+    # Its margins follow the model geometry.
+    _build_weight = "geometry"
+
     # Whether the curves follow the spline's extrapolation policy, decided when the term is
     # built: they do on superglm's own spline classes (``tensor_marginal_info`` decides so for a
     # tensor margin). The curves of a subclass, or of a term pickled before this (which reads
@@ -1629,7 +1633,7 @@ class CategoricalInteraction:
         # Report the width this term spans alongside the emitted width (the
         # identifiable rank).  Whether the group-lasso ``sqrt(p_g)`` weight and the df
         # ledger price the rank (``group_pricing="rank"``, default) or the spanned width
-        # is the builder's decision (``dm_builder._priced_group_dimension``).
+        # is the builder's decision (``_predictor_compiler._priced_group_dimension``).
         return GroupInfo(
             columns=None,
             n_cols=n_pairs,
@@ -2278,6 +2282,10 @@ class TensorInteraction:
         space to be selectable/shrinkable separately from the higher-order
         interaction surface.
     """
+
+    # The weights its build learns from (``_predictor_compiler._Build.weight``).
+    # Its margins follow the model geometry.
+    _build_weight = "geometry"
 
     def __init__(
         self,

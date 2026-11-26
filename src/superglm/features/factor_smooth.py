@@ -451,6 +451,10 @@ class FactorSmooth:
         data, and such levels are named in a fit warning.
     """
 
+    # The weights its build learns from (``_predictor_compiler._Build.weight``).
+    # Its marginal follows the model geometry.
+    _build_weight = "geometry"
+
     structured_kind = "factor_smooth"
     requires_reml = True
 

@@ -91,14 +91,7 @@ def penalty_can_zero_groups(penalty: object) -> bool:
 
     # Pure L2 proximal updates shrink continuously and never perform selection.
     # Unknown positive-lambda penalties retain the historical sparse default.
-    from superglm.penalties.group_elastic_net import GroupElasticNet
-    from superglm.penalties.ridge import Ridge
-
-    if isinstance(penalty, Ridge):
-        return False
-    if isinstance(penalty, GroupElasticNet):
-        return bool(penalty.alpha > 0.0)
-    return True
+    return bool(getattr(penalty, "_zeros_groups", True))
 
 
 @runtime_checkable

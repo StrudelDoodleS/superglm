@@ -63,6 +63,9 @@ class RandomEffect:
     on that configuration; treat the published ``tau_squared`` with care there.
     """
 
+    # What the term is.
+    _term_kind = "random_effect"
+
     requires_reml = True
 
     def __init__(

@@ -9,18 +9,6 @@ import numpy as np
 from numpy.typing import NDArray
 
 
-def _ensure_array(a, dtype=np.float64) -> NDArray:
-    """Convert input to a 1-D float64 array."""
-    return np.asarray(a, dtype=dtype)
-
-
-def _default_weights(w, n: int) -> NDArray:
-    """Return uniform weights if *w* is None, else ensure array."""
-    if w is None:
-        return np.ones(n, dtype=np.float64)
-    return np.asarray(w, dtype=np.float64)
-
-
 def _validate_strict_prior_weights(weights, n: int) -> NDArray:
     """Return one-dimensional, finite, strictly positive float64 prior weights."""
     message = f"weights must be finite and strictly positive, one-dimensional, and have length {n}"

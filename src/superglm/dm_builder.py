@@ -8,9 +8,9 @@ than a model instance.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import numpy as np
 import scipy.sparse as sp
@@ -20,6 +20,7 @@ from superglm._frame import EagerFrame
 from superglm._group_matrix._binned_codes import carry_binned_codes, certify_binned_codes
 from superglm._group_matrix._level_partition import carry_level_support, certify_level_partitions
 from superglm._predictor_compiler import (
+    BinnedRows,
     CompiledPredictorDesign,
     compile_predictor_design,
 )
@@ -45,7 +46,6 @@ from superglm.links import Link, resolve_link
 from superglm.solvers._structured.selection import carry_nesting_cache
 from superglm.solvers.dispersion import PRIOR_WEIGHTS, validate_weight_semantics
 from superglm.types import (
-    DiscreteTensorBuildResult,
     FeatureSpec,
     GroupInfo,
     GroupSlice,
@@ -309,21 +309,26 @@ def should_discretize(spec: FeatureSpec, model_discrete: bool) -> bool:
     return type(spec) in _BUILT_IN_SPLINES and spline_bins(spec, model_discrete)
 
 
+def _has_ordered_parent(ispec: Any, specs: Mapping[str, FeatureSpec]) -> bool:
+    """Whether an interaction has an OrderedCategorical parent, which it never bins on.
+
+    OC margins live on <= n_levels score points; there is nothing for
+    fit-time discretization to compress, and discretizing reads raw columns
+    as float64, which label data cannot be.
+    """
+    from superglm.features.ordered_categorical import OrderedCategorical
+
+    parents = getattr(ispec, "parent_names", ())
+    return any(isinstance(specs.get(p), OrderedCategorical) for p in parents)
+
+
 def should_discretize_tensor_interaction(
     ispec: Any, specs: dict[str, FeatureSpec], model_discrete: bool
 ) -> bool:
     """Check if a tensor interaction should use fit-time discretization."""
     from superglm.features.interaction import TensorInteraction
-    from superglm.features.ordered_categorical import OrderedCategorical
 
-    if any(
-        isinstance(specs.get(p), OrderedCategorical) for p in getattr(ispec, "parent_names", ())
-    ):
-        # OC margins live on <= n_levels score points; there is nothing for
-        # fit-time discretization to compress, and discretizing
-        # reads raw columns as float64, which label data cannot be.
-        return False
-    if not isinstance(ispec, TensorInteraction):
+    if _has_ordered_parent(ispec, specs) or not isinstance(ispec, TensorInteraction):
         return False
     p1, p2 = ispec.parent_names
     return should_discretize(specs[p1], model_discrete) and should_discretize(
@@ -336,16 +341,8 @@ def should_discretize_spline_categorical_interaction(
 ) -> bool:
     """Check if a spline-categorical interaction should use spline support compression."""
     from superglm.features.interaction import SplineCategorical
-    from superglm.features.ordered_categorical import OrderedCategorical
 
-    if any(
-        isinstance(specs.get(p), OrderedCategorical) for p in getattr(ispec, "parent_names", ())
-    ):
-        # OC margins live on <= n_levels score points; there is nothing for
-        # fit-time discretization to compress, and discretizing
-        # reads raw columns as float64, which label data cannot be.
-        return False
-    if not isinstance(ispec, SplineCategorical):
+    if _has_ordered_parent(ispec, specs) or not isinstance(ispec, SplineCategorical):
         return False
     spline_name, _cat_name = ispec.parent_names
     return should_discretize(specs[spline_name], model_discrete)
@@ -448,92 +445,34 @@ def auto_detect_features(
     logger.info("\n".join(lines))
 
 
-def _spec_kind(spec: FeatureSpec) -> str:
-    """Classify a feature spec into one of the four canonical kinds."""
-    from superglm.features.categorical import Categorical
-    from superglm.features.numeric import Numeric
-    from superglm.features.ordered_categorical import OrderedCategorical
-    from superglm.features.polynomial import Polynomial
-    from superglm.features.spline import _SplineBase
-
-    if isinstance(spec, _SplineBase):
-        return "spline"
-    if isinstance(spec, Polynomial):
-        return "polynomial"
-    if isinstance(spec, Numeric):
-        return "numeric"
-    if isinstance(spec, Categorical):
-        return "categorical"
-    if isinstance(spec, OrderedCategorical):
-        # Always the smooth: ``add_interaction`` refuses an OrderedCategorical
-        # without an inner spline before it reaches here.
-        return "spline"
-    return type(spec).__name__
-
-
-# ── Interaction factories ─────────────────────────────────────────
-# Each returns (iname, ispec) given (feat1, feat2, name, **kwargs).
-# For asymmetric pairs the factory receives the canonical orientation
-# (e.g. spline first, categorical second).
-
-
-def _make_spline_categorical(f1: str, f2: str, *, name: str | None, **kw: Any) -> tuple[str, Any]:
-    from superglm.features.interaction import SplineCategorical
-
-    return name or f"{f1}:{f2}", SplineCategorical(f1, f2)
-
-
-def _make_polynomial_categorical(
-    f1: str, f2: str, *, name: str | None, **kw: Any
-) -> tuple[str, Any]:
-    from superglm.features.interaction import PolynomialCategorical
-
-    return name or f"{f1}:{f2}", PolynomialCategorical(f1, f2)
-
-
-def _make_numeric_categorical(f1: str, f2: str, *, name: str | None, **kw: Any) -> tuple[str, Any]:
-    from superglm.features.interaction import NumericCategorical
-
-    return name or f"{f1}:{f2}", NumericCategorical(f1, f2)
-
-
-def _make_categorical_interaction(
-    f1: str, f2: str, *, name: str | None, **kw: Any
-) -> tuple[str, Any]:
-    from superglm.features.interaction import CategoricalInteraction
-
-    return name or f"{f1}:{f2}", CategoricalInteraction(f1, f2)
-
-
-def _make_numeric_interaction(f1: str, f2: str, *, name: str | None, **kw: Any) -> tuple[str, Any]:
-    from superglm.features.interaction import NumericInteraction
-
-    return name or f"{f1}:{f2}", NumericInteraction(f1, f2)
-
-
-def _make_polynomial_interaction(
-    f1: str, f2: str, *, name: str | None, **kw: Any
-) -> tuple[str, Any]:
-    from superglm.features.interaction import PolynomialInteraction
-
-    return name or f"{f1}:{f2}", PolynomialInteraction(f1, f2)
-
-
-def _make_tensor_interaction(f1: str, f2: str, *, name: str | None, **kw: Any) -> tuple[str, Any]:
-    from superglm.features.interaction import TensorInteraction
-
-    return name or f"{f1}:{f2}", TensorInteraction(f1, f2, **kw)
-
-
-_INTERACTION_FACTORIES: dict[tuple[str, str], Any] = {
-    ("spline", "categorical"): _make_spline_categorical,
-    ("polynomial", "categorical"): _make_polynomial_categorical,
-    ("numeric", "categorical"): _make_numeric_categorical,
-    ("categorical", "categorical"): _make_categorical_interaction,
-    ("numeric", "numeric"): _make_numeric_interaction,
-    ("polynomial", "polynomial"): _make_polynomial_interaction,
-    ("spline", "spline"): _make_tensor_interaction,
+# How each term kind pairs in an interaction. A smoothed ordinal pairs as its
+# spline: ``add_interaction`` refuses an OrderedCategorical without one first.
+_INTERACTION_KINDS = {
+    "spline": "spline",
+    "ordered": "spline",
+    "polynomial": "polynomial",
+    "numeric": "numeric",
+    "categorical": "categorical",
 }
+
+# The interaction class each pair of parent kinds builds. An asymmetric pair is
+# listed in one orientation (spline first, categorical second) and matched
+# either way round; ``add_interaction`` passes the parents in this orientation.
+_INTERACTION_CLASSES: dict[tuple[str, str], str] = {
+    ("spline", "categorical"): "SplineCategorical",
+    ("polynomial", "categorical"): "PolynomialCategorical",
+    ("numeric", "categorical"): "NumericCategorical",
+    ("categorical", "categorical"): "CategoricalInteraction",
+    ("numeric", "numeric"): "NumericInteraction",
+    ("polynomial", "polynomial"): "PolynomialInteraction",
+    ("spline", "spline"): "TensorInteraction",
+}
+
+
+def _spec_kind(spec: FeatureSpec) -> str:
+    """Classify a feature spec into one of the four canonical kinds, else its class name."""
+    kind = _INTERACTION_KINDS.get(getattr(spec, "_term_kind", None))
+    return type(spec).__name__ if kind is None else kind
 
 
 def _shared_row_support(B_csr, supports: dict | None):
@@ -697,22 +636,22 @@ def add_interaction(
         raise ValueError(f"Parent feature not found: {feat2}")
     refuse_unsupported_interaction_parents(feat1, feat2, specs)
 
+    from superglm.features import interaction
+
     kind1 = _spec_kind(specs[feat1])
     kind2 = _spec_kind(specs[feat2])
-
-    factory = _INTERACTION_FACTORIES.get((kind1, kind2))
-    if factory is not None:
-        iname, ispec = factory(feat1, feat2, name=name, **kwargs)
+    if (kind1, kind2) in _INTERACTION_CLASSES:
+        parents, cls = (feat1, feat2), getattr(interaction, _INTERACTION_CLASSES[kind1, kind2])
+    elif (kind2, kind1) in _INTERACTION_CLASSES:
+        parents, cls = (feat2, feat1), getattr(interaction, _INTERACTION_CLASSES[kind2, kind1])
     else:
-        # Try swapped orientation (asymmetric pairs like categorical+spline)
-        factory = _INTERACTION_FACTORIES.get((kind2, kind1))
-        if factory is not None:
-            iname, ispec = factory(feat2, feat1, name=name, **kwargs)
-        else:
-            raise TypeError(
-                f"Cannot create interaction between {kind1} "
-                f"and {kind2}. Supported: {', '.join('+'.join(k) for k in _INTERACTION_FACTORIES)}."
-            )
+        raise TypeError(
+            f"Cannot create interaction between {kind1} "
+            f"and {kind2}. Supported: {', '.join('+'.join(k) for k in _INTERACTION_CLASSES)}."
+        )
+    # Only a tensor takes keyword arguments; every other pair drops them.
+    ispec = cls(*parents, **kwargs) if cls is interaction.TensorInteraction else cls(*parents)
+    iname = name or f"{parents[0]}:{parents[1]}"
 
     if iname in interaction_specs:
         raise ValueError(f"Interaction already added: {iname}")
@@ -729,23 +668,6 @@ def add_interaction(
 # ═══════════════════════════════════════════════════════════════════
 # Design-matrix builder
 # ═══════════════════════════════════════════════════════════════════
-
-
-def _priced_group_dimension(
-    info: GroupInfo, n_cols: int, group_pricing: str
-) -> tuple[int, int | None]:
-    """``(p_g, penalty_dim)``: what the penalty prices a group at, and its stamp.
-
-    ``info.penalty_width`` is the width the term spans when its spec withholds columns the
-    design cannot identify. ``"rank"`` (default) prices at the emitted, identifiable width with
-    stamp ``None``, calibrating the ``sqrt(p_g)`` weight to the group's identifiable df (Yuan &
-    Lin 2006; Meier, van de Geer & Buhlmann 2008; Breheny & Huang 2015, sec. 2.1).
-    ``"spanned"`` prices at the spanned width, so pruning a dead column is a pure
-    reparametrisation. The group-lasso weight and the Breheny-Huang df allocation both read it.
-    """
-    if info.penalty_width is None or group_pricing == "rank":
-        return int(n_cols), None
-    return int(info.penalty_width), int(info.penalty_width)
 
 
 def _validate_group_pricing(group_pricing: str) -> None:
@@ -810,17 +732,237 @@ def _in_term_coordinates(info: GroupInfo) -> GroupInfo:
     )
 
 
+def _term_roots(info: GroupInfo) -> tuple[GroupInfo, dict[str, NDArray] | None]:
+    """``info`` in the term coordinates its declared null basis gives, and each penalty's root.
+
+    A block without a declared null basis keeps its coordinates and has no roots.
+    """
+    if info.null_coordinates is None:
+        return info, None
+    info = _in_term_coordinates(info)
+    keys = [key for key, _ in info.penalty_components] if info.penalty_components else [""]
+    roots = cast(NullCoordinates, info.null_coordinates).roots
+    return info, dict(zip(keys, roots, strict=True))
+
+
+def _fixed_qp_lambdas(info: GroupInfo, group_name: str, lambda2: float | dict) -> float | dict:
+    """``lambda2``, or a fixed-lambda QP block's own policy values for its first whitening.
+
+    The fixed-lambda QP fits in this first basis without a REML rebuild.
+    Its nested null axes keep the weak component when weighting the
+    sum. Whiten at the actual weights so the active-set search does
+    not take its steps in coordinates graded by the lambda ratio.
+    """
+    policies = info.lambda_policies
+    if (
+        info.monotone_engine == "qp"
+        and policies
+        and all(policy.mode == "fixed" for policy in policies.values())
+    ):
+        return {f"{group_name}:{key}": policy.value for key, policy in policies.items()}
+    return lambda2
+
+
+def _whitening(info, group_name, lambda2, rows, weights, term_roots):
+    """``(R_inv, R_inv_local)`` of a block that whitens (``info.uses_ssp``) on ``rows``."""
+    P = info.projection
+    if P is None:
+        lam, omega = _applied_penalty(info, group_name, lambda2)
+        R_inv = compute_R_inv(rows, omega, weights, lam)
+        # No projection: constraints are in raw space, same as R_inv input.
+        return R_inv, R_inv
+    lam, omega = _applied_penalty(info, group_name, lambda2)
+    penalty = _whitening_penalty(omega, term_roots, group_name, lambda2)
+    R_inv_local = compute_projected_R_inv(rows, P, penalty, weights, lam)
+    return P @ R_inv_local, R_inv_local
+
+
+def _block_transform(
+    info, group_name, sample_weight, lambda2, binned, in_term, term_roots, eigenbasis_turn
+):
+    """``(R_inv, R_inv_local)``: the block's map to solver coordinates, ``None`` for its own."""
+    if info.uses_ssp:
+        # Only this route whitens a projected in-term QP block at its fixed
+        # lambdas; a spline-by-level block whitens at ``lambda2``.
+        if in_term and info.projection is not None:
+            lambda2 = _fixed_qp_lambdas(info, group_name, lambda2)
+        if binned is None:
+            return _whitening(info, group_name, lambda2, info.columns, sample_weight, term_roots)
+        return _whitening(
+            info, group_name, lambda2, binned.B_unique, binned.exposure_agg, term_roots
+        )
+    P = info.projection
+    if P is None:
+        return None, None
+    R_inv_local = None
+    if eigenbasis_turn:
+        # A binned main effect is read on its distinct rows and bin weights.
+        # A binned tensor has no columns and one penalty per margin, so the
+        # turn never applies to it.
+        main = binned is not None and binned.tensor is None
+        R_inv_local = _dominant_penalty_eigenbasis(
+            info,
+            binned.B_unique if main else info.columns,
+            binned.exposure_agg if main else sample_weight,
+            group_name,
+            lambda2,
+            # Declared roots turn the range in place. A tensor's fixed
+            # coordinates declare none and take the eigenbasis.
+            term_coordinates=term_roots is not None,
+        )
+    return (P if R_inv_local is None else P @ R_inv_local), R_inv_local
+
+
+def _storage_group(info, R_inv, binned, ssp_supports):
+    """The cheapest exact storage of a block's rows at ``R_inv`` (``None``: rows unmapped)."""
+    if binned is not None:
+        # A binned block without a projection holds its bins' rows unmapped.
+        R = np.eye(info.n_cols, dtype=np.float64) if R_inv is None else R_inv
+        tensor = binned.tensor
+        if tensor is None:
+            return DiscretizedSSPGroupMatrix(binned.B_unique, R, binned.bin_idx)
+        return DiscretizedTensorGroupMatrix(
+            tensor.B1_unique,
+            tensor.B2_unique,
+            tensor.idx1,
+            tensor.idx2,
+            binned.B_unique,
+            R,
+            binned.bin_idx,
+            tensor_id=binned.tensor_id,
+            raw_channels=tensor.raw_channels,
+        )
+    if info.row_support is None and not sp.issparse(info.columns):
+        return DenseGroupMatrix(info.columns if R_inv is None else info.columns @ R_inv)
+    if R_inv is not None or info.penalty_matrix is not None or info.penalty_components is not None:
+        R = np.eye(info.n_cols, dtype=np.float64) if R_inv is None else R_inv
+        return _build_ssp_group(info.columns, R, ssp_supports, info.row_support)
+    # Only a tensor leaves its columns to its row support, and a tensor block
+    # is penalised or projected: these are sparse.
+    assert info.columns is not None
+    if info.supports_row_compression:
+        return _build_unpenalized_sparse_group(info.columns, info.n_cols)
+    # cast, not a runtime check: the checker cannot narrow by sp.issparse above.
+    return SparseGroupMatrix(cast(sp.spmatrix, info.columns))
+
+
+def _coded_group(info: GroupInfo) -> GroupMatrix:
+    """A block held by its level codes: a factor smooth, a random effect or a categorical."""
+    if info.structured_kind == "factor_smooth":
+        factor_basis = (
+            info.factor_smooth_basis_unique
+            if info.factor_smooth_basis_unique is not None
+            else info.factor_smooth_basis
+        )
+        return FactorSmoothGroupMatrix(
+            factor_basis,
+            info.factor_smooth_codes,
+            info.factor_smooth_n_levels,
+            natural_map=info.factor_smooth_transform,
+            levels=info.factor_smooth_levels,
+            repeated_penalty_components=info.repeated_penalty_components,
+            factor_basis=info.factor_smooth_factor_basis,
+            lambda_policies=info.lambda_policies,
+            bin_idx=info.factor_smooth_bin_idx,
+        )
+    if info.structured_kind == "random_effect":
+        return RandomEffectGroupMatrix(
+            info.cat_codes,
+            info.n_cols,
+            lambda_policies=info.lambda_policies,
+            nested_in=info.random_effect_nested_in,
+        )
+    return CategoricalGroupMatrix(cast(NDArray, info.cat_codes), info.n_cols)
+
+
+def _spline_by_level_group(info, group_name, sample_weight, lambda2, term_roots):
+    """``(group, R_inv, R_inv_local)`` of one level of a spline-by-category term.
+
+    The level is held on its own rows, or on their distinct support when the
+    term found one (``spline_cat_basis_unique``).
+    """
+    mask = np.asarray(info.spline_cat_mask, dtype=bool)
+    row_idx = np.flatnonzero(mask)
+    support = info.spline_cat_basis_unique is not None and info.spline_cat_bin_idx is not None
+    if support:
+        rows: sp.spmatrix | NDArray = np.asarray(info.spline_cat_basis_unique, dtype=np.float64)
+        bin_idx_level = np.asarray(info.spline_cat_bin_idx, dtype=np.intp)
+        if not info.spline_cat_bin_idx_is_level:
+            bin_idx_level = bin_idx_level[row_idx]
+        weights = np.bincount(
+            bin_idx_level, weights=sample_weight[row_idx], minlength=rows.shape[0]
+        )
+    else:
+        rows = sp.csr_matrix(info.spline_cat_basis)[row_idx]
+        weights = sample_weight[row_idx]
+    if info.uses_ssp:
+        R_inv, R_inv_local = _whitening(info, group_name, lambda2, rows, weights, term_roots)
+    else:
+        R_inv = (
+            np.eye(info.n_cols, dtype=np.float64) if info.projection is None else info.projection
+        )
+        R_inv_local = None
+    if not support:
+        gm = SplineCategoricalGroupMatrix._from_level_rows(
+            cast(sp.csr_matrix, rows), R_inv, row_idx, len(mask)
+        )
+    else:
+        # Same storage, different contract: the lossless support indexes
+        # exact distinct rows, so the class must not claim the binned route.
+        level_cls = (
+            SupportCompressedSplineCategoricalGroupMatrix
+            if info.spline_cat_support_lossless
+            else DiscretizedSplineCategoricalGroupMatrix
+        )
+        support_rows = cast(NDArray, rows)
+        if info.spline_cat_bin_idx_is_level:
+            gm = level_cls(
+                support_rows, R_inv, bin_idx_level, row_idx, n_rows=len(mask), bin_idx_is_level=True
+            )
+        else:
+            gm = level_cls(support_rows, R_inv, info.spline_cat_bin_idx, row_idx)
+    gm.spline_cat_level = info.spline_cat_level
+    gm.spline_cat_feature = info.spline_cat_feature
+    return gm, R_inv, R_inv_local
+
+
+def _attach_penalty(gm, info: GroupInfo, in_term: bool, *, components: bool = True) -> None:
+    """Hold the block's penalty on its group, in the coordinates the group's columns span.
+
+    A projected block outside term coordinates states it on the raw basis, ``P omega P'``.
+    """
+    P = None if in_term else info.projection
+    if info.penalty_matrix is not None and hasattr(gm, "omega"):
+        gm.omega = info.penalty_matrix if P is None else P @ info.penalty_matrix @ P.T
+    if components and info.penalty_components is not None and hasattr(gm, "omega_components"):
+        gm.omega_components = (
+            info.penalty_components
+            if P is None
+            else [(suffix, P @ omega_j @ P.T) for suffix, omega_j in info.penalty_components]
+        )
+        gm.component_types = info.component_types
+        if info.lambda_policies is not None:
+            gm.lambda_policies = info.lambda_policies
+
+
+def _attach_coordinates(gm, info: GroupInfo, in_term: bool, R_inv_local, term_roots, n_cols):
+    """Hold a projected block's projection, and in term coordinates its term-to-solver map."""
+    if info.projection is None:
+        return
+    if hasattr(gm, "projection"):
+        gm.projection = info.projection
+    if in_term:
+        gm.R_inv_local = np.eye(n_cols) if R_inv_local is None else R_inv_local
+        gm.term_roots = term_roots
+
+
 def _process_info(
     info: GroupInfo,
     *,
     group_name: str,
-    B_unique: NDArray | None = None,
-    bin_idx: NDArray | None = None,
     sample_weight: NDArray,
-    exposure_agg: NDArray | None = None,
     lambda2: float | dict,
-    tensor_build: DiscreteTensorBuildResult | None = None,
-    tensor_id: int = -1,
+    binned: BinnedRows | None = None,
     ssp_supports: dict | None = None,
     eigenbasis_turn: bool = True,
     term_coordinates: bool = False,
@@ -828,7 +970,8 @@ def _process_info(
     """Compute R_inv and construct a GroupMatrix from a single GroupInfo.
 
     Returns the group, its block of the combined R_inv (None without a
-    reparametrization), and its width. Subgroups share row support via ``ssp_supports``.
+    reparametrization), and its width. ``binned`` holds a binned block's
+    distinct rows. Subgroups share row support via ``ssp_supports``.
     ``eigenbasis_turn=False`` keeps a raw block in its declared coordinates.
     ``group_name`` is the block's group, which a ``lambda2`` mapping keys.
 
@@ -836,8 +979,6 @@ def _process_info(
     coordinates beside ``R_inv_local``. Lifting and re-projecting would round
     onto the null space. Consumers read the map via ``penalty_coordinate_map``.
     """
-    use_discrete = B_unique is not None
-    use_tensor = tensor_build is not None
     if isinstance(info.columns, np.ndarray) and (
         info.penalty_matrix is not None or info.penalty_components is not None
     ):
@@ -847,308 +988,34 @@ def _process_info(
     in_term = term_coordinates and (
         info.null_coordinates is not None or info.penalty_in_term_coordinates
     )
-    term_roots = None
-    if in_term and info.null_coordinates is not None:
-        info = _in_term_coordinates(info)
-        term_roots = dict(
-            zip(
-                (key for key, _ in info.penalty_components) if info.penalty_components else [""],
-                cast(NullCoordinates, info.null_coordinates).roots,
-                strict=True,
-            )
-        )
-    R_inv: NDArray | None = None
+    info, term_roots = _term_roots(info) if in_term else (info, None)
     # R_inv_local: SSP transform in post-identifiability space (projected -> solver).
     # Used to compose constraints that are already in post-identifiability space.
-    R_inv_local: NDArray | None = None
-    is_spline_cat = info.spline_cat_mask is not None and (
+    if info.spline_cat_mask is not None and (
         info.spline_cat_basis is not None
         or (info.spline_cat_basis_unique is not None and info.spline_cat_bin_idx is not None)
-    )
-
-    if is_spline_cat:
-        mask = np.asarray(info.spline_cat_mask, dtype=bool)
-        row_idx = np.flatnonzero(mask)
-        if info.spline_cat_basis_unique is not None and info.spline_cat_bin_idx is not None:
-            B_support: sp.spmatrix | NDArray = np.asarray(
-                info.spline_cat_basis_unique,
-                dtype=np.float64,
-            )
-            bin_idx_level = np.asarray(info.spline_cat_bin_idx, dtype=np.intp)
-            if not info.spline_cat_bin_idx_is_level:
-                bin_idx_level = bin_idx_level[row_idx]
-            level_weight = np.bincount(
-                bin_idx_level,
-                weights=sample_weight[row_idx],
-                minlength=B_support.shape[0],
-            )
-            B_for: sp.spmatrix | NDArray = B_support
-            use_discrete_spline_cat = True
-        else:
-            B_full = sp.csr_matrix(info.spline_cat_basis)
-            B_level = B_full[row_idx]
-            B_for = B_level
-            level_weight = sample_weight[row_idx]
-            use_discrete_spline_cat = False
-        if info.projection is not None:
-            P = info.projection
-            if info.uses_ssp:
-                lam, omega = _applied_penalty(info, group_name, lambda2)
-                penalty = _whitening_penalty(omega, term_roots, group_name, lambda2)
-                R_inv_local = compute_projected_R_inv(B_for, P, penalty, level_weight, lam)
-                R_inv = P @ R_inv_local
-            else:
-                R_inv = P
-                R_inv_local = None
-            omega_full = (
-                info.penalty_matrix
-                if in_term
-                else (P @ info.penalty_matrix @ P.T if info.penalty_matrix is not None else None)
-            )
-        elif info.uses_ssp:
-            lam, omega = _applied_penalty(info, group_name, lambda2)
-            R_inv = compute_R_inv(B_for, omega, level_weight, lam)
-            R_inv_local = R_inv
-            omega_full = info.penalty_matrix
-        else:
-            R_inv = np.eye(info.n_cols, dtype=np.float64)
-            R_inv_local = None
-            omega_full = info.penalty_matrix
-
-        n_cols = R_inv.shape[1]
-        if use_discrete_spline_cat:
-            # Same storage, different contract: the lossless support indexes
-            # exact distinct rows, so the class must not claim the binned route.
-            spline_cat_cls = (
-                SupportCompressedSplineCategoricalGroupMatrix
-                if info.spline_cat_support_lossless
-                else DiscretizedSplineCategoricalGroupMatrix
-            )
-            if info.spline_cat_bin_idx_is_level:
-                gm = spline_cat_cls(
-                    B_support,
-                    R_inv,
-                    bin_idx_level,
-                    row_idx,
-                    n_rows=len(mask),
-                    bin_idx_is_level=True,
-                )
-            else:
-                gm = spline_cat_cls(
-                    B_support,
-                    R_inv,
-                    info.spline_cat_bin_idx,
-                    row_idx,
-                )
-        else:
-            gm = SplineCategoricalGroupMatrix._from_level_rows(B_level, R_inv, row_idx, len(mask))
-        gm.spline_cat_level = info.spline_cat_level
-        gm.spline_cat_feature = info.spline_cat_feature
-        if omega_full is not None:
-            gm.omega = omega_full
-        if info.projection is not None:
-            gm.projection = info.projection
-            if in_term:
-                gm.R_inv_local = np.eye(n_cols) if R_inv_local is None else R_inv_local
-                gm.term_roots = term_roots
-
-    elif info.projection is not None:
-        P = info.projection
-        if info.uses_ssp:
-            B_for = B_unique if use_discrete else info.columns
-            exp_for = exposure_agg if use_discrete else sample_weight
-            # The fixed-lambda QP fits in this first basis without a REML rebuild.
-            # Its nested null axes keep the weak component when weighting the
-            # sum. Whiten at the actual weights so the active-set search does
-            # not take its steps in coordinates graded by the lambda ratio.
-            policies = info.lambda_policies
-            if (
-                in_term
-                and info.monotone_engine == "qp"
-                and policies
-                and all(policy.mode == "fixed" for policy in policies.values())
-            ):
-                lambda2 = {f"{group_name}:{key}": policy.value for key, policy in policies.items()}
-            lam, omega = _applied_penalty(info, group_name, lambda2)
-            penalty = _whitening_penalty(omega, term_roots, group_name, lambda2)
-            R_inv_local = compute_projected_R_inv(B_for, P, penalty, exp_for, lam)
-            R_inv = P @ R_inv_local
-        else:
-            # A binned main effect is read on its distinct rows and bin weights.
-            # A binned tensor has no columns and one penalty per margin, so the
-            # turn never applies to it.
-            binned = use_discrete and not use_tensor
-            R_inv_local = (
-                _dominant_penalty_eigenbasis(
-                    info,
-                    B_unique if binned else info.columns,
-                    exposure_agg if binned else sample_weight,
-                    group_name,
-                    lambda2,
-                    # Declared roots turn the range in place. A tensor's fixed
-                    # coordinates declare none and take the eigenbasis.
-                    term_coordinates=term_roots is not None,
-                )
-                if eigenbasis_turn
-                else None
-            )
-            R_inv = P if R_inv_local is None else P @ R_inv_local
-        n_cols = R_inv.shape[1]
-        if in_term:
-            omega_full, omega_parts = info.penalty_matrix, info.penalty_components
-        else:
-            omega_full = P @ info.penalty_matrix @ P.T if info.penalty_matrix is not None else None
-            omega_parts = (
-                None
-                if info.penalty_components is None
-                else [(suffix, P @ omega_j @ P.T) for suffix, omega_j in info.penalty_components]
-            )
-        if use_tensor:
-            gm: GroupMatrix = DiscretizedTensorGroupMatrix(
-                tensor_build.B1_unique,
-                tensor_build.B2_unique,
-                tensor_build.idx1,
-                tensor_build.idx2,
-                B_unique,
-                R_inv,
-                bin_idx,
-                tensor_id=tensor_id,
-                raw_channels=tensor_build.raw_channels,
-            )
-        elif use_discrete:
-            gm = DiscretizedSSPGroupMatrix(B_unique, R_inv, bin_idx)
-        elif info.row_support is not None or sp.issparse(info.columns):
-            gm = _build_ssp_group(info.columns, R_inv, ssp_supports, info.row_support)
-        else:
-            gm = DenseGroupMatrix(info.columns @ R_inv)
-        if omega_full is not None and hasattr(gm, "omega"):
-            gm.omega = omega_full
-        if hasattr(gm, "projection"):
-            gm.projection = P
-        if in_term:
-            gm.R_inv_local = np.eye(n_cols) if R_inv_local is None else R_inv_local
-            cast(SparseSSPGroupMatrix | DiscretizedSSPGroupMatrix, gm).term_roots = term_roots
-        if omega_parts is not None and hasattr(gm, "omega_components"):
-            gm.omega_components = omega_parts
-            gm.component_types = info.component_types
-            if info.lambda_policies is not None:
-                gm.lambda_policies = info.lambda_policies
-
-    elif info.uses_ssp:
-        B_for = B_unique if use_discrete else info.columns
-        exp_for = exposure_agg if use_discrete else sample_weight
-        lam, omega = _applied_penalty(info, group_name, lambda2)
-        R_inv = compute_R_inv(B_for, omega, exp_for, lam)
-        # No projection — constraints are in raw space, same as R_inv input
-        R_inv_local = R_inv
-        n_cols = R_inv.shape[1]
-        if use_tensor:
-            gm = DiscretizedTensorGroupMatrix(
-                tensor_build.B1_unique,
-                tensor_build.B2_unique,
-                tensor_build.idx1,
-                tensor_build.idx2,
-                B_unique,
-                R_inv,
-                bin_idx,
-                tensor_id=tensor_id,
-                raw_channels=tensor_build.raw_channels,
-            )
-            gm.omega = info.penalty_matrix
-        elif use_discrete:
-            gm = DiscretizedSSPGroupMatrix(B_unique, R_inv, bin_idx)
-            gm.omega = info.penalty_matrix
-        elif info.row_support is not None or sp.issparse(info.columns):
-            gm = _build_ssp_group(info.columns, R_inv, ssp_supports, info.row_support)
-            gm.omega = info.penalty_matrix
-        else:
-            gm = DenseGroupMatrix(info.columns @ R_inv)
-        if info.penalty_components is not None and hasattr(gm, "omega_components"):
-            gm.omega_components = info.penalty_components
-            gm.component_types = info.component_types
-            if info.lambda_policies is not None:
-                gm.lambda_policies = info.lambda_policies
-
+    ):
+        gm, R_inv, R_inv_local = _spline_by_level_group(
+            info, group_name, sample_weight, lambda2, term_roots
+        )
+        _attach_penalty(gm, info, in_term, components=False)
+    elif (
+        binned is None
+        and info.projection is None
+        and not info.uses_ssp
+        and (
+            info.structured_kind in ("factor_smooth", "random_effect") or info.cat_codes is not None
+        )
+    ):
+        gm, R_inv, R_inv_local = _coded_group(info), None, None
     else:
-        n_cols = info.n_cols
-        R_inv = None
-        if use_discrete:
-            # A binned block without a projection holds its bins' rows unmapped.
-            identity = np.eye(info.n_cols, dtype=np.float64)
-            if use_tensor:
-                gm = DiscretizedTensorGroupMatrix(
-                    tensor_build.B1_unique,
-                    tensor_build.B2_unique,
-                    tensor_build.idx1,
-                    tensor_build.idx2,
-                    B_unique,
-                    identity,
-                    bin_idx,
-                    tensor_id=tensor_id,
-                    raw_channels=tensor_build.raw_channels,
-                )
-            else:
-                gm = DiscretizedSSPGroupMatrix(B_unique, identity, bin_idx)
-            if info.penalty_matrix is not None:
-                gm.omega = info.penalty_matrix
-            if info.penalty_components is not None:
-                gm.omega_components = info.penalty_components
-                gm.component_types = info.component_types
-                if info.lambda_policies is not None:
-                    gm.lambda_policies = info.lambda_policies
-        elif info.structured_kind == "factor_smooth":
-            factor_basis = (
-                info.factor_smooth_basis_unique
-                if info.factor_smooth_basis_unique is not None
-                else info.factor_smooth_basis
-            )
-            gm = FactorSmoothGroupMatrix(
-                factor_basis,
-                info.factor_smooth_codes,
-                info.factor_smooth_n_levels,
-                natural_map=info.factor_smooth_transform,
-                levels=info.factor_smooth_levels,
-                repeated_penalty_components=info.repeated_penalty_components,
-                factor_basis=info.factor_smooth_factor_basis,
-                lambda_policies=info.lambda_policies,
-                bin_idx=info.factor_smooth_bin_idx,
-            )
-        elif info.structured_kind == "random_effect":
-            gm = RandomEffectGroupMatrix(
-                info.cat_codes,
-                info.n_cols,
-                lambda_policies=info.lambda_policies,
-                nested_in=info.random_effect_nested_in,
-            )
-        elif info.cat_codes is not None:
-            gm = CategoricalGroupMatrix(info.cat_codes, info.n_cols)
-        elif info.row_support is not None or sp.issparse(info.columns):
-            if info.penalty_matrix is not None or info.penalty_components is not None:
-                gm = _build_ssp_group(
-                    info.columns,
-                    np.eye(info.n_cols, dtype=np.float64),
-                    ssp_supports,
-                    info.row_support,
-                )
-                if info.penalty_matrix is not None:
-                    gm.omega = info.penalty_matrix
-                if info.penalty_components is not None:
-                    gm.omega_components = info.penalty_components
-                    gm.component_types = info.component_types
-                    if info.lambda_policies is not None:
-                        gm.lambda_policies = info.lambda_policies
-            else:
-                # Only a tensor leaves its columns to its row support, and a
-                # tensor block is penalised or projected: these are sparse.
-                assert info.columns is not None
-                if info.supports_row_compression:
-                    gm = _build_unpenalized_sparse_group(info.columns, info.n_cols)
-                else:
-                    # cast, not a runtime check: the checker cannot narrow by
-                    # the enclosing branch condition, sp.issparse(info.columns).
-                    gm = SparseGroupMatrix(cast(sp.spmatrix, info.columns))
-        else:
-            gm = DenseGroupMatrix(info.columns)
+        R_inv, R_inv_local = _block_transform(
+            info, group_name, sample_weight, lambda2, binned, in_term, term_roots, eigenbasis_turn
+        )
+        gm = _storage_group(info, R_inv, binned, ssp_supports)
+        _attach_penalty(gm, info, in_term)
+    n_cols = info.n_cols if R_inv is None else R_inv.shape[1]
+    _attach_coordinates(gm, info, in_term, R_inv_local, term_roots, n_cols)
 
     if info.penalty_in_term_coordinates and isinstance(
         gm, (SparseSSPGroupMatrix, DiscretizedSSPGroupMatrix)
@@ -1184,6 +1051,145 @@ class BuildResult:
     sample_weight: NDArray
     offset: NDArray | None
     compiled: CompiledPredictorDesign
+
+
+def _scan_separation(
+    compiled: CompiledPredictorDesign,
+    X: EagerFrame,
+    y: NDArray,
+    sample_weight: NDArray,
+    offset: NDArray | None,
+    link: Link,
+    boundaries: tuple,
+    selection_penalty: object | None,
+    caps_enforced: bool,
+) -> tuple[Any, list, list] | None:
+    """Scan the terms the build recorded for separated levels, cells and curves.
+
+    Each term's marks from an earlier fit are cleared first. Returns what the
+    caller discloses (``SeparatedLevels``, the held curves, the level curves),
+    or None when the build recorded no term. ``selection_penalty`` and
+    ``caps_enforced`` are as ``build_design_matrix`` documents them;
+    ``boundaries`` is the family and link's response-boundary tuple.
+    """
+    from superglm.features.categorical import Categorical
+    from superglm.model.separated_levels import record_separated_levels
+
+    for spec in compiled.specs.values():
+        if isinstance(spec, Categorical):
+            record_separated_levels(spec)
+    for spec in compiled.interaction_specs.values():
+        if getattr(spec, "_separated_cells_at_fit", ()):
+            spec._separated_cells_at_fit = ()
+            spec._occupied_cells_at_fit = None
+        if hasattr(spec, "_bounded_groups_at_fit"):
+            spec._bounded_groups_at_fit = (False, False, False)
+    if not compiled.separation_records:
+        return None
+    from superglm.diagnostics.separation import (
+        SeparatedLevels,
+        scan_categorical_term,
+        scan_interaction_term,
+    )
+    from superglm.penalties.base import penalty_targets_group
+
+    def _penalised(name: str) -> bool:
+        return selection_penalty is not None and any(
+            penalty_targets_group(selection_penalty, g)
+            for g in compiled.groups
+            if g.feature_name == name
+        )
+
+    findings = []
+    curves = []
+    level_curves = []
+    for record in compiled.separation_records:
+        term_name = record[1]
+        if record[0] == "curve":
+            # Already acted on while the term was built (its separated
+            # directions are held), so a selection penalty exempts
+            # nothing here: it is reported whatever bounds the term.
+            curves.extend(record[2])
+            continue
+        if record[0] != "inter" and _penalised(term_name):
+            # A nonzero lambda1 reaches this block: the penalty grows
+            # without bound along any recession direction, so the
+            # penalised optimum is finite and the term is estimable.
+            if record[0] == "level_curve":
+                compiled.interaction_specs[term_name]._separated_ranges = {}
+            continue
+        if record[0] == "level_curve":
+            level_curves.append(record[1:])
+            continue
+        if record[0] == "cat" and caps_enforced and record[2]._constraint_rules:
+            # A fit-time cap bounds every level's relativity against the base,
+            # so the capped optimum is finite and no level escapes to infinity.
+            compiled.scan_codes.pop(term_name, None)
+            continue
+        if record[0] == "cat":
+            _, name_c, spec_c, x_c = record
+            found = scan_categorical_term(
+                name_c,
+                spec_c,
+                x_c,
+                y,
+                sample_weight,
+                boundaries,
+                compiled.scan_codes.pop(name_c, None),
+            )
+            findings.extend(found)
+            # predict names these levels when it meets them (_predict_eta)
+            record_separated_levels(spec_c, found)
+        else:
+            _, name_i, spec1_i, spec2_i, x1_i, x2_i, p1_i, p2_i = record
+            cross_spec = compiled.interaction_specs[name_i]
+            # An "auto" penalty is calibrated after the build and can come out
+            # zero, so only a set value bounds a cell's parents or the cross.
+            set_value = getattr(selection_penalty, "lambda1", None) != "auto"
+            bounded = (
+                bool(
+                    (caps_enforced and spec1_i._constraint_rules)
+                    or (set_value and _penalised(p1_i))
+                ),
+                bool(
+                    (caps_enforced and spec2_i._constraint_rules)
+                    or (set_value and _penalised(p2_i))
+                ),
+                set_value and _penalised(name_i),
+            )
+            found = scan_interaction_term(
+                name_i,
+                spec1_i,
+                spec2_i,
+                x1_i,
+                x2_i,
+                p1_i,
+                p2_i,
+                y,
+                sample_weight,
+                boundaries,
+                cross_spec=cross_spec,
+                bounded=bounded,
+            )
+            findings.extend(found)
+            # the standard-error rule reads these cells (state_ops._names_an_unpriced_level)
+            cross_spec._separated_cells_at_fit = tuple(
+                label for finding in found for label in finding.labels
+            )
+            cross_spec._occupied_cells_at_fit = found[0].occupied if found else None
+            cross_spec._bounded_groups_at_fit = bounded
+    compiled.scan_codes.clear()
+    from superglm.links import LogLink
+
+    levels = SeparatedLevels(
+        findings=findings,
+        specs={**compiled.specs, **compiled.interaction_specs},
+        sample_weight=sample_weight,
+        offset=offset,
+        exposure=offset is not None and isinstance(link, LogLink),
+        frame=X,
+    )
+    return levels, curves, level_curves
 
 
 def build_design_matrix(
@@ -1236,7 +1242,7 @@ def build_design_matrix(
     ``group_pricing`` decides the width the selection penalty and df ledger
     price a group at when its spec emits fewer columns than the term spans:
     ``"rank"`` (default) the emitted width, ``"spanned"`` the spanned width
-    (``_priced_group_dimension``).
+    (``_predictor_compiler._priced_group_dimension``).
 
     ``weight_semantics`` decides what ``sample_weight`` says about a row, and
     reaches the build in two places: which weights a strict-positivity check
@@ -1282,21 +1288,15 @@ def build_design_matrix(
     # selection penalty's objective only when that penalty reads each group
     # through its norm; an elementwise L1 part, or a penalty not known to,
     # keeps the declared coordinates.
-    from superglm.penalties import GroupElasticNet, GroupLasso, Ridge, SparseGroupLasso
-
-    eigenbasis_turn = (
-        selection_penalty is None
-        or isinstance(selection_penalty, (Ridge, GroupLasso, GroupElasticNet))
-        or (isinstance(selection_penalty, SparseGroupLasso) and selection_penalty.alpha == 0)
+    eigenbasis_turn = selection_penalty is None or getattr(
+        selection_penalty, "_reads_groups_by_norm", False
     )
 
     compiled = compile_predictor_design(
         X,
         sample_weight,
         geometry_weight=geometry_weight,
-        polynomial_weight=sample_weight,
-        categorical_reporting_weight=sample_weight,
-        ordered_reporting_weight=sample_weight,
+        reporting_weight=sample_weight,
         specs=specs,
         feature_order=feature_order,
         interaction_specs=interaction_specs,
@@ -1315,129 +1315,27 @@ def build_design_matrix(
         eigenbasis_turn=eigenbasis_turn,
         term_coordinates=eigenbasis_turn,
     )
-    separation_records = compiled.separation_records
-    from superglm.features.categorical import Categorical
-    from superglm.model.separated_levels import record_separated_levels
-
-    for spec in compiled.specs.values():
-        if isinstance(spec, Categorical):
-            record_separated_levels(spec)
-    for spec in compiled.interaction_specs.values():
-        if getattr(spec, "_separated_cells_at_fit", ()):
-            spec._separated_cells_at_fit = ()
-            spec._occupied_cells_at_fit = None
-        if hasattr(spec, "_bounded_groups_at_fit"):
-            spec._bounded_groups_at_fit = (False, False, False)
-    if separation_records:
+    scanned = _scan_separation(
+        compiled,
+        X,
+        y,
+        sample_weight,
+        offset,
+        link,
+        separation_boundaries,
+        selection_penalty,
+        caps_enforced,
+    )
+    if scanned is not None:
+        # Emitted here: the warnings name this builder's caller by a fixed stack level.
         from superglm.diagnostics.separation import (
-            SeparatedLevels,
             emit_curve_separation,
             emit_level_curve_separation,
             emit_separation_findings,
-            scan_categorical_term,
-            scan_interaction_term,
         )
-        from superglm.penalties.base import penalty_targets_group
 
-        def _penalised(name: str) -> bool:
-            return selection_penalty is not None and any(
-                penalty_targets_group(selection_penalty, g)
-                for g in compiled.groups
-                if g.feature_name == name
-            )
-
-        findings = []
-        curves = []
-        level_curves = []
-        for record in separation_records:
-            term_name = record[1]
-            if record[0] == "curve":
-                # Already acted on while the term was built (its separated
-                # directions are held), so a selection penalty exempts
-                # nothing here: it is reported whatever bounds the term.
-                curves.extend(record[2])
-                continue
-            if record[0] != "inter" and _penalised(term_name):
-                # A nonzero lambda1 reaches this block: the penalty grows
-                # without bound along any recession direction, so the
-                # penalised optimum is finite and the term is estimable.
-                if record[0] == "level_curve":
-                    compiled.interaction_specs[term_name]._separated_ranges = {}
-                continue
-            if record[0] == "level_curve":
-                level_curves.append(record[1:])
-                continue
-            if record[0] == "cat" and caps_enforced and record[2]._constraint_rules:
-                # A fit-time cap bounds every level's relativity against the base,
-                # so the capped optimum is finite and no level escapes to infinity.
-                compiled.scan_codes.pop(term_name, None)
-                continue
-            if record[0] == "cat":
-                _, name_c, spec_c, x_c = record
-                found = scan_categorical_term(
-                    name_c,
-                    spec_c,
-                    x_c,
-                    y,
-                    sample_weight,
-                    separation_boundaries,
-                    compiled.scan_codes.pop(name_c, None),
-                )
-                findings.extend(found)
-                # predict names these levels when it meets them (_predict_eta)
-                record_separated_levels(spec_c, found)
-            else:
-                _, name_i, spec1_i, spec2_i, x1_i, x2_i, p1_i, p2_i = record
-                cross_spec = compiled.interaction_specs[name_i]
-                # An "auto" penalty is calibrated after the build and can come out
-                # zero, so only a set value bounds a cell's parents or the cross.
-                set_value = getattr(selection_penalty, "lambda1", None) != "auto"
-                bounded = (
-                    bool(
-                        (caps_enforced and spec1_i._constraint_rules)
-                        or (set_value and _penalised(p1_i))
-                    ),
-                    bool(
-                        (caps_enforced and spec2_i._constraint_rules)
-                        or (set_value and _penalised(p2_i))
-                    ),
-                    set_value and _penalised(name_i),
-                )
-                found = scan_interaction_term(
-                    name_i,
-                    spec1_i,
-                    spec2_i,
-                    x1_i,
-                    x2_i,
-                    p1_i,
-                    p2_i,
-                    y,
-                    sample_weight,
-                    separation_boundaries,
-                    cross_spec=cross_spec,
-                    bounded=bounded,
-                )
-                findings.extend(found)
-                # the standard-error rule reads these cells (state_ops._names_an_unpriced_level)
-                cross_spec._separated_cells_at_fit = tuple(
-                    label for finding in found for label in finding.labels
-                )
-                cross_spec._occupied_cells_at_fit = found[0].occupied if found else None
-                cross_spec._bounded_groups_at_fit = bounded
-        compiled.scan_codes.clear()
-        from superglm.links import LogLink
-
-        emit_separation_findings(
-            SeparatedLevels(
-                findings=findings,
-                specs={**compiled.specs, **compiled.interaction_specs},
-                sample_weight=sample_weight,
-                offset=offset,
-                exposure=offset is not None and isinstance(link, LogLink),
-                frame=X,
-            ),
-            separation,
-        )
+        levels, curves, level_curves = scanned
+        emit_separation_findings(levels, separation)
         emit_curve_separation(curves, separation)
         emit_level_curve_separation(level_curves)
 
@@ -1498,11 +1396,146 @@ def _group_has_lambda(gm, g, lambdas):
     return False
 
 
+def _sparse_rows(gm, sample_weight):
+    return gm.B, sample_weight
+
+
+def _level_rows(gm, sample_weight):
+    return gm.B_level, sample_weight[gm.row_idx]
+
+
+def _level_bin_rows(gm, sample_weight):
+    weights = np.bincount(gm.bin_idx_level, weights=sample_weight[gm.row_idx], minlength=gm.n_bins)
+    return gm.B_unique, weights
+
+
+def _bin_rows(gm, sample_weight):
+    return gm.B_unique, np.bincount(gm.bin_idx, weights=sample_weight, minlength=gm.n_bins)
+
+
+def _tensor_rows(gm, sample_weight):
+    if gm.omega_components is not None and gm.projection is None:
+        # Discrete tensors keep fixed centred coordinates with explicit
+        # marginal penalties: a lambda update changes S(lambda), not the
+        # packed design, as in mgcv bam(discrete=TRUE).
+        return None
+    return _bin_rows(gm, sample_weight)
+
+
+def _carry_level(gm, new_gm):
+    new_gm.spline_cat_level = gm.spline_cat_level
+    new_gm.spline_cat_feature = gm.spline_cat_feature
+    carry_level_support(gm, new_gm)
+    carry_binned_codes(gm, new_gm)
+    return new_gm
+
+
+def _sparse_copy(gm, R_inv):
+    return SparseSSPGroupMatrix(gm.B, R_inv)
+
+
+def _level_copy(gm, R_inv):
+    if gm.B is None:
+        new_gm = SplineCategoricalGroupMatrix._from_level_rows(
+            gm.B_level, R_inv, gm.row_idx, gm.n_rows
+        )
+    else:
+        new_gm = SplineCategoricalGroupMatrix(gm.B, R_inv, gm.row_idx)
+    return _carry_level(gm, new_gm)
+
+
+def _level_bin_copy(gm, R_inv):
+    # type(gm), not the parent: every REML lambda update comes through
+    # here, and a lossless block must not be downgraded to a binned one.
+    new_gm = type(gm)(
+        gm.B_unique, R_inv, gm.bin_idx_level, gm.row_idx, n_rows=gm.n_rows, bin_idx_is_level=True
+    )
+    return _carry_level(gm, new_gm)
+
+
+def _tensor_copy(gm, R_inv):
+    new_gm = DiscretizedTensorGroupMatrix(
+        gm.B1_unique_t,
+        gm.B2_unique_t,
+        gm.idx1,
+        gm.idx2,
+        gm.B_unique,
+        R_inv,
+        gm.bin_idx,
+        tensor_id=gm.tensor_id,
+        raw_channels=gm._current_raw_channels(),
+    )
+    carry_binned_codes(gm, new_gm)
+    return new_gm
+
+
+def _bin_copy(gm, R_inv):
+    # type(gm) preserves subclass semantics (e.g. lossless support
+    # compression) across the per-lambda rebuild.
+    return type(gm)(gm.B_unique, R_inv, gm.bin_idx)
+
+
+class _Rebuild(NamedTuple):
+    """How one storage class is whitened again at new lambdas.
+
+    ``rows`` gives the basis rows and weights the whitening reads (``None``
+    keeps the group), ``copy`` a new group of the same storage at a new
+    ``R_inv``, and ``term_roots`` whether the whitening reads the group's
+    term roots and the copy carries them.
+    """
+
+    storage: type
+    rows: Callable
+    copy: Callable
+    term_roots: bool = True
+
+
+# Subclasses before their parents. A group of no listed class keeps its design.
 # Discrete tensor interactions are not constrained against one another: ``ti()``
 # marginals are centred, so ``ti(a, b) + ti(a, c)`` span jointly identifiable
 # surfaces, and a cross-Gram null space would keep the directions a tensor
 # shares least, discarding the fitted surface on a holey joint support.  As on
 # the exact path, the penalty and shared rank policy handle degenerate directions.
+_REBUILDS = (
+    _Rebuild(SparseSSPGroupMatrix, _sparse_rows, _sparse_copy),
+    _Rebuild(SplineCategoricalGroupMatrix, _level_rows, _level_copy),
+    _Rebuild(DiscretizedSplineCategoricalGroupMatrix, _level_bin_rows, _level_bin_copy),
+    # Unlike every other class, a binned tensor whitens without its term roots
+    # and does not carry them to the rebuilt group.
+    _Rebuild(DiscretizedTensorGroupMatrix, _tensor_rows, _tensor_copy, term_roots=False),
+    _Rebuild(DiscretizedSSPGroupMatrix, _bin_rows, _bin_copy),
+)
+_CARRIED = ("omega", "projection", "omega_components", "component_types", "lambda_policies")
+
+
+def _rebuilt_group(gm, g, lambdas: dict[str, float], sample_weight: NDArray):
+    """``gm`` whitened again at ``lambdas``, or ``gm`` itself where its design stays."""
+    # Earlier saved groups have no flag and retain their original policy.
+    if not getattr(gm, "reparametrize", True):
+        return gm
+    rebuild = next((entry for entry in _REBUILDS if isinstance(gm, entry.storage)), None)
+    if rebuild is None or not _group_has_lambda(gm, g, lambdas) or gm.omega is None:
+        return gm
+    read = rebuild.rows(gm, sample_weight)
+    if read is None:
+        return gm
+    B, weights = read
+    lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
+    roots = getattr(gm, "term_roots", None) if rebuild.term_roots else None
+    R_inv_local = None
+    if gm.projection is None:
+        R_inv = compute_R_inv(B, omega_eff, weights, lam)
+    else:
+        penalty = _whitening_penalty(_projected_penalty(gm, omega_eff), roots, g.name, lambdas)
+        R_inv_local = compute_projected_R_inv(B, gm.projection, penalty, weights, lam)
+        R_inv = gm.projection @ R_inv_local
+    new_gm = rebuild.copy(gm, R_inv)
+    for name in _CARRIED:
+        setattr(new_gm, name, getattr(gm, name))
+    new_gm.R_inv_local = None if getattr(gm, "R_inv_local", None) is None else R_inv_local
+    new_gm.term_roots = roots
+    new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
+    return new_gm
 
 
 def rebuild_design_matrix_with_lambdas(
@@ -1516,197 +1549,9 @@ def rebuild_design_matrix_with_lambdas(
     Recomputes R_inv for groups that use SSP and have an updated lambda.
     Fixed-coordinate groups keep their design as the smoothing penalty changes.
     """
-    new_gms: list[GroupMatrix] = []
-    for gm, g in zip(dm.group_matrices, groups):
-        # Earlier saved groups have no flag and retain their original policy.
-        if not getattr(gm, "reparametrize", True):
-            new_gms.append(gm)
-            continue
-        if isinstance(gm, SparseSSPGroupMatrix) and _group_has_lambda(gm, g, lambdas):
-            if gm.omega is None:
-                new_gms.append(gm)
-                continue
-            lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
-            R_inv_local = None
-            if gm.projection is not None:
-                P = gm.projection
-                omega_proj = _projected_penalty(gm, omega_eff)
-                penalty = _whitening_penalty(
-                    omega_proj, getattr(gm, "term_roots", None), g.name, lambdas
-                )
-                R_inv_local = compute_projected_R_inv(gm.B, P, penalty, sample_weight, lam)
-                R_inv_new = P @ R_inv_local
-            else:
-                R_inv_new = compute_R_inv(gm.B, omega_eff, sample_weight, lam)
-            new_gm = SparseSSPGroupMatrix(gm.B, R_inv_new)
-            new_gm.omega = gm.omega
-            new_gm.projection = gm.projection
-            new_gm.R_inv_local = None if getattr(gm, "R_inv_local", None) is None else R_inv_local
-            new_gm.term_roots = getattr(gm, "term_roots", None)
-            new_gm.omega_components = gm.omega_components
-            new_gm.component_types = gm.component_types
-            new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
-            new_gm.lambda_policies = gm.lambda_policies
-            new_gms.append(new_gm)
-        elif isinstance(gm, SplineCategoricalGroupMatrix) and _group_has_lambda(gm, g, lambdas):
-            if gm.omega is None:
-                new_gms.append(gm)
-                continue
-            lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
-            level_weight = sample_weight[gm.row_idx]
-            R_inv_local = None
-            if gm.projection is not None:
-                P = gm.projection
-                omega_proj = _projected_penalty(gm, omega_eff)
-                penalty = _whitening_penalty(
-                    omega_proj, getattr(gm, "term_roots", None), g.name, lambdas
-                )
-                R_inv_local = compute_projected_R_inv(gm.B_level, P, penalty, level_weight, lam)
-                R_inv_new = P @ R_inv_local
-            else:
-                R_inv_new = compute_R_inv(gm.B_level, omega_eff, level_weight, lam)
-            if gm.B is None:
-                new_gm = SplineCategoricalGroupMatrix._from_level_rows(
-                    gm.B_level, R_inv_new, gm.row_idx, gm.n_rows
-                )
-            else:
-                new_gm = SplineCategoricalGroupMatrix(gm.B, R_inv_new, gm.row_idx)
-            new_gm.omega = gm.omega
-            new_gm.projection = gm.projection
-            new_gm.R_inv_local = None if getattr(gm, "R_inv_local", None) is None else R_inv_local
-            new_gm.term_roots = getattr(gm, "term_roots", None)
-            new_gm.omega_components = gm.omega_components
-            new_gm.component_types = gm.component_types
-            new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
-            new_gm.lambda_policies = gm.lambda_policies
-            new_gm.spline_cat_level = gm.spline_cat_level
-            new_gm.spline_cat_feature = gm.spline_cat_feature
-            carry_level_support(gm, new_gm)
-            carry_binned_codes(gm, new_gm)
-            new_gms.append(new_gm)
-        elif isinstance(gm, DiscretizedSplineCategoricalGroupMatrix) and _group_has_lambda(
-            gm, g, lambdas
-        ):
-            if gm.omega is None:
-                new_gms.append(gm)
-                continue
-            lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
-            level_weight = np.bincount(
-                gm.bin_idx_level,
-                weights=sample_weight[gm.row_idx],
-                minlength=gm.n_bins,
-            )
-            R_inv_local = None
-            if gm.projection is not None:
-                P = gm.projection
-                omega_proj = _projected_penalty(gm, omega_eff)
-                penalty = _whitening_penalty(
-                    omega_proj, getattr(gm, "term_roots", None), g.name, lambdas
-                )
-                R_inv_local = compute_projected_R_inv(
-                    gm.B_unique,
-                    P,
-                    penalty,
-                    level_weight,
-                    lam,
-                )
-                R_inv_new = P @ R_inv_local
-            else:
-                R_inv_new = compute_R_inv(gm.B_unique, omega_eff, level_weight, lam)
-            # type(gm), not the parent: every REML lambda update comes through
-            # here, and a lossless block must not be downgraded to a binned one.
-            new_gm = type(gm)(
-                gm.B_unique,
-                R_inv_new,
-                gm.bin_idx_level,
-                gm.row_idx,
-                n_rows=gm.n_rows,
-                bin_idx_is_level=True,
-            )
-            new_gm.omega = gm.omega
-            new_gm.projection = gm.projection
-            new_gm.R_inv_local = None if getattr(gm, "R_inv_local", None) is None else R_inv_local
-            new_gm.term_roots = getattr(gm, "term_roots", None)
-            new_gm.omega_components = gm.omega_components
-            new_gm.component_types = gm.component_types
-            new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
-            new_gm.lambda_policies = gm.lambda_policies
-            new_gm.spline_cat_level = gm.spline_cat_level
-            new_gm.spline_cat_feature = gm.spline_cat_feature
-            carry_level_support(gm, new_gm)
-            carry_binned_codes(gm, new_gm)
-            new_gms.append(new_gm)
-        elif isinstance(gm, DiscretizedTensorGroupMatrix) and _group_has_lambda(gm, g, lambdas):
-            if gm.omega is None:
-                new_gms.append(gm)
-                continue
-            if gm.omega_components is not None and gm.projection is None:
-                # Discrete tensors keep fixed centred coordinates with explicit
-                # marginal penalties: a lambda update changes S(lambda), not the
-                # packed design, as in mgcv bam(discrete=TRUE).
-                new_gms.append(gm)
-                continue
-            lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
-            exposure_agg = np.bincount(gm.bin_idx, weights=sample_weight, minlength=gm.n_bins)
-            if gm.projection is not None:
-                P = gm.projection
-                omega_proj = _projected_penalty(gm, omega_eff)
-                R_inv_local = compute_projected_R_inv(gm.B_unique, P, omega_proj, exposure_agg, lam)
-                R_inv_new = P @ R_inv_local
-            else:
-                R_inv_new = compute_R_inv(gm.B_unique, omega_eff, exposure_agg, lam)
-            new_gm = DiscretizedTensorGroupMatrix(
-                gm.B1_unique_t,
-                gm.B2_unique_t,
-                gm.idx1,
-                gm.idx2,
-                gm.B_unique,
-                R_inv_new,
-                gm.bin_idx,
-                tensor_id=gm.tensor_id,
-                raw_channels=gm._current_raw_channels(),
-            )
-            carry_binned_codes(gm, new_gm)
-            new_gm.omega = gm.omega
-            new_gm.projection = gm.projection
-            if getattr(gm, "R_inv_local", None) is not None:
-                new_gm.R_inv_local = R_inv_local
-            new_gm.omega_components = gm.omega_components
-            new_gm.component_types = gm.component_types
-            new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
-            new_gm.lambda_policies = gm.lambda_policies
-            new_gms.append(new_gm)
-        elif isinstance(gm, DiscretizedSSPGroupMatrix) and _group_has_lambda(gm, g, lambdas):
-            if gm.omega is None:
-                new_gms.append(gm)
-                continue
-            lam, omega_eff = _resolve_group_lambda(gm, g, lambdas)
-            exposure_agg = np.bincount(gm.bin_idx, weights=sample_weight, minlength=gm.n_bins)
-            R_inv_local = None
-            if gm.projection is not None:
-                P = gm.projection
-                omega_proj = _projected_penalty(gm, omega_eff)
-                penalty = _whitening_penalty(
-                    omega_proj, getattr(gm, "term_roots", None), g.name, lambdas
-                )
-                R_inv_local = compute_projected_R_inv(gm.B_unique, P, penalty, exposure_agg, lam)
-                R_inv_new = P @ R_inv_local
-            else:
-                R_inv_new = compute_R_inv(gm.B_unique, omega_eff, exposure_agg, lam)
-            # type(gm) preserves subclass semantics (e.g. lossless support
-            # compression) across the per-lambda rebuild.
-            new_gm = type(gm)(gm.B_unique, R_inv_new, gm.bin_idx)
-            new_gm.omega = gm.omega
-            new_gm.projection = gm.projection
-            new_gm.R_inv_local = None if getattr(gm, "R_inv_local", None) is None else R_inv_local
-            new_gm.term_roots = getattr(gm, "term_roots", None)
-            new_gm.omega_components = gm.omega_components
-            new_gm.component_types = gm.component_types
-            new_gm.structural_ranks = getattr(gm, "structural_ranks", None)
-            new_gm.lambda_policies = gm.lambda_policies
-            new_gms.append(new_gm)
-        else:
-            new_gms.append(gm)
+    new_gms = [
+        _rebuilt_group(gm, g, lambdas, sample_weight) for gm, g in zip(dm.group_matrices, groups)
+    ]
     rebuilt = DesignMatrix(new_gms, dm.n, dm.p)
     rebuilt._centered_pattern_plan = dm._centered_pattern_plan
     # RandomEffect matrices pass through unchanged, so their nesting tests do too.

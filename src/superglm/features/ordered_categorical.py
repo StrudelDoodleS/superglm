@@ -365,6 +365,18 @@ class OrderedCategorical:
         Categorical(base="most_exposed")
     """
 
+    # What the term is.
+    _term_kind = "ordered"
+
+    @property
+    def _build_weight(self) -> str:
+        """The weights its build learns from (``_predictor_compiler._Build.weight``).
+
+        A polynomial basis reports as a ``Polynomial`` does; a spline or
+        ``Piecewise`` basis follows the model geometry.
+        """
+        return "reporting" if isinstance(self._basis_spline, Polynomial) else "geometry"
+
     # Whether `base=` names a band although it reads "first" or "most_exposed";
     # set only by a rebuild. A class attribute so older pickles read False.
     _base_is_level: bool = False

@@ -92,6 +92,11 @@ class Polynomial:
     1e-6.
     """
 
+    # What the term is, and the weights its build learns from
+    # (``_predictor_compiler._Build.weight``). Standardisation follows the reporting weights.
+    _term_kind = "polynomial"
+    _build_weight = "reporting"
+
     def __init__(
         self,
         degree: int | None = None,

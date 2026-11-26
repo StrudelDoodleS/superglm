@@ -27,6 +27,10 @@ class GroupLasso:
         based on an initial estimate.
     """
 
+    # It reads each group through its norm and can zero a whole group.
+    _reads_groups_by_norm = True
+    _zeros_groups = True
+
     def __init__(
         self,
         lambda1: float | Literal["auto"] | None = None,

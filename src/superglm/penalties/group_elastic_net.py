@@ -37,6 +37,14 @@ class GroupElasticNet:
         based on an initial estimate.
     """
 
+    # It reads each group through its norm; only its group-L2 part (alpha > 0)
+    # can zero a whole group.
+    _reads_groups_by_norm = True
+
+    @property
+    def _zeros_groups(self) -> bool:
+        return bool(self.alpha > 0.0)
+
     def __init__(
         self,
         lambda1: float | Literal["auto"] | None = None,
