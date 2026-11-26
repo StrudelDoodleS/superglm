@@ -51,12 +51,12 @@ from superglm.reml.penalty_algebra import build_penalty_context, build_penalty_m
 from superglm.reml.result import REMLResult
 from superglm.solvers.mode_score import linear_predictor
 from tests.test_import_compat import _LIBRARIES, _loaded_after, _type_checking_imports
-from tests.test_ncv_engine_rank_cache import one_row_on_the_right, spectral_basis
+from tests.test_ncv_engine_rank_cache import one_row_on_the_right, rebuilt, spectral_basis, twin
 
 U = 2.0**-53
 TOL = DEFAULT_NCV_TOL
 # An inner fit is certified to this share of the search's tolerance (``ncv_mode_bar``).
-SHARE = 0.1
+SHARE = 0.01
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
@@ -297,8 +297,8 @@ def replace_trials(monkeypatch, rule):
 def assert_first_order(c: Case, result):
     """A converged result: its criterion and slopes meet the first-order test and are the engine's.
 
-    The engine's are re-solved from a cold start.  The inner fits are certified to a tenth of
-    the search's tolerance, so the two agree within a tenth of the stopping bar.
+    The engine's are re-solved from a cold start.  The inner fits are certified to a hundredth
+    of the search's tolerance, so the two agree within a hundredth of the stopping bar.
     """
     rho = log_lambdas(c, result)
     state = first_order(rho, result.gradient, result.objective, result.lambda_box, TOL)
@@ -586,6 +586,21 @@ def test_ceiling_that_stops_a_falling_criterion_is_disclosed_as_holding_the_term
     assert held.n_reml_iter >= 1
     assert held.objective == pytest.approx(at_ceiling.value, rel=SHARE * TOL)
     assert held.objective > wide.objective
+
+
+def test_inner_fits_are_certified_finely_enough_for_the_last_steps():
+    """A 240-row Poisson search over single rows meets its first-order test at the default bar.
+
+    Two inner fits at one smoothing differ in the criterion by a share of their certificate
+    bar.  At a tenth of the search's tolerance that was the size of the last steps' gains:
+    this search ended on its line search after 27 evaluations, its slope 1.1 times the
+    stopping bar.  At a hundredth it converges in 8.
+    """
+    design = twin("poisson", False)
+    problem = rebuilt(design.problem, mode_bar=engine.ncv_mode_bar(TOL))
+    result = search(problem, single_rows(problem.n), configured={"t": 1.0}, tol=TOL).result
+    assert result.termination_reason == "gradient" and result.converged
+    assert result.n_evaluations <= 12
 
 
 # ── infeasible trials ─────────────────────────────────────────────────────────

@@ -149,12 +149,18 @@ _POCON = get_lapack_funcs("pocon", dtype=np.float64)
 
 
 def ncv_mode_bar(ncv_tol: float = DEFAULT_NCV_TOL) -> float:
-    """The inner fit's certificate bar for a search stopping at ``ncv_tol``: a tenth of it.
+    """The inner fit's certificate bar for a search stopping at ``ncv_tol``: a hundredth of it.
 
     The criterion is not stationary in the coefficients, so a mode error enters it and its
-    gradient at first order.  Never below ``100 eps``, the least the certificate expresses.
+    gradient at first order, and a line search on values that uncertain finds steps only
+    while the slope exceeds about the square root of the uncertainty times the criterion's
+    curvature (Xie, Byrd and Nocedal, "Analysis of the BFGS method with errors",
+    arXiv:1901.09063, Theorems 3.4 and 3.16).  The bar is therefore well below the search's
+    own, and no tighter than a fit can meet: a Gaussian fit whose response lies 1e7 of its
+    spread from zero is certified at 1e-8 and not at 1e-9, and a trial without a certified
+    fit has no criterion.  Never below ``100 eps``, the least the certificate expresses.
     """
-    return max(0.1 * float(ncv_tol), 100.0 * EPS)
+    return max(0.01 * float(ncv_tol), 100.0 * EPS)
 
 
 class LeaveOutRankError(ValueError):
