@@ -2001,6 +2001,19 @@ class TestNewtonStepStop:
                 "bound_held_step",
                 lambda *_, **__: np.array([1e-4 if len(freezes) == 1 else 0.0, 0.0]),
             )
+        if move == "restoration":
+            from superglm._family_link import FamilyLinkPair
+
+            class BoundaryPair(FamilyLinkPair):
+                """The search's pair declares a mean space, as the forced exit's binomial/log."""
+
+                __slots__ = ()
+
+                @property
+                def mean_space_violation(self):
+                    return lambda *_: False
+
+            monkeypatch.setattr(direct, "pair_of", BoundaryPair)
         monkeypatch.setattr(direct, "freeze_flat_directions", freeze)
         monkeypatch.setattr(direct, "reml_direct_hessian", hessian)
         monkeypatch.setattr(direct, "reml_laml_objective", objective)
