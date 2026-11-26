@@ -672,6 +672,30 @@ def test_an_object_forwarding_to_a_shipped_one_declares_no_fact():
     np.testing.assert_array_equal(stabilize_eta(eta, _Forwards(LogLink())), [-20.0, 0.0, 20.0])
 
 
+class _Presents(_Forwards):
+    """A forwarding object that also presents the class it wraps, as ``isinstance`` reads it."""
+
+    @property
+    def __class__(self):
+        return type(self._inner)
+
+
+def test_a_proxy_presenting_a_shipped_class_keeps_its_facts():
+    """A fact is read from the class ``isinstance`` reads, so a transparent proxy keeps it."""
+    from superglm.distributions import REAL_LINE, mean_domain
+
+    family, link = _Presents(Gaussian()), _Presents(LogLink())
+    assert isinstance(family, Gaussian) and isinstance(link, LogLink)
+    assert mean_domain(family) is REAL_LINE
+    assert isinstance(
+        prepare_reml_scale_data(family, _PROBE_Y, _PROBE_W, weight_semantics="prior"),
+        GaussianScaleProfile,
+    )
+    assert is_multiplicative(link)
+    eta = np.array([-100.0, 0.0, 100.0])
+    np.testing.assert_array_equal(stabilize_eta(eta, link), [-80.0, 0.0, 80.0])
+
+
 def test_a_null_mean_is_held_below_the_upper_bound_its_family_declares():
     """A family whose means lie below 10 has a null mean of 2.5, and none at 10."""
     from superglm.distributions import POSITIVE, MeanDomain

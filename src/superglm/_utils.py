@@ -13,10 +13,11 @@ def declared(obj: object, name: str, default: object = None) -> object:
     """``obj.name`` where ``obj``'s class declares ``name``, else ``default``.
 
     A family or link declares a fact on its class, so a subclass inherits it.
-    An object that only forwards attribute reads to another one
-    (``__getattr__``) declares none, and keeps the default.
+    The class is the one ``isinstance`` reads (``obj.__class__``): a proxy that
+    presents the class it wraps keeps that class's facts, and an object that
+    only forwards attribute reads (``__getattr__``) declares none.
     """
-    return getattr(obj, name) if hasattr(type(obj), name) else default
+    return getattr(obj, name) if hasattr(obj.__class__, name) else default
 
 
 def _validate_strict_prior_weights(weights, n: int) -> NDArray:

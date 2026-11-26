@@ -550,3 +550,42 @@ def test_a_family_forwarding_to_gamma_publishes_pearsons_scale() -> None:
     pearson = float(np.sum((y - mu) ** 2 / mu**2)) / (n - result.effective_df)
     assert result.phi_likelihood_method == "pearson"
     np.testing.assert_allclose(result.phi_likelihood, pearson, rtol=1e-10)
+
+
+@pytest.mark.pins_behaviour
+def test_a_proxy_presenting_gaussian_fits_as_a_gaussian() -> None:
+    """Pins the fit of a family proxy that presents Gaussian's class: least squares.
+
+    ``isinstance`` reads the class the proxy presents, so its means are
+    unbounded and a negative response fits by ordinary least squares.
+    """
+    import pandas as pd
+
+    from superglm import Numeric, SuperGLM
+
+    class Presents:
+        def __init__(self, inner):
+            self._inner = inner
+
+        @property
+        def __class__(self):
+            return type(self._inner)
+
+        def __getattr__(self, name):
+            if name.startswith("__"):
+                raise AttributeError(name)
+            return getattr(self._inner, name)
+
+    x = np.arange(20.0)
+    y = -5.0 + 0.05 * x + 0.1 * np.sin(x)
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family=Presents(Gaussian()),
+        link="identity",
+        features={"x": Numeric()},
+        selection_penalty=0,
+        weight_semantics="frequency",
+    )
+    model.fit(frame, y, sample_weight=np.ones(20))
+    least_squares = np.polyval(np.polyfit(x, y, 1), x)
+    np.testing.assert_allclose(model.predict(frame), least_squares, rtol=1e-9)
