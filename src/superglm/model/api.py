@@ -1486,8 +1486,9 @@ class SuperGLM:
             - ``"work"`` : dict[str, int or float]. Cumulative work counts of
               the search (``inner_solves``, ``fallback_solves``,
               ``stagnated_fits``, ``pirls_iterations``, ``factorisations``,
-              ``small_factorisations``, ``solves``, ``rows_read``,
-              ``rows_multiplied``, ``kept_fits``).
+              ``small_factorisations``, ``stacks``, ``stacked``, ``solves``,
+              ``rows_read``, ``rows_multiplied``, ``rows_streamed``,
+              ``kept_fits``).
 
         Raises
         ------
