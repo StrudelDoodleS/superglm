@@ -1571,6 +1571,115 @@ def test_a_population_curve_blanks_twin_variables_sharing_an_sz_group() -> None:
     )
 
 
+def _thin_population_with_numeric(alias, solve, *, degree=3, thin=0.4):
+    x = np.r_[np.tile(np.linspace(0.0, 1.0, 30), 3), thin]
+    g = np.array([*np.repeat(["a", "b", "c"], 30), "d"])
+    X = pd.DataFrame({"x": x, "g": g})
+    y = np.sin(3 * x) + 0.3 * (g == "b") * x + 0.1 * np.cos(np.arange(len(x)))
+    main = (
+        Spline(n_knots=5, lambda_policy=LambdaPolicy.fixed(1.2))
+        if alias == "indicator"
+        else Spline(kind="ps", degree=degree, n_knots=5, lambda_policy=LambdaPolicy.fixed(0.0))
+    )
+    features = {"x": main}
+    if alias is not None:
+        X["z"] = (g == "a").astype(float) if alias == "indicator" else (x - 0.5) ** 2
+        features["z"] = Numeric()
+    smooth = FactorSmooth(
+        "x", group="g", basis="sz", k=5, lambda_policy={"wiggle": LambdaPolicy.fixed(1)}
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = SuperGLM(
+            family="gaussian",
+            features=features,
+            interactions=[smooth],
+            selection_penalty=0,
+            direct_solve=solve,
+        ).fit_reml(X, y)
+    assert model._reml_profile["direct_backend"] == solve
+    assert model._interaction_specs["x:g:sz"]._has_population_offset
+    return model, X, y
+
+
+def test_population_level_indicator_preserves_centered_errors_on_both_solvers() -> None:
+    """A transfer between a group indicator and sz level constants leaves every centered row fixed."""
+    centered = []
+    for solve in ("structured", "gram"):
+        model, X, y = _thin_population_with_numeric("indicator", solve)
+        native = _assert_population_errors_are_the_contrasts(model)
+        inf = model.term_inference("x", centering="mean", simultaneous=True, n_sim=200)
+        assert np.isfinite(inf.ci_lower_simultaneous).all()
+        np.testing.assert_allclose(model.simultaneous_bands("x", n_sim=200)["se"], native)
+        np.testing.assert_allclose(model.metrics(X, y).feature_se("x")["se_log_relativity"], native)
+        row = _numeric_test_rows(model.summary(), ("x",))["x"]
+        np.testing.assert_allclose(
+            [row.curve_se_min, row.curve_se_max], [native.min(), native.max()]
+        )
+        centered.append(inf.se_log_relativity)
+    np.testing.assert_allclose(*centered, rtol=1e-9)
+
+
+@pytest.mark.parametrize("solve", ["gram", "structured"])
+@pytest.mark.parametrize(("degree", "thin"), [(2, 0.5), (3, 0.4)])
+def test_population_quadratic_alias_is_decided_on_each_reported_grid_row(
+    solve, degree, thin
+) -> None:
+    """The two endpoints have equal quadratic exposure. On seven points only 1/6 and 5/6
+    equal the grid mean quadratic exposure, so they alone retain pointwise intervals."""
+    model, X, y = _thin_population_with_numeric("quadratic", solve, degree=degree, thin=thin)
+    reference, _, _ = _thin_population_with_numeric(None, solve, degree=degree, thin=thin)
+    # Move z's complete linear predictor to the main P-spline. This data null
+    # leaves the thin-level convention untouched because it moves no sz coefficient.
+    design = _design(model)
+    main = next(g for g in model._groups if g.name == "x")
+    z = next(g for g in model._groups if g.name == "z")
+    columns = np.r_[0, 1 + np.arange(main.start, main.end)]
+    move = np.zeros(design.shape[1])
+    move[columns] = np.linalg.lstsq(design[:, columns], design[:, 1 + z.start], rcond=None)[0]
+    move[1 + z.start] = -1
+    tol = max(design.shape) * np.finfo(float).eps * np.linalg.norm(move) * np.linalg.norm(design)
+    assert np.linalg.norm(design @ move) <= tol
+    for count, determined in (
+        (2, [True, True]),
+        (7, [False, True, False, False, False, True, False]),
+    ):
+        args = dict(n_points=count, centering="mean", simultaneous=True, n_sim=256)
+        inf = model.term_inference("x", **args)
+        ref = reference.term_inference("x", **args)
+        grid = np.linspace(0, 1, count)
+        np.testing.assert_array_equal(inf.x, grid)
+        rows = _population_contrasts(model, grid)
+        rows -= rows.mean(axis=0)
+        np.testing.assert_array_equal(np.abs(rows @ move[1:]) <= tol, determined)
+        if count == 2 and degree == 2:
+            # Here both actual centered rows belong to the raw data row space as well.
+            assert _rank_gain(model, rows) == 0
+        np.testing.assert_allclose(inf.log_relativity, rows @ model.result.beta, atol=1e-12)
+        np.testing.assert_array_equal(np.isfinite(inf.se_log_relativity), determined)
+        np.testing.assert_array_equal(np.isfinite(inf.ci_lower), determined)
+        np.testing.assert_allclose(
+            inf.se_log_relativity[determined], ref.se_log_relativity[determined], rtol=1e-9
+        )
+        np.testing.assert_allclose(
+            inf.log_relativity[determined], ref.log_relativity[determined], atol=1e-11
+        )
+        if count == 2:
+            assert inf.critical_value_simultaneous > 0
+            np.testing.assert_allclose(
+                inf.ci_upper_simultaneous, ref.ci_upper_simultaneous, rtol=1e-9
+            )
+        else:
+            assert inf.ci_upper_simultaneous is None and inf.critical_value_simultaneous is None
+    native = model.term_inference("x", n_points=2, simultaneous=True, n_sim=256)
+    assert np.isnan(native.se_log_relativity).all() and native.ci_upper_simultaneous is None
+    single = model.term_inference("x", centering="mean", n_points=1, simultaneous=True, n_sim=256)
+    assert np.isnan(single.se_log_relativity).all() and single.ci_upper_simultaneous is None
+    bands = model.simultaneous_bands("x", n_points=2, n_sim=256)
+    assert bands[["se", "ci_upper_pointwise", "ci_upper_simultaneous"]].isna().all().all()
+    assert np.isnan(model.metrics(X, y).feature_se("x", n_points=2)["se_log_relativity"]).all()
+
+
 _INTERACTION_KINDS = {
     "spline by level": (lambda: Spline(n_knots=5), "c", "wood"),
     "tensor": (lambda: Spline(n_knots=4), "w", "wood"),

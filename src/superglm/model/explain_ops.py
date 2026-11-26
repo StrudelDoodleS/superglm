@@ -304,6 +304,7 @@ def simultaneous_bands(
         )
     if robust_cov is not None and str(feature) in _aliased_features(model, covariance):
         raise RuntimeError(_ALIASED_INFERENCE_MESSAGE.format(terms=repr(feature)))
+    from superglm.features.factor_smooth import population_curve_terms
     from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
 
     _ensure_factor_smooth_levels_recorded(model)
@@ -320,6 +321,9 @@ def simultaneous_bands(
         n_sim=n_sim,
         n_points=n_points,
         seed=seed,
+        determines=_default_determinacy(model, [feature])
+        if robust_cov is None and population_curve_terms(feature, model._interaction_specs)
+        else None,
     )
     return bands
 

@@ -1438,10 +1438,11 @@ def population_curve_terms(name: Any, interaction_specs: Any) -> list[tuple[Any,
 
 
 def population_curve_level_constants(
-    terms: list[tuple[Any, FactorSmooth]], groups: Any, width: int, x_grid: NDArray
-) -> NDArray[np.float64]:
-    """Basis of level-constant directions in the ``sz`` blocks moving a population curve."""
-    columns: list[NDArray[np.float64]] = []
+    terms: list[tuple[Any, FactorSmooth]], groups: Any, width: int
+) -> sp.csr_matrix:
+    """Disjoint level-constant directions in the free sz blocks, in fitted coordinates."""
+    rows, columns, values = [], [], []
+    count = 0
     for key, spec in terms:
         term_groups = [group for group in groups if group.feature_name == key]
         if not term_groups:
@@ -1449,25 +1450,14 @@ def population_curve_level_constants(
         term_cols = np.concatenate([np.arange(group.start, group.end) for group in term_groups])
         if len(term_cols) != (len(spec._levels) - 1) * spec.k:
             continue
-        if len(x_grid) >= spec.k:
-            eval_x = np.asarray(x_grid, dtype=np.float64)
-        elif len(x_grid) >= 2 and float(np.max(x_grid)) > float(np.min(x_grid)):
-            eval_x = np.linspace(float(np.min(x_grid)), float(np.max(x_grid)), max(2 * spec.k, 10))
-        else:
-            continue
-        basis = np.asarray(spec.marginal_basis(eval_x), dtype=np.float64)
-        const_vec, *_ = np.linalg.lstsq(basis, np.ones(len(basis), dtype=np.float64), rcond=None)
-        if not basis.size or float(np.max(np.abs(basis @ const_vec - 1.0))) > 1e-10:
-            continue
-        norm = float(np.linalg.norm(const_vec))
-        if norm <= 0.0:
-            continue
-        unit = const_vec / norm
-        for level in range(len(spec._levels) - 1):
-            column = np.zeros(width, dtype=np.float64)
-            column[term_cols[level * spec.k : (level + 1) * spec.k]] = unit
-            columns.append(column)
-    return np.column_stack(columns) if columns else np.zeros((width, 0), dtype=np.float64)
+        unit = spec._lowest_order_null_space(1)[:, 0]
+        unit = unit / np.linalg.norm(unit)
+        free = len(spec._levels) - 1
+        rows.extend(term_cols)
+        columns.extend(np.repeat(np.arange(count, count + free), spec.k))
+        values.extend(np.tile(unit, free))
+        count += free
+    return sp.csr_matrix((values, (rows, columns)), shape=(width, count))
 
 
 def share_group_levels(specs: Any) -> None:

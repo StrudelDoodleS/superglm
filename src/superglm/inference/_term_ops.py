@@ -354,7 +354,8 @@ class _TermReport:
         raw = with_population_curve(raw, name, self.interaction_specs, self.groups, self.beta, spec)
         log_rel = raw["log_relativity"]
         se = self.feature_errors(n_points=self.n_points)
-        se_centered = self.centred_errors(n_points=self.n_points)
+        # _recenter_term leaves a one-point report at its native value.
+        se_centered = self.centred_errors(n_points=self.n_points) if len(log_rel) > 1 else None
         ci_lo, ci_hi = self.interval(log_rel, se)
         ci_lo_sim = ci_hi_sim = c_sim = None
         # A simultaneous band is one statement about the whole curve, the centred one
@@ -372,7 +373,7 @@ class _TermReport:
                 n_sim=self.n_sim,
                 n_points=self.n_points,
                 seed=self.seed,
-                center=self.centering == "mean",
+                center=se_centered is not None,
             )
             ci_lo_sim = bands["ci_lower_simultaneous"].values
             ci_hi_sim = bands["ci_upper_simultaneous"].values

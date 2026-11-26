@@ -36,6 +36,7 @@ from superglm.solvers._structured.state import (
 )
 from superglm.solvers.rank import (
     RankDecomposition,
+    SharedDirections,
     decide_data_rank,
     decompose_factor,
     decompose_gram,
@@ -730,7 +731,7 @@ def _structured_contrast_estimable(
     contrast: NDArray,
     intercept: float = 0.0,
     design_rows: bool = False,
-    shared: NDArray | None = None,
+    shared: SharedDirections | None = None,
     group_columns: NDArray | None = None,
 ) -> bool:
     """Whether a structured fit's data determine ``contrast``, by its coefficient mask's rule.
@@ -744,20 +745,22 @@ def _structured_contrast_estimable(
     coefficients and the answer is of its fitted function (``function_estimable``).
     """
     factor = state.profiled_factor
-    decision = inference.get("contrast_estimability")
+    population = shared is not None and isinstance(factor, ProfiledSumToZeroTreeFactor)
+    key = "population_estimability" if population else "contrast_estimability"
+    decision = inference.get(key)
     if decision is None or (isinstance(decision, BorderNullSpace) and decision.centre is None):
         decision = (
-            factor.border_estimability(state.centered_data_operator)
+            factor.border_estimability(state.centered_data_operator, all_slopes=population)
             if isinstance(factor, ProfiledSumToZeroTreeFactor)
             else centered_operator_contrast_estimability(
                 state.centered_data_operator, factor.xtw / factor.sum_w
             )
         )
-        inference["contrast_estimability"] = decision
+        inference[key] = decision
     if design_rows:
         if isinstance(decision, BorderNullSpace):
             return decision.function_estimable(
-                np.asarray(contrast, dtype=bool), group_columns=group_columns
+                np.asarray(contrast, dtype=bool), shared=shared, group_columns=group_columns
             )
         return decision.function_estimable(np.asarray(contrast, dtype=bool), shared=shared)
     if isinstance(decision, RankDecomposition):

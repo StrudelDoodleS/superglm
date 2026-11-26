@@ -3093,9 +3093,8 @@ class ProfiledSumToZeroTreeFactor(_ProfiledLeafFactor):
         """The slopes' estimability (``SumToZeroTreeFactor.coefficient_estimable``)."""
         return self.augmented_factor.coefficient_estimable()[1:]
 
-    def border_estimability(self, operator: CenteredBlockOperator):
-        """``coefficient_estimable``'s null space on contrasts of the border slopes and the
-        reported intercept, as ``geometry.BorderNullSpace``.
+    def border_estimability(self, operator: CenteredBlockOperator, *, all_slopes: bool = False):
+        """The data null space on the border and intercept, or on every slope for a population curve.
 
         The tree certifies it in the uncentred columns; the contrast rule reads it in the
         centred scales of ``operator``, the fit's centred data operator
@@ -3108,7 +3107,9 @@ class ProfiledSumToZeroTreeFactor(_ProfiledLeafFactor):
         if data.system is not self.augmented_factor.system:
             operator = data.system.centred_data_operator
         null, root = data._verified_data_null()
-        return augmented_null_border_space(operator, null, root, self.xtw / self.sum_w)
+        return augmented_null_border_space(
+            operator, null, root, self.xtw / self.sum_w, all_slopes=all_slopes
+        )
 
     def raw_level_inverse_block(self, level: int) -> NDArray:
         return self.augmented_factor.raw_level_inverse_block(level)

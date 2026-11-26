@@ -19,9 +19,11 @@ from superglm.solvers._structured.operators import (
 from superglm.solvers.rank import (
     SHARED_RANK_POLICY,
     RankDecomposition,
+    SharedDirections,
     decompose_gram,
     needs_factor_certification,
     null_directions_keep_to,
+    shared_function_estimable,
 )
 
 if TYPE_CHECKING:
@@ -108,7 +110,7 @@ class BorderNullSpace:
     def function_estimable(
         self,
         columns: NDArray,
-        shared: NDArray | None = None,
+        shared: SharedDirections | None = None,
         group_columns: NDArray | None = None,
     ) -> bool:
         """``RankDecomposition.function_estimable`` for coefficients on the border.
@@ -119,6 +121,14 @@ class BorderNullSpace:
         not determined, as in ``is_estimable``.
         """
         marked = np.asarray(columns, dtype=bool)
+        if shared is not None and len(self.indices) == len(marked):
+            scaled = self.column_scale > 0.0
+            return shared_function_estimable(
+                self.basis[scaled],
+                marked[self.indices][scaled],
+                shared[self.indices][scaled],
+                self.column_scale[scaled],
+            )
         if group_columns is not None:
             marked = marked | np.asarray(group_columns, dtype=bool)
         outside = np.ones(len(marked), dtype=bool)
@@ -132,7 +142,12 @@ class BorderNullSpace:
 
 
 def augmented_null_border_space(
-    operator: CenteredBlockOperator, null: NDArray, root: NDArray, centre: NDArray
+    operator: CenteredBlockOperator,
+    null: NDArray,
+    root: NDArray,
+    centre: NDArray,
+    *,
+    all_slopes: bool = False,
 ) -> BorderNullSpace:
     """``BorderNullSpace`` of a null space certified in the augmented coordinates ``[1, X]``.
 
@@ -146,6 +161,16 @@ def augmented_null_border_space(
     """
     scale = _centered_operator_column_scale(operator)
     basis = _orthonormal_column_span(null[1:] * (scale / root[1:])[:, None])
+    if all_slopes:
+        # A population curve weighs level slopes too. Only this reader keeps those rows.
+        return BorderNullSpace(
+            np.arange(len(scale)),
+            scale,
+            basis,
+            centre=centre,
+            centre_along=np.zeros(basis.shape[1]),
+            centre_size=1.0 / np.sqrt(operator.total),
+        )
     border, levels = operator.raw.small_indices, operator.raw.structured_indices.ravel()
     space = BorderNullSpace(border, scale[border], basis[border])
     return space.with_centre(centre, levels, scale[levels], basis[levels], operator.total)
