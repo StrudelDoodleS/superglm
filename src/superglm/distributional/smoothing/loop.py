@@ -546,11 +546,7 @@ class _SmoothingSearch:
         del initial_fit  # current_fit and history own it until their live window ends.
         with measure_phase(self.phase_recorder, "efs_update_backtracking"):
             terminal_evidence = _fresh_raw_evidence(
-                self.layout,
-                current_lambdas,
-                current_fit,
-                self.outer_config,
-                face=current_face,
+                self.layout, current_lambdas, current_fit, self.outer_config, face=current_face
             )
         self.state = EndgameState(
             lambdas=current_lambdas,
@@ -599,6 +595,127 @@ class _SmoothingSearch:
             reason="fixed_only" if converged else "coefficient_not_converged",
         )
 
+    # What every phase reads and writes: evidence, fits, held caps, resets, the result.
+
+    def _evidence_at(
+        self,
+        lambdas: Mapping[str, float],
+        fit: DenseSolverResult,
+        memo: _PenaltyEvaluationMemo | None = None,
+        held: frozenset[str] | None = None,
+    ) -> _FreshRawEvidence:
+        """Fresh evidence at one state on the current face, less the caps ``held`` there."""
+        with measure_phase(self.phase_recorder, "efs_update_backtracking"):
+            return _fresh_raw_evidence(
+                self.layout,
+                lambdas,
+                fit,
+                self.outer_config,
+                face=self.state.face,
+                penalty_memo=memo,
+                held=self.cap_held if held is None else held,
+            )
+
+    def _adopt(self, evidence: _FreshRawEvidence) -> _FreshRawEvidence:
+        """Take ``evidence`` as the accepted state's: the caps it holds are the ones still held."""
+        self.cap_held = frozenset(evidence.cap_held)
+        return evidence
+
+    def _evidence(self, memo: _PenaltyEvaluationMemo | None = None) -> _FreshRawEvidence:
+        """The evidence at the accepted state, adopted: the caps it holds stay held."""
+        return self._adopt(self._evidence_at(self.state.lambdas, self.state.fit, memo))
+
+    def _append_fits(self, fits: Sequence[DenseSolverResult]) -> tuple[int, ...]:
+        """Append ``fits`` to the search's coefficient fits and return their indices."""
+        first = len(self.coefficient_fits)
+        self.coefficient_fits.extend(fits)
+        return tuple(range(first, len(self.coefficient_fits)))
+
+    def _release_held_caps(self) -> bool:
+        """Return the held caps to the evidence; true when one is still pressed outward."""
+        if not self.cap_held:
+            return False
+        self.cap_held = frozenset()
+        self.state = replace(self.state, evidence=self._evidence())
+        self.caps_final = bool(self.state.evidence.unresolved_upper_bound)
+        return self.caps_final
+
+    def _foreign_cap(self) -> bool:
+        """Whether a component the search does not hold stands at its cap off the face.
+
+        A face is promoted with every cap in it, so beside such a component the held
+        ones cannot be.
+        """
+        return any(
+            self.state.lambdas[name] == self.outer_config.upper(name)
+            for name in self.estimated_names
+            if name not in self.cap_held
+        )
+
+    def _active_set_changed(self, *, held_promoted: bool = False) -> None:
+        """A face was promoted or released: the plateau and the endgame's verdict were the old set's.
+
+        ``held_promoted`` is the promotion of caps held while the other components
+        reached a practical plateau, which that plateau survives.
+        """
+        self.plateau_earned = self.plateau_earned and held_promoted
+        self.fall = self.previous_fall = math.inf
+        self._forget_endgame()  # its derivatives named the old set's components
+        self.state = replace(self.state, evidence=self._evidence())
+        self.estimated_names = self.state.evidence.estimated_names
+        self._restart_windows()
+
+    def _forget_endgame(self) -> None:
+        """Drop the endgame's verdict and the cap pressure it reported."""
+        self.endgame_outcome = None
+        self.endgame_stationary = False
+        self.pending_cap = None
+
+    def _restart_windows(self) -> None:
+        """Start the plateau windows and the accelerator's secant history again."""
+        self.windows = _PlateauWindows()
+        if self.accelerator is not None:
+            self.accelerator.reset()
+
+    def _result(
+        self,
+        *,
+        converged: bool,
+        reason: EFSConvergenceReason,
+        terminal_endpoint_directions: Mapping[str, EndpointDirectionEvidence] | None = None,
+    ) -> DistributionalEFSResult:
+        """The search's result at the accepted state."""
+        self._release_held_caps()  # a result names every cap still pressed
+        evidence = self.state.evidence
+        endgame = self.endgame_outcome
+        if converged and self.endgame_stationary:
+            # The exact gradient voids a Fellner--Schall cap nomination, including
+            # one on evidence refreshed after an exact-face revalidation. That
+            # revalidation judged the endgame's own fit, so the derivatives the
+            # endgame published are already those of the published fit.
+            evidence = replace(evidence, unresolved_upper_bound=())
+        return _efs_result(
+            layout=self.layout,
+            config=self.outer_config,
+            initial_lambdas=self.initial_lambdas,
+            lambdas=self.state.lambdas,
+            initial_objective=self.initial_objective,
+            objective=self.state.objective,
+            converged=converged,
+            reason=reason,
+            terminal_evidence=evidence,
+            history=self.history,
+            coefficient_fits=self.coefficient_fits,
+            terminal_fit_index=self.state.terminal_fit_index,
+            terminal_endpoint_directions=terminal_endpoint_directions,
+            endgame=endgame,
+            beyond_cap_components=tuple(
+                name for name in self.state.lambdas if name in self.beyond_cap
+            ),
+        )
+
+    # When a cap is pressed outward.
+
     def _decide_caps(self) -> DistributionalEFSResult | None:
         """A cap is pressed outward: promote it to an exact face, or answer for the refusal."""
         if (len(self.history) >= self.outer_config.max_iterations and not self.plateau_earned) or (
@@ -610,8 +727,7 @@ class _SmoothingSearch:
             # search step, so the round limit does not refuse it.
             unjudged = self.caps_final and self.refused_fit is None
             return self._result(
-                converged=False,
-                reason="max_iterations" if unjudged else "lambda_cap_unresolved",
+                converged=False, reason="max_iterations" if unjudged else "lambda_cap_unresolved"
             )
         promotion, attempt = self._assess_caps()
         if promotion is None:
@@ -668,8 +784,7 @@ class _SmoothingSearch:
             self.endpoint_caps.difference_update(self.state.evidence.unresolved_upper_bound)
             self.endgame_due = self.handed_over = False
             self.state = replace(
-                self.state,
-                evidence=replace(self.state.evidence, unresolved_upper_bound=()),
+                self.state, evidence=replace(self.state.evidence, unresolved_upper_bound=())
             )
             return None
         if not self.mode.has_endgame and not self.caps_final:
@@ -692,9 +807,7 @@ class _SmoothingSearch:
                 None
                 if attempt.direction is None
                 else _indexed_joint_direction(
-                    attempt.direction,
-                    assessment_indices,
-                    attempt.coefficient_tolerance,
+                    attempt.direction, assessment_indices, attempt.coefficient_tolerance
                 )
             )
         else:
@@ -703,9 +816,7 @@ class _SmoothingSearch:
                 None
                 if attempt.check is None
                 else _indexed_direction(
-                    attempt.check.direction,
-                    assessment_indices,
-                    attempt.coefficient_tolerance,
+                    attempt.check.direction, assessment_indices, attempt.coefficient_tolerance
                 )
             )
         self.history.append(
@@ -737,22 +848,11 @@ class _SmoothingSearch:
             raise RuntimeError("an accepted exact face requires an authority assessment")
         coefficient_tolerance = attempt.coefficient_tolerance
         indexed_direction = (
-            _indexed_joint_direction(
-                promotion.direction,
-                assessment_indices,
-                coefficient_tolerance,
-            )
+            _indexed_joint_direction(promotion.direction, assessment_indices, coefficient_tolerance)
             if isinstance(promotion.direction, JointEndpointDirectionEvidence)
-            else _indexed_direction(
-                promotion.direction,
-                assessment_indices,
-                coefficient_tolerance,
-            )
+            else _indexed_direction(promotion.direction, assessment_indices, coefficient_tolerance)
         )
-        promotion = replace(
-            promotion,
-            direction=indexed_direction,
-        )
+        promotion = replace(promotion, direction=indexed_direction)
         self.history.append(
             _face_transition_iteration(
                 iteration=len(self.history) + 1,
@@ -768,10 +868,7 @@ class _SmoothingSearch:
             )
         )
         self.state = replace(
-            self.state,
-            face=promotion.face,
-            fit=promotion.fit,
-            objective=promotion.objective,
+            self.state, face=promotion.face, fit=promotion.fit, objective=promotion.objective
         )
         self._active_set_changed(held_promoted=True)
         resume = self.endgame_due and bool(self.estimated_names)
@@ -783,11 +880,110 @@ class _SmoothingSearch:
             return self._run_endgame()
         return None
 
-    def _append_fits(self, fits: Sequence[DenseSolverResult]) -> tuple[int, ...]:
-        """Append ``fits`` to the search's coefficient fits and return their indices."""
-        first = len(self.coefficient_fits)
-        self.coefficient_fits.extend(fits)
-        return tuple(range(first, len(self.coefficient_fits)))
+    def _bracket_after_refusal(
+        self, attempt: _FaceDirectionAttempt | _JointFaceDirectionAttempt | None
+    ) -> BracketRelease | BracketAttempt | None:
+        """Search beyond the cap for the first refused component with a finite verdict."""
+        if attempt is None or self.pending_cap is None or self.pending_cap.derivatives is None:
+            return None
+        directions: dict[str, EndpointDirectionEvidence] = {}
+        if isinstance(attempt, _JointFaceDirectionAttempt):
+            if attempt.direction is not None:
+                directions = dict(attempt.direction.component_directions)
+        elif attempt.check is not None:
+            directions = {self.state.evidence.unresolved_upper_bound[0]: attempt.check.direction}
+        for name, direction in directions.items():
+            if direction.decision != "finite":
+                continue
+            found = bracket_refused_component(
+                self.family,
+                self.layout,
+                self.y,
+                self.likelihood_plan,
+                name=name,
+                endpoint_derivative=float(direction.analytic_derivative),
+                pending=self.pending_cap,
+                state=self.state,
+                solver_config=self.inner_config,
+                efs_config=self.outer_config,
+                chunk_size=self.chunk_size,
+                phase_recorder=self.phase_recorder,
+                reuse_session=self.reuse_session,
+            )
+            if found is not None:
+                return found
+        return None
+
+    def _accept_bracket_release(
+        self,
+        release: BracketRelease,
+        attempt: _FaceDirectionAttempt | _JointFaceDirectionAttempt | None,
+    ) -> None:
+        """Record the released component as one accepted bracket iteration."""
+        assert self.pending_cap is not None and self.pending_cap.derivatives is not None
+        assessment_fits = () if attempt is None else tuple(attempt.assessment_fits)
+        indices = self._append_fits((*assessment_fits, *release.fits))
+        tolerances = (
+            *(() if attempt is None else (attempt.coefficient_tolerance,) * len(assessment_fits)),
+            *((release.tolerance,) * len(release.fits)),
+        )
+        evidence = _fresh_raw_evidence(
+            self.layout, release.lambdas, release.fit, self.outer_config, face=self.state.face
+        )
+        self.history.append(
+            newton_iteration_record(
+                iteration=len(self.history) + 1,
+                state=self.state,
+                proposed_lambdas=release.lambdas,
+                lambdas_after=release.lambdas,
+                objective_after=release.objective,
+                evidence=evidence,
+                fit_indices=indices,
+                tolerances=tolerances,
+                accepted_fit=release.fit,
+                step_source="bracket",
+                derivatives=self.pending_cap.derivatives,
+                projected_gradient_norm=self.pending_cap.projected_gradient_norm or 0.0,
+                hessian_certificate=None,
+                ridge=None,
+                estimated_names=self.estimated_names,
+            )
+        )
+        self.state = replace(
+            self.state,
+            lambdas=dict(release.lambdas),
+            fit=release.fit,
+            objective=release.objective,
+            terminal_fit_index=indices[-1],
+            evidence=evidence,
+        )
+        self.beyond_cap[release.name] = self.outer_config.conditioning_limit(release.name)
+
+    def _record_bracket_attempt(self, attempt: BracketAttempt) -> None:
+        """Record a search that found no root as one rejected bracket iteration."""
+        assert self.pending_cap is not None and self.pending_cap.derivatives is not None
+        indices = self._append_fits(attempt.fits)
+        self.history.append(
+            newton_iteration_record(
+                iteration=len(self.history) + 1,
+                state=self.state,
+                proposed_lambdas=self.state.lambdas,
+                lambdas_after=self.state.lambdas,
+                objective_after=self.state.objective,
+                evidence=self.state.evidence,
+                fit_indices=indices,
+                tolerances=(attempt.tolerance,) * len(indices),
+                accepted_fit=None,
+                step_source="bracket",
+                derivatives=self.pending_cap.derivatives,
+                projected_gradient_norm=self.pending_cap.projected_gradient_norm or 0.0,
+                hessian_certificate=None,
+                ridge=None,
+                estimated_names=self.estimated_names,
+            )
+        )
+
+    # When the free components have stopped, or no round is left.
 
     def _stop_earned(self) -> bool:
         """Whether a stationary endgame or an earned plateau has stopped the search."""
@@ -848,8 +1044,7 @@ class _SmoothingSearch:
                 (
                     name,
                     _optional_penalty_face(
-                        self.layout,
-                        tuple(item for item in face.component_names if item != name),
+                        self.layout, tuple(item for item in face.component_names if item != name)
                     ),
                 )
                 for name in face.component_names
@@ -895,9 +1090,7 @@ class _SmoothingSearch:
         direction = joint_attempt.direction
         assert direction is not None
         indexed_direction = _indexed_joint_direction(
-            direction,
-            assessment_indices,
-            joint_attempt.coefficient_tolerance,
+            direction, assessment_indices, joint_attempt.coefficient_tolerance
         )
         self.history.append(
             _joint_face_revalidation_iteration(
@@ -916,9 +1109,7 @@ class _SmoothingSearch:
             )
         )
         self.state = replace(
-            self.state,
-            fit=endpoint_fit,
-            objective=indexed_direction.endpoint_objective,
+            self.state, fit=endpoint_fit, objective=indexed_direction.endpoint_objective
         )
         terminal_endpoint_directions = dict(indexed_direction.component_directions)
         with measure_phase(self.phase_recorder, "efs_update_backtracking"):
@@ -971,9 +1162,7 @@ class _SmoothingSearch:
         retraction_direction = joint_attempt.direction
         if retraction_direction is not None:
             retraction_direction = _indexed_joint_direction(
-                retraction_direction,
-                assessment_indices[:1],
-                joint_attempt.coefficient_tolerance,
+                retraction_direction, assessment_indices[:1], joint_attempt.coefficient_tolerance
             )
         retraction = _FaceRetraction(
             component_names=face.component_names,
@@ -1024,9 +1213,7 @@ class _SmoothingSearch:
         assessment_indices = self._append_fits(check.assessment_fits)
         self.state = replace(self.state, terminal_fit_index=assessment_indices[-1])
         direction = _indexed_direction(
-            check.direction,
-            assessment_indices,
-            check.coefficient_tolerance,
+            check.direction, assessment_indices, check.coefficient_tolerance
         )
         self.history.append(
             _face_revalidation_iteration(
@@ -1068,9 +1255,7 @@ class _SmoothingSearch:
             retraction = replace(
                 retraction,
                 direction=_indexed_direction(
-                    retraction.direction,
-                    assessment_indices[:2],
-                    retraction.coefficient_tolerance,
+                    retraction.direction, assessment_indices[:2], retraction.coefficient_tolerance
                 ),
             )
         return retraction, assessment_indices
@@ -1131,10 +1316,18 @@ class _SmoothingSearch:
     ) -> DistributionalEFSResult:
         """The strict stop's converged result, with the directions that kept its face."""
         return self._result(
-            converged=True,
-            reason=self._strict_reason(),
-            terminal_endpoint_directions=directions,
+            converged=True, reason=self._strict_reason(), terminal_endpoint_directions=directions
         )
+
+    def _strict_reason(self) -> EFSConvergenceReason:
+        """Why the strict stop converged: an earned plateau, a stationary endgame, or the step."""
+        if self.plateau_earned:
+            return "practical_plateau"
+        if self.endgame_stationary or (
+            self.mode.stationary and not self.state.evidence.estimated_names
+        ):
+            return "stationary"
+        return "objective_plateau" if self.windows.plateau_qualified else "lambda_change"
 
     def _out_of_rounds(self) -> DistributionalEFSResult | None:
         """No round is left: the held caps go back to the evidence and the fit ends."""
@@ -1142,6 +1335,165 @@ class _SmoothingSearch:
             return None
         # The other components ran out of rounds; the result names the held caps.
         return self._result(converged=False, reason="max_iterations")
+
+    # The Newton endgame: for a component released beyond the cap, and every hand-off.
+
+    def _endgame_budget(self) -> int:
+        """The endgame iterations left: ``max_iterations`` bounds warm-up and endgame together."""
+        return min(self.newton_budget, self.outer_config.max_iterations - len(self.history))
+
+    def _run_endgame(self) -> DistributionalEFSResult | None:
+        """Run the endgame from the accepted state; a result ends the fit, ``None`` continues."""
+        budget = self._endgame_budget()
+        if budget <= 0:
+            return self._result(converged=False, reason="max_iterations")
+        # A plateau's finish is a few steps, so the held caps are judged first and its
+        # exact gradient is taken on the face they belong to. A search handed to the
+        # endgame runs it off the face, as it does beside another component's cap, and
+        # the gradient decides the caps.
+        pause = self.mode.finishes_plateau and not self._foreign_cap()
+        self.endgame_due = self._release_held_caps() and pause
+        if self.endgame_due:
+            return None
+        outcome, stalled = self._endgame_from_here(budget)
+        if stalled:
+            return self._after_stalled_finish()
+        return self._after_endgame(outcome)
+
+    def _endgame_from_here(self, budget: int) -> tuple[NewtonEndgameOutcome, bool]:
+        """Run the endgame and take the state it ends at; whether a plateau's finish stalled."""
+        entry = self.state
+        entry_fits = list(self.coefficient_fits) if self.mode.finishes_plateau else []
+        entry_iterations = len(self.history)
+        outcome = self._endgame_at(entry, budget)
+        stalled = self.mode.finishes_plateau and outcome.kind not in ("stationary", "cap_pressure")
+        if stalled:
+            # The plateau held where the finish started, not where it stalled, so a
+            # finish that cannot reach stationarity leaves the search where it was.
+            self.coefficient_fits[:] = entry_fits
+            del self.history[entry_iterations:]
+            outcome = replace(outcome, state=entry, derivatives=None)
+        self.newton_budget -= outcome.newton_iterations
+        self.endpoint_caps.update(outcome.endpoint_components)
+        self.endgame_outcome = outcome
+        state = outcome.state
+        self.state = replace(
+            self.state,
+            lambdas=dict(state.lambdas),
+            fit=state.fit,
+            objective=state.objective,
+            terminal_fit_index=state.terminal_fit_index,
+            evidence=state.evidence,
+        )
+        return outcome, stalled
+
+    def _endgame_at(self, entry: EndgameState, budget: int) -> NewtonEndgameOutcome:
+        """The Newton endgame from ``entry``, for at most ``budget`` iterations."""
+        return run_newton_endgame(
+            self.family,
+            self.layout,
+            self.y,
+            self.likelihood_plan,
+            state=entry,
+            solver_config=self.inner_config,
+            efs_config=self.endgame_config,
+            chunk_size=self.chunk_size,
+            phase_recorder=self.phase_recorder,
+            reuse_session=self.reuse_session,
+            history=self.history,
+            coefficient_fits=self.coefficient_fits,
+            upper_bounds=self.beyond_cap,
+            budget=budget,
+            cap_tolerance=self.outer_config.tolerance,
+            endpoint_trial=self._endpoint_names,
+        )
+
+    def _after_stalled_finish(self) -> DistributionalEFSResult | None:
+        """A plateau's finish stalled: the plateau stands, or the search goes on.
+
+        One a rejected round came to (``unearned``), at once or after the caps it
+        held were judged, has no plateau and leaves that round's verdict.
+        """
+        self.endgame_outcome = None
+        if self.unearned:
+            return self._result(converged=False, reason="objective_rejected")
+        if self.state.face is None and not self.state.evidence.unresolved_upper_bound:
+            return self._result(converged=True, reason="practical_plateau")
+        # Only the strict stop revalidates a face, and a stall decides nothing about
+        # a nominated cap, so both carry on with the finish spent.
+        self._resume_fellner_schall()
+        return None
+
+    def _after_endgame(self, outcome: NewtonEndgameOutcome) -> DistributionalEFSResult | None:
+        """Act on the endgame's verdict: resume, wait on the cap assessment, or end."""
+        if outcome.kind == "derivative_unavailable":
+            if self.beyond_cap or self.mode.stationary:
+                # EFS proposals use the original finite box and cannot safely
+                # continue from a component released above that box.
+                self.endgame_outcome = None
+                return self._result(converged=False, reason="derivative_unavailable")
+            self._resume_fellner_schall()
+            return None
+        if outcome.kind == "stationary":
+            # The exact gradient is the authority now: no component is at the cap
+            # with an outward gradient, so a Fellner--Schall nomination is void,
+            # but for the caps handed to the assessor.
+            self.endgame_stationary = True
+            self.pending_cap = None
+            handed = self._handed_caps()
+            self.endgame_due = self.handed_over = bool(handed)
+            self.state = replace(
+                self.state, evidence=replace(self.state.evidence, unresolved_upper_bound=handed)
+            )
+            return None
+        if outcome.kind == "cap_pressure":
+            self.pending_cap = outcome
+            self.endgame_due = True  # the endgame goes on from a face promoted for this pressure
+            nominated = set(self.state.evidence.unresolved_upper_bound) | set(outcome.cap_pressure)
+            self.state = replace(
+                self.state,
+                evidence=replace(
+                    self.state.evidence,
+                    unresolved_upper_bound=tuple(
+                        name for name in self.state.lambdas if name in nominated
+                    ),
+                ),
+            )
+            return None
+        return self._result(converged=False, reason=outcome.kind)
+
+    def _handed_caps(self) -> tuple[str, ...]:
+        """The caps a stationary endgame hands to the face assessor.
+
+        They are the pressed caps an endpoint trial reached, where a round is left
+        to promote them in and to take the gradient on their face, and no other
+        component stands at its cap, beside which none could be promoted.
+        """
+        pressed = self.state.evidence.unresolved_upper_bound
+        capped = [
+            name
+            for name in self.estimated_names
+            if self.state.lambdas[name] == self.outer_config.upper(name)
+        ]
+        if (
+            not pressed
+            or any(name not in self.endpoint_caps or name not in pressed for name in capped)
+            or min(self.newton_budget, self.outer_config.max_iterations - len(self.history) - 1)
+            <= 0
+        ):
+            return ()
+        return pressed
+
+    def _resume_fellner_schall(self) -> None:
+        """Keep the accepted fit; drop what cannot describe the next EFS step.
+
+        Disabling handoff bounds the recovery by the ordinary outer budget.
+        """
+        self._forget_endgame()
+        self.newton_budget = 0
+        self._restart_windows()
+
+    # Otherwise: one Fellner--Schall round.
 
     def _fellner_schall_round(self) -> DistributionalEFSResult | None:
         """One round: propose, try the bound, the accelerated point and shorter steps."""
@@ -1213,6 +1565,36 @@ class _SmoothingSearch:
         else:
             round_.acceleration_outcome = "refused"
             round_.acceleration_refusal_reason = decision.refusal_reason
+
+    def _endpoint_names(
+        self, state: EndgameState, log_steps: Mapping[str, float], names: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """The components to try at their bounds beside the step ``log_steps`` from ``state``.
+
+        Each is tried once in a search. The accelerator extrapolates the same
+        fixed-point map, so an accelerated search makes no endpoint trial. A
+        practical plateau reads the objective, so ``"efs"`` and ``"efs+finish"``
+        with one make no trial for a fall within the score bar, unless the step
+        itself puts a tail on its bound (``resolved_flat_tails``). A strict stop,
+        and the hand-off of the other searches, read the step, which a flat tail
+        never shrinks: there every tail is tried.
+        """
+        if self.accelerator is not None:
+            return ()
+        flat_tail = state.evidence.flat_tail
+        plateau = self.outer_config.practical_convergence and not self.mode.hands_off
+        resolution = self.outer_config.score_bar(state.objective) if plateau else -math.inf
+        # The steps ``_scaled_proposal`` assigns the bound to.
+        arriving = [
+            name
+            for name in flat_tail
+            if log_steps[name]
+            >= math.log(self.outer_config.upper(name)) - math.log(state.lambdas[name])
+        ]
+        tails = resolved_flat_tails(flat_tail, self.endpoint_tried, resolution, arriving)
+        chosen = endpoint_trial_names(tails, log_steps, names, self.endpoint_tried)
+        self.endpoint_tried.update(chosen)
+        return chosen
 
     def _try_endpoint(self, round_: _Round) -> None:
         """Try the components whose working problem falls to their bounds at those bounds."""
@@ -1286,6 +1668,75 @@ class _SmoothingSearch:
             elif self._no_worse(trial):
                 round_.accepted = trial
                 return
+
+    def _trial(
+        self, round_: _Round, lambdas: Mapping[str, float], log_steps: Mapping[str, float]
+    ) -> _Trial | None:
+        """Fit one trial state from the accepted fit and record it in the round.
+
+        ``None`` when the fit is not stationary or its objective cannot be
+        certified.
+        """
+        fit, tolerance, stationary = self._trial_fit(lambdas)
+        self.coefficient_fits.append(fit)
+        fit_index = len(self.coefficient_fits) - 1
+        round_.fit_indices.append(fit_index)
+        round_.tolerances.append(tolerance)
+        round_.any_converged_trial = round_.any_converged_trial or stationary
+        if not stationary:
+            return None
+        with measure_phase(self.phase_recorder, "efs_update_backtracking"):
+            objective = _trial_laplace_objective(
+                fit,
+                layout=self.layout,
+                lambdas=lambdas,
+                face=self.state.face,
+                objective_tolerance=self.outer_config.objective_tolerance,
+                penalty_memo=self.penalty_memo,
+            )
+        if objective is None:
+            return None
+        return _Trial(fit, fit_index, lambdas, log_steps, objective)
+
+    def _trial_fit(self, lambdas: Mapping[str, float]) -> tuple[DenseSolverResult, float, bool]:
+        """The fit at ``lambdas`` from the accepted fit, its tolerance, and whether it is stationary."""
+        if self.state.face is None:
+            tolerance = self.inner_config.tolerance
+            fit = _fit_fixed_state(
+                self.family,
+                self.layout,
+                self.y,
+                self.likelihood_plan,
+                lambdas=lambdas,
+                face=None,
+                initial=self.state.fit.coefficients,
+                config=self.inner_config,
+                chunk_size=self.chunk_size,
+                phase_recorder=self.phase_recorder,
+                _reuse_session=self.reuse_session,
+                _reuse_source=self.state.fit,
+            )
+            return fit, tolerance, fit.converged
+        authority_config = _face_authority_config(self.inner_config)
+        tolerance = authority_config.tolerance
+        fit = _fit_endpoint_authority_stationary(
+            self.family,
+            self.layout,
+            self.y,
+            self.likelihood_plan,
+            lambdas=lambdas,
+            face=self.state.face,
+            initial=self.state.fit.coefficients,
+            config=authority_config,
+            chunk_size=self.chunk_size,
+            phase_recorder=self.phase_recorder,
+            _reuse_session=self.reuse_session,
+        )
+        return (
+            fit,
+            tolerance,
+            fit.converged and _assessment_is_numerically_stationary(fit, tolerance),
+        )
 
     def _no_worse(self, trial: _Trial) -> bool:
         """Whether ``trial``'s objective is no worse than the accepted state's."""
@@ -1475,175 +1926,6 @@ class _SmoothingSearch:
             return self._run_endgame()
         return None
 
-    def _evidence_at(
-        self,
-        lambdas: Mapping[str, float],
-        fit: DenseSolverResult,
-        memo: _PenaltyEvaluationMemo | None = None,
-        held: frozenset[str] | None = None,
-    ) -> _FreshRawEvidence:
-        """Fresh evidence at one state on the current face, less the caps ``held`` there."""
-        with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-            return _fresh_raw_evidence(
-                self.layout,
-                lambdas,
-                fit,
-                self.outer_config,
-                face=self.state.face,
-                penalty_memo=memo,
-                held=self.cap_held if held is None else held,
-            )
-
-    def _adopt(self, evidence: _FreshRawEvidence) -> _FreshRawEvidence:
-        """Take ``evidence`` as the accepted state's: the caps it holds are the ones still held."""
-        self.cap_held = frozenset(evidence.cap_held)
-        return evidence
-
-    def _evidence(self, memo: _PenaltyEvaluationMemo | None = None) -> _FreshRawEvidence:
-        return self._adopt(self._evidence_at(self.state.lambdas, self.state.fit, memo))
-
-    def _trial(
-        self, round_: _Round, lambdas: Mapping[str, float], log_steps: Mapping[str, float]
-    ) -> _Trial | None:
-        """Fit one trial state from the accepted fit and record it in the round.
-
-        ``None`` when the fit is not stationary or its objective cannot be
-        certified.
-        """
-        fit, tolerance, stationary = self._trial_fit(lambdas)
-        self.coefficient_fits.append(fit)
-        fit_index = len(self.coefficient_fits) - 1
-        round_.fit_indices.append(fit_index)
-        round_.tolerances.append(tolerance)
-        round_.any_converged_trial = round_.any_converged_trial or stationary
-        if not stationary:
-            return None
-        with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-            objective = _trial_laplace_objective(
-                fit,
-                layout=self.layout,
-                lambdas=lambdas,
-                face=self.state.face,
-                objective_tolerance=self.outer_config.objective_tolerance,
-                penalty_memo=self.penalty_memo,
-            )
-        if objective is None:
-            return None
-        return _Trial(fit, fit_index, lambdas, log_steps, objective)
-
-    def _trial_fit(self, lambdas: Mapping[str, float]) -> tuple[DenseSolverResult, float, bool]:
-        """The fit at ``lambdas`` from the accepted fit, its tolerance, and whether it is stationary."""
-        if self.state.face is None:
-            tolerance = self.inner_config.tolerance
-            fit = _fit_fixed_state(
-                self.family,
-                self.layout,
-                self.y,
-                self.likelihood_plan,
-                lambdas=lambdas,
-                face=None,
-                initial=self.state.fit.coefficients,
-                config=self.inner_config,
-                chunk_size=self.chunk_size,
-                phase_recorder=self.phase_recorder,
-                _reuse_session=self.reuse_session,
-                _reuse_source=self.state.fit,
-            )
-            return fit, tolerance, fit.converged
-        authority_config = _face_authority_config(self.inner_config)
-        tolerance = authority_config.tolerance
-        fit = _fit_endpoint_authority_stationary(
-            self.family,
-            self.layout,
-            self.y,
-            self.likelihood_plan,
-            lambdas=lambdas,
-            face=self.state.face,
-            initial=self.state.fit.coefficients,
-            config=authority_config,
-            chunk_size=self.chunk_size,
-            phase_recorder=self.phase_recorder,
-            _reuse_session=self.reuse_session,
-        )
-        return (
-            fit,
-            tolerance,
-            fit.converged and _assessment_is_numerically_stationary(fit, tolerance),
-        )
-
-    def _release_held_caps(self) -> bool:
-        """Return the held caps to the evidence; true when one is still pressed outward."""
-        if not self.cap_held:
-            return False
-        self.cap_held = frozenset()
-        self.state = replace(self.state, evidence=self._evidence())
-        self.caps_final = bool(self.state.evidence.unresolved_upper_bound)
-        return self.caps_final
-
-    def _foreign_cap(self) -> bool:
-        """Whether a component the search does not hold stands at its cap off the face.
-
-        A face is promoted with every cap in it, so beside such a component the held
-        ones cannot be.
-        """
-        return any(
-            self.state.lambdas[name] == self.outer_config.upper(name)
-            for name in self.estimated_names
-            if name not in self.cap_held
-        )
-
-    def _endpoint_names(
-        self, state: EndgameState, log_steps: Mapping[str, float], names: tuple[str, ...]
-    ) -> tuple[str, ...]:
-        """The components to try at their bounds beside the step ``log_steps`` from ``state``.
-
-        Each is tried once in a search. The accelerator extrapolates the same
-        fixed-point map, so an accelerated search makes no endpoint trial. A
-        practical plateau reads the objective, so ``"efs"`` and ``"efs+finish"``
-        with one make no trial for a fall within the score bar, unless the step
-        itself puts a tail on its bound (``resolved_flat_tails``). A strict stop,
-        and the hand-off of the other searches, read the step, which a flat tail
-        never shrinks: there every tail is tried.
-        """
-        if self.accelerator is not None:
-            return ()
-        flat_tail = state.evidence.flat_tail
-        plateau = self.outer_config.practical_convergence and not self.mode.hands_off
-        resolution = self.outer_config.score_bar(state.objective) if plateau else -math.inf
-        # The steps ``_scaled_proposal`` assigns the bound to.
-        arriving = [
-            name
-            for name in flat_tail
-            if log_steps[name]
-            >= math.log(self.outer_config.upper(name)) - math.log(state.lambdas[name])
-        ]
-        tails = resolved_flat_tails(flat_tail, self.endpoint_tried, resolution, arriving)
-        chosen = endpoint_trial_names(tails, log_steps, names, self.endpoint_tried)
-        self.endpoint_tried.update(chosen)
-        return chosen
-
-    def _handed_caps(self) -> tuple[str, ...]:
-        """The caps a stationary endgame hands to the face assessor.
-
-        They are the pressed caps an endpoint trial reached, where a round is left
-        to promote them in and to take the gradient on their face, and no other
-        component stands at its cap, beside which none could be promoted.
-        """
-        pressed = self.state.evidence.unresolved_upper_bound
-        capped = [
-            name
-            for name in self.estimated_names
-            if self.state.lambdas[name] == self.outer_config.upper(name)
-        ]
-        if (
-            not pressed
-            or any(name not in self.endpoint_caps or name not in pressed for name in capped)
-            or min(self.newton_budget, self.outer_config.max_iterations - len(self.history) - 1)
-            <= 0
-        ):
-            return ()
-        return pressed
-
     def _plateau_result(self) -> DistributionalEFSResult | None:
         """End at a practical plateau, or go on (``None``).
 
@@ -1669,309 +1951,3 @@ class _SmoothingSearch:
             return self._result(converged=True, reason="practical_plateau")
         self.plateau_earned = not self.cap_held
         return None
-
-    def _active_set_changed(self, *, held_promoted: bool = False) -> None:
-        """A face was promoted or released: the plateau and the endgame's verdict were the old set's.
-
-        ``held_promoted`` is the promotion of caps held while the other components
-        reached a practical plateau, which that plateau survives.
-        """
-        self.plateau_earned = self.plateau_earned and held_promoted
-        self.fall = self.previous_fall = math.inf
-        self._forget_endgame()  # its derivatives named the old set's components
-        self.state = replace(self.state, evidence=self._evidence())
-        self.estimated_names = self.state.evidence.estimated_names
-        self._restart_windows()
-
-    def _endgame_budget(self) -> int:
-        """The endgame iterations left: ``max_iterations`` bounds warm-up and endgame together."""
-        return min(self.newton_budget, self.outer_config.max_iterations - len(self.history))
-
-    def _endgame_at(self, entry: EndgameState, budget: int) -> NewtonEndgameOutcome:
-        return run_newton_endgame(
-            self.family,
-            self.layout,
-            self.y,
-            self.likelihood_plan,
-            state=entry,
-            solver_config=self.inner_config,
-            efs_config=self.endgame_config,
-            chunk_size=self.chunk_size,
-            phase_recorder=self.phase_recorder,
-            reuse_session=self.reuse_session,
-            history=self.history,
-            coefficient_fits=self.coefficient_fits,
-            upper_bounds=self.beyond_cap,
-            budget=budget,
-            cap_tolerance=self.outer_config.tolerance,
-            endpoint_trial=self._endpoint_names,
-        )
-
-    def _result(
-        self,
-        *,
-        converged: bool,
-        reason: EFSConvergenceReason,
-        terminal_endpoint_directions: Mapping[str, EndpointDirectionEvidence] | None = None,
-    ) -> DistributionalEFSResult:
-        self._release_held_caps()  # a result names every cap still pressed
-        evidence = self.state.evidence
-        endgame = self.endgame_outcome
-        if converged and self.endgame_stationary:
-            # The exact gradient voids a Fellner--Schall cap nomination, including
-            # one on evidence refreshed after an exact-face revalidation. That
-            # revalidation judged the endgame's own fit, so the derivatives the
-            # endgame published are already those of the published fit.
-            evidence = replace(evidence, unresolved_upper_bound=())
-        return _efs_result(
-            layout=self.layout,
-            config=self.outer_config,
-            initial_lambdas=self.initial_lambdas,
-            lambdas=self.state.lambdas,
-            initial_objective=self.initial_objective,
-            objective=self.state.objective,
-            converged=converged,
-            reason=reason,
-            terminal_evidence=evidence,
-            history=self.history,
-            coefficient_fits=self.coefficient_fits,
-            terminal_fit_index=self.state.terminal_fit_index,
-            terminal_endpoint_directions=terminal_endpoint_directions,
-            endgame=endgame,
-            beyond_cap_components=tuple(
-                name for name in self.state.lambdas if name in self.beyond_cap
-            ),
-        )
-
-    def _strict_reason(self) -> EFSConvergenceReason:
-        if self.plateau_earned:
-            return "practical_plateau"
-        if self.endgame_stationary or (
-            self.mode.stationary and not self.state.evidence.estimated_names
-        ):
-            return "stationary"
-        return "objective_plateau" if self.windows.plateau_qualified else "lambda_change"
-
-    def _resume_fellner_schall(self) -> None:
-        """Keep the accepted fit; drop what cannot describe the next EFS step.
-
-        Disabling handoff bounds the recovery by the ordinary outer budget.
-        """
-        self._forget_endgame()
-        self.newton_budget = 0
-        self._restart_windows()
-
-    def _forget_endgame(self) -> None:
-        """Drop the endgame's verdict and the cap pressure it reported."""
-        self.endgame_outcome = None
-        self.endgame_stationary = False
-        self.pending_cap = None
-
-    def _restart_windows(self) -> None:
-        """Start the plateau windows and the accelerator's secant history again."""
-        self.windows = _PlateauWindows()
-        if self.accelerator is not None:
-            self.accelerator.reset()
-
-    def _run_endgame(self) -> DistributionalEFSResult | None:
-        """Run the endgame from the accepted state; a result ends the fit, ``None`` continues."""
-        budget = self._endgame_budget()
-        if budget <= 0:
-            return self._result(converged=False, reason="max_iterations")
-        # A plateau's finish is a few steps, so the held caps are judged first and its
-        # exact gradient is taken on the face they belong to. A search handed to the
-        # endgame runs it off the face, as it does beside another component's cap, and
-        # the gradient decides the caps.
-        pause = self.mode.finishes_plateau and not self._foreign_cap()
-        self.endgame_due = self._release_held_caps() and pause
-        if self.endgame_due:
-            return None
-        outcome, stalled = self._endgame_from_here(budget)
-        if stalled:
-            return self._after_stalled_finish()
-        return self._after_endgame(outcome)
-
-    def _endgame_from_here(self, budget: int) -> tuple[NewtonEndgameOutcome, bool]:
-        """Run the endgame and take the state it ends at; whether a plateau's finish stalled."""
-        entry = self.state
-        entry_fits = list(self.coefficient_fits) if self.mode.finishes_plateau else []
-        entry_iterations = len(self.history)
-        outcome = self._endgame_at(entry, budget)
-        stalled = self.mode.finishes_plateau and outcome.kind not in ("stationary", "cap_pressure")
-        if stalled:
-            # The plateau held where the finish started, not where it stalled, so a
-            # finish that cannot reach stationarity leaves the search where it was.
-            self.coefficient_fits[:] = entry_fits
-            del self.history[entry_iterations:]
-            outcome = replace(outcome, state=entry, derivatives=None)
-        self.newton_budget -= outcome.newton_iterations
-        self.endpoint_caps.update(outcome.endpoint_components)
-        self.endgame_outcome = outcome
-        state = outcome.state
-        self.state = replace(
-            self.state,
-            lambdas=dict(state.lambdas),
-            fit=state.fit,
-            objective=state.objective,
-            terminal_fit_index=state.terminal_fit_index,
-            evidence=state.evidence,
-        )
-        return outcome, stalled
-
-    def _after_stalled_finish(self) -> DistributionalEFSResult | None:
-        """A plateau's finish stalled: the plateau stands, or the search goes on.
-
-        One a rejected round came to (``unearned``), at once or after the caps it
-        held were judged, has no plateau and leaves that round's verdict.
-        """
-        self.endgame_outcome = None
-        if self.unearned:
-            return self._result(converged=False, reason="objective_rejected")
-        if self.state.face is None and not self.state.evidence.unresolved_upper_bound:
-            return self._result(converged=True, reason="practical_plateau")
-        # Only the strict stop revalidates a face, and a stall decides nothing about
-        # a nominated cap, so both carry on with the finish spent.
-        self._resume_fellner_schall()
-        return None
-
-    def _after_endgame(self, outcome: NewtonEndgameOutcome) -> DistributionalEFSResult | None:
-        """Act on the endgame's verdict: resume, wait on the cap assessment, or end."""
-        if outcome.kind == "derivative_unavailable":
-            if self.beyond_cap or self.mode.stationary:
-                # EFS proposals use the original finite box and cannot safely
-                # continue from a component released above that box.
-                self.endgame_outcome = None
-                return self._result(converged=False, reason="derivative_unavailable")
-            self._resume_fellner_schall()
-            return None
-        if outcome.kind == "stationary":
-            # The exact gradient is the authority now: no component is at the cap
-            # with an outward gradient, so a Fellner--Schall nomination is void,
-            # but for the caps handed to the assessor.
-            self.endgame_stationary = True
-            self.pending_cap = None
-            handed = self._handed_caps()
-            self.endgame_due = self.handed_over = bool(handed)
-            self.state = replace(
-                self.state, evidence=replace(self.state.evidence, unresolved_upper_bound=handed)
-            )
-            return None
-        if outcome.kind == "cap_pressure":
-            self.pending_cap = outcome
-            self.endgame_due = True  # the endgame goes on from a face promoted for this pressure
-            nominated = set(self.state.evidence.unresolved_upper_bound) | set(outcome.cap_pressure)
-            self.state = replace(
-                self.state,
-                evidence=replace(
-                    self.state.evidence,
-                    unresolved_upper_bound=tuple(
-                        name for name in self.state.lambdas if name in nominated
-                    ),
-                ),
-            )
-            return None
-        return self._result(converged=False, reason=outcome.kind)
-
-    def _bracket_after_refusal(
-        self,
-        attempt: _FaceDirectionAttempt | _JointFaceDirectionAttempt | None,
-    ) -> BracketRelease | BracketAttempt | None:
-        """Search beyond the cap for the first refused component with a finite verdict."""
-        if attempt is None or self.pending_cap is None or self.pending_cap.derivatives is None:
-            return None
-        directions: dict[str, EndpointDirectionEvidence] = {}
-        if isinstance(attempt, _JointFaceDirectionAttempt):
-            if attempt.direction is not None:
-                directions = dict(attempt.direction.component_directions)
-        elif attempt.check is not None:
-            directions = {self.state.evidence.unresolved_upper_bound[0]: attempt.check.direction}
-        for name, direction in directions.items():
-            if direction.decision != "finite":
-                continue
-            found = bracket_refused_component(
-                self.family,
-                self.layout,
-                self.y,
-                self.likelihood_plan,
-                name=name,
-                endpoint_derivative=float(direction.analytic_derivative),
-                pending=self.pending_cap,
-                state=self.state,
-                solver_config=self.inner_config,
-                efs_config=self.outer_config,
-                chunk_size=self.chunk_size,
-                phase_recorder=self.phase_recorder,
-                reuse_session=self.reuse_session,
-            )
-            if found is not None:
-                return found
-        return None
-
-    def _accept_bracket_release(
-        self,
-        release: BracketRelease,
-        attempt: _FaceDirectionAttempt | _JointFaceDirectionAttempt | None,
-    ) -> None:
-        """Record the released component as one accepted bracket iteration."""
-        assert self.pending_cap is not None and self.pending_cap.derivatives is not None
-        assessment_fits = () if attempt is None else tuple(attempt.assessment_fits)
-        indices = self._append_fits((*assessment_fits, *release.fits))
-        tolerances = (
-            *(() if attempt is None else (attempt.coefficient_tolerance,) * len(assessment_fits)),
-            *((release.tolerance,) * len(release.fits)),
-        )
-        evidence = _fresh_raw_evidence(
-            self.layout, release.lambdas, release.fit, self.outer_config, face=self.state.face
-        )
-        self.history.append(
-            newton_iteration_record(
-                iteration=len(self.history) + 1,
-                state=self.state,
-                proposed_lambdas=release.lambdas,
-                lambdas_after=release.lambdas,
-                objective_after=release.objective,
-                evidence=evidence,
-                fit_indices=indices,
-                tolerances=tolerances,
-                accepted_fit=release.fit,
-                step_source="bracket",
-                derivatives=self.pending_cap.derivatives,
-                projected_gradient_norm=self.pending_cap.projected_gradient_norm or 0.0,
-                hessian_certificate=None,
-                ridge=None,
-                estimated_names=self.estimated_names,
-            )
-        )
-        self.state = replace(
-            self.state,
-            lambdas=dict(release.lambdas),
-            fit=release.fit,
-            objective=release.objective,
-            terminal_fit_index=indices[-1],
-            evidence=evidence,
-        )
-        self.beyond_cap[release.name] = self.outer_config.conditioning_limit(release.name)
-
-    def _record_bracket_attempt(self, attempt: BracketAttempt) -> None:
-        """Record a search that found no root as one rejected bracket iteration."""
-        assert self.pending_cap is not None and self.pending_cap.derivatives is not None
-        indices = self._append_fits(attempt.fits)
-        self.history.append(
-            newton_iteration_record(
-                iteration=len(self.history) + 1,
-                state=self.state,
-                proposed_lambdas=self.state.lambdas,
-                lambdas_after=self.state.lambdas,
-                objective_after=self.state.objective,
-                evidence=self.state.evidence,
-                fit_indices=indices,
-                tolerances=(attempt.tolerance,) * len(indices),
-                accepted_fit=None,
-                step_source="bracket",
-                derivatives=self.pending_cap.derivatives,
-                projected_gradient_norm=self.pending_cap.projected_gradient_norm or 0.0,
-                hessian_certificate=None,
-                ridge=None,
-                estimated_names=self.estimated_names,
-            )
-        )
