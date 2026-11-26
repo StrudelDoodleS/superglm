@@ -124,6 +124,16 @@ def main() -> None:
     sb.number("motor.exposure_years", round(float(book.exposure.sum()), 1))
     for reason, count in book.dropped.items():
         sb.number(f"motor.dropped.{reason}", count)
+    by_year = book.raw.pivot(index="insured_id", columns="year", values="liability_claims")
+    left_parts, right_parts = [], []
+    for a, b in ((2022, 2023), (2023, 2024)):
+        both = by_year[a].notna() & by_year[b].notna()
+        left_parts.append(by_year.loc[both, a].to_numpy(float))
+        right_parts.append(by_year.loc[both, b].to_numpy(float))
+    left = np.concatenate(left_parts)
+    right = np.concatenate(right_parts)
+    sb.number("motor.consecutive_year_pairs", len(left))
+    sb.number("motor.consecutive_year_claim_corr", f"{np.corrcoef(left, right)[0, 1]:.3f}")
     for method, record in results.items():
         sb.number(f"motor.full.{method}.edf_total", f"{record['edf_total']:.1f}")
         for term in CURVES:
