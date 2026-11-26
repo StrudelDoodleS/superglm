@@ -669,6 +669,22 @@ def test_a_shape_level_lost_above_a_candidate_drops_only_that_candidate():
     assert result.dropped.loc[0, "n_above"] == np.sum(y > 2.0)
 
 
+def test_a_shape_the_claims_above_do_not_identify_is_dropped_not_banded():
+    # x varies among the claims above 0.2 but is 0 on every claim above 1, so above 1 the
+    # slope is not identified while the book mean still reads it on the rows with x = 1
+    excess = np.expm1(-0.3 * np.log(np.random.default_rng(5).random(600))) / 0.3
+    y = np.r_[np.linspace(0.3, 0.8, 600), 1.0 + excess]
+    frame = pd.DataFrame({"x": np.r_[np.ones(600), np.zeros(600)]})
+    family = GeneralizedParetoLSS()
+    tail = SuperLSS(family, family.scale(), family.shape(term("x", Numeric())))
+    result = threshold_stability(frame, y, [0.2, 1.0], tail=tail)
+    assert result.table["threshold"].tolist() == [0.2]
+    assert result.dropped["threshold"].tolist() == [1.0]
+    assert "do not identify the tail shape" in result.dropped.loc[0, "reason"]
+    with pytest.raises(ValueError, match="do not identify the tail shape"):
+        threshold_stability(frame, y, [1.0], tail=tail)
+
+
 def test_the_band_of_a_shape_with_terms_follows_the_mean_shape_over_the_whole_book():
     frame, y = _book(2_500, seed=64)
     rng = np.random.default_rng(64)

@@ -695,6 +695,16 @@ def _book_mean_shape(fitted: Any, state: Any, book: _Book) -> tuple[float, NDArr
     return float(mean), np.sum([part[1] for part in parts], axis=0)
 
 
+def _identified(result: Any, block: slice, gradient: NDArray) -> bool:
+    """Whether the fit's own rank decision identifies the functional ``gradient`` of ``block``."""
+    contrast = np.zeros(len(result.coefficients))
+    contrast[block] = gradient
+    face = result.coefficient_face
+    if face is None:
+        return bool(result.terminal_rank.is_estimable(contrast))
+    return bool(result.terminal_reduced_rank.is_estimable(np.asarray(face.null_basis).T @ contrast))
+
+
 def _estimates(model: SuperLSS, threshold: float, z: float, book: _Book | None) -> dict[str, Any]:
     """The shape, the scale and the threshold-free scale of one fitted tail, with bands and flags.
 
@@ -718,6 +728,12 @@ def _estimates(model: SuperLSS, threshold: float, z: float, book: _Book | None) 
     else:
         assert book is not None
         xi, gradient = _book_mean_shape(fitted, shape, book)
+        if not _identified(fitted.result, shape.coefficient_slice, gradient):
+            raise ValueError(
+                f"At threshold {threshold:g} the claims above it do not identify the tail shape "
+                "on every row of the book: a covariate in the shape takes one value among "
+                "them. Use lower thresholds, or drop that term from the tail's shape."
+            )
         block = covariance[shape.coefficient_slice, shape.coefficient_slice]
         eta = float(shape.link.link(xi))
         se_eta = math.sqrt(max(gradient @ block @ gradient, 0.0)) * float(shape.link.deriv(xi))
