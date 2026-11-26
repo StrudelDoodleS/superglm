@@ -19,6 +19,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._blas_threads import solver_blas_threads
+from superglm._experimental import warn_experimental
 from superglm._fit_gate import fit_record
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm._lambda_box import LAMBDA_CEILING, bound_warning_message
@@ -91,6 +92,7 @@ from superglm.distributional.revision import (
     ShapeRepairedWarning,
     revised_model,
 )
+from superglm.distributional.row_law import DistributionCurve, model_curve
 from superglm.distributional.separation import (
     validate_separation_policy,
     warn_on_separated_prediction,
@@ -312,11 +314,19 @@ def _owned_n_bins(value: int | Mapping[str, int]) -> int | Mapping[str, int]:
 _RENDERERS = {
     "matplotlib": (
         "superglm.plotting.distributional",
-        {"diagnostics": "plot_diagnostics_figure", "term_grid": "plot_term_grid"},
+        {
+            "diagnostics": "plot_diagnostics_figure",
+            "term_grid": "plot_term_grid",
+            "distribution": "plot_distribution_curve",
+        },
     ),
     "plotly": (
         "superglm.plotting.distributional_plotly",
-        {"diagnostics": "plotly_diagnostics_figure", "term_grid": "plotly_term_grid"},
+        {
+            "diagnostics": "plotly_diagnostics_figure",
+            "term_grid": "plotly_term_grid",
+            "distribution": "plotly_distribution_curve",
+        },
     ),
 }
 
@@ -335,6 +345,7 @@ _PLOT_DATA_KINDS = (
     "density_fan",
     "spread",
     "portfolio",
+    "distribution",
 )
 
 
@@ -1329,6 +1340,39 @@ class SuperLSS:
         """Return ``P(Y <= y)`` per row; ``y`` is a scalar or one value per row."""
         return self._require_fitted().predict_cdf(X, y, offsets=offsets)
 
+    def predict_pdf(
+        self,
+        X: FrameLike | EagerFrame,
+        y: NDArray | float,
+        *,
+        offsets: Mapping[str, NDArray] | None = None,
+    ) -> NDArray[np.float64]:
+        """Return each row's density at ``y``; ``y`` is a scalar or one value per row.
+
+        The density is the row's unit-weight law, the one ``predict_cdf`` reports, whatever
+        weights, truncation or censoring the model was fitted with. An amount outside the
+        support reads 0; a missing amount is refused. Experimental: the name, the arguments
+        and the layout of the result may change in a minor release.
+        """
+        warn_experimental("predict_pdf")
+        return self._require_fitted().predict_pdf(X, y, offsets=offsets)
+
+    def predict_mean_excess(
+        self,
+        X: FrameLike | EagerFrame,
+        v: NDArray | float,
+        *,
+        offsets: Mapping[str, NDArray] | None = None,
+    ) -> NDArray[np.float64]:
+        """Return ``E[Y - v | Y > v]`` per row; ``v`` is a finite scalar or one value per row.
+
+        It is ``inf`` where the row's mean is infinite, as ``predict`` reports, and the mean
+        less ``v`` at or below the support. Experimental: the name, the arguments and the
+        layout of the result may change in a minor release.
+        """
+        warn_experimental("predict_mean_excess")
+        return self._require_fitted().predict_mean_excess(X, v, offsets=offsets)
+
     def predict_quantile(
         self,
         X: FrameLike | EagerFrame,
@@ -2163,6 +2207,62 @@ class SuperLSS:
             **kwargs,
         )
 
+    def distribution_curve(
+        self,
+        row: FrameLike | EagerFrame,
+        *,
+        kind: str = "density",
+        y: NDArray | None = None,
+        n_points: int = 200,
+        offsets: Mapping[str, NDArray] | None = None,
+    ) -> DistributionCurve:
+        """Return one row's law on a grid: its density, its survival or its mean excess.
+
+        ``kind`` is ``"density"``, ``"survival"`` or ``"mean_excess"``. Without ``y`` the grid
+        is ``n_points`` amounts between the row's 0.001 and 0.999 quantiles, or for the
+        survival between its 0.01 and ``1 - 1e-6`` quantiles, spaced geometrically for a law
+        of positive amounts. Experimental: the name, the arguments and the layout of the
+        result may change in a minor release.
+        """
+        warn_experimental("distribution_curve")
+        return model_curve(
+            self._require_fitted(),
+            row,
+            kind=kind,
+            y=y,
+            n_points=n_points,
+            offsets=offsets,
+            caller="distribution_curve",
+        )
+
+    def plot_distribution(
+        self,
+        row: FrameLike | EagerFrame,
+        *,
+        kind: str = "density",
+        engine: str = "matplotlib",
+        y: NDArray | None = None,
+        n_points: int = 200,
+        offsets: Mapping[str, NDArray] | None = None,
+    ) -> Any:
+        """Draw one row's law from :meth:`distribution_curve`; ``engine`` is matplotlib or plotly.
+
+        The survival is drawn on log axes, with a linear amount axis for a law on the whole
+        line. Experimental: the name, the arguments and the layout of the result may change
+        in a minor release.
+        """
+        warn_experimental("plot_distribution")
+        curve = model_curve(
+            self._require_fitted(),
+            row,
+            kind=kind,
+            y=y,
+            n_points=n_points,
+            offsets=offsets,
+            caller="plot_distribution",
+        )
+        return _renderer(engine, "distribution")(curve)
+
     def parameter_spread(
         self,
         X: FrameLike | EagerFrame,
@@ -2390,7 +2490,7 @@ class SuperLSS:
         ``kind`` names the payload -- ``"qq"``, ``"worm"``, ``"pit"``,
         ``"binned"``, ``"actual_expected"``, ``"calibration"``, ``"scores"``,
         ``"comparison"``, ``"term"``, ``"risk_curves"``, ``"density_fan"``,
-        ``"spread"`` or ``"portfolio"`` -- and the keywords are those of the
+        ``"spread"``, ``"portfolio"`` or ``"distribution"`` -- and the keywords are those of the
         method that builds it.  Every payload carries what was asked of it
         (levels, seeds, bin edges, draw counts), so a figure is reproducible
         from its payload alone and a front end can draw it without the model.
@@ -2417,6 +2517,7 @@ class SuperLSS:
             "density_fan": self.density_fan,
             "spread": self.parameter_spread,
             "portfolio": self.portfolio,
+            "distribution": self.distribution_curve,
         }
         return builders[kind](**kwargs).to_json()
 
