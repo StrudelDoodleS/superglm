@@ -176,10 +176,10 @@ def from_splitter(cv: Any, frame: Any, y: Any, groups: Any = None) -> Neighbourh
         )
         for s, (train, test) in enumerate(cv.split(frame, y, groups))
     ]
-    if len(splits) < 2:
+    if not splits:
         raise ValueError(
-            f"`cv` ({source}) gave {len(splits)} splits and fit_ncv needs at least two to hold "
-            "out; use a splitter that gives two or more."
+            f"`cv` ({source}) gave no splits, so fit_ncv has nothing to hold out; use a splitter "
+            "that gives at least one."
         )
     removed, scored = [], []
     for s, (train, test) in enumerate(splits):
@@ -275,6 +275,7 @@ def build_neighbourhoods(
     else:
         nb = single_rows(n_rows)
     check_leaves_weighted_rows(nb, active)
+    check_scores_weighted_rows(nb, active)
     warn_few_neighbourhoods(nb)
     return nb
 
@@ -295,6 +296,18 @@ def check_leaves_weighted_rows(nb: Neighbourhoods, active: NDArray[np.bool_]) ->
         raise ValueError(
             f"{where[0].upper()}{where[1:]} removes every row with positive weight, "
             "leaving nothing to fit; choose neighbourhoods that leave weighted rows in the fit."
+        )
+
+
+def check_scores_weighted_rows(nb: Neighbourhoods, active: NDArray[np.bool_]) -> None:
+    """Refuse neighbourhoods whose scored rows together hold no positive weight.
+
+    One neighbourhood whose scored rows all have zero weight is allowed and contributes nothing.
+    """
+    if not np.any(active[nb.scored_rows()]):
+        raise ValueError(
+            "Every row the neighbourhoods score has zero weight, leaving nothing to score; "
+            "choose neighbourhoods that score rows with positive weight."
         )
 
 
@@ -390,7 +403,15 @@ def _split_rows(indices: Any, n_rows: int, s: int, which: str, source: str) -> N
             f"Split {s} of `cv` ({source}) gives the {which} row {int(values[outside[0]])}, which "
             f"is not a row position from 0 to {n_rows - 1}; the splitter must index the rows of X."
         )
-    return np.unique(values).astype(np.intp)
+    rows, counts = np.unique(values, return_counts=True)
+    repeated = np.flatnonzero(counts > 1)
+    if repeated.size:
+        raise ValueError(
+            f"Split {s} of `cv` ({source}) lists the {which} row {int(rows[repeated[0]])} more "
+            "than once; use a splitter whose folds are sets of rows (a bootstrap splitter that "
+            "resamples rows is not supported)."
+        )
+    return rows.astype(np.intp)
 
 
 def _listed_neighbours(neighbours: Any, n_rows: int) -> tuple[NDArray[np.intp], NDArray[np.intp]]:

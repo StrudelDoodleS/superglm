@@ -206,10 +206,16 @@ FRAME = np.zeros((N, 1))
             "gives training rows of type float64",
         ),
         ({"groups": ["a"] * N}, ValueError, r"one label only \('a'\)"),
+        ({"cv": Splits()}, ValueError, r"^`cv` \(Splits\) gave no splits"),
         (
-            {"cv": PredefinedSplit([0, 0, 0, -1, -1, -1])},
+            {"cv": Splits(([0, 1, 2], [3, 4, 5]), ([0, 1, 1, 2], [3, 4, 5]))},
             ValueError,
-            r"`cv` \(PredefinedSplit\) gave 1 splits and fit_ncv needs at least two",
+            r"^Split 1 of `cv` \(Splits\) lists the training row 1 more than once; .*bootstrap",
+        ),
+        (
+            {"cv": Splits(([0, 1, 2], [3, 5, 4, 5]), ([3, 4, 5], [0, 1, 2]))},
+            ValueError,
+            r"^Split 0 of `cv` \(Splits\) lists the test row 5 more than once; .*bootstrap",
         ),
         (
             {"cv": Splits(([0, 1, 2], [3, 4, 5]), ([0, 1, 2, 3], [3, 4, 5]))},
@@ -243,6 +249,34 @@ def test_neighbourhood_removing_every_weighted_row_is_refused(kwargs, where):
         active[5] = True
     with pytest.raises(ValueError, match=f"^{where} removes every row with positive weight"):
         build_neighbourhoods(N, active, frame=FRAME, **kwargs)
+
+
+def test_one_valid_split_builds_and_warns():
+    with pytest.warns(UserWarning, match="fit_ncv has 1 neighbourhoods; with fewer than 10"):
+        nb = build_neighbourhoods(N, ACTIVE, frame=FRAME, cv=PredefinedSplit([0, 0, 0, -1, -1, -1]))
+    assert enumerated(nb) == [([0, 1, 2], [0, 1, 2])]
+
+
+def test_repeated_neighbour_index_is_counted_once():
+    nb = from_neighbours([[1, 1, 2, 2], [], [], [], [], []], N)
+    assert nb.drop(0).tolist() == [0, 1, 2]
+    assert nb.drop(0)[nb.scored_positions(0)].tolist() == [0]
+
+
+SCORED_ZERO_WEIGHT = np.array([True, True, False, False, True, True])
+
+
+def test_scored_rows_of_zero_total_weight_are_refused():
+    cv = Splits(([0, 1, 2], [3]), ([0, 1, 3], [2]))
+    with pytest.raises(ValueError, match="^Every row the neighbourhoods score has zero weight"):
+        build_neighbourhoods(N, SCORED_ZERO_WEIGHT, frame=FRAME, cv=cv)
+
+
+def test_one_zero_weight_fold_among_weighted_folds_is_accepted():
+    cv = Splits(([0, 1, 2], [3]), ([0, 1, 3], [2, 4]))
+    with pytest.warns(UserWarning, match="fit_ncv has 2 neighbourhoods"):
+        nb = build_neighbourhoods(N, SCORED_ZERO_WEIGHT, frame=FRAME, cv=cv)
+    assert enumerated(nb) == [([3, 4, 5], [3]), ([2, 4, 5], [2, 4])]
 
 
 @pytest.mark.filterwarnings("error")
