@@ -1,7 +1,8 @@
 """CDF and quantile of ``GammaLS`` and ``GeneralizedGammaLSS`` at large gamma shape.
 
-Above gamma shape 1e4 both families read the log tail's uniform expansion in
-place of SciPy's incomplete gamma, whose power series stops at 2000 terms.
+Above gamma shape 1e4 both families, and the Gamma and Poisson GLMs' quantile
+residuals, read the log tail's uniform expansion in place of SciPy's
+incomplete gamma, whose power series stops at 2000 terms.
 
 Oracle.  For the gamma variate ``G`` of shape ``a``, ``z = sqrt(a) log(G/a)``
 has density ``exp(c + a (t - expm1(t)))``, ``t = z/sqrt(a)``, within
@@ -22,9 +23,12 @@ from __future__ import annotations
 import warnings
 
 import numpy as np
+import pandas as pd
 import pytest
 from scipy import special
 
+from superglm import Numeric, SuperGLM
+from superglm._weight_units import likelihood_scale
 from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
 
@@ -161,6 +165,122 @@ def test_gamma_distribution_functions_stay_probabilities_at_any_concentration(cv
         assert cdf[[1, 3]] == pytest.approx(special.ndtr(w), rel=1e-6)
 
 
+_TAIL = (-6.0, -5.5, -5.0, -4.6)
+
+
+def _glm_residuals(family, y, weights, x):
+    """Quantile residuals of a prior-weighted GLM on ``x``, its fitted means and dispersion."""
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(family=family, selection_penalty=0.0, features={"x": Numeric()})
+    model.fit(frame, y, sample_weight=weights)
+    residuals = model.metrics(frame, y, sample_weight=weights).residuals("quantile")
+    return residuals, model.predict(frame), likelihood_scale(model.result).phi
+
+
+def _score(probability):
+    return special.ndtri(np.clip(float(probability), 1e-10, 1.0 - 1e-10))
+
+
+def test_gamma_glm_quantile_residuals_match_the_density_integral_at_large_prior_weight():
+    """A row's residual is ``Phi^-1`` of its gamma CDF at shape ``w / phi``, clipped at 1e-10.
+
+    The first rows sit 4.6 to 6 standard deviations below the mean, where SciPy's series
+    stops short at this shape (2e8). The CDF tolerance above bounds the residual's.
+    """
+    rng = np.random.default_rng(7)
+    n, weight = 200, 1e8
+    x = rng.standard_normal(n)
+    mean = np.exp(1.0 + 0.3 * x)
+    shape = weight / 0.5
+    y = rng.gamma(shape, mean / shape)
+    y[: len(_TAIL)] = mean[: len(_TAIL)] * np.exp(np.array(_TAIL) / np.sqrt(shape))
+    residuals, mu, phi = _glm_residuals("gamma", y, np.full(n, weight), x)
+    rows = slice(0, 2 * len(_TAIL))
+    with mp.workdps(_DIGITS):
+        fitted_shape = mp.mpf(weight) / mp.mpf(phi)
+        for residual, amount, fitted in zip(residuals[rows], y[rows], mu[rows], strict=True):
+            log_ratio = mp.log(mp.mpf(float(amount)) / mp.mpf(float(fitted)))
+            expected = _score(_gamma_tails(fitted_shape, log_ratio)[0])
+            assert residual == pytest.approx(expected, abs=2**10 * _EPS * max(1.0, expected**2))
+
+
+def test_poisson_glm_quantile_residuals_match_the_density_integral_at_large_counts():
+    """A row's residual lies between ``Phi^-1`` of ``F(k - 1)`` and ``F(k)``, ``F(k) = Q(k + 1, w mu)``.
+
+    The first counts sit 4.6 to 6 standard deviations above the mean (about 1.4e8), where
+    SciPy's series stops short. A probability near one is a float64 within ``eps`` of it,
+    ``eps / phi(z)`` in the residual.
+    """
+    rng = np.random.default_rng(11)
+    n, exposure = 200, 1e9
+    x = rng.standard_normal(n)
+    lam = exposure * np.exp(-2.0 + 0.2 * x)
+    counts = rng.poisson(lam).astype(float)
+    head = slice(0, len(_TAIL))
+    counts[head] = np.round(lam[head] - np.array(_TAIL) * np.sqrt(lam[head]))
+    rate = counts / exposure
+    residuals, mu, _ = _glm_residuals("poisson", rate, np.full(n, exposure), x)
+    rows = slice(0, 2 * len(_TAIL))
+    with mp.workdps(_DIGITS):
+        for residual, observed, fitted in zip(residuals[rows], rate[rows], mu[rows], strict=True):
+            count, mean = np.round(exposure * observed), mp.mpf(float(exposure * fitted))
+            low, high = (
+                _score(_gamma_tails(mp.mpf(k + 1.0), mp.log(mean / (k + 1.0)))[1])
+                for k in (count - 1.0, count)
+            )
+            density = np.exp(-0.5 * high * high) / np.sqrt(2.0 * np.pi)
+            tol = 4.0 * _EPS / density + 2**10 * _EPS * max(1.0, high * high)
+            assert low - tol <= residual <= high + tol
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("family", ["gamma", "poisson"])
+def test_glm_residual_at_an_overflowing_prior_weight_stays_saturated(family):
+    """Pins master's behaviour where ``w / phi`` or the weighted count ``w y`` overflows.
+
+    At prior weight 1e308 a response twice its mean is far above the law, so the residual
+    is the cap ``Phi^-1(1 - 1e-10)``. Mutation check: sending a row whose shape is
+    infinite to the log tail makes the Poisson endpoints NaN and the draw raise.
+    """
+    rng = np.random.default_rng(5)
+    frame = pd.DataFrame({"x": rng.standard_normal(60)})
+    y = rng.gamma(4.0, 0.25, 60) if family == "gamma" else rng.poisson(1.0, 60).astype(float)
+    model = SuperGLM(family=family, selection_penalty=0.0, features={"x": Numeric()})
+    model.fit(frame, y)
+    row = frame.iloc[:1]
+    response = 2.0 * model.predict(row)
+    residual = model.metrics(row, response, sample_weight=np.array([1e308])).residuals("quantile")
+    assert residual == pytest.approx([special.ndtri(1.0 - 1e-10)], rel=1e-12)
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize(
+    ("family", "observed", "response", "weight", "level"),
+    [
+        # Endpoints either side of the shape switch: F(9999) from SciPy, F(10000) the log tail.
+        ("poisson", [0.0, 1.0, 1.0, 2.0], 10000.0 / 9192.0, 9192.0, 1.0 - 1e-10),
+        # y / mu rounds to zero at an ordinary shape.
+        ("gamma", [0.5, 1.5, 0.5, 1.5], 1e-20, 1.0, 1e-10),
+    ],
+)
+def test_glm_residual_at_the_edges_of_the_tail_switch_is_the_cap(
+    family, observed, response, weight, level
+):
+    """Pins master's behaviour at two boundary rows: the capped residual, with no warning.
+
+    Mutation checks: drawing between unordered Poisson endpoints raises ``high - low < 0``;
+    forming ``log1p(-1)`` for the Gamma row without silencing it warns of a division by zero.
+    """
+    frame = pd.DataFrame(index=range(len(observed)))
+    model = SuperGLM(family=family, selection_penalty=0.0, features={})
+    model.fit(frame, np.array(observed))
+    metrics = model.metrics(frame.iloc[:1], np.array([response]), sample_weight=np.array([weight]))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        residual = metrics.residuals("quantile")
+    assert residual == pytest.approx([special.ndtri(level)], rel=1e-12)
+
+
 @pytest.mark.pins_behaviour
 @pytest.mark.parametrize("q", [1e-155, -1e-155, 0.0])
 def test_generalized_gamma_near_zero_shape_raises_no_overflow(q):
@@ -205,4 +325,8 @@ def test_an_ordinary_law_never_calls_the_log_tail_kernel(monkeypatch):
     theta = np.tile([0.0, 0.5, 0.5], (3, 1))
     gg.cdf(y, theta)
     gg.quantile(levels, theta)
+    rng = np.random.default_rng(3)
+    x = rng.standard_normal(60)
+    _glm_residuals("gamma", rng.gamma(4.0, 0.25, 60), np.full(60, 2.0), x)
+    _glm_residuals("poisson", rng.poisson(3.0, 60) / 2.0, np.full(60, 2.0), x)
     assert calls == []
