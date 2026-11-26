@@ -53,7 +53,6 @@ _FREQUENCY = WeightContract("frequency")
 #: Levels of the default candidate thresholds, in hundredths: the 0.80 to 0.99 quantiles of the
 #: complete losses (the grid of Belzile and Davison, arXiv:2606.28540, Table 6).
 _DEFAULT_LEVELS = np.arange(80, 100)
-_MEAN_EXCESS_COLUMNS = ("threshold", "mean_excess", "se", "lower", "upper", "n_above")
 _STABILITY_COLUMNS = (
     "threshold",
     "n_above",
@@ -100,8 +99,8 @@ def _read_claims(
     """Check the claims row by row; rows with a zero count are dropped before any is read."""
     values = np.asarray(y)
     if values.ndim != 1 or n not in (None, len(values)):
-        rows = "" if n is None else f" of X ({n} rows)"
-        raise ValueError(f"y must hold one loss per row{rows}, not shape {values.shape}.")
+        of_x = "" if n is None else f" of X ({n} rows)"
+        raise ValueError(f"y must hold one loss per row{of_x}, not shape {values.shape}.")
     n = len(values)
     counts = _weight_values(
         None if sample_weight is None else np.asarray(sample_weight), n, _FREQUENCY
@@ -170,8 +169,9 @@ def _mean_excess_table(
     candidates form a block. A block's moments are taken about its own smallest loss, and the
     sweep merges blocks from the top by the pooled-variance identity
     ``M2 = M2_a + M2_b + n_a n_b d^2 / (n_a + n_b)``, with ``d`` the distance between the two
-    means. Every term is non-negative and local, so a threshold far from the losses costs no
-    digits. An empty block only shifts the running mean by the gap between its candidates.
+    means, and the two means by their weighted average. Every term is non-negative and local,
+    so a threshold far from the losses costs no digits. An empty block only shifts the running
+    mean by the gap between its candidates.
     """
     start = np.searchsorted(values, candidates, side="right")
     stop = np.append(start[1:], len(values))
@@ -202,7 +202,8 @@ def _mean_excess_table(
             # how far the swept claims' mean lies above the block's
             apart = mean_run + ((upper - anchor[b]) - mean_block[b])
             m2_run += m2_block[b] + n_run * n_block[b] * apart * apart / total
-            shifted -= apart * n_block[b] / total
+            own = (anchor[b] - candidates[j]) + mean_block[b]
+            shifted = (n_run * shifted + n_block[b] * own) / total
             n_run = total
         mean_run, upper = shifted, candidates[j]
         n[j], mean[j], m2[j] = n_run, mean_run, m2_run
