@@ -176,3 +176,29 @@ def test_generalized_gamma_near_zero_shape_raises_no_overflow(q):
     assert cdf == pytest.approx(special.ndtr(np.log([0.5, 1.0, 2.0])), rel=1e-12)
     assert quantile[1] == pytest.approx(1.0, rel=1e-14)
     assert np.all(np.diff(quantile) > 0.0)
+
+
+def test_an_ordinary_law_never_calls_the_log_tail_kernel(monkeypatch):
+    """Below the switch nothing reaches the compiled log tail, whose first call compiles it.
+
+    Mutation check: calling the kernel with zero rows counts one call per function.
+    """
+    from superglm.distributional.kernels import generalized_gamma as kernels
+
+    calls = []
+    original = kernels.gg_log_tail_jets
+
+    def counted(*args, **kwargs):
+        calls.append(len(args[0]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(kernels, "gg_log_tail_jets", counted)
+    y, levels = np.array([0.5, 1.0, 2.0]), np.array([0.1, 0.5, 0.9])
+    gamma, theta = GammaLS(), np.tile([1.0, 0.5], (3, 1))
+    gamma.cdf(y, theta)
+    gamma.quantile(levels, theta)
+    gg = GeneralizedGammaLSS(parametrisation="location")
+    theta = np.tile([0.0, 0.5, 0.5], (3, 1))
+    gg.cdf(y, theta)
+    gg.quantile(levels, theta)
+    assert calls == []

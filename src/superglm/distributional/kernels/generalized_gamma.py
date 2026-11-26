@@ -1681,7 +1681,9 @@ def log_tail_cdf(w: NDArray, shape: NDArray) -> NDArray[np.float64]:
     """
     out = special.ndtr(w)
     inside = np.abs(w) <= _UNIFORM_REACH
-    out[inside] = np.exp(gg_log_tail_jets(w[inside], shape[inside], upper=False, order=0)[0])
+    # No call with zero rows: the first call compiles the kernel.
+    if np.any(inside):
+        out[inside] = np.exp(gg_log_tail_jets(w[inside], shape[inside], upper=False, order=0)[0])
     return out
 
 
@@ -1693,6 +1695,8 @@ def log_tail_quantile(p: NDArray, shape: NDArray) -> NDArray[np.float64]:
     order in ``Q``; monotone after one step by log-concavity.  Unresolved rows
     are NaN.
     """
+    if p.size == 0:  # no call with zero rows: the first call compiles the kernel
+        return np.empty(0)
     z = special.ndtri(p)
     w = z - shape * (z * z + 2.0) / 6.0
     upper = p > 0.5
