@@ -311,12 +311,10 @@ def test_a_truncated_or_censored_fit_reports_the_parent_density(bounds):
         y = np.minimum(y, 9.0)
     family = GammaLS()
     model = _quiet_fit(SuperLSS(family, family.mean(), family.scale()), X, y, **options)
-    amounts = y[:50]
-    mean, cv = model.predict_parameters(X.iloc[:50]).to_numpy().T
-    expected = stats.gamma.logpdf(amounts, 1 / cv**2, scale=mean * cv**2)
-    np.testing.assert_allclose(
-        np.log(model.predict_pdf(X.iloc[:50], amounts)), expected, rtol=0, atol=64 * U * 10
-    )
+    # The training rows themselves: their own bounds must not enter the density.
+    mean, cv = model.predict_parameters(X).to_numpy().T
+    expected = stats.gamma.logpdf(y, 1 / cv**2, scale=mean * cv**2)
+    np.testing.assert_allclose(np.log(model.predict_pdf(X, y)), expected, rtol=0, atol=64 * U * 10)
 
 
 # --------------------------------------------------------------------------- #
