@@ -346,7 +346,11 @@ def test_dev_ci_keeps_auxiliary_checks_without_duplicating_the_regression_suite(
         # The full suite runs as `pytest tests/` or through the shared suite runner.
         if re.search(r"pytest\s+tests/(?:\s|$)|scripts/run_test_suite\.py", block)
     ]
-    assert full_suite_jobs == [(".github/workflows/ci.yml", "test-compatibility")]
+    # The dependency-floor job reruns the quick suite in a different environment.
+    assert full_suite_jobs == [
+        (".github/workflows/ci.yml", "test-compatibility"),
+        (".github/workflows/ci.yml", "dependency-floors"),
+    ]
 
 
 def test_dev_ci_keeps_browser_and_non_test_checks_independent():

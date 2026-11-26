@@ -220,6 +220,29 @@ def test_polars_floor_job_runs_the_declared_floor_with_the_matrix_extras() -> No
     assert " pytest " in uv_runs[1] and " -rs " in uv_runs[1]
 
 
+def test_dependency_floor_job_runs_the_quick_suite_at_lowest_direct_on_the_oldest_python() -> None:
+    """One job installs every direct dependency at its declared floor, with the
+    matrix's extras, on the oldest Python pyproject.toml admits, and runs the
+    quick suite in that environment without letting uv re-sync it."""
+    job = yaml.safe_load((_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"][
+        "dependency-floors"
+    ]
+    project = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    oldest = project["requires-python"].removeprefix(">=")
+    runs = [" ".join(step["run"].split()) for step in job["steps"] if "run" in step]
+    assert job["runs-on"] == "ubuntu-latest" and "strategy" not in job
+    assert f"Python {oldest} " in job["name"]
+    (sync,) = [run for run in runs if run.startswith("uv sync ")]
+    assert sync == (
+        f"uv sync --resolution lowest-direct --python {oldest} "
+        "--extra dev --extra bench --extra plotting"
+    )
+    (suite,) = [run for run in runs if "run_test_suite.py" in run]
+    assert suite.startswith("uv run --no-sync python scripts/run_test_suite.py")
+    assert '-m "not slow and not browser and not docs"' in suite
+    assert all(run.startswith("uv run --no-sync ") for run in runs if run.startswith("uv run"))
+
+
 def test_compatibility_shards_do_not_queue_platforms_behind_each_other() -> None:
     workflow = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     block = _jobs(workflow)["test-compatibility"]

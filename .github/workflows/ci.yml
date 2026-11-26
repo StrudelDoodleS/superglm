@@ -250,6 +250,45 @@ jobs:
           files=$(grep -rlE "import polars|importorskip\(.polars" tests --include='*.py' | sort)
           uv run --no-sync --with "polars==${POLARS_FLOOR}" pytest $files -q -rs -n logical --dist worksteal -m "not browser and not docs and not threads"
 
+  dependency-floors:
+    # The lock holds the newest release of every dependency, so the matrix never
+    # runs the floors pyproject.toml declares. This job resolves every direct
+    # dependency at its declared floor and every other one at its newest (uv's
+    # lowest-direct resolution) on the oldest supported Python, with the
+    # matrix's extras, and runs the quick suite there. The re-resolution rewrites
+    # uv.lock in this checkout only, so every later command passes --no-sync.
+    name: Python 3.12 · quick suite · declared dependency floors
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Install every direct dependency at its declared floor
+        run: >-
+          uv sync --resolution lowest-direct --python 3.12
+          --extra dev --extra bench --extra plotting
+
+      - name: Record the versions installed
+        run: uv pip list
+
+      # Two tests are deselected because their own references, not the fits, move
+      # on numpy below 2.5: the u-turn fixture's least-squares coefficients round
+      # past a slack the locked numpy clears by 13%, and the Tweedie bounds test's
+      # BFGS reference stops on precision loss short of the stationarity it asks
+      # of itself, while the fit passes the stricter check made on it first.
+      - name: Run the quick suite on the floors
+        run: >-
+          uv run --no-sync python scripts/run_test_suite.py
+          -m "not slow and not browser and not docs"
+          --deselect tests/test_shape_rule_rows.py::test_u_turn_slope_zero_only_at_turn
+          --deselect "tests/test_tweedie_response_bounds.py::test_bounded_fixed_and_smoothing_fits_use_normalized_natural_rows[True-prior]"
+
   coverage:
     name: Python 3.12 · combined branch coverage
     if: github.event_name == 'push'
