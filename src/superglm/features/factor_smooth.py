@@ -1443,15 +1443,31 @@ def population_curve_family(name: Any, interaction_specs: Any) -> set:
     The ``sz`` terms that move the curve (``population_curve_terms``) share their group's
     levels with every other ``sz`` term on it and with a main term on the group
     (``share_group_levels``), and each ``sz`` term shares a thin level's open directions
-    with the main term on its variable.  Empty when no ``sz`` term moves the curve.
+    with the main term on its variable.  The family closes transitively over connected
+    ``sz`` variables and groups whose population offsets bind them.  Empty when no ``sz``
+    term moves the curve.
     """
     groups = {spec.group for _, spec in population_curve_terms(name, interaction_specs)}
     if not groups:
         return set()
+    variables = {name}
     family = {name, *groups}
-    for key, spec in interaction_specs.items():
-        if isinstance(spec, FactorSmooth) and spec.basis == "sz" and spec.group in groups:
-            family.update((key, spec.variable))
+    sz_terms = [
+        (key, spec)
+        for key, spec in (interaction_specs or {}).items()
+        if isinstance(spec, FactorSmooth) and spec.basis == "sz"
+    ]
+    changed = True
+    while changed:
+        changed = False
+        for key, spec in sz_terms:
+            if spec.group in groups or (spec.variable in variables and spec._has_population_offset):
+                before = (len(family), len(groups), len(variables))
+                family.update((key, spec.variable, spec.group))
+                variables.add(spec.variable)
+                groups.add(spec.group)
+                if (len(family), len(groups), len(variables)) != before:
+                    changed = True
     return family
 
 

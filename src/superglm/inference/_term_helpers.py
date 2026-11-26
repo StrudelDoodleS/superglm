@@ -218,6 +218,7 @@ def _spline_se(
         M_ref = np.asarray(spline_spec.transform(reference_x), dtype=np.float64)[:, active_cols]
         if M_ref.shape[0] == 1:
             M = M - M_ref
+            M[np.asarray(x_grid) == reference_x[0]] = 0.0
         elif M_ref.shape[0] == M.shape[0]:
             M = M - M_ref
         else:

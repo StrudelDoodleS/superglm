@@ -1379,6 +1379,61 @@ def test_a_population_curve_keeps_its_errors_beside_the_terms_its_smooth_shares(
     _assert_population_errors_are_the_contrasts(model)
 
 
+@pytest.mark.pins_behaviour
+def test_a_population_curve_closes_its_family_across_connected_sz_groups() -> None:
+    """Control (pins): a curve's ``sz`` family closes transitively over connected groups (#752).
+
+    ``sz(x, g)``, ``sz(w, g)``, and ``sz(w, h)`` with thin levels in both ``g`` and ``h``
+    chain ``x`` through ``w`` onto ``w:h:sz`` and ``h``.  Closing the family over
+    connected ``sz`` smooths keeps ``x``'s curve determined instead of reading ``w:h:sz`` as
+    external aliasing.
+    """
+    from superglm.features.factor_smooth import population_curve_family
+
+    x = np.r_[np.tile(np.linspace(0.0, 1.0, 30), 3), 0.4]
+    g = np.array([*np.repeat(["a", "b", "c"], 30), "d"])
+    row = np.arange(float(len(x)))
+    h = np.where(row == 17, "r", np.where(row % 2 == 0, "p", "q"))
+    w = np.cos(1.7 * row)
+    y = np.sin(3.0 * x) + 0.3 * (g == "b") * x + 0.2 * np.sin(2.5 * w) + 0.1 * np.cos(row)
+    X = pd.DataFrame({"x": x, "w": w, "g": g, "h": h})
+    wiggle = {"wiggle": LambdaPolicy.fixed(1.0)}
+    fixed = LambdaPolicy.fixed(1.2)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = SuperGLM(
+            family="gaussian",
+            features={
+                "x": Spline(n_knots=5, lambda_policy=fixed),
+                "w": Spline(n_knots=5, lambda_policy=fixed),
+            },
+            interactions=[
+                FactorSmooth("x", group="g", basis="sz", k=5, lambda_policy=wiggle),
+                FactorSmooth("w", group="g", basis="sz", k=5, lambda_policy=wiggle),
+                FactorSmooth("w", group="h", basis="sz", k=5, lambda_policy=wiggle),
+            ],
+            selection_penalty=0,
+            direct_solve="gram",
+        ).fit_reml(X, y)
+    assert model._interaction_specs["w:h:sz"]._has_population_offset
+    assert population_curve_family("x", model._interaction_specs) == {
+        "x",
+        "w",
+        "g",
+        "h",
+        "x:g:sz",
+        "w:g:sz",
+        "w:h:sz",
+    }
+    native = _assert_population_errors_are_the_contrasts(model)
+    banded = model.term_inference("x", simultaneous=True, n_sim=200)
+    assert np.all(banded.ci_upper_simultaneous >= banded.ci_upper)
+    row_x = _numeric_test_rows(model.summary(), ("x",))["x"]
+    np.testing.assert_allclose(
+        [row_x.curve_se_min, row_x.curve_se_max], [native.min(), native.max()], rtol=1e-9
+    )
+
+
 _INTERACTION_KINDS = {
     "spline by level": (lambda: Spline(n_knots=5), "c", "wood"),
     "tensor": (lambda: Spline(n_knots=4), "w", "wood"),
