@@ -77,10 +77,9 @@ magnitude branch at ``2 n^2 eps |tr S|``.
 Reproducibility: permuting level coordinates, or changing BLAS kernel or thread
 count, moves ``edf`` by about 1e-12. Monotonicity in lambda holds for a
 definite pencil (Kaufman and Rosset, *Biometrika* 101:771-784, 2014) and can
-fail on this route when the delivered ``V_eff`` is indefinite (issues #263,
-#269); the ladder guards for it. When the border Schur complement is nearly
-singular (8 levels of 3 rows against an 11-column margin) no organization of
-the arithmetic recovers the lost digits and the ladder refuses.
+fail on this route when the delivered ``V_eff`` is indefinite; the ladder
+guards for it. When the border Schur complement is nearly singular, no
+organization of the arithmetic recovers the lost digits and the ladder refuses.
 """
 
 from __future__ import annotations

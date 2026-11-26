@@ -40,15 +40,15 @@ def psum_chisq(
         Weights w_j in the linear combination. Must be non-zero.
     df : array of float, optional
         Degrees of freedom for each chi² term. Default is all 1.
-    sigma : float
+    sigma : float, default 0.0
         Standard deviation of additional normal component.
-    lim : int
-        Maximum number of integration subdivisions for quad.
-    acc : float
+    lim : int, default 10000
+        Maximum number of integration subdivisions for ``quad``.
+    acc : float, default 1e-4
         Requested absolute accuracy of the inversion, clamped to
-        [50 * eps, 1e-10]. A looser request is ignored: certifying a far tail
-        needs an absolute tolerance well below the probability being reported,
-        and the default of 1e-4 predates that contract.
+        ``[50 * eps, 1e-10]``. Values looser than ``1e-10`` (including the
+        default) are clamped to ``1e-10`` so far-tail probabilities can be
+        certified.
 
     Returns
     -------

@@ -630,7 +630,27 @@ def weighted_deviance(y, mu, p, weights) -> float:
 
 
 def tweedie_logpdf(y, mu, phi, p, weights=None) -> NDArray:
-    """Row log densities of Tweedie(mu, phi / w, p), 1 < p < 2 (Dunn & Smyth 2005)."""
+    """Evaluate per-row log densities of ``Tweedie(mu, phi / w, p)`` via Dunn & Smyth (2005).
+
+    Parameters
+    ----------
+    y : array-like, shape (n,)
+        Finite non-negative observed responses.
+    mu : array-like, shape (n,)
+        Finite strictly positive means aligned with ``y``.
+    phi : float
+        Finite strictly positive dispersion parameter.
+    p : float
+        Tweedie variance power in the open interval ``(1, 2)``.
+    weights : array-like, shape (n,), optional
+        Finite strictly positive prior weights scaling each row's dispersion to
+        ``phi / weights``. Defaults to ones.
+
+    Returns
+    -------
+    NDArray, shape (n,)
+        Log density evaluated at each row.
+    """
     y, mu, phi, p, weights = _density_arrays(y, mu, phi, p, weights)
     saturated = _saturated_rows(y, weights, phi, p)
     return saturated - _scaled_deviance(y, mu, p, weights, phi)
@@ -760,12 +780,30 @@ def tweedie_unit_deviance(y: NDArray, mu: NDArray, p: float) -> NDArray:
 
 
 def generate_tweedie_cpg(n: int, mu, phi, p: float, rng=None) -> NDArray:
-    """Simulate Tweedie(mu, phi, p) as compound Poisson-gamma: N ~ Poisson, Y | N ~ Gamma.
+    """Simulate Tweedie(mu, phi, p) draws via the compound Poisson-gamma representation.
 
-    ``rng`` is a numpy Generator, or any object whose ``poisson(lam)`` and
-    ``gamma(shape, scale=...)`` return one draw per element as numpy's do; the
-    draws are checked, since fractional counts or one draw broadcast over every
-    row would sample a different distribution.
+    Draws ``N ~ Poisson(mu^(2 - p) / ((2 - p) * phi))`` and, conditional on
+    ``N > 0``, ``Y | N ~ Gamma(N * (2 - p) / (p - 1), scale=phi * (p - 1) * mu^(p - 1))``.
+
+    Parameters
+    ----------
+    n : int
+        Number of observations to generate (non-negative).
+    mu : float or array-like
+        Strictly positive finite mean(s), broadcast to shape ``(n,)``.
+    phi : float or array-like
+        Strictly positive finite dispersion(s), broadcast to shape ``(n,)``.
+    p : float
+        Tweedie variance power in the open interval ``(1, 2)``.
+    rng : numpy.random.Generator or compatible object, optional
+        Random number generator whose ``poisson(lam)`` and
+        ``gamma(shape, scale=...)`` return one draw per element. Uses
+        ``np.random.default_rng()`` when ``None``.
+
+    Returns
+    -------
+    NDArray, shape (n,)
+        Simulated non-negative Tweedie responses.
     """
     if isinstance(n, bool | np.bool_):
         raise TypeError("n must be a non-negative integer")

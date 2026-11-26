@@ -76,10 +76,13 @@ class LogLogisticLSS(
     ScalePredictor,
     ShapePredictor,
 ):
-    """Fisk(scale, shape) on y>0 with log links; scale is the median.
+    """Log-logistic (Fisk) severity model on ``y > 0`` with scale and shape predictors.
 
-    No expected-information or expected-shortfall capability is supplied.
-    Mean and variance are infinite at shape<=1 and shape<=2 respectively.
+    Declare ``family.scale(...)`` and ``family.shape(...)``. Both use log
+    links; ``scale`` is the median and ``shape`` controls concentration around
+    the median (larger ``shape`` means a tighter distribution and lighter
+    tail). Mean and variance are finite for ``shape > 1`` and ``shape > 2``
+    respectively. Does not supply expected information or expected shortfall.
     """
 
     spec: ClassVar[DeclaredScalarSpec] = _SPEC

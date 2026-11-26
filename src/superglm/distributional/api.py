@@ -392,7 +392,8 @@ class SuperLSS:
         coefficient for a predictor. The family defines these boundaries.
     coefficient_curvature : {"observed", "fisher"}, default="observed"
         Curvature used for coefficient updates. ``"fisher"`` requires a
-        family that supplies expected information.
+        family that supplies expected information and complete (non-truncated,
+        non-censored) observations.
 
     Notes
     -----
@@ -536,8 +537,9 @@ class SuperLSS:
         """Return the curvature the dense coefficient solve is asked to use.
 
         ``"observed"`` (the default) is Newton's method on the observed Hessian
-        for every family; ``"fisher"`` requests Fisher scoring and needs a
-        family with expected information.  Under either policy a materially
+        for every family; ``"fisher"`` requests Fisher scoring and requires a
+        family with expected information and complete (non-truncated,
+        non-censored) observations.  Under either policy a materially
         indefinite terminal penalized observed Hessian falls back to penalized
         expected information when the family supplies it, and otherwise to the
         nearest positive semidefinite curvature; the fit is not refused, and
@@ -556,10 +558,12 @@ class SuperLSS:
 
     @property
     def discrete(self) -> bool:
+        """Whether discrete (binned) marginal designs are used during fitting."""
         return self._discrete
 
     @property
     def n_bins(self) -> int | Mapping[str, int]:
+        """Bin count per continuous feature used when ``discrete=True``."""
         return self._n_bins
 
     def _n_bins_config(self) -> int | dict[str, int]:
@@ -682,9 +686,10 @@ class SuperLSS:
         ----------
         X : DataFrame or EagerFrame
             Input columns named in the predictor declarations.
-        y : array-like of shape (n_observations,)
-            Response values in the family's support, in the same row order
-            as ``X``.
+        y : array-like of shape (n_observations,) or (n_observations, n_components)
+            Response values in the family's support, in the same row order as
+            ``X``. Vector families such as ``DirichletLSS`` take one column per
+            component.
         sample_weight : array-like, optional
             One weight per row, interpreted using ``weight_semantics``.
         lambdas : mapping of str to float, optional
@@ -785,66 +790,108 @@ class SuperLSS:
     ) -> SuperLSS:
         """Fit coefficients and estimate smoothing parameters jointly.
 
-        ``X`` supplies the declared columns and ``y`` supplies the response
-        in the same row order. ``sample_weight`` follows the model's
-        ``weight_semantics``. Declare fixed link-scale additions with
-        ``offset=`` on the family predictor helpers. ``truncation`` and ``censored``
-        are as in :meth:`fit`. This method updates the model and returns it.
+        Parameters
+        ----------
+        X : DataFrame or EagerFrame
+            Input columns named in the predictor declarations.
+        y : array-like of shape (n_observations,) or (n_observations, n_components)
+            Response values in the family's support, in the same row order as
+            ``X``.
+        sample_weight : array-like, optional
+            One weight per row, interpreted under ``weight_semantics``.
+        method : {"efs"}, default="efs"
+            Smoothing-parameter estimation family. Only ``"efs"`` is supported.
+        max_reml_iter : int, default=100
+            Maximum outer smoothing iterations (Fellner--Schall and Newton
+            combined). If a default Newton finish stalls on an active exact
+            face or unresolved upper bound, its rolled-back steps are not
+            counted, so up to 16 additional iterations may run.
+        reml_tol : float, default=1e-6
+            Stopping tolerance for the smoothing optimiser. Tightening it also
+            tightens the flat-term stationarity bar (``1e-4`` nats per
+            log-lambda at default fidelity) proportionally.
+        max_log_step : float, default=5.0
+            Maximum step size in log-lambda per Fellner--Schall update.
+        max_lambda : float, optional
+            Upper smoothing-parameter bound. With ``None`` (default), each
+            penalty is bounded between ``1e-6`` and ``1e10`` times its term's
+            information scale (at least ``1e10`` above), so rescaling the
+            response or weights moves the optimum and bounds together; families
+            without expected information use unit scale. A float sets a fixed
+            upper cap with a ``1e-6`` floor. A term still pushing against a
+            bound emits a ``ConvergenceWarning``.
+        initial_lambda : float, optional
+            Starting smoothing strength. ``None`` (default) chooses a
+            data-scaled start per penalty component (``0.1`` when expected
+            information is unavailable, under truncation/censoring, or when
+            numerical rank is unresolved), clipped to the smoothing bounds. A
+            float sets a common start; ``lambdas`` and fixed penalty policies
+            take precedence.
+        max_inner_iter : int, default=100
+            Maximum coefficient iterations per smoothing step.
+        inner_tol : float, default=1e-7
+            Inner coefficient convergence tolerance.
+        lambdas : mapping of str to float, optional
+            Starting or fixed smoothing strengths keyed by qualified penalty
+            name (e.g. ``"location:age#wiggle"``), overriding
+            ``initial_lambda``.
+        retain_rows : bool, default=True
+            Retain fitted row arrays for training diagnostics.
+        acceleration : {"none", "multisecant"}, default="none"
+            Optional multisecant acceleration for Fellner--Schall updates.
+        acceleration_history : int, default=5
+            Number of prior updates used when ``acceleration="multisecant"``.
+        acceleration_max_amplification : float, default=8.0
+            Maximum step-amplification factor permitted for accelerated updates.
+        practical_reml : bool, default=True
+            Allow Fellner--Schall updates to stop after sustained negligible
+            objective and fitted-parameter movement across comparable trials.
+            Set ``False`` to disable this approximate plateau stop (under
+            Newton schedules a fit can still converge with ``stationary``
+            independently of the Fellner--Schall fixed-point residual;
+            ``lambda_change`` and ``objective_plateau`` indicate that residual
+            met its tolerance).
+        retain_history_rows : bool, default=False
+            If True, keep per-iteration ``eta`` and ``theta`` arrays for
+            debugging instead of only the terminal fit and recent plateau
+            checks.
+        practical_reml_parameter_tol : float, default=1e-3
+            Relative natural-parameter change threshold for practical plateau
+            stopping.
+        reml_plateau_tol : float, default=1e-7
+            Relative objective change threshold for plateau stopping.
+        outer : {"efs", "efs+finish", "efs+newton", "efs+stationary"}, optional
+            Smoothing optimiser schedule. ``"efs"`` runs generalised
+            Fellner--Schall updates alone. ``"efs+finish"`` runs them to a
+            plateau and finishes with Newton steps on the LAML objective in
+            log-lambda (Wood, Pya and Säfken 2016, section 3.1).
+            ``"efs+newton"`` hands off to Newton steps after a shorter warm-up
+            (or once the Fellner--Schall loop stops with a converged
+            coefficient fit).
+            ``"efs+stationary"`` continues until the projected LAML gradient
+            meets the stationarity tolerance. ``None`` (default) selects
+            ``"efs+finish"``, except for families with discontinuous curvature
+            (``TwoPieceNormalLSS``, ``TwoPieceLogNormalLSS``), which use
+            ``"efs"``.
+        phase_recorder : FitPhaseRecorder, optional
+            Optional timing recorder for :meth:`diagnose`.
+        truncation : (lower, upper), optional
+            Observation truncation bounds, as in :meth:`fit`.
+        censored : bool, label, or array-like, optional
+            Observation censoring indicators, as in :meth:`fit`.
 
-        ``outer`` selects the smoothing optimiser. ``"efs"`` runs generalised
-        Fellner-Schall updates alone. ``"efs+finish"`` runs them to a practical
-        plateau, then finishes with Newton steps on the LAML gradient and Hessian
-        in log lambda, aiming for a stationary point of the LAML over the
-        smoothing-parameter box (Wood, Pya and Saefken 2016, section 3.1).
-        ``"efs+newton"`` hands to those Newton steps after a shorter warm-up, on
-        any Fellner-Schall stop. ``"efs+stationary"`` requires the projected
-        profile score at the returned fit. A flat term must have small
-        curvature and a score below 1e-4 nats per log lambda at default
-        fidelity. Tightening ``reml_tol`` tightens that bar proportionally.
-        ``smoothing_convergence_reason_`` and
-        ``smoothing_certified_`` report how a fit stopped. The default ``None``
-        runs ``"efs+finish"``, except where a family's curvature jumps
-        (``TwoPieceNormalLSS`` and ``TwoPieceLogNormalLSS``): Newton's smoothness
-        assumption fails there, so they run ``"efs"`` and the endgame is not advised.
-        ``max_reml_iter`` bounds the smoothing iterations, Fellner-Schall and
-        Newton together. A default finish that stalls on an exact face is not
-        counted, so such a fit can do up to 16 further iterations of work.
+        Returns
+        -------
+        SuperLSS
+            This model, updated with the fitted state.
 
-        ``practical_reml`` stops the Fellner--Schall loop after sustained
-        negligible objective and fitted-parameter movement across comparable
-        trials. Set it to ``False`` to disable this approximate plateau stop.
-        The ``lambda_change`` and ``objective_plateau`` reasons both indicate
-        that the Fellner--Schall fixed-point residual met its tolerance.
-
-        Historical coefficient fits retain compact evidence by default, with
-        row arrays kept only for the terminal fit and recent plateau checks.
-        Set ``retain_history_rows=True`` to keep every fit's ``eta`` and
-        ``theta`` for debugging. ``retain_rows`` separately controls final
-        row diagnostics and keeps its existing default.
-
-        By default, choose a data-scaled starting penalty for each term.
-        ``initial_lambda=None`` adjusts the starting strength of smoothing to
-        the term's units and the information in the data. Terms with several
-        penalties get a separate start for each.
-        These starts are clipped to the smoothing bounds. Families without
-        expected information, fits with truncated or censored rows, and terms
-        with unresolved numerical rank use 0.1, also clipped to those bounds.
-
-        A numeric ``initial_lambda`` supplies a common start. Entries in
-        ``lambdas`` override it, and fixed penalty policies take precedence over
-        both. The smoothing result retains the numeric starts for replay.
-        Stops can depend on the starting values, so vary them when comparing fits.
-
-        With ``max_lambda=None`` the search keeps each smoothing parameter
-        between ``1e-6`` and ``1e10`` times its term's information unit (the
-        mean expected information per row of the term's parameter at the
-        start, rounded to a power of two), with the upper limit never below
-        ``1e10``. Rescaling the response or the weights moves the optimum and
-        the relative limits together. Families without
-        expected information keep a unit of one. A number caps every smoothing
-        parameter at that value, with the floor at ``1e-6``, whatever the
-        data's scale. A fit whose search still pointed past a limit warns,
-        naming the term.
+        Notes
+        -----
+        Declare fixed link-scale offsets with ``offset=`` on the family
+        predictor helpers. Inspect :attr:`smoothing_convergence_reason_`,
+        :attr:`smoothing_certified_`, and :meth:`diagnose` to see how
+        smoothing selection stopped. Stops can depend on starting values, so
+        vary ``initial_lambda`` or ``lambdas`` when checking sensitivity.
         """
         if outer is None:
             # Resolved before the fit record reads the arguments, so it names what ran.
@@ -951,6 +998,7 @@ class SuperLSS:
 
     @property
     def predictors_(self) -> tuple[Predictor, ...]:
+        """Independent copies of the fitted predictor templates in parameter order."""
         return _clone_predictor_templates(self._require_fitted().fit_state.predictor_templates)
 
     @property
@@ -960,6 +1008,7 @@ class SuperLSS:
 
     @property
     def coef_(self) -> Mapping[str, float]:
+        """Read-only mapping from qualified coefficient names to fitted values."""
         model = self._require_fitted()
         return MappingProxyType(
             dict(
@@ -973,10 +1022,12 @@ class SuperLSS:
 
     @property
     def coef_by_predictor_(self) -> Mapping[str, NDArray[np.float64]]:
+        """Mapping from parameter name to its fitted coefficient vector."""
         return self._require_fitted().predictor_coefficients
 
     @property
     def smoothing_parameters_(self) -> Mapping[str, float]:
+        """Mapping from penalty component name to its fitted smoothing strength."""
         return self._require_fitted().smoothing_parameters
 
     @property
@@ -987,27 +1038,43 @@ class SuperLSS:
 
     @property
     def smoothing_certified_(self) -> bool | None:
-        """Return strict matched-certification status, or ``None`` for a fixed fit."""
+        """Whether smoothing selection met strict convergence checks, or ``None`` for a fixed fit.
+
+        ``True`` only when smoothing and coefficients both converged (not via an
+        approximate plateau), no term was solved at an infinite-smoothing
+        boundary or hit an unresolved upper bound, no curvature fallback
+        occurred, and all boundary checks passed.
+        """
         smoothing = self._require_fitted().smoothing
         return None if smoothing is None else smoothing.matched_certified
 
     @property
     def smoothing_unresolved_upper_bound_(self) -> tuple[str, ...] | None:
-        """Return smoothing components with unresolved pressure at the finite cap."""
+        """Smoothing penalties still pushing against their upper bound, or ``None`` for a fixed fit.
+
+        Names terms whose REML/LAML objective still favoured stronger smoothing
+        at the configured upper cap.
+        """
         smoothing = self._require_fitted().smoothing
         return None if smoothing is None else smoothing.unresolved_upper_bound
 
     @property
     def exact_face_components_(self) -> tuple[str, ...]:
-        """Return smoothing components accepted at the exact infinity face."""
+        """Names of smoothing penalties set to infinite smoothing in the fitted model.
+
+        For each listed component, the penalised part of the term is reduced to
+        exact zero.
+        """
         return self._require_fitted().fit_state.exact_face_components
 
     @property
     def covariance_(self) -> NDArray[np.float64]:
+        """Joint Bayesian coefficient covariance matrix of the fitted model."""
         return self._require_fitted().covariance
 
     @property
     def result_(self) -> DistributionalFitResult:
+        """Detailed fit result object for the accepted model revision."""
         return self._require_fitted().fitted_result
 
     @property
@@ -1101,34 +1168,36 @@ class SuperLSS:
     ) -> SuperLSS:
         """Repair every term whose curve breaks its ``Constraint.postfit`` rule.
 
-        The meaning is :meth:`superglm.SuperGLM.apply_shape_postfit`'s, for a term of any
-        parameter on that parameter's link scale: the fitted curve is projected onto the
-        monotone or curvature cone in the term's own fitted basis, in the fit's penalized
-        curvature on the term with every other coefficient held and the parameter's intercept
-        profiled (its posterior precision), and the parameter's intercept is then re-estimated
-        on the joint likelihood with everything else held. A repair whose penalized objective
-        (the negative log-likelihood plus the fit's smoothing penalty) is worse than with the
-        term dropped is continued towards the constrained fit, and where no curve the rule
-        allows beats the dropped term, the term is published flat with a ``RuntimeWarning``.
-        A repair that leaves a training row without valid parameters is refused, and nothing
-        is published.
+        Projects each violating term on its parameter's link scale onto the
+        required monotone or curvature cone using the fit's penalised Hessian
+        (other coefficients held fixed and the parameter's intercept profiled),
+        then re-estimates that parameter's intercept on the joint likelihood.
+        If the projection worsens the penalised objective relative to dropping
+        the term, the repair continues toward the constrained optimum; if no
+        feasible curve beats dropping the term, the term is published flat with
+        a ``RuntimeWarning``. A repair that leaves any training row with invalid
+        parameters is refused without modifying the model.
 
-        Predictions, curves, ``coef_`` and rating tables follow the repair; ``result_`` and
-        the covariance keep describing the fit. A repaired term reports its EDF, and its
-        standard errors, bands and test are withheld: the projection is a constrained
-        estimator whose reference distribution is not the fit's. ``diagnose()`` reports
-        each repair, and each post-fit rule still waiting for one.
+        Predictions, curves, ``coef_``, and rating tables reflect the repair,
+        while ``result_`` and ``covariance_`` continue to describe the original
+        fit. Standard errors, bands, and term tests are withheld for repaired
+        terms; :meth:`diagnose` reports all applied and pending repairs. Terms
+        that already satisfy their rule are untouched, so repeated calls are
+        idempotent unless a term is later edited into violation.
 
-        A term that already obeys its rule is left exactly as it is, so a second call
-        repairs nothing; a term edited after its repair so that it breaks the rule again is
-        repaired again, and its new repair replaces the earlier one. The projection reads the
-        training rows: the frame attached at ``fit``, else ``X_train`` (the frame given to the
-        fit, or the rows it kept), and the fit must have kept its rows (``retain_rows``).
+        Parameters
+        ----------
+        X_train : DataFrame or EagerFrame, optional
+            Training frame used to fit the model (or the retained rows). Needed
+            only when the model was restored from pickle/joblib, which does not
+            store the training frame. Requires ``retain_rows=True`` at fit time.
+        n_grid : int, default=500
+            Grid resolution used for the shape projection.
 
         Returns
         -------
         SuperLSS
-            The model (self), repaired.
+            This model, with post-fit shape repairs applied.
         """
         fitted = self._require_fitted()
         frame = self._training_frame if X_train is None else X_train
@@ -1155,7 +1224,8 @@ class SuperLSS:
         exact, with no draws, and an offset does not move it. It is formed a block
         of rows at a time, one block's design and products per worker, so memory
         grows with the number of workers (``n_jobs``, capped by ``max_memory``)
-        and not with the rows. ``covariance`` names ``V``, as in ``posterior_bounds``.
+        and not with the rows. ``covariance`` selects ``V`` (``"fixed"`` or
+        ``"corrected"``), as in :meth:`posterior_draws`.
         """
         model = self._require_fitted()
         # One adapter for both passes, so the columns and the coded levels are read from X once.
@@ -1218,7 +1288,7 @@ class SuperLSS:
 
         Vector families return a DataFrame with their component columns and
         ``X``'s index. Dirichlet columns are the mean shares ``alpha / sum(alpha)``.
-        Scalar families return their existing one-dimensional arrays.
+        Scalar families return a one-dimensional array.
 
         Custom families define their own default prediction quantity. Use
         ``predict_parameters`` for the complete parameter table and
@@ -1744,8 +1814,9 @@ class SuperLSS:
         weights select the row's weighted predictive law, while frequency
         weights return the compressed contribution of the repeated unit law.
         ``truncation`` and ``censored`` are the bounds the model was fitted
-        with, read as in :meth:`fit`; only the log score supports truncated or
-        censored rows, so pass ``which=("log",)`` with them.
+        with, read as in :meth:`fit`; CRPS and ``thresholds`` require a scalar
+        family and complete rows, so pass ``which=("log",)`` for vector
+        families (such as ``DirichletLSS``) and for truncated or censored rows.
         """
         self._warn_bounds_unread("scores", truncation, censored)
         return score_table(
@@ -1952,9 +2023,9 @@ class SuperLSS:
         which is the posterior of Marra and Wood (2012) with the smoothing
         parameters held at their estimates; ``covariance="corrected"`` asks
         instead for the smoothing-uncertainty correction of Wood, Pya and
-        Säfken (2016), using either trusted published curvature or one
-        authenticated replay from the fit's retained rows.  A fit whose
-        smoothing did not stop stationary is corrected about its own point
+        Säfken (2016), using the fit's stored smoothing-parameter Hessian when
+        available or recomputing it once from the retained training rows. A fit
+        whose smoothing did not stop stationary is corrected about its own point
         with a ``ConvergenceWarning``; where no correction can be formed the
         draws use the fixed covariance, say so in a ``ConvergenceWarning``,
         and carry ``covariance_kind="fixed"``.  After a hand edit the draws are
@@ -2077,8 +2148,10 @@ class SuperLSS:
         point rather than a few quantiles of it: it is the picture that shows a
         shape change -- a mass moving into the tail, a mode splitting -- which
         no set of quantile curves states outright.
-        This payload supports continuous families only; families with atoms
-        refuse. ``weights`` gives positive prior-law weights per swept point,
+        This payload supports continuous scalar families with a CDF and quantile
+        function only; vector families (such as ``DirichletLSS``) and families
+        with atoms or without a CDF/quantile refuse with ``NotImplementedError``.
+        ``weights`` gives positive prior-law weights per swept point,
         with the unit law as the default, as in :meth:`risk_curves`.
         """
         require_scalar_response(self.family, "density_fan")

@@ -875,7 +875,7 @@ def runtime_finding(
     eta_unclipped: NDArray,
     weights: NDArray,
 ) -> RuntimeFinding | None:
-    """The runtime backstop's finding on one coefficient state, or ``None`` (issue #341).
+    """The runtime backstop's finding on one coefficient state, or ``None``.
 
     Under an extreme working-weight range (``ratio``), two terminal signatures
     mark a coefficient walking toward +/-infinity: the linear predictor pinned
@@ -969,7 +969,7 @@ def format_runtime_message(
     *,
     unbounded_response: bool = False,
 ) -> str:
-    """Terminal-state message for the in-solver backstop (issue #341)."""
+    """Terminal-state message for the in-solver backstop."""
     where = ""
     if drifting_groups:
         where = f" (the rows it reached are carried there by group(s): {drifting_groups})"

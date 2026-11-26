@@ -367,6 +367,10 @@ class SplitSplice:
     ) -> _Components:
         """Fit and return the three supplied models on one verified split.
 
+        ``body`` must be a :class:`SuperLSS` with ``GammaLS`` or
+        ``LogNormalLS``; ``exceedance`` must be a binomial :class:`SuperGLM`;
+        ``tail`` must be a :class:`SuperLSS` with ``GeneralizedParetoLSS``.
+
         ``y`` contains positive loss amounts, or the limit for a right-censored
         row. ``censored`` is a boolean flag per row (or one flag for all rows).
         A right-censored limit must be at or above the threshold, so the loss

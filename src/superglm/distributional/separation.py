@@ -101,14 +101,13 @@ def scan_predictor_separation(
     boundaries: Sequence[tuple[str, ...]],
     bounds: ResponseBounds | None,
 ) -> list[SeparatedTerm]:
-    """Separated levels and crossed cells on every predictor that can separate.
+    """Return separated levels and crossed cells on every predictor that can separate.
 
-    Each compiled predictor recorded its scannable terms with their built
-    specs and raw columns; the scan itself is the scalar path's.  The
-    varying-coefficient levels its build already held (spline-by-factor
-    curves, and numeric or polynomial levels, which ``predict`` holds to
-    their rows' range) are named in a ``SeparationWarning`` here, never
-    refused: 0.40 fitted them without a scan.
+    Each compiled predictor records its scannable terms with their built specs
+    and raw columns, delegating the scan itself to the scalar path.
+    Varying-coefficient levels already held by the build (spline-by-factor
+    curves, and numeric or polynomial levels that ``predict`` holds to their
+    observed range) are reported via ``SeparationWarning`` rather than refused.
     """
     compiled_tuple = tuple(compiled)
     boundary_tuple = tuple(tuple(boundary) for boundary in boundaries)

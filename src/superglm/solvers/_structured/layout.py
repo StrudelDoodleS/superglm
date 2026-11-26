@@ -484,7 +484,7 @@ def _distinct_level_counts(
 
 
 class SzLevelRows(NamedTuple):
-    """What an ``sz`` term's design and prior weights identify of each level (#432).
+    """What an ``sz`` term's design and prior weights identify of each level.
 
     ``null_space`` is the level penalty's null space ``N_P`` ``(k, m)``;
     ``thin`` the levels whose rows of positive weight hold fewer than ``m``

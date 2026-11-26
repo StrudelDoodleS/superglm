@@ -402,14 +402,17 @@ def _negative_binomial_log_density(y: NDArray, mu: NDArray, theta: NDArray | flo
 
 
 class NegativeBinomial:
-    """Negative binomial (NB2) family with overdispersion controlled by ``theta``.
+    """Negative binomial (NB2) distribution with variance ``V(mu) = mu + mu^2 / theta``.
 
     Parameters
     ----------
     theta : float or "auto"
-        Overdispersion parameter (>0). Larger theta = less overdispersion.
-        As theta -> inf, approaches Poisson. Pass ``"auto"`` to estimate
-        theta via profile likelihood during ``fit()``.
+        Positive NB2 size parameter (inverse of overdispersion:
+        ``variance = mean + mean^2 / theta = mean + mean^2 * overdispersion``).
+        Larger values mean less overdispersion; ``theta -> inf`` approaches
+        Poisson. Pass ``"auto"`` to estimate ``theta`` via profile likelihood
+        during ``fit()`` or jointly with smoothing parameters during
+        ``fit_reml()``.
     """
 
     def __init__(self, theta: float | str):
@@ -456,10 +459,14 @@ class NegativeBinomial:
 
 
 class Binomial:
-    """Binomial (Bernoulli) distribution. V(mu) = mu * (1 - mu).
+    """Bernoulli distribution with variance ``V(mu) = mu * (1 - mu)``.
 
-    For use with binary y in {0, 1}.  This is a Bernoulli GLM (n_trials=1);
-    sample_weight is case/frequency weight, not binomial trials.
+    For binary responses ``y`` in ``{0, 1}`` (single-trial Bernoulli GLM;
+    multi-trial ``Binomial(n, p)`` counts are not modelled). Under the default
+    ``weight_semantics="prior"``, non-unit ``sample_weight`` scales the
+    exponential-dispersion prior weight (and warns via
+    :class:`PriorWeightLatticeWarning`); under ``weight_semantics="frequency"``,
+    ``sample_weight`` is a case/replication weight.
     """
 
     @property

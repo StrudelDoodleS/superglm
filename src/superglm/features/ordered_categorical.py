@@ -139,14 +139,14 @@ def _declared_matcher(declared_levels: list[Any], *, numeric_strings: bool = Fal
 
 
 def group_axis_position(member_values: Sequence[float]) -> float:
-    """Where a merged group sits on the numeric level axis: the MEAN of its members.
+    """Where a merged group sits on the numeric level axis: the mean of its members.
 
-    The one definition, shared by the spec (placing the group on the basis
-    axis) and the display collapse in ``plotting/group_display.py`` (placing
-    its marker). The mean is label-invariant, so renaming a group never moves
-    the fit (issue #326). To place a group elsewhere, declare ``values=`` with
-    equal values for its members. Not used for a ``Piecewise``/``Polynomial``
-    inner basis, whose axis is level positions and where a group is one band.
+    Shared by the spec (placing the group on the basis axis) and the display
+    collapse in ``plotting/group_display.py`` (placing its marker). The mean is
+    label-invariant, so renaming a group never moves the fit. To place a group
+    elsewhere, declare ``values=`` with equal values for its members. Not used
+    for a ``Piecewise``/``Polynomial`` inner basis, whose axis is level
+    positions and where a group is one band.
     """
     return float(np.mean(np.asarray(member_values, dtype=np.float64)))
 
@@ -294,14 +294,14 @@ class OrderedCategorical:
 
     Parameters
     ----------
-    values : dict[str, float] or None
+    values : dict[str, float] or None, default None
         Explicit mapping from category labels to numeric values (e.g.
         midpoints: ``{"18-25": 21.5, "26-35": 30.5, ...}``).
         Mutually exclusive with ``order``.
-    order : list[str] or None
+    order : list[str] or None, default None
         Ordered list of category labels.  Numeric values are generated as
         ``linspace(0, 1, len(order))``.  Mutually exclusive with ``values``.
-    basis : Spline, Piecewise, Polynomial object, or None
+    basis : Spline, Piecewise, Polynomial object, or None, default None
         The shape fitted over the ordered levels.  Deep-copied at
         construction, so mutating the passed object afterwards changes
         nothing here.
@@ -331,11 +331,17 @@ class OrderedCategorical:
         the training exposure (SAS ``ORPOL``'s weighted construction).
         ``powers=`` may be a non-contiguous subset, and each stated power
         reports its own z row in the summary.
-    base : str
-        Reporting reference level. ``"most_exposed"`` (default), ``"first"``,
+    base : str, default "most_exposed"
+        Reporting reference level: ``"most_exposed"``, ``"first"``,
         or a specific level name. This changes only the reported relativities
         and reference-adjusted intercept, not the fitted smooth.
-    specials : list[str] or None
+    grouping : LevelGrouping or None, default None
+        Optional grouping produced by :func:`collapse_levels` that merges
+        adjacent ordered levels before smoothing. Each merged group sits at
+        the mean of its member values on the numeric axis (or forms one band
+        for ``Piecewise``/``Polynomial``). Must cover every ``specials`` entry
+        as its own single-member group without merging it with other levels.
+    specials : list[str] or None, default None
         Level labels held out of the smooth and fitted as free, unpenalized
         level effects — one indicator column and one coefficient each. Use for
         levels that are structurally different rather than merely sparse (a
@@ -1734,6 +1740,7 @@ class OrderedCategorical:
     # ── Reparametrisation ──────────────────────────────────────────
 
     def set_reparametrisation(self, R_inv: NDArray) -> None:
+        """Store the inverse reparametrisation matrix on the underlying spline basis."""
         self._basis_spline.set_reparametrisation(R_inv)
 
 

@@ -543,16 +543,16 @@ class SqrtLink:
 
 
 class PowerLink:
-    """Power link: eta = mu^p, mu = eta^(1/p).
+    """Power link: ``eta = mu^p``, ``mu = eta^(1/p)``.
 
-    Generalises identity (p=1), sqrt (p=0.5), inverse (p=-1),
-    inverse-squared (p=-2).  The log link is the p→0 limit but is
-    handled separately for numerical reasons.
+    Generalises identity (``p=1``), square root (``p=0.5``), inverse (``p=-1``),
+    and inverse-squared (``p=-2``). The log link is the ``p -> 0`` limit and is
+    provided separately as :class:`LogLink`.
 
     Parameters
     ----------
-    power : float
-        The power parameter.  Must not be 0 (use LogLink instead).
+    power : float, default 1.0
+        Power exponent. Must be nonzero (use :class:`LogLink` for ``power=0``).
     """
 
     def __init__(self, power: float = 1.0):
@@ -607,15 +607,14 @@ class PowerLink:
 
 
 class NegativeBinomialLink:
-    """Negative binomial link: eta = log(mu / (mu + theta)).
+    """Negative binomial link: ``eta = log(mu / (mu + theta))``.
 
-    Canonical link for NB2(θ), parametrised so that mu > 0 maps to
-    eta in (-inf, 0).
+    Canonical link for NB2(theta), mapping ``mu > 0`` to ``eta in (-inf, 0)``.
 
     Parameters
     ----------
-    theta : float
-        The NB overdispersion parameter (must be > 0).
+    theta : float, default 1.0
+        Positive NB2 size parameter (inverse of overdispersion).
     """
 
     def __init__(self, theta: float = 1.0):

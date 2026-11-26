@@ -262,17 +262,18 @@ _CAPABILITIES = FamilyCapabilities(2, True, False, False, False, True, censored_
 
 @dataclass(frozen=True)
 class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
-    """Negative-binomial responses with mean and size predictors.
+    """Negative-binomial (NB2) responses with Mean and Overdispersion predictors.
 
     Declare ``family.mean(...)`` and ``family.theta(...)``. Both use log
-    links. The unit count law has variance ``mean + mean**2 / theta``, so
-    larger theta means less overdispersion. ``theta`` is the size parameter
-    in the NB2 parametrization.
+    links. ``theta`` is the NB2 size parameter (inverse of Overdispersion
+    ``1 / theta``), so the unit-count variance is
+    ``mean + mean**2 / theta = mean + mean**2 * overdispersion``: larger
+    ``theta`` means less overdispersion.
 
     Results use the column names ``mean`` and ``theta`` in that order.
-    ``family.theta()`` estimates a constant size; a declaration with terms
-    lets size vary between rows. The observation law for counts or weighted
-    rates follows the model's weight contract.
+    ``family.theta()`` estimates constant overdispersion; adding terms lets
+    it vary across rows. The observation law for counts or weighted rates
+    follows the model's ``weight_semantics``.
 
     See Also
     --------

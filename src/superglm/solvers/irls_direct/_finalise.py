@@ -251,8 +251,9 @@ def _retained_rank_info(
     is the one it publishes.  Owner and lifetime of a deferred call: the
     caller's model, until ``fit_ops._install_deferred_rank_info`` runs it or
     the next REML attempt drops it.  It reads ``dm`` when it runs, so nothing
-    may mutate the design's group matrices in place in between.  Never a
-    method of the fit, which it would keep alive (#492).
+    may mutate the design's group matrices in place in between.  Kept as a
+    module-level function rather than a bound method so a deferred closure does
+    not retain the fit object.
     """
     M_beta = centered_final.hessian + centered_final.sum_w * np.outer(
         centered_final.mean_x, centered_final.mean_x

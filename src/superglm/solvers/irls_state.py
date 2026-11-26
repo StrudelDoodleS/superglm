@@ -718,12 +718,11 @@ def mean_space_first_halving(
     Each depth ``j`` whose trial the row attaining ``t`` leaves outside, with
     ``fl(eta_r + fl(2^-j d_r)) >= 0`` formed exactly as the trial forms it, is
     a trial the space test refuses, so the search can start at the first depth
-    that row admits.  That depth is found by scanning from ``floor(log2(1 /
-    t))`` on that one row.  No trial the test could accept is skipped, so the
-    accepted step, and every fit, is the halving's own bit for bit; only the
-    refused evaluations go.  Backing off by a fixed fraction ``tau t`` instead
-    moves the iterate's path, and on #437's extreme sweep that path left 20
-    light levels the halving certified short of the bar (``score_stagnated``).
+    that row admits. That depth is found by scanning from
+    ``floor(log2(1 / t))`` on that one row. No trial the test could accept is
+    skipped, so the accepted step matches plain halving bit for bit while
+    skipping only refused evaluations (unlike backing off by a fixed fraction
+    ``tau t``, which changes the iterate path).
     """
     violates = mean_space_violation(family, link)
     if violates is None or violates(committed.eta_unclipped, weights):

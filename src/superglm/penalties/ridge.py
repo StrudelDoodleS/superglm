@@ -16,13 +16,16 @@ from superglm.types import GroupSlice
 
 
 class Ridge:
-    """Ridge penalty: lambda1 * ||beta||_2^2 / 2.
+    """Ridge penalty: ``lambda1 * ||beta||_2^2 / 2``.
 
     Parameters
     ----------
-    lambda1 : float, {"auto"}, or None
+    lambda1 : float, {"auto"}, or None, default None
         Regularisation strength. ``None`` disables shrinkage and ``"auto"``
-        explicitly requests automatic calibration.
+        requests automatic calibration.
+    features : str, list of str, or None, default None
+        Optional feature or group name(s) to penalise. ``None`` penalises all
+        penalised groups.
     """
 
     # Its L2 update reads each group through its norm and shrinks it

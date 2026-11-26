@@ -1,12 +1,11 @@
-"""The binomial/log mean space's overlay on the direct IRLS fit: Newton steps and the true-score certificate.
+"""Binomial/log mean-space overlay for direct IRLS: Newton steps and true-score certificate.
 
-PR #437's machinery for the binomial/log pair, whose log link can leave the
-probability space and whose clipped deviance is flat where ``clip_mu`` holds
-a row.  ``_IRLSDirectMeanSpaceOverlay`` is all of it, so a later change can
-replace it whole (the constrained-QP method on ``eta <= 0`` for the event
-rows, stopped by its KKT conditions; design ``2026-10-23-irls-direct-split``).
-The mean-space and link-domain trial predicates (#425's guard, #498) are the
-shared line search's, not this overlay's.
+Encapsulates the mean-space handling for the binomial/log pair, whose log link
+can leave the probability space and whose clipped deviance is flat where
+``clip_mu`` holds a row. ``_IRLSDirectMeanSpaceOverlay`` isolates this logic so
+it can be replaced cleanly if superseded by a constrained-QP method on
+``eta <= 0``. Mean-space and link-domain trial predicates belong to the shared
+line search, not this overlay.
 """
 
 from __future__ import annotations
@@ -93,7 +92,7 @@ def _column_shift(penalty_size: NDArray, weight_exponent: int) -> NDArray:
 
 
 class _IRLSDirectMeanSpaceOverlay:
-    """The binomial/log mean space on every route: #437's Newton steps and the true-score certificate.
+    """Binomial/log mean-space overlay: observed Newton steps and true-score certificate.
 
     The fit holds one (``mean_space``) when its family and link can leave
     their mean space (``irls_state.mean_space_violation``), else ``None``, and

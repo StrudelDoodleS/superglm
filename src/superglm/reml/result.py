@@ -44,9 +44,9 @@ class PenaltyCache:
 class REMLResult:
     """Result of REML smoothing parameter estimation.
 
-    A result a model fitted on the retired SCOP engine (0.41.0 or earlier)
-    also carries that engine's fields, such as ``scop_newton_fallback``,
-    which the diagnostics read with ``getattr``.
+    A result saved from a model fitted on the retired SCOP engine may also
+    carry that engine's legacy fields, such as ``scop_newton_fallback``, which
+    diagnostics read via ``getattr``.
     """
 
     lambdas: dict[str, float]  # group_name -> estimated lambda_j

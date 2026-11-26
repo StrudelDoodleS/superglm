@@ -108,8 +108,7 @@ class ConstraintSpec:
 
 @dataclass(frozen=True, repr=False)
 class ConstraintRules:
-    """
-    An ordered set of fit-time shape rules, built with ``&``.
+    """An ordered set of fit-time shape rules, built with ``&``.
 
     Examples
     --------
@@ -139,6 +138,7 @@ class ConstraintRules:
         return NotImplemented
 
     def describe(self) -> str:
+        """Format the combined rules as a human-readable ``&``-joined string."""
         return " & ".join(r.describe() for r in self.rules)
 
     def __repr__(self) -> str:
@@ -260,11 +260,12 @@ class _FitKindNamespace(_ConstraintKindNamespace):
 class _ConstraintNamespace:
     """The shape constraints a feature can carry, reached through ``Constraint``.
 
-    ``Constraint.fit`` enforces the shape inside the fit, ``Constraint.postfit`` repairs it after
-    an unconstrained fit; each offers ``increasing``, ``decreasing``, ``convex`` and ``concave``
-    (a :class:`ConstraintSpec`). ``Constraint.fit`` also offers ``flat``, ``cap(lo, hi)`` and
-    ``max_step(up, down=None)``; rules join with ``&`` into :class:`ConstraintRules`, and
-    ``.below``, ``.above`` and ``.within(a, b)`` restrict one to a stretch.
+    ``Constraint.fit`` enforces rules during fitting (splines ``"cr"``, ``"ps"``, ``"bs"`` with
+    ``select=False``); ``Constraint.postfit`` repairs after fitting (also ``"cr_cardinal"``;
+    ``"ns"`` takes no constraints). Each offers ``increasing``, ``decreasing``, ``convex`` and
+    ``concave`` (:class:`ConstraintSpec`). ``Constraint.fit`` adds ``flat``, ``cap(lo, hi)`` and
+    ``max_step(up, down=None)`` (``OrderedCategorical`` only); ``&`` builds
+    :class:`ConstraintRules`, and ``.below``/``.above``/``.within(a, b)`` restrict to a stretch.
 
     >>> from superglm import Constraint, Spline
     >>> Spline(kind="ps", k=10, constraint=Constraint.fit.increasing)  # doctest: +SKIP

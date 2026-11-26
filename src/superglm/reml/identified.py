@@ -192,7 +192,7 @@ def laplace_excluded_coefficients(
 
 
 def binomial_log(distribution: Any, link: Any) -> bool:
-    """Whether the family is binomial with the log link: the true-score mean space (#437)."""
+    """Whether the family is binomial with the log link (true-score mean-space regime)."""
     from superglm.distributions import Binomial
     from superglm.links import LogLink
 

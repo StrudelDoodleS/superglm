@@ -593,6 +593,7 @@ class ModelSummary:
         return self._data[key]
 
     def items(self):
+        """Return ``(key, value)`` pairs from the underlying summary dictionary."""
         return self._data.items()
 
     # ── Helpers ────────────────────────────────────────────────────

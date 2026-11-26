@@ -410,12 +410,12 @@ def weighted_center(design: MetricsDesign, W: NDArray) -> NDArray:
 def _merge_weights(total: float, chunk_weight: float) -> tuple[float, float, float]:
     """``(sqrt(m), f_a, f_b)`` for the pairwise merge of two positive weights, without over- or underflow.
 
-    ``m = w_a w_b / (w_a + w_b)`` is formed as ``min(w_a, w_b) (max / (w_a +
+    ``m = w_a w_b / (w_a + w_b)`` is formed as ``min(w_a, w_b) * (max / (w_a +
     w_b))`` and the shares ``f_a = w_a / (w_a + w_b)``, ``f_b = w_b / (w_a +
     w_b)`` from both weights scaled by the larger one's power of two, so the
     sum cannot overflow and ``max / sum`` lies in ``[1/2, 1]``: ``m``
-    underflows only where its value does (``w_b / (w_a + w_b)`` alone
-    underflowed at 1e-200 beside 1e200 and dropped the merge term, Sol).
+    underflows only where its value does, avoiding premature underflow in
+    ``w_b / (w_a + w_b)`` when weights span many orders of magnitude.
     """
     exponent = math.frexp(max(total, chunk_weight))[1]
     scaled_total = math.ldexp(total, -exponent)

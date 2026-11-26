@@ -48,9 +48,16 @@ def nb2(theta: float | str = "auto") -> NegativeBinomial:
 
     Parameters
     ----------
-    theta : float or "auto"
-        Overdispersion parameter.  ``"auto"`` estimates theta via
-        profile likelihood during ``fit()``.
+    theta : float or "auto", default "auto"
+        Positive NB2 size parameter (inverse of overdispersion:
+        ``V(mu) = mu + mu^2 / theta``). Pass ``"auto"`` to estimate ``theta``
+        via profile likelihood during ``fit()`` or jointly with smoothing
+        parameters during ``fit_reml()``.
+
+    Returns
+    -------
+    NegativeBinomial
+        Configured NB2 distribution instance.
     """
     return NegativeBinomial(theta=theta)
 

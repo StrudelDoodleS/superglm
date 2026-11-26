@@ -609,13 +609,13 @@ def canonical_intercept_shift(model, beta) -> float:
 
 
 def _recorded_shift_reads_the_coefficients(model) -> bool:
-    """Whether the recorded shift ``m' beta`` is the one at the current ``beta``.
+    """Whether the recorded shift ``m' beta`` matches the current ``beta``.
 
-    Every revision records it again (``_read_solver_state_from_public``); an
-    editor edit made before #447 left it, and the solver state it describes,
-    at the pre-edit ``beta``.  The recorded shift is compared with the one at
-    the current ``beta`` to the two sums' rounding, ``gamma_(k+1) sum |m|
-    |beta|`` each over ``k`` terms in any order (Higham 2002, section 3.1).
+    Revisions recompute the shift via ``_read_solver_state_from_public``; older
+    unpickled edits may carry a stale pre-edit shift. The recorded shift is
+    compared with the one at the current ``beta`` to the two sums' rounding,
+    ``gamma_(k+1) sum |m| |beta|`` each over ``k`` terms in any order (Higham
+    2002, section 3.1).
     """
     state = getattr(model, "_runtime_canonical_state", None)
     public = getattr(model, "_result", None)
@@ -643,13 +643,13 @@ def _intercepts_read_the_shift(model) -> bool:
     """Whether the raw intercepts read one predictor through the recorded shift ``h``.
 
     A fit publishes ``P = fl(S + h)`` and a revision reads ``S = fl(P - h)``
-    (``_read_solver_state_from_public``).  In the second case ``fl(S + h) - P =
-    d1 (P - h) + d2 (S + h)`` with ``|d1|, |d2| <= u``, so ``|P - fl(S + h)| <=
-    u (|P| + |S| + 2 |h|) <= gamma_2 (|P| + |S| + |h|)`` (Higham 2002, section
-    2.2); the first case is exact.  The gap is formed by one subtraction of
-    nearby floats, exact by Sterbenz's lemma where it matters.  A bare
-    ``1e-13`` checked this before #449, below one rounding of a solver
-    intercept above about 900 (Claude's review of #448).
+    (``_read_solver_state_from_public``). In the second case
+    ``fl(S + h) - P = d1 (P - h) + d2 (S + h)`` with ``|d1|, |d2| <= u``, so
+    ``|P - fl(S + h)| <= u (|P| + |S| + 2 |h|) <= gamma_2 (|P| + |S| + |h|)``
+    (Higham 2002, section 2.2); the first case is exact. The gap is formed by
+    one subtraction of nearby floats, exact by Sterbenz's lemma where it
+    matters, and compared against the scaled ``gamma_2`` bound so large solver
+    intercepts are not rejected by an absolute tolerance.
     """
     public = getattr(model, "_result", None)
     solver = getattr(model, "_solver_result", None)
@@ -700,14 +700,13 @@ def _carry_into_centred_pair(result, values) -> None:
 
 
 def move_public_intercept(model, delta: float) -> None:
-    """Move the published predictor by ``delta``: its raw intercept and its centred pair alike.
+    """Move the published predictor by ``delta`` in both its raw intercept and centred pair.
 
-    A revision's intercept change has to reach the pair the model predicts
-    from.  Added to the raw intercepts alone it rounded away beside a numeric
-    column at an offset of 1e16, whose raw intercept is about -2e15 (#447);
-    a post-fit shape repair lost its profiled intercept the same way.  The
-    solver's intercepts are read from the published ones when the revision is
-    published (``publish_revised_coefficients``).
+    Updating the centred pair alongside the raw intercept preserves small
+    shifts (such as a post-fit shape repair's profiled intercept) that would
+    otherwise round away next to a large raw intercept induced by an offset
+    numeric column. The solver intercepts are synced from the published ones
+    by ``publish_revised_coefficients``.
     """
     public = model._result
     public.intercept = float(public.intercept + delta)
@@ -719,19 +718,15 @@ def _read_solver_state_from_public(model) -> None:
 
     The public predictor is ``intercept_pub + X_pub beta`` raw and
     ``alpha_pub + (X_pub - 1 c_pub') beta`` centred, ``X_pub = X - 1 m'`` over
-    the materialized columns (``runtime_canonicalize._fold_public_pair``).
-    The solver's reads the same rows' values from ``intercept_pub - m' beta``
-    raw and from ``alpha = alpha_pub - (m - c)' beta`` over the columns the
-    public pair folds (``c_pub = 0``), centred: the inverse fold, a correctly
-    rounded ``fsum`` and a TwoSum into the remainder.  Every other column is a
-    numeric one, whose public shift ``m`` is zero, so its ``c_pub`` is ``c``
-    and it adds nothing.  The solver's pair is evaluated as the public one is
-    (``centred_sum_compensated``).  Left at its pre-revision
-    values, the solver predictor, which a post-fit shape repair profiles its
-    intercept from and metrics read on the training rows, read the old
-    coefficients' shift ``m' beta_old`` after an editor edit, and the repair
-    published the difference (#447).  With no published pair the public
-    predictor is raw, and so is the solver's.
+    the materialized columns (``runtime_canonicalize._fold_public_pair``). The
+    solver reads the same rows from ``intercept_pub - m' beta`` raw and from
+    ``alpha = alpha_pub - (m - c)' beta`` over the columns the public pair
+    folds (``c_pub = 0``), centred: the inverse fold, a correctly rounded
+    ``fsum`` and a TwoSum into the remainder. Every other column is numeric
+    with ``m = 0`` (so ``c_pub = c``) and adds nothing. Keeping the solver
+    state aligned with the revised ``beta`` ensures post-fit shape repairs and
+    training-row metrics read the current shift rather than a pre-revision one.
+    With no published pair, both predictors stay raw.
     """
     public = getattr(model, "_result", None)
     solver = getattr(model, "_solver_result", None)
@@ -800,22 +795,19 @@ def _carry_revised_columns(model, beta_before) -> None:
     """Carry the change of each centred column a revision moved into the pair, exactly.
 
     A revision writes raw coordinates: a numeric column's new slope pivots at
-    ``x = 0``, so about its fitted centre ``c`` the column contributes ``(x -
-    c) beta`` and the pair takes ``K = sum c beta - c beta_before``.  ``K`` is
-    formed from exact products, ``c beta`` and ``-c beta_before`` and never
-    their difference (which -1e308 to 1e308 overflows), and split into its
-    correctly rounded value and the rounded remainder, so the pair holds it to
-    ``u^2``.  The centres stay where the fit put them.  A zero-centre column
-    contributes ``x beta`` already and is skipped.
+    ``x = 0``, so about its fitted centre ``c`` the column contributes
+    ``(x - c) beta`` and the pair takes ``K = sum (c beta - c beta_before)``.
+    ``K`` is formed from exact products ``c beta`` and ``-c beta_before``
+    (never from ``beta - beta_before``, which can overflow) and split into its
+    correctly rounded value and rounded remainder so the pair holds it to
+    ``u^2``. Centres stay fixed and zero-centre columns are skipped.
 
-    ``alpha`` then holds ``c dbeta``, which a row's ``(x - c) beta`` can cancel:
-    ``1e16 + 2`` beside ``-1e16`` at ``x = 0`` in Sol's review of #448.  The
-    result is marked ``centred_sum_compensated`` and evaluated as one
-    compensated sum with each column's exact centred product
-    (``mode_score.linear_predictor``, ``model.base.EtaSum``), so the remainder
-    survives the cancellation.  Moving the centre instead (0.36.0, ``c' = c
-    beta_before / beta``) lost a cancellation between two edited columns
-    (#449).  A pair with no remainder gains one here, whatever the family.
+    Because ``alpha`` then holds ``c dbeta`` which can cancel against
+    ``(x - c) beta``, the result is marked ``centred_sum_compensated`` and
+    evaluated as one compensated sum with each column's exact centred product
+    (``mode_score.linear_predictor``, ``model.base.EtaSum``) so the remainder
+    survives cancellation across one or more edited columns. A pair without a
+    remainder gains one here regardless of family.
     """
     public = model._result
     centre = getattr(public, "state_center", None)
@@ -854,22 +846,18 @@ def _carry_revised_columns(model, beta_before) -> None:
 
 
 def publish_revised_coefficients(model, beta_before) -> None:
-    """Publish a revision of the fitted coefficients as one predictor in every coordinate.
+    """Publish a revision of the fitted coefficients consistently in every coordinate system.
 
-    A revision (an editor edit, a post-fit shape repair) writes ``beta`` into
+    A revision (an editor edit or post-fit shape repair) writes ``beta`` into
     both results and moves the public intercept through
-    ``move_public_intercept``; the raw public predictor ``intercept_pub +
-    X_pub beta`` states what it means.  The change of a column the pair keeps
-    centred (a numeric one) that the revision moved is carried into the pair
-    exactly (``_carry_revised_columns``), so that ``alpha_pub + (X_pub - 1
-    c_pub') beta`` predicts the same rows; every other column carries no centre
-    and nothing moves.  The solver state is then read from the published one
-    (``_read_solver_state_from_public``) and the fitted mode's identity is
-    cleared, with the runtime separation finding, a statement about the state
-    the solve returned.  The pair is carried, never dropped: clearing it
-    dropped every dense column's centring (Sol's review of #445, P2), and
-    keeping the solver's pre-revision pair beside it left the solver predictor
-    at the old coefficients (#447).
+    ``move_public_intercept``, with the raw public predictor
+    ``intercept_pub + X_pub beta`` defining its meaning. Changes in centred
+    (numeric) columns are carried into the centred pair exactly
+    (``_carry_revised_columns``) rather than dropping the pair, so
+    ``alpha_pub + (X_pub - 1 c_pub') beta`` predicts the same values while
+    preserving dense-column centring. The solver state is then synced from the
+    published state (``_read_solver_state_from_public``), and fit-specific
+    mode identity and runtime separation findings are cleared.
     """
     _carry_revised_columns(model, beta_before)
     _read_solver_state_from_public(model)

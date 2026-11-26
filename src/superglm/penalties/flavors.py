@@ -27,10 +27,10 @@ class Adaptive:
 
     Parameters
     ----------
-    expon : float
+    expon : float, default 1.0
         Exponent for the inverse weighting. Higher values increase
         the contrast between large and small groups.
-    eps : float
+    eps : float, default 1e-6
         Floor on a group's initial norm, as a fraction of the largest group's
         norm, so initially-zeroed groups get a large finite weight.  The floor
         follows the units of the coefficients, so rescaling the response does
