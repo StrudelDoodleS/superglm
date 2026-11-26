@@ -384,8 +384,8 @@ def test_the_gamma_fraction_goes_deeper_where_32_levels_do_not_settle():
 
 
 def test_the_gamma_fraction_keeps_the_distance_from_a_large_shape():
-    """At ``a = 4e6`` forming ``x + 2n + 1 - a`` instead of ``(x - a) + (2n + 1)`` costs ``1e-13``."""
-    shape = 4e6 + 0.3
+    """At ``a = 4e7`` forming ``x + 2n + 1 - a`` instead of ``(x - a) + (2n + 1)`` costs ``1e-12``."""
+    shape = 4e7 + 0.3
     gap = 1.5 * math.sqrt(shape) + 1.5 + 2.0**-20
     got = kernel._gamma_excess(np.array([shape]), np.array([gap]))[0][0]
     with mp.workdps(40):
@@ -581,10 +581,10 @@ def test_the_log_logistic_matches_the_incomplete_beta(shape, logit):
     _assert_close(got, _log_logistic_reference(v, 1.0, shape), kappa)
 
 
-@pytest.mark.parametrize("offset", [2.0**-20, -(2.0**-20)])
+@pytest.mark.parametrize("offset", [3e-7, -3e-7, 7e-5])
 def test_a_concentrated_log_logistic_keeps_its_digits_beside_the_median(offset):
-    """Shape 3000 at ``v = s (1 + 2^-20)``: ``log(v/s)`` from the quotient is off by ``3000 u``."""
-    scale, shape = 1.75, 3000.0
+    """Shape 3000 just off the median: ``log(v/s)`` from a rounded quotient is off by ``3000 u``."""
+    scale, shape = 1.7, 3000.0
     v = scale * (1.0 + offset)
     got = kernel.log_logistic_mean_excess(*_column(v, scale, shape))[0]
     _assert_close(got, _log_logistic_reference(v, scale, shape))
