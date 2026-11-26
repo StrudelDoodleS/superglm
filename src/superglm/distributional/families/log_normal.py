@@ -779,7 +779,7 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
         location, sigma = self._location_coordinates(values), values[:, 1]
         return on_positive_support(
             amount,
-            self.default_prediction(values),
+            lambda rows: self.default_prediction(values[rows]),
             lambda rows: log_normal_mean_excess(amount[rows], location[rows], sigma[rows]),
         )
 

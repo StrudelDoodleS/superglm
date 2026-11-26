@@ -86,16 +86,18 @@ def finite_amounts(v: object, n_rows: int) -> Vector:
 
 
 def on_positive_support(
-    amount: Vector, mean: Vector, inside: Callable[[Rows], Vector]
+    amount: Vector, mean: Callable[[Rows], Vector], inside: Callable[[Rows], Vector]
 ) -> NDArray[np.float64]:
-    """``inside(rows)`` where ``amount > 0``; ``E[Y] - v`` at or below zero, where ``S(v) = 1``.
+    """``inside(rows)`` where ``amount > 0``; ``mean(rows) - v`` at or below zero, where ``S(v) = 1``.
 
     The result is read-only.
     """
-    result = mean - amount
-    rows = np.flatnonzero(amount > 0.0)
-    if rows.size:
-        result[rows] = inside(rows)
+    result = np.empty(amount.shape)
+    above = amount > 0.0
+    for rows, value in ((np.flatnonzero(above), inside), (np.flatnonzero(~above), mean)):
+        if rows.size:
+            result[rows] = value(rows)
+    result[~above] -= amount[~above]
     result.setflags(write=False)
     return result
 
@@ -182,11 +184,13 @@ def _log_normal_excess(amount: Vector, location: Vector, z: Vector, s: Vector) -
     return result
 
 
+@np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore")
 def normal_mean_excess(v: Vector, location: Vector, scale: Vector) -> Vector:
     """``sigma (phi(z)/Q(z) - z)``, ``z = (v - mu)/sigma``; accuracy as ``_normal_excess``."""
     return scale * _normal_excess((v - location) / scale)
 
 
+@np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore")
 def two_piece_normal_mean_excess(
     v: Vector, location: Vector, scale: Vector, skew: Vector
 ) -> Vector:
@@ -219,6 +223,7 @@ def two_piece_normal_mean_excess(
     return result
 
 
+@np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore")
 def log_normal_mean_excess(v: Vector, location: Vector, scale: Vector) -> Vector:
     """``v expm1(I)``, ``I = int_(z-sigma)^z (phi/Q - t) dt``, ``z = (log v - mu)/sigma``.
 
@@ -245,6 +250,7 @@ def _window_moment(t: Vector, s: Vector) -> Vector:
     return result
 
 
+@np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore")
 def two_piece_log_normal_mean_excess(
     v: Vector, location: Vector, scale: Vector, skew: Vector
 ) -> Vector:
@@ -345,27 +351,30 @@ def gamma_in_tail(shape: Vector, gap: Vector) -> NDArray[np.bool_]:
     return gap > _TAIL_SD * np.sqrt(shape) + _TAIL_OFFSET
 
 
+@np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore")
 def gamma_mean_excess(
-    shape: Vector, x: Vector, log_hazard: Callable[[Rows], Vector]
+    v: Vector, mean: Vector, shape: Vector, log_hazard: Callable[[Rows, Vector], Vector]
 ) -> NDArray[np.float64]:
-    """Mean excess of a unit-scale gamma of shape ``a`` at ``x > 0``.
+    """Gamma of shape ``a`` and mean ``m``: ``(m/a) e_a(x)`` at ``x = a v/m``, ``v > 0``.
 
-    Above ``a + 1.5 sqrt(a) + 1.5``: the continued fraction, relative error a few ``u``.
-    At or below: ``(a - x) + D/Q``, ``D = x^a e^-x/Gamma(a)``, with
-    ``log_hazard(rows) = log D - log Q`` supplied for those rows; a sum of positive terms
-    for ``x <= a`` and a loss under a factor 5 above.
+    Above ``a + 1.5 sqrt(a) + 1.5``: the continued fraction for ``e_a``, relative error a
+    few ``u``.  At or below: ``e_a = (a - x) + D/Q``, ``D = x^a e^-x/Gamma(a)``, with
+    ``log_hazard(rows, x) = log D - log Q`` supplied for those rows; a sum of positive terms
+    for ``x <= a`` and a loss under a factor 5 above.  ``x - a`` is formed as
+    ``a (v - m)/m``, which keeps a small distance from the mean.
     """
-    gap = x - shape
-    result = np.empty_like(gap)
+    x = shape * (v / mean)
+    gap = shape * ((v - mean) / mean)
+    unit = np.empty_like(gap)
     tail = gamma_in_tail(shape, gap)
-    result[tail] = _gamma_excess(shape[tail], gap[tail])[0]
+    unit[tail] = _gamma_excess(shape[tail], gap[tail])[0]
     rows = np.flatnonzero(~tail)
     if rows.size:
-        with np.errstate(over="ignore", under="ignore"):
-            result[rows] = np.exp(log_hazard(rows)) - gap[rows]
-    return result
+        unit[rows] = np.exp(log_hazard(rows, x[rows])) - gap[rows]
+    return mean * (unit / shape)
 
 
+@np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore")
 def generalized_gamma_mean_excess(
     v: Vector,
     location: Vector,
@@ -444,7 +453,9 @@ def generalized_gamma_mean_excess(
             log_tail_mean = (
                 log_mean[at] + log_tilt - log_survival(at, mu[body], sigma[body], q[body])
             )
-            drop = log_tail_mean - np.log(amount[body])
+            # D is positive; rounding can take it below zero only where it is under about 1e-14
+            # (sigma or sigma/|Q| that small), and the excess there reads zero.
+            drop = np.maximum(log_tail_mean - np.log(amount[body]), 0.0)
             excess[body] = np.where(
                 drop > _EXP_SAFE,
                 np.exp(log_tail_mean),
@@ -454,17 +465,20 @@ def generalized_gamma_mean_excess(
     return result
 
 
+@np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore")
 def generalized_pareto_mean_excess(v: Vector, scale: Vector, shape: Vector) -> Vector:
     """``(scale + shape v)/(1 - shape)`` for ``0 <= shape < 1``; exact to rounding."""
     return (scale + shape * v) / (1.0 - shape)
 
 
+@np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore")
 def lomax_mean_excess(v: Vector, scale: Vector, shape: Vector) -> NDArray[np.float64]:
     """``(scale + v)/(shape - 1)``, ``inf`` for ``shape <= 1``; exact to rounding."""
     with np.errstate(divide="ignore"):
         return np.where(shape > 1.0, (scale + v) / np.maximum(shape - 1.0, 0.0), np.inf)
 
 
+@np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore")
 def log_logistic_mean_excess(v: Vector, scale: Vector, shape: Vector) -> NDArray[np.float64]:
     """Log-logistic (Fisk) with ``S(v) = 1/(1 + (v/s)^a)``; ``inf`` for ``a <= 1``.
 

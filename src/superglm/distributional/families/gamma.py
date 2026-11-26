@@ -664,21 +664,23 @@ class GammaLS(MeanPredictor, ScalePredictor):
             theta, n_observations=None, parameters=self.parameters, family_name="GammaLS"
         )
         amount = finite_amounts(v, len(values))
-        cv2 = values[:, 1] * values[:, 1]
-        shape, scale = 1.0 / cv2, values[:, 0] * cv2
+        mean = values[:, 0]
+        with np.errstate(over="ignore"):
+            shape = 1.0 / (values[:, 1] * values[:, 1])
 
         def inside(rows: NDArray[np.intp]) -> NDArray[np.float64]:
-            a, x = shape[rows], amount[rows] / scale[rows]
-
-            def log_hazard(body: NDArray[np.intp]) -> NDArray[np.float64]:
+            def log_hazard(body: NDArray[np.intp], x: NDArray[np.float64]) -> NDArray[np.float64]:
                 # log[x^a e^-x / Gamma(a)] - log Q(a, x), each from its own tail-safe kernel.
-                log_density = gamma_shape_plus_one_log_increment(a[body], x[body]) + np.log(a[body])
                 at = rows[body]
-                return log_density - self.log_window_probability(amount[at], np.inf, values[at])
+                log_density = gamma_shape_plus_one_log_increment(shape[at], x) + np.log(shape[at])
+                log_survival = self.log_window_probability(amount[at], np.inf, values[at])
+                # Q >= Q(a, a + 1.5 sqrt(a) + 1.5) > 0.05 on these rows, so a density below
+                # e^-800 gives a hazard of zero in float64 whatever the survival reads.
+                return np.where(log_density < -800.0, -np.inf, log_density - log_survival)
 
-            return scale[rows] * gamma_mean_excess(a, x, log_hazard)
+            return gamma_mean_excess(amount[rows], mean[rows], shape[rows], log_hazard)
 
-        return on_positive_support(amount, values[:, 0], inside)
+        return on_positive_support(amount, lambda rows: mean[rows], inside)
 
     def variance(self, theta: NDArray) -> NDArray[np.float64]:
         """``Var(Y) = (mean cv)^2`` per row at unit prior weight."""

@@ -794,7 +794,9 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
                 at_amount, location[rows], sigma[rows], q[rows], log_mean[rows], log_survival
             )
 
-        return on_positive_support(amount, self.default_prediction(values), inside)
+        return on_positive_support(
+            amount, lambda rows: self.default_prediction(values[rows]), inside
+        )
 
     def expected_shortfall(self, p: NDArray, theta: NDArray) -> NDArray[np.float64]:
         """``E[Y | Y > q_p]`` per row in either natural parametrisation."""

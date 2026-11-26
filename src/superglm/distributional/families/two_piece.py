@@ -1028,7 +1028,7 @@ class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, Ske
         location = self._location_coordinates(values)
         return on_positive_support(
             amount,
-            self.default_prediction(values),
+            lambda rows: self.default_prediction(values[rows]),
             lambda rows: two_piece_log_normal_mean_excess(
                 amount[rows], location[rows], values[rows, 1], values[rows, 2]
             ),

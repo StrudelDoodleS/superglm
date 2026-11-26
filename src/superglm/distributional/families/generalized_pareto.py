@@ -725,7 +725,7 @@ class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
         amount = finite_amounts(v, len(values))
         return on_positive_support(
             amount,
-            self.default_prediction(values),
+            lambda rows: self.default_prediction(values[rows]),
             lambda rows: generalized_pareto_mean_excess(
                 amount[rows], values[rows, 0], values[rows, 1]
             ),
