@@ -140,18 +140,15 @@ def _log_mills_drop(z: Vector, s: Vector) -> tuple[Vector, Vector]:
     where one panel is enough.  The second value is exact only where ``z < 0``.
     """
     low = z - s
-    with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
-        above_low = np.where(
-            low < 0.0,
-            special.erfc(low * _SQRT_HALF),
-            special.erfcx(np.maximum(low, 0.0) * _SQRT_HALF),
-        )
-        above_z = np.where(
-            z < 0.0, special.erfc(z * _SQRT_HALF), special.erfcx(np.maximum(z, 0.0) * _SQRT_HALF)
-        )
-        log_ratio = np.log(above_low / above_z)
-        base = np.where(z < 0.0, s * (0.5 * s - z), 0.5 * np.minimum(low, 0.0) ** 2)
-        drop = base + log_ratio
+    above_low = np.where(
+        low < 0.0, special.erfc(low * _SQRT_HALF), special.erfcx(np.maximum(low, 0.0) * _SQRT_HALF)
+    )
+    above_z = np.where(
+        z < 0.0, special.erfc(z * _SQRT_HALF), special.erfcx(np.maximum(z, 0.0) * _SQRT_HALF)
+    )
+    log_ratio = np.log(above_low / above_z)
+    base = np.where(z < 0.0, s * (0.5 * s - z), 0.5 * np.minimum(low, 0.0) ** 2)
+    drop = base + log_ratio
     rows = np.flatnonzero(~(drop >= _DROP_CLOSED))
     if rows.size:
         total = np.zeros(rows.size)
@@ -171,16 +168,15 @@ def _log_normal_excess(amount: Vector, location: Vector, z: Vector, s: Vector) -
     is not.
     """
     drop, log_ratio = _log_mills_drop(z, s)
-    with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
-        result = amount * np.expm1(np.minimum(drop, _EXP_SAFE))
-        rows = np.flatnonzero(((z < 0.0) & (drop > 1.0)) | (drop > _EXP_SAFE))
-        if rows.size:
-            log_tail_mean = np.where(
-                z[rows] < 0.0,
-                location[rows] + 0.5 * s[rows] * s[rows] + log_ratio[rows],
-                np.log(amount[rows]) + drop[rows],
-            )
-            result[rows] = np.exp(log_tail_mean) * -np.expm1(-drop[rows])
+    result = amount * np.expm1(np.minimum(drop, _EXP_SAFE))
+    rows = np.flatnonzero(((z < 0.0) & (drop > 1.0)) | (drop > _EXP_SAFE))
+    if rows.size:
+        log_tail_mean = np.where(
+            z[rows] < 0.0,
+            location[rows] + 0.5 * s[rows] * s[rows] + log_ratio[rows],
+            np.log(amount[rows]) + drop[rows],
+        )
+        result[rows] = np.exp(log_tail_mean) * -np.expm1(-drop[rows])
     return result
 
 
@@ -211,14 +207,11 @@ def two_piece_normal_mean_excess(
     above = distance >= 0.0
     result[above] = right[above] * _normal_excess(distance[above] / right[above])
     below = ~above
-    t = -distance[below] / left[below]
-    with np.errstate(under="ignore", over="ignore"):
-        window = 0.5 * special.erf(t * _SQRT_HALF)
-        ramp = t * window + _PHI_0 * np.expm1(-0.5 * t * t)
-    eps = skew[below]
-    numerator = (1.0 + eps) * (-0.5 * distance[below] + right[below] * _PHI_0) + (1.0 - eps) * left[
-        below
-    ] * ramp
+    eps, t = skew[below], -distance[below] / left[below]
+    window = 0.5 * special.erf(t * _SQRT_HALF)
+    ramp = t * window + _PHI_0 * np.expm1(-0.5 * t * t)
+    right_share = (1.0 + eps) * (-0.5 * distance[below] + right[below] * _PHI_0)
+    numerator = right_share + (1.0 - eps) * left[below] * ramp
     result[below] = numerator / (0.5 * (1.0 + eps) + (1.0 - eps) * window)
     return result
 
@@ -247,6 +240,21 @@ def _window_moment(t: Vector, s: Vector) -> Vector:
                 u = width * (panel + node)
                 total += weight * np.expm1(s[rows] * (t[rows] - u)) * np.exp(-0.5 * u * u)
         result[rows] = _PHI_0 * width * total
+    return result
+
+
+def _left_window_share(
+    amount: Vector, median: Vector, depth: Vector, s: Vector, window: Vector
+) -> Vector:
+    """``L = E[(Y - v); v < Y < m]`` of a log-normal piece: ``depth = log(m/v)``, ``window = h``."""
+    t = depth / s
+    result = np.empty_like(t)
+    closed = depth >= _WINDOW_CLOSED
+    v, m, tc, sc = amount[closed], median[closed], t[closed], s[closed]
+    beyond = np.exp(-0.5 * tc * tc) * 0.5 * special.erfcx((sc + tc) * _SQRT_HALF)
+    result[closed] = m * 0.5 * special.erfcx(sc * _SQRT_HALF) - v * (beyond + window[closed])
+    near = ~closed
+    result[near] = amount[near] * _window_moment(t[near], s[near])
     return result
 
 
@@ -280,26 +288,12 @@ def two_piece_log_normal_mean_excess(
     if not rows.size:
         return result
     amount, s, eps, depth = v[rows], left[rows], skew[rows], -log_ratio[rows]
-    t = depth / s
-    with np.errstate(over="ignore", under="ignore"):
-        median = np.exp(location[rows])
-        window = 0.5 * special.erf(t * _SQRT_HALF)
-        closed = depth >= _WINDOW_CLOSED
-        left_share = np.empty_like(t)
-        left_share[closed] = median[closed] * (0.5 * special.erfcx(s[closed] * _SQRT_HALF)) - (
-            amount[closed]
-            * (
-                np.exp(-0.5 * t[closed] ** 2)
-                * (0.5 * special.erfcx((s[closed] + t[closed]) * _SQRT_HALF))
-                + window[closed]
-            )
-        )
-        left_share[~closed] = amount[~closed] * _window_moment(t[~closed], s[~closed])
-        at_median = _log_normal_excess(median, location[rows], np.zeros_like(t), right[rows])
-        numerator = (1.0 - eps) * left_share + 0.5 * (1.0 + eps) * (
-            -median * np.expm1(-depth) + at_median
-        )
-    result[rows] = numerator / (0.5 * (1.0 + eps) + (1.0 - eps) * window)
+    median = np.exp(location[rows])
+    window = 0.5 * special.erf(depth / s * _SQRT_HALF)
+    at_median = _log_normal_excess(median, location[rows], np.zeros_like(s), right[rows])
+    right_share = 0.5 * (1.0 + eps) * (-median * np.expm1(-depth) + at_median)
+    left_share = (1.0 - eps) * _left_window_share(amount, median, depth, s, window)
+    result[rows] = (left_share + right_share) / (0.5 * (1.0 + eps) + (1.0 - eps) * window)
     return result
 
 
@@ -397,7 +391,7 @@ def generalized_gamma_mean_excess(
 
           e(v)/v = [r - (e_k* - e_k)] / [|x - k*| + e_k*],
 
-      from the two continued fractions.  ``e_k* - e_k`` is under ``0.9 r``, so the numerator
+      from the two continued fractions.  ``e_k* - e_k`` is under ``r/2``, so the numerator
       keeps its sign; its relative error is a few ``u (1 + 1/sigma)``.
     - elsewhere: ``v expm1(D)``, ``D = log E[Y] - log v + log S*(v) - log S(v)``, with
       ``log_survival(rows, mu, sigma, Q)`` the log survival at ``v[rows]`` of the law with
@@ -474,8 +468,7 @@ def generalized_pareto_mean_excess(v: Vector, scale: Vector, shape: Vector) -> V
 @np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore")
 def lomax_mean_excess(v: Vector, scale: Vector, shape: Vector) -> NDArray[np.float64]:
     """``(scale + v)/(shape - 1)``, ``inf`` for ``shape <= 1``; exact to rounding."""
-    with np.errstate(divide="ignore"):
-        return np.where(shape > 1.0, (scale + v) / np.maximum(shape - 1.0, 0.0), np.inf)
+    return np.where(shape > 1.0, (scale + v) / (shape - 1.0), np.inf)
 
 
 @np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore")
