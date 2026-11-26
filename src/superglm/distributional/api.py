@@ -2491,7 +2491,9 @@ class SuperLSS:
         ``"binned"``, ``"actual_expected"``, ``"calibration"``, ``"scores"``,
         ``"comparison"``, ``"term"``, ``"risk_curves"``, ``"density_fan"``,
         ``"spread"``, ``"portfolio"`` or ``"distribution"`` -- and the keywords are those of the
-        method that builds it.  Every payload carries what was asked of it
+        method that builds it, except that ``"distribution"`` takes the curve's own kind as
+        ``curve=`` (``"density"``, ``"survival"`` or ``"mean_excess"``), since ``kind`` is
+        taken here.  Every payload carries what was asked of it
         (levels, seeds, bin edges, draw counts), so a figure is reproducible
         from its payload alone and a front end can draw it without the model.
         """
@@ -2517,9 +2519,12 @@ class SuperLSS:
             "density_fan": self.density_fan,
             "spread": self.parameter_spread,
             "portfolio": self.portfolio,
-            "distribution": self.distribution_curve,
+            "distribution": self._distribution_payload,
         }
         return builders[kind](**kwargs).to_json()
+
+    def _distribution_payload(self, curve: str = "density", **kwargs: Any) -> DistributionCurve:
+        return self.distribution_curve(kind=curve, **kwargs)
 
     def _qq_payload(
         self,

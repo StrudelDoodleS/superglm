@@ -466,6 +466,8 @@ def test_the_payload_is_json_and_plot_data_returns_it():
     assert payload["y"] == curve.y.tolist() and payload["values"] == curve.values.tolist()
     assert payload["kind"] == "density" and payload["threshold"] is None
     assert model.plot_data("distribution", row=row, n_points=5) == payload
+    survival = model.distribution_curve(row, kind="survival", n_points=5).to_json()
+    assert model.plot_data("distribution", row=row, curve="survival", n_points=5) == survival
 
 
 def test_an_infinite_mean_excess_is_null_in_json():
