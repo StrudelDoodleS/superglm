@@ -804,7 +804,7 @@ def _coverage_report(out: Path) -> None:
     import coverage
 
     data, rc = out / "coverage" / ".coverage", _coverage_rc(out)
-    subprocess.run([sys.executable, "-m", "coverage", "combine", f"--rcfile={rc}",
+    subprocess.run([sys.executable, "-m", "coverage", "combine", "--append", f"--rcfile={rc}",
                     f"--data-file={data}"], cwd=out / "coverage", capture_output=True, check=False)  # fmt: skip
     cov = coverage.Coverage(data_file=str(data), config_file=str(rc), branch=True)
     cov.load()
