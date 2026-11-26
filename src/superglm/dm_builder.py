@@ -1183,14 +1183,14 @@ def _scan_separation(
             cross_spec._occupied_cells_at_fit = found[0].occupied if found else None
             cross_spec._bounded_groups_at_fit = bounded
     compiled.scan_codes.clear()
-    from superglm.links import LogLink
+    from superglm.links import is_multiplicative
 
     levels = SeparatedLevels(
         findings=findings,
         specs={**compiled.specs, **compiled.interaction_specs},
         sample_weight=sample_weight,
         offset=offset,
-        exposure=offset is not None and isinstance(link, LogLink),
+        exposure=offset is not None and is_multiplicative(link),
         frame=X,
     )
     return levels, curves, level_curves
