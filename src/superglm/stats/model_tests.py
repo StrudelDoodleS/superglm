@@ -481,7 +481,10 @@ def score_test_zi(
             "rows and the offset passed."
         )
 
-    statistic = score * score / variance
+    # Standardised before it is squared: score**2 can pass float64's largest
+    # number where score**2 / variance does not.
+    standardised = score / float(np.sqrt(variance))
+    statistic = standardised * standardised
     return ScoreTestZIResult(
         statistic=statistic,
         p_value=float(stats.chi2.sf(statistic, df=1)),

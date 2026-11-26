@@ -762,6 +762,34 @@ def _zi_score_statistic(y, mu):
     return np.sum(((y == 0) - p0) / p0 + (y - mu)) ** 2 / np.sum((1.0 - p0) / p0 - mu)
 
 
+def _assert_zi_exact(result, y, mu):
+    """``result`` against 60-digit sums over the rows; returns the reference statistic.
+
+    A row's exp(mu) - 1 - mu is the exponential series from its third term where
+    mu < 1, which has nothing to cancel.  The library evaluates a row to 2e-13 (the
+    1e-13 of its log-variance and the rounding of a sum near 800), and the tolerance
+    allows for the cancellation between the rows of the score.  The p-value is the
+    chi-square tail of the statistic returned, erfc(sqrt(statistic / 2)).
+    """
+    mp = pytest.importorskip("mpmath")
+    with mp.workdps(60):
+        score = variance = magnitude = mp.mpf(0)
+        for count, mean in zip(y, mu, strict=True):
+            m = mp.mpf(float(mean))
+            series = (m**j / mp.factorial(j) for j in range(2, 50))
+            information = mp.fsum(series) if m < 1 else mp.exp(m) - 1 - m
+            term = information if count == 0 else mp.mpf(float(count)) - 1 - m
+            score, variance, magnitude = score + term, variance + information, magnitude + abs(term)
+        statistic = float(score**2 / variance)
+        rel = 2e-13 * (1.0 + 2.0 * float(magnitude / abs(score)))
+        tail = float(mp.erfc(mp.sqrt(mp.mpf(result.statistic) / 2)))
+        direction = "inflated" if score > 0 else "deflated"
+    assert result.statistic == pytest.approx(statistic, rel=rel, abs=0.0)
+    assert result.p_value == pytest.approx(tail, rel=1e-12, abs=0.0)
+    assert result.direction == direction
+    return statistic
+
+
 def _null_statistics(rng, replicates, mu, fit, X):
     """``score_test_zi`` on ``replicates`` Poisson samples at ``mu``, each refitted."""
     results = []
@@ -889,6 +917,19 @@ class TestScoreTestZIStatistic:
         assert abs(np.sum(y[held_out] - mu)) > 1.0
         result = score_test_zi(model, X[held_out], y[held_out])
         assert result.statistic == pytest.approx(_zi_score_statistic(y[held_out], mu), rel=1e-12)
+
+    def test_a_score_whose_square_passes_float64_keeps_its_statistic(self):
+        """One zero at a fitted mean of 355, beside a row at 709 that carries the
+        variance: the score is 1.5e154 and its square is past float64's largest number,
+        while score**2 / variance is 2.72."""
+        X = pd.DataFrame({"x": np.r_[np.zeros(999), 1.0]})
+        y = np.r_[0.0, 710.0, np.full(997, 355.0), 709.0]
+        model = _fit_poisson_numeric(X, y)
+        mu = np.asarray(model.predict(X), dtype=np.float64)
+        assert np.expm1(mu[0]) > np.sqrt(np.finfo(np.float64).max)  # the zero's own score
+
+        statistic = _assert_zi_exact(score_test_zi(model, X, y), y, mu)
+        assert 2.0 < statistic < 4.0
 
     @pytest.mark.slow
     def test_null_rejection_rate_with_covariates_is_five_percent(self):
