@@ -2,28 +2,26 @@
 
 A spline term needs a smoothing parameter to balance following the signal
 against chasing noise. {py:meth}`~superglm.SuperGLM.fit_reml` chooses that
-smoothing from a likelihood criterion (REML) that assumes the rows are
-independent once you account for the covariates.
+smoothing from a likelihood criterion (REML) that **trusts the declared count
+law and that rows are independent** once you account for the covariates.
+{py:meth}`~superglm.SuperGLM.fit_ncv` **trusts neither**: it chooses the
+smoothing parameters by predicting rows it did not fit (neighbourhood
+cross-validation; Wood, 2024).
 
-On many insurance books, rows are not independent:
+When to reach for `fit_ncv` and when not to bother:
 
-- **Repeated policies or fleets**: several policy years or vehicles from the
-  same insured share unobserved risk habits.
-- **Calendar periods**: claims in the same month or accident year share weather
-  events, court decisions or claims-inflation shifts.
-- **Spatial grids**: nearby cells or postcodes share local weather, road layout
-  or neighbourhood effects.
+- **Reach for `fit_ncv`** when counts are far more variable than the declared
+  law allows (so Poisson REML reads overdispersion as real wiggliness), or when
+  rows share unobserved risk — repeated policies or fleets, calendar periods,
+  or nearby spatial cells.
+- **Do not bother** when the declared law is reasonable and rows within a group
+  barely move together. On the public Spanish motor book below, `fit_reml` and
+  `fit_ncv` produce the same curves and agree to within a few thousandths of a
+  percent on held-out error, while `fit_ncv` takes about three to four times as
+  long to fit.
 
-When rows that belong together move together, an independence criterion reads
-their agreement as a real feature of the curve and chooses a smoothing
-parameter that is too small. The fitted curve bends to chase those group or
-local shocks.
-
-{py:meth}`~superglm.SuperGLM.fit_ncv` chooses the smoothing parameters by
-**held-out prediction** instead (neighbourhood cross-validation; Wood, 2024).
-You say which rows belong together, and `fit_ncv` removes each neighbourhood
-from the fit together, predicts the held-out rows, and picks the smoothing that
-minimises the summed held-out deviance:
+You tell `fit_ncv` which rows leave the fit together, and it picks the smoothing
+that minimises the summed held-out deviance:
 
 ```python
 from sklearn.model_selection import GroupKFold
@@ -39,6 +37,168 @@ supports `SuperGLM` with a **Gaussian family and identity link** or a **Poisson
 family and log link**, without covariate binning (`discrete=False`). See
 [When to use it and when not](#when-to-use-it-and-when-not) for the
 full list of limits.
+
+## A real example: the Spanish health portfolio
+
+Consider a public Spanish health insurance portfolio: 210,998 insured-year rows
+across 41,256 policies (families and collectives), recording 3,820,391 medical
+services over 204,987.7 insured-years (2017 to 2019). The model is a Poisson
+frequency model with log exposure as offset, a fine age curve for women
+(`k=48`, roughly a knot every two years of age) plus a male age-difference
+interaction, a spline for years with the insurer (`seniority`, `k=20`), and six
+underwriting factors:
+
+```python
+import numpy as np
+from superglm import Categorical, Spline, SuperGLM
+
+model = SuperGLM(
+    family="poisson",
+    features={
+        "age": Spline(kind="ps", k=48),
+        "seniority": Spline(kind="ps", k=20),
+        "gender": Categorical(),
+        "product": Categorical(),
+        "policy_type": Categorical(),
+        "reimbursement": Categorical(),
+        "channel": Categorical(),
+        "habitat": Categorical(),
+        "climate": Categorical(),
+    },
+    interactions=[("age", "gender")],
+    discrete=False,
+)
+model.fit_ncv(X, y, offset=np.log(exposure), groups=df["ID_policy"])
+```
+
+Fitting the same model with `fit_reml` and with `fit_ncv(..., groups=df["ID_policy"])`
+produces very different age curves:
+
+```{figure} ../images/ncv/health_age_curves.png
+:name: fig-ncv-health-age-curves
+:alt: Expected medical services per insured-year by age for women and men under fit_reml and fit_ncv with policies held out, with percentage ratio panels underneath showing fit_reml oscillating up to 13 percent around fit_ncv.
+
+Expected medical services per insured-year by age (reference member) on the Spanish health portfolio. `fit_reml` produces jagged single-age wiggles (20 turning points for women, 27 for men); `fit_ncv` with whole policies held out produces graduated curves (4 turning points each).
+```
+
+Because medical service counts are heavily overdispersed relative to a Poisson
+law, `fit_reml` treats single-age fluctuations in 3,820,391 services as real
+signal and spends 133.5 total effective degrees of freedom (46.4 on women's
+age, 44.1 on men's age difference, 19.0 on seniority). Its curves turn 20 times
+for women and 27 times for men, sitting between 9.9% below (at age 12) and
+13.0% above (at age 0) `fit_ncv`'s curve for women, and between 8.2% below (at
+age 89) and 8.8% above (at age 40) for men. Holding out each policy with
+`fit_ncv` converges in 13 evaluations at 74.1 total degrees of freedom (20.4 on
+women's age, 11.1 on men's difference, 18.6 on seniority) and leaves 4 turning
+points on each age curve.
+
+### Comparing declared variance laws against `fit_ncv`
+
+A natural question is whether declaring a more flexible count or variance law
+inside `fit_reml` solves the same problem. To test that, the committed script
+`docs/scripts/ncv_health_seven_methods.py` splits the portfolio into five folds
+of whole policies and scores seven ways of choosing the smoothing on policies
+each fit never saw — all evaluated on the same held-out Poisson deviance per
+row:
+
+```{figure} ../images/ncv/health_seven_methods.png
+:name: fig-ncv-health-seven-methods
+:alt: Dot and mean-diamond plot comparing six smoothing methods against Poisson fit_reml across five folds of unseen policies on the Spanish health book, with mean EDF annotated on the right.
+
+Held-out Poisson deviance per row less Poisson `fit_reml`'s (24.282348, mean EDF 133.6) across five folds of unseen policies. Dots show individual folds, diamonds show the five-fold mean, and values to the left of the red line are better.
+```
+
+| Method | Mean EDF | Deviance less Poisson `fit_reml` | Fold SD | Folds better |
+|---|---:|---:|---:|---:|
+| `fit_reml`, Poisson (baseline: 24.282348) | 133.6 | 0 | — | — |
+| `fit_reml`, Tweedie $p = 1.01$ (fold-mean scale 34.4) | 129.1 | −0.001383 (−0.006%) | 0.000796 | 5 of 5 |
+| `fit_reml`, Tweedie $p = 1.2$ (fold-mean scale 20.2) | 91.5 | −0.012483 (−0.051%) | 0.008656 | 5 of 5 |
+| `fit_reml`, Tweedie $p = 1.5$ (fold-mean scale 9.1) | 81.0 | −0.011221 (−0.046%) | 0.019818 | 3 of 5 |
+| `fit_reml`, negative binomial ($\theta$ 0.504 to 0.507) | 76.3 | +0.009688 (+0.040%) | 0.035896 | 1 of 5 |
+| `fit_ncv`, single rows held out | 78.1 | −0.014494 (−0.060%) | 0.007814 | 5 of 5 |
+| `fit_ncv`, policies held out | 73.2 | −0.015310 (−0.063%) | 0.008494 | 5 of 5 |
+
+Three things stand out:
+
+- **`fit_reml`'s smoothing moves with the variance law declared.** Across the
+  five laws, mean EDF runs from 133.6 down to 76.3, and held-out deviance moves
+  both ways: Tweedie $p = 1.01$ estimates a fold-mean scale of 34.4 yet still
+  keeps 129.1 EDF, Tweedie $p = 1.2$ improves all 5 folds (−0.012483), Tweedie
+  $p = 1.5$ is mixed (3 of 5 folds), and negative binomial is worse on 4 of 5
+  folds (+0.009688).
+- **`fit_ncv` declares no overdispersion law and predicts unseen policies best
+  of the seven.** With policies held out it lands at 73.2 EDF and lowers
+  held-out deviance by −0.015310 (−0.063%, SD 0.008494), winning on all 5 of 5
+  folds while removing the single-age wiggles.
+- **On this book, single rows already get most of the gain.** Holding out
+  single rows alone reaches −0.014494 (−0.060%, 5 of 5 folds, 78.1 EDF).
+  Holding out whole policies instead of single rows changes deviance by
+  −0.000816 (SD 0.001543, better on 3 of 5 folds). Here the improvement comes
+  chiefly from not trusting the Poisson count law, not from grouping rows by
+  policy.
+
+### Data, licence and changes
+
+The real-data figures are generated from public datasets that are fetched, never
+redistributed. To fetch and verify both Spanish books into `data/`:
+
+```bash
+uv run python scripts/fetch_spanish_books.py --dest data/
+```
+
+The health book is Lledó, J., Espinosa Adamez, P. and Perez Gimenez, V. (2025),
+*Dataset of health insurance portfolio*, version 4, Mendeley Data
+([doi:10.17632/386vmj2tbk.4](https://doi.org/10.17632/386vmj2tbk.4)), licensed
+under [CC BY 4.0](http://creativecommons.org/licenses/by/4.0). Changes made:
+the fetch script converts the first sheet of the spreadsheet (228,711 rows by
+42 columns) to parquet without altering rows or columns; before fitting, the
+figure scripts drop 8,645 rows with zero exposure (which carry 24,663 services
+and cannot be placed on a rate) and 9,068 dental-only rows, cap age at 90 and
+years with the insurer at 40, and omit post-underwriting columns (`premium`,
+`cost_claims_year`, `lapse`).
+
+## Where it changes nothing: the Spanish motor book
+
+`fit_ncv` is not always different from `fit_reml`. On the public Spanish motor
+book by coverage — 353,576 rows across 185,407 insureds, 37,695 liability
+claims over 249,980.1 exposure-years (2022 to 2024) — fitting the same Poisson
+liability frequency model with `fit_reml` and with `fit_ncv(..., groups=insured)`
+produces curves that lie on top of each other:
+
+```{figure} ../images/ncv/motor_curves_agree.png
+:name: fig-ncv-motor-curves-agree
+:alt: Driver-age and vehicle-age liability claim frequency relativities on the Spanish motor book under fit_reml and fit_ncv with insureds held out, lying nearly on top of each other.
+
+Driver-age and vehicle-age liability frequency relativities on the Spanish motor book. `fit_reml` and `fit_ncv` with insureds held out agree closely across the bulk of the exposure.
+```
+
+Across the whole book, total EDF is 64.3 under `fit_reml` and 61.0 under
+`fit_ncv` (driver age 7.2 against 6.0; vehicle age 7.8 against 7.2). Over the
+central 90% of exposure, the curves differ by at most 2.0% on driver age (ages
+31 to 69) and 1.3% on vehicle age (ages 8 to 46), reaching 6.5% only at driver
+age 85 (the end of the range) and 2.6% at vehicle age 0. On five folds of
+unseen insureds, held-out Poisson deviance per row is 0.507529 for `fit_reml`
+(mean EDF 63.2) and 0.507556 for `fit_ncv` (mean EDF 63.5): a difference of
++0.000028 (+0.0055%, SD 0.000026; `fit_ncv` better on 1 of 5 folds). Because
+the held-out criterion is flat there, `fit_ncv`'s fold EDF moves slightly more
+from fold to fold (59.1 to 66.8 against 61.5 to 65.5) with no effect on the
+score.
+
+Why they agree: a policyholder's liability claim counts barely move together
+from one year to the next (correlation 0.054 across 168,169 consecutive
+insured-year pairs), so holding out an insured's years together leaves almost
+the same information as treating rows as independent.
+
+The motor book is Espinosa, P., Lledó, J. and Atance, D. (2026), *A detailed
+dataset of motor insurance policies with coverage-specific financial
+information*, version 1, Mendeley Data
+([doi:10.17632/sw4jmdb2sm.1](https://doi.org/10.17632/sw4jmdb2sm.1)), licensed
+under [CC BY 4.0](http://creativecommons.org/licenses/by/4.0). Changes made:
+the fetch script converts the `;`-separated CSV (354,140 rows by 47 columns) to
+parquet; before fitting, the figure script drops 49 rows with
+zero liability exposure and 515 rows missing vehicle value, vehicle age or
+licence age, lumps vehicle brands with fewer than 2,000 rows into `"OTHER"`,
+and caps continuous covariates at fixed limits.
 
 ## What is held out
 
@@ -81,15 +241,13 @@ the full fit. A row with zero weight stays out of every fit and adds nothing to
 the criterion, though it is still predicted when scored. Under
 `weight_semantics="frequency"`, a row's replicates leave the fit together.
 
-## When rows in a group share noise
+### Textbook case: rows in a group that share noise
 
-Consider a simulated Gaussian book of 600 rows split into 30 groups of 20 rows
-each (for example, 30 fleets or multi-year policies sitting in different parts
-of a continuous covariate $x$). Every row in a group shares a group shock
-(standard deviation 0.45) on top of smaller row-level noise (standard deviation
-0.12) around a smooth true curve $f(x) = \sin(2\pi x) + 0.5x$. Fitting the same
-25-basis P-spline with `fit_reml` and with `fit_ncv(..., groups=groups)` gives
-two very different curves:
+When rows within a group genuinely share a large unobserved shock, holding out
+whole groups is what stops the curve chasing it. In a simulated Gaussian book
+of 600 rows across 30 groups of 20 rows sitting in local stretches of $x$
+(group shock SD 0.45 on top of row noise SD 0.12 around
+$f(x) = \sin(2\pi x) + 0.5x$):
 
 ```python
 from superglm import Spline, SuperGLM
@@ -107,17 +265,13 @@ ncv_model = SuperGLM(family="gaussian", features=spec).fit_ncv(X, y, groups=grou
 Simulated grouped data (30 groups of 20 rows). `fit_reml` bends toward each displaced cluster; holding out whole groups with `fit_ncv` recovers the smooth curve.
 ```
 
-Because 20 rows in the same group all sit above or below the curve together,
-`fit_reml` picks a small smoothing parameter ($\lambda = 0.25$, EDF 17.3) and
-chases every group's shock (RMSE 0.205 against the truth). `fit_ncv` removes
-all 20 rows of each group before predicting them; a bump fitted to one group
-hurts predictions for neighbouring groups, so the search moves to
-$\lambda = 343.2$ (EDF 4.0) and cuts RMSE by 63.2%, to 0.075.
-
-### Held-out error against smoothing
-
-Sweeping $\lambda$ by hand across seven decades on the same grouped dataset
-shows what `fit_ncv` optimises:
+`fit_reml` reads the 20 agreeing rows in each cluster as signal
+($\lambda = 0.25$, EDF 17.3, RMSE 0.205 against the truth). Removing all 20
+rows of each group before scoring moves `fit_ncv` to $\lambda = 343.2$
+(EDF 4.0) and cuts RMSE by 63.2%, to 0.075. Sweeping $\lambda$ across seven
+decades shows the leave-group-out criterion `fit_ncv` walks down in 5 outer
+steps (from mean held-out error 0.571 at `fit_reml`'s choice to 0.421, a 26.4%
+drop):
 
 ```{figure} ../images/ncv/criterion_vs_smoothing.png
 :name: fig-ncv-criterion-vs-smoothing
@@ -126,23 +280,13 @@ shows what `fit_ncv` optimises:
 Leave-group-out mean squared error per row on the grouped dataset above, with `fit_reml` on the overfitted left side and `fit_ncv` at the minimum.
 ```
 
-At small $\lambda$ the spline follows individual group shocks (`fit_reml`'s
-$\lambda = 0.25$ gives mean held-out error 0.571); at very large $\lambda$ it
-collapses toward a straight line and misses the true curvature. `fit_ncv` uses
-the analytic gradient to walk to the bottom at $\lambda = 343.2$ (mean held-out
-error 0.421, a 26.4% drop) in 5 outer steps, without a grid search.
+### Spatial grids with ring neighbourhoods
 
-## Spatial grids with ring neighbourhoods
-
-Spatial pricing models often aggregate policies onto a regular mesh such as an
-H3 hexagonal grid. Adjacent hex cells share local weather, road conditions and
-unobserved neighbourhood risk, so holding out a single cell still leaves its
-six immediate neighbours in the fit to copy the same local disturbance.
-
-With `neighbours=`, each cell is scored after removing both the cell and its
-surrounding ring. You can pass either a list of row-position arrays (one per
-row) or a sparse $n \times n$ adjacency matrix whose stored entries mark the
-removed rows:
+On a regular spatial mesh such as an H3 hexagonal grid, adjacent cells share
+local weather, road layout or neighbourhood risk, so holding out one cell alone
+still leaves its neighbours in the fit. With `neighbours=`, each cell is scored
+after removing both the cell and its surrounding ring (either as a list of
+row-position arrays or a sparse $n \times n$ adjacency matrix):
 
 ```python
 import numpy as np
@@ -167,11 +311,11 @@ model = SuperGLM(
 model.fit_ncv(X, y, neighbours=neighbours)
 ```
 
-On a simulated $16 \times 16$ hexagonal grid (256 cells) where a smooth spatial
-risk surface is overlaid with a local 1-ring disturbance, two cells two steps
-apart still overlap through a shared neighbour. Removing a 2-ring neighbourhood
-blocks that spillover: each interior cell leaves the fit with its 18 nearest
-neighbours (19 cells in total; corner and edge cells remove 7 to 18).
+On a simulated $16 \times 16$ hexagonal grid (256 cells) with a local 1-ring
+disturbance, removing each cell's 2-ring neighbourhood (up to 19 cells; corner
+and edge cells remove 7 to 18) drops EDF from 52.2 (`fit_reml`, RMSE 0.374) to
+30.8 (`fit_ncv`, RMSE 0.302, a 19.3% reduction), though some pockets still
+remain:
 
 ```{figure} ../images/ncv/spatial_ring_grid.png
 :name: fig-ncv-spatial-ring-grid
@@ -180,14 +324,7 @@ neighbours (19 cells in total; corner and edge cells remove 7 to 18).
 Simulated $16 \times 16$ hexagonal grid (256 cells) with locally correlated spatial disturbances. Left: true spatial risk surface with one interior cell (red) and its 18 ring neighbours (amber) outlined. Centre: `fit_reml`. Right: `fit_ncv` with 2-ring neighbourhoods.
 ```
 
-Because `fit_reml` assumes independent cells, it spends 52.2 effective degrees
-of freedom fitting isolated pockets across the grid (RMSE 0.374 against the
-true surface). Holding out each cell's 2-ring neighbourhood with `fit_ncv`
-lowers the effective degrees of freedom to 30.8 and cuts RMSE by 19.3%, to
-0.302. Even so, `fit_ncv`'s map still shows pockets the true surface does not
-have: it cuts the error by 19.3%, rather than removing the disturbance.
-
-## Inspecting held-out predictions by group
+## Reading held-out results by group
 
 Once `fit_ncv` finishes, the held-out prediction for every scored row is
 already in hand — no extra refits are needed. Two accessors return copies of
@@ -201,66 +338,88 @@ those results as pandas DataFrames:
   `actual_over_expected` and `heldout_deviance`.
 
 For a `groups=` or `cv=` fit, `ncv_heldout_groups()` groups by the fit's own
-groups or splits automatically. After a single-row or `neighbours=` fit, pass
-`by=` with one label per row of `X` (for example, region or postcode sector).
-When a model is constructed with `retain_fit_state=False`, the per-group table
-of a `groups=` or `cv=` fit is still kept, while row-level arrays are released
-so `ncv_heldout()` and `ncv_heldout_groups(by=...)` are unavailable. Where a
-group's held-out expected total is zero or negative, `actual_over_expected` is
-reported as missing (`NaN`).
+groups or splits automatically. After any fit (including single-row or
+`neighbours=`), pass `by=` with one label per row of `X` to aggregate by
+another key such as calendar year or product. When a model is constructed with
+`retain_fit_state=False`, the per-group table of a `groups=` or `cv=` fit is
+still kept, while row-level arrays are released so `ncv_heldout()` and
+`ncv_heldout_groups(by=...)` are unavailable. Where a group's held-out expected
+total is zero or negative, `actual_over_expected` is reported as missing
+(`NaN`).
 
-Below is a simulated Poisson claim-frequency book of 700 rows across 20 fleets
-(35 rows per fleet, 1,760 claims in total), with exposure carried as a log
-offset and `groups=fleets`:
+On the Spanish health fit above (`groups=df["ID_policy"]`), calling
+`ncv_heldout_groups()` gives every policy's experience against a fit that never
+saw it — where experience rating of a collective starts, at no extra fit:
 
 ```python
-import numpy as np
-from superglm import Spline, SuperGLM
-
-model = SuperGLM(
-    family="poisson",
-    features={"veh_age": Spline(kind="cr", k=14)},
-).fit_ncv(X, claims, offset=np.log(exposure), groups=fleets)
-
-by_fleet = model.ncv_heldout_groups()
+by_policy = model.ncv_heldout_groups()
+large_policies = by_policy[by_policy["rows"] >= 100].sort_values("rows", ascending=False)
+by_year = model.ncv_heldout_groups(by=df["period"])
 ```
 
-```{figure} ../images/ncv/heldout_groups_ae.png
-:name: fig-ncv-heldout-groups-ae
-:alt: Scatter plot of actual claims against held-out expected claims for 20 simulated fleets, with a diagonal balance line, a plus or minus 25 percent reference band, and standout fleets labelled with their A/E ratios.
+```{figure} ../images/ncv/health_heldout_policies.png
+:name: fig-ncv-health-heldout-policies
+:alt: Log-log scatter plot of actual against held-out expected medical services for the 23 Spanish health policies with 100 or more rows, with a plus or minus 25 percent band and standout policies 4728, 28288, 32614 and 7303 labelled.
 
-Actual claims against held-out expected claims for the 20 simulated fleets, read directly from `model.ncv_heldout_groups()`. Overall actual-to-expected is 0.998 (1,760 actual against 1,762.9 held-out expected), while five fleets stand more than 25% away from what the other 19 fleets predict for them.
+Actual against held-out expected services for the 23 Spanish health policies with 100 or more insured-year rows (7,832 rows in all), read directly from `model.ncv_heldout_groups()`. Fourteen of the 23 stand more than 25% away from what the rest of the portfolio predicts for them.
 ```
 
-Sorting `by_fleet` by `actual_over_expected` highlights the fleets whose
-realised experience stands furthest from what the rest of the book predicts for
-them (showing the three highest, two near balance, and three lowest fleets):
+Out of 41,256 policies, 23 have 100 or more insured-year rows (7,832 rows in
+all), and 14 of them sit more than 25% away from their held-out expected
+services. The table below shows the largest policies alongside the four
+standout collectives labelled on the chart:
 
-| `group` | `rows` | `weight` | `actual` | `heldout_expected` | `actual_over_expected` | `heldout_deviance` |
-|---|---:|---:|---:|---:|---:|---:|
-| `Fleet_20` | 35 | 35 | 160 | 86.7 | 1.85 | 92.3 |
-| `Fleet_04` | 35 | 35 | 138 | 91.4 | 1.51 | 48.2 |
-| `Fleet_12` | 35 | 35 | 90 | 72.8 | 1.24 | 33.1 |
-| `Fleet_18` | 35 | 35 | 86 | 88.1 | 0.98 | 44.3 |
-| `Fleet_15` | 35 | 35 | 73 | 75.6 | 0.97 | 36.0 |
-| `Fleet_01` | 35 | 35 | 95 | 134.2 | 0.71 | 59.9 |
-| `Fleet_16` | 35 | 35 | 66 | 100.0 | 0.66 | 37.9 |
-| `Fleet_10` | 35 | 35 | 51 | 77.6 | 0.66 | 45.7 |
+| Policy | `rows` | `actual` | `heldout_expected` | `actual_over_expected` |
+|---|---:|---:|---:|---:|
+| `31307` | 2,507 | 39,086 | 39,598.0 | 0.99 |
+| `31306` | 925 | 16,835 | 14,621.0 | 1.15 |
+| `31133` | 777 | 7,687 | 7,798.9 | 0.99 |
+| `28288` | 519 | 0 | 1,508.3 | 0.00 |
+| `36163` | 463 | 4,269 | 5,747.3 | 0.74 |
+| `4728` | 155 | 3,245 | 590.0 | 5.50 |
+| `7303` | 116 | 274 | 815.3 | 0.34 |
+| `32614` | 103 | 334 | 1,632.0 | 0.20 |
 
-Because each fleet's expected claims come from the fit with that fleet removed,
-a large fleet cannot pull the smooth curve toward its own claims history and
-hide its own A/E gap.
+Policy `28288` has 519 insured-year rows and not a single recorded medical
+service against 1,508.3 held-out expected — a question about the cover or the
+data, surfaced without another fit. Policy `4728` runs at 5.50 times expected
+(3,245 services against 590.0 held-out expected), while `32614` (0.20) and
+`7303` (0.34) sit far below. Because each policy's expected total comes from
+the fit without that policy, a large collective cannot pull the curves toward
+its own history and mask its gap.
+
+**Know where the table adds information and where it does not.** Calling
+`ncv_heldout_groups(by=year)` gives actual-over-expected ratios of 0.893 (2017,
+70,917 rows), 0.931 (2018, 68,910 rows) and 1.177 (2019, 71,171 rows) — showing
+that utilisation jumped in 2019, which no choice of smoothing answers. Those
+ratios match the ordinary in-sample fitted actual-over-expected (0.893, 0.932
+and 1.177) to three decimals. The same holds for large product segments:
+product `S` (169,634 rows) reads 1.000 held out against 1.000 fitted, and
+product `P` (38,468 rows) reads 1.000 against 1.000. For any broad segment, one
+policy is a tiny share of the total, so held-out and fitted ratios coincide.
+The table earns its place on the held-out groups themselves, and on small
+factor levels (such as product `I`, 2,896 rows: 0.989 held out against 1.000
+fitted).
 
 ## When to use it and when not
 
-`fit_ncv` is not a drop-in replacement for `fit_reml`. It pays off when rows
-belong to correlated groups or spatial neighbourhoods and there are enough
-neighbourhoods to judge held-out error reliably. It loses when neighbourhoods
-are few, and it adds extra fitting work for no practical gain when rows are
-independent.
+`fit_ncv` is not a drop-in replacement for `fit_reml`. On real books, the two
+Spanish portfolios above mark out the boundary:
 
-To make that trade-off concrete, the committed study script repeats the
-simulated grouped curve above over 50 random seeds across three settings:
+- Reach for `fit_ncv` when the declared count law is badly misspecified (as in
+  the Spanish health book, where Tweedie $p = 1.01$ estimates a scale of 34.4
+  and Poisson `fit_reml` under-smooths the age curves) or when rows inside a
+  neighbourhood genuinely share unobserved risk, provided there are enough
+  neighbourhoods to judge held-out error reliably.
+- Stay with `fit_reml` on motor-like frequency books where counts are close to
+  Poisson and one insured's claims barely correlate across years (on the
+  Spanish motor book the two methods agree to within 0.0055% while `fit_ncv`
+  does several times the work), or when you have only a handful of
+  neighbourhoods.
+
+To make the small-neighbourhood and independent-row trade-offs concrete, the
+committed study script repeats the simulated grouped curve above over 50 random
+seeds across three settings:
 
 1. **Correlated groups (30 groups of 20 rows)**: rows in a group share a shock
    and are held out together.
@@ -290,11 +449,11 @@ Read the three rows plainly:
   the criterion is noisy (50 of 50 seeds), `fit_ncv` loses on 29 of 50 seeds,
   and the worst seed reaches 1.94× `fit_reml`'s error.
 - **Where `fit_ncv` does not pay — independent rows**: with no shared group
-  noise, medians tie (0.0515 against 0.0520), mean RMSE is slightly higher for
-  `fit_ncv` (0.0548 against 0.0542), occasional seeds under-smooth up to 1.76×,
-  and it still does more fitting work (median 10 inner solves against 6 REML
-  iterations; on the 30-group model, also a median of 300 leave-out
-  factorisations).
+  noise and a well-specified law, medians tie (0.0515 against 0.0520), mean
+  RMSE is slightly higher for `fit_ncv` (0.0548 against 0.0542), occasional
+  seeds under-smooth up to 1.76×, and it still does more fitting work (median
+  10 inner solves against 6 REML iterations; on the 30-group model, also a
+  median of 300 leave-out factorisations).
 
 ### Practical limits to keep in mind
 
@@ -304,6 +463,15 @@ Read the three rows plainly:
   measured threshold). With only a handful of folds, the chosen smoothing can
   move noticeably between splits. Use more groups or folds where you can, or
   stick with `fit_reml`.
+- **Forward-in-time splits (`TimeSeriesSplit`)**: forward-in-time hold-out is
+  described under [What is held out](#what-is-held-out) rather than
+  demonstrated on real data here, because public insurance books typically span
+  only three to seven calendar years — giving just one to four yearly splits.
+  With that few splits, `fit_ncv` emits the fewer-than-10-neighbourhoods
+  warning and its smoothing choice is erratic (shrinking a curve to a straight
+  line in one fit or under-smoothing in another). Reserve forward-in-time
+  splits for books with enough periods (such as monthly or quarterly series) to
+  form at least ~10 neighbourhoods.
 - **Poisson one-step approximation**: for a Gaussian model with an identity
   link, every leave-out fit inside `fit_ncv` is exact. For a Poisson model with
   a log link, each leave-out fit is one Newton step from the full fit. Against
@@ -314,9 +482,12 @@ Read the three rows plainly:
   per coefficient drop to 5.0 with large quarter-book folds (140 rows, 4
   groups, 28 coefficients). Treat Poisson `fit_ncv` carefully on very small
   books or very large folds.
-- **Fitting cost**: `fit_ncv` typically takes several times as many outer
-  evaluations and factorisations as `fit_reml`. When rows are independent, that
-  extra work does not buy better curves.
+- **Fitting cost**: `fit_ncv` typically takes about three to four times as long
+  as `fit_reml`. On the public French motor book (freMTPL2), measured on one
+  machine with default threads: `fit_reml` takes 3.9 to 4.0 s, `fit_ncv` with
+  five folds takes 10.6 to 11.0 s, and `fit_ncv` with each policy held out
+  takes 14.1 to 16.0 s. When the two methods choose the same curves, that extra
+  work buys nothing.
 - **Standard errors and scale**: `fit_ncv` chooses the smoothing parameters and
   then publishes the ordinary fit at those smoothing parameters. Standard
   errors, effective degrees of freedom and the Pearson scale are the same ones
@@ -413,7 +584,36 @@ How `fit_mode="fit_ncv"` runs inside each outer fold:
   carries a note naming the fold). Choose outer and inner groupings that leave
   several groups in every training fold.
 
-Running the call above on the 30-group simulated Gaussian book from earlier
+Passing `groups=` to `cross_validate(..., fit_mode="fit_ncv")` uses those
+groups both to split the outer folds and to form the inner hold-out inside each
+fold. To score single-row `fit_ncv` on outer folds of whole policies or groups
+(as in the seven-methods comparison on the health book above), precompute the
+outer `(train, test)` splits once and pass them through a small fixed-fold
+splitter without `groups=`:
+
+```python
+from sklearn.model_selection import GroupKFold
+from superglm import cross_validate
+
+
+class FixedFolds:
+    def __init__(self, folds):
+        self.folds = folds
+
+    def split(self, X, y=None, groups=None):
+        yield from self.folds
+
+    def get_n_splits(self, X=None, y=None, groups=None):
+        return len(self.folds)
+
+
+folds = list(GroupKFold(n_splits=5).split(X, groups=groups))
+ncv_rows_cv = cross_validate(
+    model, X, y, cv=FixedFolds(folds), fit_mode="fit_ncv"
+)
+```
+
+Running the grouped call above on the 30-group simulated Gaussian book from earlier
 (5 outer folds, each training on 24 groups of 20 rows and holding out those 24
 groups in turn inside `fit_ncv`) gives:
 
@@ -501,8 +701,8 @@ and `criterion="ncv"` (no REML score) and points to `ncv_diagnostics()`.
 | Method | What chooses the smoothing | What it assumes | When to use it |
 |---|---|---|---|
 | `fit()` | Fixed by you (`spline_penalty`) | Nothing about automatic smoothness; you set the penalties | Sparse screening (`selection_penalty > 0`), fixed-penalty challengers, or reproducing known penalties |
-| `fit_reml()` | Marginal / restricted likelihood (REML / Laplace approximation) | Rows are conditionally independent given the covariates | Default for pricing models, large binned books (`discrete=True`), Gamma/Tweedie/NB/Binomial, monotone terms, `RandomEffect` and `FactorSmooth` |
-| `fit_ncv()` | Held-out deviance over neighbourhoods you define | Observations outside a neighbourhood predict it without sharing its noise | Gaussian/identity or Poisson/log exact fits when rows share group, period or spatial disturbances and you have enough neighbourhoods (at least ~10) |
+| `fit_reml()` | Marginal / restricted likelihood (REML / Laplace approximation) | The declared variance/count law holds and rows are conditionally independent given the covariates | Default for pricing models, motor-like books where the declared law fits reasonably well, large binned books (`discrete=True`), Gamma/Tweedie/NB/Binomial, monotone terms, `RandomEffect` and `FactorSmooth` |
+| `fit_ncv()` | Held-out deviance over neighbourhoods you define | Observations outside a neighbourhood predict it without sharing its noise (does not trust the count law or row independence) | Gaussian/identity or Poisson/log exact fits when counts are far more variable than the declared law allows, or when rows share group, period or spatial risk and you have enough neighbourhoods (at least ~10) |
 
 ## How `fit_ncv` works
 
@@ -530,18 +730,29 @@ to obtain the leave-out predictor on $d(k)$ (Wood, 2024).
 
 **For readers familiar with `mgcv`:** R's `mgcv` package offers the same method
 via `method="NCV"`. Both engines optimise the same score — the summed held-out
-deviance with prior weights, not averaged and not scaled — and both use one
-Newton step per neighbourhood for non-Gaussian families, choosing the same fit
-on the same design and penalties. `fit_ncv`'s standard errors are the ordinary
-ones at the chosen smoothing, whereas `mgcv`'s default on single-row and
-row-with-neighbours structures adjusts them for the neighbourhood structure, so
-the two differ there unless `mgcv` is told `nei$jackknife = FALSE`. When
-comparing the two engines directly, compare without an offset.
+deviance with prior weights, not averaged and not scaled — and choose the same
+fit on the same design and penalties. `fit_ncv`'s standard errors are the
+ordinary ones at the chosen smoothing, whereas `mgcv`'s default on single-row
+and row-with-neighbours structures adjusts them for the neighbourhood
+structure, so the two differ there unless `mgcv` is told
+`nei$jackknife = FALSE`. When comparing the two engines directly, compare
+without an offset.
 
-## Reference
+## References
 
 - Wood, S. N. (2024). On Neighbourhood Cross Validation.
   [arXiv:2404.16490](https://arxiv.org/abs/2404.16490).
+- Lledó, J., Espinosa Adamez, P. and Perez Gimenez, V. (2025). *Dataset of
+  health insurance portfolio*, version 4. Mendeley Data,
+  [doi:10.17632/386vmj2tbk.4](https://doi.org/10.17632/386vmj2tbk.4),
+  [Mendeley record](https://data.mendeley.com/datasets/386vmj2tbk/4).
+  Licensed under [CC BY 4.0](http://creativecommons.org/licenses/by/4.0).
+- Espinosa, P., Lledó, J. and Atance, D. (2026). *A detailed dataset of motor
+  insurance policies with coverage-specific financial information*, version 1.
+  Mendeley Data,
+  [doi:10.17632/sw4jmdb2sm.1](https://doi.org/10.17632/sw4jmdb2sm.1),
+  [Mendeley record](https://data.mendeley.com/datasets/sw4jmdb2sm/1).
+  Licensed under [CC BY 4.0](http://creativecommons.org/licenses/by/4.0).
 
 ## Next steps
 

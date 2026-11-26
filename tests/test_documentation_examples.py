@@ -339,7 +339,20 @@ def _install_execution_doubles(monkeypatch) -> dict[str, object]:
     )
     _method_double(monkeypatch, superglm.SuperGLM, "ncv_heldout", return_value=pd.DataFrame())
     _method_double(
-        monkeypatch, superglm.SuperGLM, "ncv_heldout_groups", return_value=pd.DataFrame()
+        monkeypatch,
+        superglm.SuperGLM,
+        "ncv_heldout_groups",
+        return_value=pd.DataFrame(
+            {
+                "rows": [20],
+                "weight": [20.0],
+                "actual": [10.0],
+                "heldout_expected": [10.0],
+                "actual_over_expected": [1.0],
+                "heldout_deviance": [1.0],
+            },
+            index=pd.Index(["G0"], name="group"),
+        ),
     )
     _method_double(monkeypatch, superglm.SuperLSS, "fit_reml", side_effect=return_model)
     _method_double(monkeypatch, superglm.SuperLSS, "apply_shape_postfit", side_effect=return_model)
@@ -517,6 +530,8 @@ def _documentation_namespace(results: dict[str, object]) -> dict[str, object]:
             "Region": np.take(["R11", "R24"], index % 2),
             "Exposure": exposure,
             "ClaimNb": index % 3,
+            "ID_policy": index % 5,
+            "period": 2017 + (index % 3),
             "policy_id": index % 5,
             "x": np.linspace(0.0, 1.0, n_rows),
             "x1": np.linspace(0.0, 1.0, n_rows),

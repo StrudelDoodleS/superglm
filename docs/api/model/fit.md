@@ -37,8 +37,8 @@ smoothing parameter for every penalised term by optimising a Laplace
 approximate REML objective, except terms whose
 {py:class}`~superglm.LambdaPolicy` pins the value, and it does not accept a
 selection penalty. {py:meth}`~superglm.SuperGLM.fit_ncv` chooses the smoothing
-parameters by held-out prediction (neighbourhood cross-validation) instead, for
-grouped, repeated or spatially correlated rows; see
+parameters by held-out prediction (neighbourhood cross-validation) instead,
+without trusting the declared count law or row independence; see
 [Choose smoothing by held-out prediction](../../how-to/choose-smoothing-by-holdout.md).
 {py:meth}`~superglm.SuperGLM.fit` holds the smoothing
 parameters fixed at the configured `spline_penalty` and is the path for sparse
