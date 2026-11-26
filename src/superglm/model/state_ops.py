@@ -24,6 +24,7 @@ from superglm.solvers._structured.balance_tree import (
     ProfiledSumToZeroTreeFactor,
 )
 from superglm.solvers._structured.geometry import (
+    BorderNullSpace,
     centered_operator_coefficient_estimable,
     centered_operator_contrast_estimability,
 )
@@ -730,16 +731,17 @@ def _structured_contrast_estimable(
 
     The mask's geometry (``fit_inference_info``) is formed again on the first contrast a
     reader asks about, and kept in ``inference``, the fit's inference record: it lives and
-    is dropped with that record.  ``intercept`` is ``RankInfo.is_estimable``'s, which the
-    geometry decides with its columns' mean (``BorderNullSpace.is_estimable``).  With
-    ``design_rows``, ``contrast`` marks a term's coefficients and the answer is of its
-    fitted function (``function_estimable``).
+    is dropped with that record.  One saved before it kept the columns' mean decides no
+    intercept, and is formed again from the retained factor.  ``intercept`` is
+    ``RankInfo.is_estimable``'s, which the geometry decides with that mean
+    (``BorderNullSpace.is_estimable``).  With ``design_rows``, ``contrast`` marks a term's
+    coefficients and the answer is of its fitted function (``function_estimable``).
     """
     factor = state.profiled_factor
     decision = inference.get("contrast_estimability")
-    if decision is None:
+    if decision is None or (isinstance(decision, BorderNullSpace) and decision.centre is None):
         decision = (
-            factor.border_estimability()
+            factor.border_estimability(state.centered_data_operator)
             if isinstance(factor, ProfiledSumToZeroTreeFactor)
             else centered_operator_contrast_estimability(
                 state.centered_data_operator, factor.xtw / factor.sum_w

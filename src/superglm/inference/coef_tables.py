@@ -499,18 +499,22 @@ class _CoefTable:
     def block_determines(self, g: GroupSlice) -> Callable[[NDArray], NDArray[np.bool_]]:
         """Which contrasts of active group ``g``'s coefficients the covariance in hand determines.
 
-        A robust covariance decides by its bread (``SandwichCovariance.determines``), the
-        default one by its mask's rule (``mask_determines``).
+        The default covariance decides by its mask's rule (``mask_determines``).  A robust
+        one has the same first clause, a contrast of coefficients its mask all shows, and
+        decides the rest by its bread (``SandwichCovariance.determines``): a truncated
+        structured bread keeps the mask and no null direction to decide by.
         """
         covariance = self.sandwich_covariance
         if covariance is None:
             return self.mask_determines(g.sl)
         start = 1 + self.active_by_name[g.name].start
+        hidden = ~self.estimable[g.sl]
 
         def determines(contrasts: NDArray) -> NDArray[np.bool_]:
             rows = np.zeros((len(contrasts), covariance.n_params))
             rows[:, start : start + contrasts.shape[1]] = contrasts
-            return covariance.determines(rows)
+            shown = ~np.any(contrasts[:, hidden] != 0.0, axis=1)
+            return shown | covariance.determines(rows)
 
         return determines
 

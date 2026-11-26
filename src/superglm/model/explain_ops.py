@@ -92,15 +92,20 @@ def _aliased_features(model, covariance) -> set[str]:
     }
 
 
-def _default_determinacy(model):
-    """The default covariance's ``Determinacy``: the summary's mask and decomposition.
+def _default_determinacy(model, names):
+    """The default covariance's ``Determinacy``, the summary's mask and decomposition, for
+    the main terms ``names``; ``None`` where none of them reads it (``reads_determinacy``).
 
     The mask is read without the rest of the fit's inference record
     (``fit_coefficient_mask``); the decider forms that record on the first contrast the
     mask leaves open (``fit_contrast_estimable``).
     """
-    from superglm.inference._term_covariance import Determinacy
+    from superglm.inference._term_covariance import Determinacy, reads_determinacy
     from superglm.model.state_ops import fit_coefficient_mask, fit_contrast_estimable
+
+    specs, interactions = model._specs, model._interaction_specs
+    if not any(reads_determinacy(specs.get(name), name, interactions) for name in names):
+        return None
 
     def decide(*args, **kwargs) -> bool:
         decider = fit_contrast_estimable(model, model._fit_inference_info)
@@ -233,7 +238,11 @@ def relativities(model, with_se=False, centering="native", *, covariance=None):
         with_se=with_se,
         covariance_fn=cov_fn,
         centering=centering,
-        determines=_default_determinacy(model) if with_se and robust_cov is None else None,
+        determines=(
+            _default_determinacy(model, model._feature_order)
+            if with_se and robust_cov is None
+            else None
+        ),
     )
     # Per FEATURE, not for the whole call: this returns every term at once, and
     # dropping the band on unrepaired terms because one term was projected
@@ -371,7 +380,9 @@ def term_inference(
         n_sim=n_sim,
         seed=seed,
         centering=centering,
-        determines=_default_determinacy(model) if robust_cov is None and with_se else None,
+        determines=(
+            _default_determinacy(model, [name]) if robust_cov is None and with_se else None
+        ),
     )
     if covariance is not None and hasattr(inference, "covariance_method"):
         inference = dataclasses.replace(

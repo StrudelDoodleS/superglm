@@ -3,7 +3,7 @@
 import importlib.util
 import re
 from collections import Counter
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from importlib import import_module
 
 import numpy as np
@@ -829,15 +829,14 @@ def test_centered_contrast_estimability_agrees_with_the_centered_design(
     """Contrasts of border columns: the compact rule and its dense fallback, against the design.
 
     The first two border columns differ by a column the levels span, so neither is
-    estimable alone and only their sum is.  The compact geometry's decisions
-    (``BorderNullSpace``) and the dense fallback's agree with the centered public design's
-    own decomposition, and on single columns with the coefficient mask.
+    estimable alone and only their sum is.  The compact geometry (``BorderNullSpace``)
+    and the dense fallback agree with the centered public design's own decomposition,
+    and on single columns with the coefficient mask.
 
-    The reported intercept is the centred one less the columns' mean times the slopes, a
-    contrast on every coordinate (issue #752).  No null direction here moves it, and it is
-    determined; with a constant column in each level's block the levels span the
-    constant, and it is not.  The compact geometry, which keeps only that mean's share on
-    its structured coordinates, and the dense fallback give the design's answer.
+    The reported intercept weighs the columns' mean on every coordinate (issue #752).
+    No null direction here moves it, and it is determined; with a constant column in
+    each level's block the levels span the constant, and it is not.  The compact
+    geometry keeps only that mean's share on its structured coordinates.
     """
     import superglm.solvers._structured.geometry as structured_geometry
 
@@ -896,6 +895,28 @@ def test_centered_contrast_estimability_agrees_with_the_centered_design(
         spanning, spanning.center
     )
     assert not dense_spanning.is_estimable(-spanning.center, centred_unit)
+
+
+def test_centered_contrast_estimability_survives_an_empty_lifted_null_space() -> None:
+    """A structural alias with no lifted null direction still gives a contrast rule (#752).
+
+    One level holds ``[-1, 1, -1, 1]`` and a column of ones, whose norm from the rows is
+    certified zero: it is the intercept's exact alias and is dropped before the reduced
+    Schur complement, which then has no null direction.  The mask is ``[True, False]``
+    and the reported intercept, which weighs the aliased column's mean, is not
+    determined.  At 07ceaec50 the geometry inferred the lifted basis's row count from
+    an array with no columns and raised ``ValueError``.
+    """
+    import superglm.solvers._structured.geometry as structured_geometry
+
+    X = np.column_stack(([-1.0, 1.0, -1.0, 1.0], np.ones(4)))
+    operator, _ = _independent_centered_operator(X[None], np.empty((4, 0)))
+    operator = replace(operator, row_column_norm=np.array([np.nan, 0.0]))
+    centre = X.mean(axis=0)
+    np.testing.assert_array_equal(centered_operator_coefficient_estimable(operator), [True, False])
+    compact = structured_geometry.centered_operator_contrast_estimability(operator, centre)
+    assert not compact.is_estimable(-centre, intercept=1.0)
+    assert compact.centre_along is None and compact.basis.shape == (0, 0)
 
 
 def test_centered_estimability_certification_failure_raises_over_workspace_budget(

@@ -35,14 +35,13 @@ class BorderNullSpace:
     """The data's null space on a structured operator's border (small) coordinates.
 
     ``basis`` holds the border rows of an orthonormal basis of the data's null space in
-    the equilibrated coordinates its coefficient mask reads, each coordinate times
-    ``column_scale``.  A border coordinate is estimable when its row is at most
-    ``factor_rcond``, as the mask says; a contrast when its equilibrated projection is,
-    relative to its own norm (``RankDecomposition.is_estimable``).  The structured rows
-    are not kept, so a contrast that weighs a structured coordinate reads as not
-    determined, the answer of its coefficients' mask alone.  One such contrast is kept:
-    ``centre``, the columns' mean, which the reported intercept weighs on every
-    coordinate (``with_centre``).
+    the centred columns' equilibrated coordinates, each coordinate times ``column_scale``.
+    A border coordinate is estimable when its row is at most ``factor_rcond``, the mask's
+    rule; a contrast when its equilibrated projection is, relative to its own norm
+    (``RankDecomposition.is_estimable``).  The structured rows are not kept, so a contrast
+    that weighs a structured coordinate reads as not determined, the answer of its
+    coefficients' mask alone.  One such contrast is kept: ``centre``, the columns' mean,
+    which the reported intercept weighs on every coordinate (``with_centre``).
     """
 
     indices: NDArray
@@ -109,14 +108,40 @@ class BorderNullSpace:
     def function_estimable(self, columns: NDArray) -> bool:
         """``RankDecomposition.function_estimable`` for coefficients on the border.
 
-        A marked structured coordinate reads as not determined, as in ``is_estimable``.
+        With every structured coordinate marked too, the marked coordinates are all but
+        the unmarked border ones, and a direction keeps to a set exactly when it keeps to
+        the rest: those rows decide.  Marked in part, the structured coordinates read as
+        not determined, as in ``is_estimable``.
         """
         marked = np.asarray(columns, dtype=bool)
         outside = np.ones(len(marked), dtype=bool)
         outside[self.indices] = False
+        rows = marked[self.indices]
         if np.any(marked[outside]):
-            return False
-        return null_directions_keep_to(self.basis[marked[self.indices] & (self.column_scale > 0.0)])
+            if not np.all(marked[outside]):
+                return False
+            rows = ~rows
+        return null_directions_keep_to(self.basis[rows & (self.column_scale > 0.0)])
+
+
+def augmented_null_border_space(
+    operator: CenteredBlockOperator, null: NDArray, root: NDArray, centre: NDArray
+) -> BorderNullSpace:
+    """``BorderNullSpace`` of a null space certified in the augmented coordinates ``[1, X]``.
+
+    ``null`` is orthonormal in the uncentred columns' equilibrated coordinates, intercept
+    first, each coordinate times ``root`` (an ``sz`` tree's).  A null direction's slopes
+    are a null direction of the centred columns, and a contrast is sized in their
+    equilibrated coordinates (``RankDecomposition.is_estimable``): beside a large mean an
+    uncentred norm counts the intercept's own weight as part of every slope.  So the
+    slopes are scaled to ``operator``'s centred column norms and made orthonormal there;
+    ``centre``, the columns' mean, keeps its share on the structured coordinates.
+    """
+    scale = _centered_operator_column_scale(operator)
+    basis = _orthonormal_column_span(null[1:] * (scale / root[1:])[:, None])
+    border, levels = operator.raw.small_indices, operator.raw.structured_indices.ravel()
+    space = BorderNullSpace(border, scale[border], basis[border])
+    return space.with_centre(centre, levels, scale[levels], basis[levels], operator.total)
 
 
 def _bounded_centered_estimability(operator: CenteredBlockOperator) -> NDArray:
@@ -384,7 +409,8 @@ def _independent_block_centered_geometry(
             centre,
             structured_indices.ravel(),
             structured_column_scale.ravel(),
-            lifted_basis.reshape(-1, lifted_basis.shape[-1]),
+            # the rows are counted, not inferred: an empty null space has no columns
+            lifted_basis.reshape(structured_indices.size, lifted_basis.shape[-1]),
             operator.total,
         )
     return result, border

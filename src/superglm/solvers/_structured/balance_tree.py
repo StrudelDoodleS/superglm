@@ -70,7 +70,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from functools import cached_property, lru_cache
 from typing import TYPE_CHECKING
 
@@ -2411,18 +2411,6 @@ class SumToZeroTreeFactor:
         )
         return SumToZeroTreeFactor(system, data)
 
-    def border_estimability(self, centre: NDArray):
-        """``coefficient_estimable``'s rule on contrasts of the border slopes, as
-        ``geometry.BorderNullSpace``: the same verified null space's border rows, with the
-        share of ``centre``, the columns' mean, on the level coordinates (``with_centre``).
-        """
-        from superglm.solvers._structured.geometry import BorderNullSpace
-
-        null, root = self._data_factor()._verified_data_null()
-        border, levels = self.small_indices[1:], self.structured_indices.ravel()
-        space = BorderNullSpace(border, root[border], null[border])
-        return space.with_centre(centre, levels, root[levels], null[levels], root[0] ** 2)
-
     def _verified_data_estimable(self) -> NDArray:
         """Data estimability on this (unpenalized) tree (``_verified_data_null``)."""
         null, _ = self._verified_data_null()
@@ -3105,11 +3093,22 @@ class ProfiledSumToZeroTreeFactor(_ProfiledLeafFactor):
         """The slopes' estimability (``SumToZeroTreeFactor.coefficient_estimable``)."""
         return self.augmented_factor.coefficient_estimable()[1:]
 
-    def border_estimability(self):
-        """The slopes' ``SumToZeroTreeFactor.border_estimability``, centred on their mean."""
-        centre = self.xtw / self.sum_w
-        border = self.augmented_factor.border_estimability(np.concatenate(([0.0], centre)))
-        return replace(border, indices=border.indices - 1, centre=centre)
+    def border_estimability(self, operator: CenteredBlockOperator):
+        """``coefficient_estimable``'s null space on contrasts of the border slopes and the
+        reported intercept, as ``geometry.BorderNullSpace``.
+
+        The tree certifies it in the uncentred columns; the contrast rule reads it in the
+        centred scales of ``operator``, the fit's centred data operator
+        (``geometry.augmented_null_border_space``).  Signed weights certify it on the
+        ``|w|`` rows, whose own centred operator then gives the scales.
+        """
+        from superglm.solvers._structured.geometry import augmented_null_border_space
+
+        data = self.augmented_factor._data_factor()
+        if data.system is not self.augmented_factor.system:
+            operator = data.system.centred_data_operator
+        null, root = data._verified_data_null()
+        return augmented_null_border_space(operator, null, root, self.xtw / self.sum_w)
 
     def raw_level_inverse_block(self, level: int) -> NDArray:
         return self.augmented_factor.raw_level_inverse_block(level)

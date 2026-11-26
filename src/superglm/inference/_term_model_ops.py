@@ -10,7 +10,7 @@ from numpy.typing import NDArray
 
 from superglm._frame import FrameLike
 from superglm.distributions import prior_weights_in_normalizer, scale_is_known
-from superglm.inference._term_covariance import feature_se_from_cov
+from superglm.inference._term_covariance import as_determinacy, feature_se_from_cov
 from superglm.inference._term_helpers import _VALID_CENTERING
 from superglm.inference._term_types import _safe_exp
 
@@ -35,13 +35,18 @@ def relativities(
     """Extract plot-ready relativity DataFrames for all features.
 
     ``determines`` is ``term_inference``'s: the errors of a spline's curve and of an
-    ordered term's levels that the covariance does not determine are NaN.  ``None``
-    reports every one.
+    ordered term's levels that the covariance does not determine are NaN.  A callable is
+    the earlier form: ``determines(name)`` gives term ``name``'s decider of a contrast,
+    or ``None``.  ``None`` reports every one.
     """
     if centering not in _VALID_CENTERING:
         raise ValueError(f"centering must be one of {_VALID_CENTERING}, got {centering!r}")
     if with_se:
         Cov_active, active_groups = covariance_fn()
+
+    def _determinacy(name: str):
+        rule = determines(name) if callable(determines) else determines
+        return as_determinacy(rule, len(result.beta))
 
     def _feature_groups(name: str) -> list[GroupSlice]:
         return [g for g in groups if g.feature_name == name]
@@ -105,7 +110,7 @@ def relativities(
                     specs,
                     interaction_specs,
                     center=center_se,
-                    determines=determines,
+                    determines=_determinacy(name),
                 )
             out[name] = _center_df(df)
             continue
@@ -129,7 +134,7 @@ def relativities(
                     interaction_specs,
                     n_points=len(raw["x"]),
                     center=center_se,
-                    determines=determines,
+                    determines=_determinacy(name),
                 )
             out[name] = _center_df(df)
         elif "levels" in raw:

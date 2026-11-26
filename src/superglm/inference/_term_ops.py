@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 
 from superglm.features.constraint import rules_of
 from superglm.inference._term_covariance import (
+    as_determinacy,
     feature_se_from_cov,
     piecewise_knot_covariance,
     simultaneous_band_and_critical_value,
@@ -353,11 +354,13 @@ class _TermReport:
         raw = with_population_curve(raw, name, self.interaction_specs, self.groups, self.beta, spec)
         log_rel = raw["log_relativity"]
         se = self.feature_errors(n_points=self.n_points)
+        se_centered = self.centred_errors(n_points=self.n_points)
         ci_lo, ci_hi = self.interval(log_rel, se)
         ci_lo_sim = ci_hi_sim = c_sim = None
-        # A simultaneous band is one statement about the whole curve: none where the
-        # covariance leaves a point of it open.
-        if se is not None and self.simultaneous and not np.isnan(se).any():
+        # A simultaneous band is one statement about the whole curve, the centred one
+        # under ``centering="mean"``: none where the covariance leaves a point of it open.
+        banded = se if se_centered is None else se_centered
+        if banded is not None and self.simultaneous and not np.isnan(banded).any():
             bands, c_sim = simultaneous_band_and_critical_value(
                 name,
                 result=self.result,
@@ -396,7 +399,7 @@ class _TermReport:
                 alpha=self.alpha,
             ),
             self.centering,
-            se_centered=self.centred_errors(n_points=self.n_points),
+            se_centered=se_centered,
         )
 
     def categorical(self) -> TermInference:
@@ -644,10 +647,11 @@ def term_inference(
         same fitted coefficients, so the errors and intervals are propagated
         through the centering contrast rather than translated with the
         values -- see ``_recenter_term``.
-    determines : Determinacy or None
+    determines : Determinacy, callable or None
         The covariance's rule for a contrast over the fitted coefficients
         (``contrast_determined``); the errors of a spline's curve and of an ordered term's
-        levels and curve that it does not determine are NaN.  ``None`` reports every one.
+        levels and curve that it does not determine are NaN.  A callable, the earlier
+        form, decides each contrast itself.  ``None`` reports every one.
 
     Returns
     -------
@@ -690,7 +694,7 @@ def term_inference(
         n_sim=n_sim,
         seed=seed,
         centering=centering,
-        determines=determines,
+        determines=as_determinacy(determines, len(result.beta)),
     ).inference()
 
 

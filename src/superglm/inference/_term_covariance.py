@@ -145,8 +145,19 @@ def _population_curve_se(
     *,
     n_points: int,
     center: bool,
+    groups: list[GroupSlice] | tuple = (),
+    determines: Determinacy | None = None,
 ) -> NDArray | None:
-    """The errors of a main-effect curve on its ``sz`` population curve (``_population_curve_map``)."""
+    """The errors of a main-effect curve on its ``sz`` population curve (``_population_curve_map``).
+
+    The curve is a report of the terms its ``sz`` smooths bind
+    (``population_curve_family``), which hold between them what a left-out level's rows
+    leave open: the population offset, the levels they share, and the smooths' penalty.
+    So ``determines`` decides the curve whole, as that family's fitted function
+    (``function_determined``): every error is NaN where a null direction of the data
+    trades the family against another term's coefficients.  ``groups`` are the fitted
+    model's.
+    """
     x_grid = np.linspace(spline_spec._lo, spline_spec._hi, n_points)
     mapped = _population_curve_map(
         spline_spec,
@@ -160,7 +171,16 @@ def _population_curve_se(
     )
     if mapped is None:
         return None
-    return cast(NDArray, np.sqrt(np.maximum(np.diag(mapped[1]), 0.0)))
+    se = cast(NDArray, np.sqrt(np.maximum(np.diag(mapped[1]), 0.0)))
+    if determines is None:
+        return se
+    from superglm.features.factor_smooth import population_curve_family
+
+    family = population_curve_family(name, interaction_specs)
+    columns = np.zeros(len(determines.coefficient_estimable), dtype=bool)
+    for group in groups:
+        columns[group.sl] = group.feature_name in family
+    return se if function_determined(columns, *determines) else np.full(len(se), np.nan)
 
 
 def _held_levels(spec, name, interaction_specs):
@@ -258,6 +278,36 @@ class Determinacy(NamedTuple):
     contrast_estimable: Callable[..., bool] | None
 
 
+def reads_determinacy(spec: Any, name: Hashable, interaction_specs: Mapping[Any, Any]) -> bool:
+    """Whether ``feature_se_from_cov`` puts main term ``name``'s errors to ``determines``.
+
+    It does for a spline's curve, an ordered term's levels and the levels an ``sz`` term
+    folds (``_held_levels``); the other term classes are reported as they are.
+    """
+    from superglm.features.ordered_categorical import OrderedCategorical
+    from superglm.features.spline import _SplineBase
+
+    if isinstance(spec, _SplineBase | OrderedCategorical):
+        return True
+    return _held_levels(spec, name, interaction_specs) is not None
+
+
+def as_determinacy(determines: Any, width: int) -> Determinacy | None:
+    """``determines`` as a ``Determinacy`` over ``width`` fitted coefficients.
+
+    A bare decider of one contrast, the form the readers took before the mask came with
+    it, shows no coefficient: every contrast with a nonzero weight is put to it.  It was
+    never asked about a term's fitted function, which stays reported.
+    """
+    if determines is None or isinstance(determines, Determinacy):
+        return determines
+
+    def decide(contrast: NDArray, design_rows: bool = False) -> bool:
+        return design_rows or bool(determines(contrast))
+
+    return Determinacy(np.zeros(width, dtype=bool), decide)
+
+
 def contrast_determined(
     contrast: NDArray,
     coefficient_estimable: NDArray,
@@ -339,8 +389,8 @@ def feature_se_from_cov(
     calling reader's ``separated_levels.separation_flags``.  ``determines``
     leaves NaN each error of a spline's curve and of an ordered term's levels
     that the covariance does not determine, decided where its map is formed
-    (``_spline_se``, ``_held_level_se``); a curve an ``sz`` term moves and the
-    other term classes are reported as they are.
+    (``_spline_se``, ``_held_level_se``, ``_population_curve_se``); the other
+    term classes are reported as they are.
     """
     from superglm.features.categorical import Categorical
     from superglm.features.numeric import Numeric
@@ -464,6 +514,8 @@ def feature_se_from_cov(
             interaction_specs,
             n_points=n_points,
             center=center,
+            groups=groups,
+            determines=determines,
         )
         if shifted is not None:
             return shifted

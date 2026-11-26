@@ -1437,6 +1437,24 @@ def population_curve_terms(name: Any, interaction_specs: Any) -> list[tuple[Any,
     ]
 
 
+def population_curve_family(name: Any, interaction_specs: Any) -> set:
+    """Feature names of the terms bound to feature ``name``'s population curve, itself included.
+
+    The ``sz`` terms that move the curve (``population_curve_terms``) share their group's
+    levels with every other ``sz`` term on it and with a main term on the group
+    (``share_group_levels``), and each ``sz`` term shares a thin level's open directions
+    with the main term on its variable.  Empty when no ``sz`` term moves the curve.
+    """
+    groups = {spec.group for _, spec in population_curve_terms(name, interaction_specs)}
+    if not groups:
+        return set()
+    family = {name, *groups}
+    for key, spec in interaction_specs.items():
+        if isinstance(spec, FactorSmooth) and spec.basis == "sz" and spec.group in groups:
+            family.update((key, spec.variable))
+    return family
+
+
 def share_group_levels(specs: Any) -> None:
     """Decide once, for the ``sz`` terms on each group, which levels they treat alike, and who folds.
 

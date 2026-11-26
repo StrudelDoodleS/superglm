@@ -462,7 +462,10 @@ def summary(
         )
 
         contrast_estimable = fit_contrast_estimable(model, inf)
-        intercept_centre = fit_intercept_centre(model, inf)
+        # read only beside a coefficient the mask leaves open (``contrast_determined``)
+        intercept_centre = (
+            None if np.all(inf["coefficient_estimable"]) else fit_intercept_centre(model, inf)
+        )
 
         model_info["standard_error_note"] = saved_standard_error_note(
             model, inf["coefficient_estimable"]
