@@ -38,6 +38,7 @@ from superglm.features.spline import Spline
 from superglm.links import LogLink
 from superglm.model import fit_method, ncv_ops
 from superglm.ncv import engine, from_groups, from_neighbours, from_splitter, single_rows
+from superglm.ncv import rows as ncv_rows
 from superglm.ncv import search as search_module
 from superglm.ncv.engine import LeaveOutRankError
 from superglm.ncv.result import TRIAL_FAILURES
@@ -295,6 +296,48 @@ def test_poisson_heldout_results_are_one_newton_step_without_each_neighbourhood(
     criterion = model.ncv_diagnostics()["criterion"]
     assert abs(criterion - deviance.sum()) <= resolved.sum()
     assert criterion == table.heldout_deviance.to_numpy().sum()
+
+
+@pytest.mark.parametrize("form", FORMS)
+@pytest.mark.parametrize("family", ["gaussian", "poisson"])
+def test_an_intercept_only_model_holds_out_in_closed_form(family, form):
+    """No term: each held-out predictor is the intercept fitted on the kept rows, plus the offset.
+
+    Gaussian: the weighted mean of the kept rows' ``y - offset``.  Poisson: one Newton step on
+    the kept rows from the published intercept ``a``, ``a + sum w y / sum w mu - 1`` with
+    ``mu = exp(a + offset)``; the published fit's residual score moves the engine's step from
+    it by at most that score over the kept rows' Hessian.  Every set of rows is read from
+    dense blocks, then from the design's compact form.
+    """
+    b = book(family)
+    nb, w, y, offset = structure(form, b), b.weights, b.y, b.offset
+    for entries in (1 << 62, 1):
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(ncv_rows, "COMPACT_ENTRIES", entries)
+            model, _ = run(SuperGLM(family=family, features={}), b, **held_out(form, b))
+        assert model.ncv_diagnostics()["termination_reason"] == "no_smoothing_parameters"
+        table = model.ncv_heldout()
+        assert np.array_equal(table.row, nb.scored_rows())
+        want = np.empty(len(table))
+        residual = np.zeros(len(table))
+        intercept = float(np.mean(predictor(model, b) - offset))
+        for k in range(nb.m):
+            kept = np.setdiff1d(np.arange(len(y)), nb.drop(k))
+            at = (table.neighbourhood == k).to_numpy()
+            if family == "gaussian":
+                fitted = np.sum(w[kept] * (y[kept] - offset[kept])) / np.sum(w[kept])
+            else:
+                mean = np.exp(intercept + offset)
+                curvature = np.sum(w[kept] * mean[kept])
+                fitted = intercept + np.sum(w[kept] * y[kept]) / curvature - 1.0
+                residual[at] = abs(np.sum(w * (mean - y))) / curvature
+            want[at] = fitted + offset[table.row.to_numpy()[at]]
+        got = table.heldout.to_numpy()
+        eta = got if family == "gaussian" else np.log(got)
+        # Each side sums over the rows, within gamma_n of the sum of its magnitudes.
+        slack = residual + predictor_slack(len(y), want)
+        gap = np.abs(eta - want)
+        assert np.all(gap <= slack), f"gap {gap.max():.3e} against {slack.min():.3e}"
 
 
 @pytest.mark.parametrize("family", ["gaussian", "poisson"])

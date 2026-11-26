@@ -80,9 +80,14 @@ def augmented_rows(
     centre_hi: NDArray[np.float64],
     centre_lo: NDArray[np.float64] | None,
 ) -> NDArray[np.float64]:
-    """``(1, (x - hi) - lo)`` for ``rows``: dense, ``(len(rows), p + 1)``."""
+    """``(1, (x - hi) - lo)`` for ``rows``: dense, ``(len(rows), p + 1)``.
+
+    A design without slopes (``p == 0``) has the intercept's column alone.
+    """
     block = np.empty((len(rows), dm.p + 1), dtype=np.float64)
     block[:, 0] = 1.0
+    if dm.p == 0:
+        return block
     slopes = block[:, 1:]
     slopes[:] = dm.row_subset(rows).toarray()
     slopes -= centre_hi
