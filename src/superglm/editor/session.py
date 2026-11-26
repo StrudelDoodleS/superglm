@@ -1575,11 +1575,12 @@ class EditorSession:
         if base_offset is not None:
             combined_offset = np.asarray(base_offset, dtype=np.float64).ravel() + editor_offset
 
+        # A ``fit`` holds each lambda policy's resolved value; a ``fit_reml`` keeps the policies.
         refit_model = self.model._clone_without_features(
             set(names),
             lambda1=lambda1,
             lambda2=lambda2,
-            smoothing_resolved=True,
+            smoothing_resolved=resolve_refit_method(self.model, method) == "fit",
         )
         fit_refit_model(
             self.model,

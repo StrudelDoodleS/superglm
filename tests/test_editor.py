@@ -36,7 +36,10 @@ from superglm.editor.persistence import (
     serialize_validated_model,
 )
 from superglm.inference.summary import ModelSummary, _BasisDetailRow, _CoefRow
+from superglm.model import fit_method
+from superglm.model.fit_state import fitted_lambda2
 from superglm.profiling._scalar import Interval
+from superglm.types import LambdaPolicy
 
 
 def test_editor_demo_notebook_includes_k_adequacy_sweep():
@@ -2353,6 +2356,40 @@ def test_offset_refit_rejects_terms_used_by_interactions():
 
     with pytest.raises(ValueError, match="used by interaction"):
         session.refit_with_edited_offset("x", method="fit")
+
+
+def test_a_fit_reml_offset_refit_keeps_a_fixed_lambda_policy():
+    """A fit_reml source's offset refit replays fit_reml with each lambda policy as declared.
+
+    The fixed term is refitted at its declared value, not searched; the reference is a ``fit`` of
+    that spline at the value on the same edited offset.
+    """
+    rng = np.random.default_rng(20261126)
+    X = pd.DataFrame({"x": rng.uniform(size=400), "z": rng.uniform(size=400)})
+    y = np.sin(6 * X["x"].to_numpy()) + np.cos(4 * X["z"].to_numpy()) + rng.normal(0, 0.3, 400)
+    features = {
+        "x": Spline(kind="ps", n_knots=8, lambda_policy=LambdaPolicy.fixed(3.0)),
+        "z": Spline(kind="ps", n_knots=6),
+    }
+    model = SuperGLM(family="gaussian", features=features).fit_reml(X, y)
+    session = EditorSession.from_model(model, terms=["x", "z"], train_data=(X, y))
+    session.select_x("z", 0.2, 0.5)
+    session.shift("z", 0.3)
+
+    refit = session.refit_with_edited_offset("z")
+
+    assert fit_method.method_of(refit) == "fit_reml"
+    assert fitted_lambda2(refit) == {"x:wiggle": 3.0}
+    assert refit._specs["x"]._lambda_policy == LambdaPolicy.fixed(3.0)
+    reference = SuperGLM(family="gaussian", features={"x": Spline(kind="ps", n_knots=8)})
+    reference.lambda2 = {"x": 3.0}
+    reference.fit(X, y, offset=session.edited_offset("z", X=X))
+    np.testing.assert_allclose(
+        refit.term_inference("x").log_relativity,
+        reference.term_inference("x").log_relativity,
+        rtol=1e-8,
+        atol=1e-10,
+    )
 
 
 def test_refit_explicit_data_omits_session_train_weights_and_offsets_when_not_supplied():
