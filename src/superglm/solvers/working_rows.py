@@ -112,16 +112,17 @@ def null_fit_eta(
             np.isfinite(rescaled_weights[carried])
         ):
             rows = (rescaled_y, rescaled_weights)
-    unit_interval = mean_domain(distribution).bounded_above
-    if unit_interval:
+    domain = mean_domain(distribution)
+    bounded = domain.bounded_above
+    if bounded:
         # ``initial_mean`` returns the weighted mean unclamped for an
-        # unbounded mean space.  A mean of 0 or 1 has no finite intercept
+        # unbounded mean space.  A mean at either end has no finite intercept
         # under any offset, whatever a binary link's own clamp at 1e-15 would
         # make of it.
         mean = initial_mean(y, weights, Gaussian())
-        if not 0.0 < mean < 1.0:
+        if not 0.0 < mean < domain.upper:
             return None
-    if rows is not None and unit_interval:
+    if rows is not None and bounded:
         intercept = float(link.link(np.atleast_1d(mean))[0])
     elif rows is not None:
         intercept = coefficient_initial_intercept(

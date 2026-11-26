@@ -14,6 +14,7 @@ from scipy.optimize import brentq
 from scipy.special import digamma, gammaln, polygamma, zeta
 
 from superglm._tweedie import TweedieRows, solve_log_phi
+from superglm._utils import declared
 from superglm.solvers.dispersion import FREQUENCY_WEIGHTS, PRIOR_WEIGHTS
 
 _GAMMA_ASYMPTOTIC_SHAPE = 100.0
@@ -932,7 +933,7 @@ def prepare_reml_scale_data(
     weight contract enters the scale machinery in exactly one place and
     cannot be re-derived per evaluation.
     """
-    prepare = getattr(distribution, "scale_profile", None)
+    prepare = declared(distribution, "scale_profile")
     if prepare is None:
         return None
     return prepare(y, sample_weight, weight_semantics=weight_semantics)

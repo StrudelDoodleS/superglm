@@ -512,3 +512,41 @@ def test_gaussian_reml_fit_reduces_the_weights_once_for_its_scale(
     # Under prior weights every reduction left in ``reml.scale`` is a log-weight sum.
     expected = ["sum"] * profiles if semantics == "prior" else []
     assert reductions == expected
+
+
+@pytest.mark.pins_behaviour
+def test_a_family_forwarding_to_gamma_publishes_pearsons_scale() -> None:
+    """Pins the likelihood scale of a custom family that forwards its reads to Gamma: Pearson's.
+
+    Such a family is not a Gamma and declares no scale profile of its own, so its
+    fit publishes Pearson's estimate, not Gamma's maximum-likelihood one.
+    """
+    import pandas as pd
+
+    from superglm import Spline, SuperGLM
+
+    class Forwards:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            if name.startswith("__"):
+                raise AttributeError(name)
+            return getattr(self._inner, name)
+
+    n = 100
+    x = np.linspace(0.0, 1.0, n)
+    y = np.random.default_rng(13).gamma(3.0, np.exp(x) / 3.0)
+    frame = pd.DataFrame({"x": x})
+    model = SuperGLM(
+        family=Forwards(Gamma()),
+        link="log",
+        features={"x": Spline(n_knots=5)},
+        weight_semantics="frequency",
+    )
+    model.fit(frame, y, sample_weight=np.ones(n))
+    result = model.result
+    mu = np.asarray(model.predict(frame))
+    pearson = float(np.sum((y - mu) ** 2 / mu**2)) / (n - result.effective_df)
+    assert result.phi_likelihood_method == "pearson"
+    np.testing.assert_allclose(result.phi_likelihood, pearson, rtol=1e-10)

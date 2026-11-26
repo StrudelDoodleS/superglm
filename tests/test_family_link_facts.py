@@ -643,3 +643,54 @@ def test_more_than_one_shipped_base_reads_its_first_declaring_base():
     )
     eta = np.array([-100.0, 0.0, 100.0])
     np.testing.assert_array_equal(stabilize_eta(eta, LogIdentity()), [-80.0, 0.0, 80.0])
+
+
+class _Forwards:
+    """An object that declares nothing itself and forwards every read to another."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return getattr(self._inner, name)
+
+
+def test_an_object_forwarding_to_a_shipped_one_declares_no_fact():
+    """A fact is its class's declaration: a forwarding family or link takes the defaults."""
+    from superglm.distributions import POSITIVE, mean_domain, prior_weights_in_normalizer
+
+    assert mean_domain(_Forwards(Binomial())) is POSITIVE
+    assert prior_weights_in_normalizer(_Forwards(Tweedie(p=1.5))) is False
+    profile = prepare_reml_scale_data(
+        _Forwards(Gamma()), _PROBE_Y, _PROBE_W, weight_semantics="frequency"
+    )
+    assert profile is None
+    assert not is_multiplicative(_Forwards(LogLink()))
+    eta = np.array([-100.0, 0.0, 100.0])
+    np.testing.assert_array_equal(stabilize_eta(eta, _Forwards(LogLink())), [-20.0, 0.0, 20.0])
+
+
+def test_a_null_mean_is_held_below_the_upper_bound_its_family_declares():
+    """A family whose means lie below 10 has a null mean of 2.5, and none at 10."""
+    from superglm.distributions import POSITIVE, MeanDomain
+    from superglm.solvers.working_rows import null_fit_eta
+
+    class Capped(Poisson):
+        mean_domain = MeanDomain(
+            positive=True, upper=10.0, clip=POSITIVE.clip, start=POSITIVE.start
+        )
+
+    def null_eta(y):
+        return null_fit_eta(
+            distribution=Capped(),
+            link=LogLink(),
+            y=np.asarray(y),
+            sample_weight=np.ones(2),
+            offset=np.zeros(2),
+            weight_semantics="frequency",
+        )
+
+    np.testing.assert_allclose(null_eta([2.0, 3.0]), np.log(2.5), rtol=4 * np.finfo(float).eps)
+    assert null_eta([10.0, 10.0]) is None

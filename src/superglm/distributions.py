@@ -15,6 +15,8 @@ import scipy.linalg
 from numpy.typing import NDArray
 from scipy.special import betaln, gammaln
 
+from superglm._utils import declared
+
 # ── Numerical guard constants for positive-mean families ─────────
 _POSITIVE_INIT_MIN = 1e-12  # floor for initial_mean
 _POSITIVE_MU_MIN = 1e-50  # clip_mu lower bound (log → eta ≈ -115)
@@ -244,6 +246,8 @@ class Distribution(Protocol):
     (the density's normalizer carries ``log w``, so a prior weight must be
     strictly positive; False) and scale_profile (the dispersion's exact REML
     profile on a fit's rows; a Gaussian-shaped approximation, with a warning).
+    Each is read from the family's class (``_utils.declared``), so an object
+    that forwards attribute reads to a shipped family takes the defaults.
 
     A class that inherits from more than one shipped family takes each declared
     fact from the first base in its method resolution order that declares it:
@@ -712,7 +716,7 @@ def resolve_distribution(
 
 def mean_domain(family: object) -> MeanDomain:
     """The family's declared ``mean_domain``; positive means for one that declares none."""
-    return getattr(family, "mean_domain", POSITIVE)
+    return declared(family, "mean_domain", POSITIVE)
 
 
 def scale_is_known(family: object) -> bool:
@@ -722,7 +726,7 @@ def scale_is_known(family: object) -> bool:
 
 def prior_weights_in_normalizer(family: object) -> bool:
     """Whether a prior weight enters the density's normalizer, so it must be strictly positive."""
-    return getattr(family, "prior_weights_in_normalizer", False)
+    return declared(family, "prior_weights_in_normalizer", False)
 
 
 def validate_response(y: NDArray, family: Distribution) -> None:
@@ -734,7 +738,7 @@ def validate_response(y: NDArray, family: Distribution) -> None:
     """
     if not np.all(np.isfinite(y)):
         raise ValueError("Response y must contain only finite values")
-    support = getattr(family, "response_support", None)
+    support = declared(family, "response_support")
     if support is not None:
         support.check(y)
 

@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._utils import declared
+
 if TYPE_CHECKING:
     from superglm.distributions import Distribution
 
@@ -48,6 +50,8 @@ class Link(Protocol):
         protection (``stabilize_eta``; a band of plus or minus 20).
         multiplicative — the mean is ``exp(eta)``, so an effect on the predictor
         multiplies it (False).
+    Each is read from the link's class (``_utils.declared``), so an object that
+    forwards attribute reads to a shipped link takes the defaults.
 
     A class that inherits from more than one shipped link takes each declared
     fact from the first base in its method resolution order that declares it:
@@ -766,13 +770,13 @@ def stabilize_eta(eta: NDArray, link: Link) -> NDArray:
 
     A link that declares none keeps a conservative band.
     """
-    clip = getattr(link, "clip_eta", None)
+    clip = declared(link, "clip_eta")
     return np.clip(eta, -20.0, 20.0) if clip is None else clip(eta)
 
 
 def is_multiplicative(link: object) -> bool:
     """Whether the link declares a mean of ``exp(eta)``, where an effect multiplies the mean."""
-    return getattr(link, "multiplicative", False)
+    return declared(link, "multiplicative", False)
 
 
 _LINK_SHORTCUTS: dict[str, type] = {
