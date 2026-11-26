@@ -243,6 +243,17 @@ _FINISH_TOLERANCE = 0.1
 _FINISH_ITERATIONS = 16
 
 
+def _endgame_config(config: DistributionalEFSConfig) -> DistributionalEFSConfig:
+    """The config the Newton endgame runs on.
+
+    ``"efs+finish"`` finishes a plateau on the exact gradient, an order tighter
+    than the plateau's own bar.
+    """
+    if config.outer != "efs+finish":
+        return config
+    return replace(config, outer="efs+newton", tolerance=_FINISH_TOLERANCE * config.tolerance)
+
+
 class _Trial(NamedTuple):
     """One trial fit of a round whose objective could be judged."""
 
@@ -397,6 +408,76 @@ class _SmoothingSearch:
         self.reuse_session = _DenseObservedReuseSession()
         self.penalty_memo = _PenaltyEvaluationMemo()
         self.endpoint_derivatives = _EndpointDerivativeMemo()
+        # ``fit_start`` sets the start (``initial_lambdas``, ``initial_objective``) and the
+        # accepted state (``state``, ``estimated_names``, ``history``, ``coefficient_fits``);
+        # ``run`` sets ``endgame_config``, which carries the start's lambda units.
+        self.stationary_search = outer_config.outer == "efs+stationary"
+        self.accelerator = (
+            WindowedTypeIIAnderson(
+                history=outer_config.acceleration_history,
+                max_amplification=outer_config.acceleration_max_amplification,
+            )
+            if outer_config.acceleration == "multisecant"
+            else None
+        )
+        # Under plain Fellner--Schall a cap whose promotion is refused is held as an
+        # active bound while the other components move (Burke and Moré 1988), so a cap
+        # does not stop them. ``cap_held`` names those caps and ``refused_fit`` is the fit
+        # the last refusal judged. Every stop returns the held caps to the evidence, so
+        # they are judged again where the other components end; ``caps_final`` records
+        # that, and from then on a refusal is the fit's answer.
+        self.cap_held: frozenset[str] = frozenset()
+        self.refused_fit: DenseSolverResult | None = None
+        self.caps_final = False
+        # A multiplicative update keeps every iterate interior, as an interior-point method
+        # does (Zhou, Hu, Zhou and Lange, arXiv 1509.07426), so a component heading for its
+        # upper bound never arrives. One whose working problem falls all the way there is
+        # tried at the bound once (``endpoint_tried``), and the objective and the evidence
+        # at the bound decide. An accepted trial (``endpoint_caps``) holds its components at
+        # their caps like a refused promotion's, so the other components' fits stay off the
+        # face and it is assessed once, where they end. That stop is theirs: ``endgame_due``
+        # returns a search whose endgame waits on the assessment straight to it, and
+        # ``plateau_earned`` keeps a practical plateau through it. The exact gradient in log
+        # lambda vanishes at a cap whatever the multiplier of the bound tau = 1/lambda >= 0,
+        # which is what decides an optimum on it (Mishchenko, Holmgren and Ronnegard, arXiv
+        # 0711.2619, section 4.3), so a stationary endgame hands the caps a trial reached to
+        # the assessor (``handed_over``), whose refusal leaves its verdict standing.
+        # The trial takes at once the fall that component's walk spreads over the rounds
+        # to come. On that fall the walk's rounds are accepted, whatever the other
+        # components' steps do to the objective, up to the plateau the default search
+        # finishes. With the fall taken the same steps can be rejected at every length,
+        # so beside a cap a trial holds a rejected round goes to the finish as that
+        # plateau does. It has earned no plateau (``unearned``), so a finish that stalls
+        # leaves the round's verdict.
+        self.endpoint_tried: set[str] = set()
+        self.endpoint_caps: set[str] = set()
+        self.endgame_due = False
+        self.handed_over = False
+        self.plateau_earned = False
+        self.unearned = False
+        # The Newton endgame's bookkeeping.  ``endgame_outcome`` is the last run's
+        # outcome (its derivatives are the result's terminal gradient and Hessian);
+        # ``endgame_stationary`` routes a stationary outcome through the strict stop
+        # so an active exact face is revalidated exactly as an EFS stop would;
+        # ``pending_cap`` is the cap-pressure outcome the cap decision is deciding;
+        # ``beyond_cap`` holds the raised upper bound of every component the
+        # bracketed search released above ``maximum_lambda``.
+        self.endgame_outcome: NewtonEndgameOutcome | None = None
+        self.endgame_stationary = False
+        self.pending_cap: NewtonEndgameOutcome | None = None
+        self.newton_budget = (
+            (
+                _FINISH_ITERATIONS
+                if outer_config.outer == "efs+finish"
+                else outer_config.max_iterations
+            )
+            if outer_config.max_newton_iterations is None
+            else outer_config.max_newton_iterations
+        )
+        self.beyond_cap: dict[str, float] = {}
+        # The objective's fall over the last two accepted Fellner--Schall rounds.
+        self.fall = self.previous_fall = math.inf
+        self.windows = _PlateauWindows()
 
     def fit_start(self, lambdas: Mapping[str, float] | None, initial: NDArray | None) -> None:
         """Fit the start: its smoothing parameters, coefficients, objective and evidence."""
@@ -465,114 +546,9 @@ class _SmoothingSearch:
 
     def run(self) -> DistributionalEFSResult:
         """Search from the start fit until a phase returns the result."""
-        if not self.estimated_names:
-            return _efs_result(
-                layout=self.layout,
-                config=self.outer_config,
-                initial_lambdas=self.initial_lambdas,
-                lambdas=self.state.lambdas,
-                initial_objective=self.initial_objective,
-                objective=self.state.objective,
-                converged=self.state.fit.converged,
-                reason="fixed_only" if self.state.fit.converged else "coefficient_not_converged",
-                terminal_evidence=self.state.evidence,
-                history=self.history,
-                coefficient_fits=self.coefficient_fits,
-                terminal_fit_index=self.state.terminal_fit_index,
-            )
-        if not self.state.fit.converged:
-            return _efs_result(
-                layout=self.layout,
-                config=self.outer_config,
-                initial_lambdas=self.initial_lambdas,
-                lambdas=self.state.lambdas,
-                initial_objective=self.initial_objective,
-                objective=self.state.objective,
-                converged=False,
-                reason="coefficient_not_converged",
-                terminal_evidence=self.state.evidence,
-                history=self.history,
-                coefficient_fits=self.coefficient_fits,
-                terminal_fit_index=self.state.terminal_fit_index,
-            )
-        # The Newton endgame's bookkeeping.  ``endgame_outcome`` is the last run's
-        # outcome (its derivatives are the result's terminal gradient and Hessian);
-        # ``endgame_stationary`` routes a stationary outcome through the strict-stop
-        # block below so an active exact face is revalidated exactly as an EFS stop
-        # would; ``pending_cap`` is the cap-pressure outcome the face block is
-        # deciding; ``beyond_cap`` holds the raised upper bound of every component
-        # the bracketed search released above ``maximum_lambda``.
-        self.endgame_outcome: NewtonEndgameOutcome | None = None
-        self.stationary_search = self.outer_config.outer == "efs+stationary"
-        self.endgame_stationary = False
-        self.pending_cap: NewtonEndgameOutcome | None = None
-        self.newton_budget = (
-            (
-                _FINISH_ITERATIONS
-                if self.outer_config.outer == "efs+finish"
-                else self.outer_config.max_iterations
-            )
-            if self.outer_config.max_newton_iterations is None
-            else self.outer_config.max_newton_iterations
-        )
-        # ``"efs+finish"`` finishes a plateau on the exact gradient, an order tighter than
-        # the plateau's own bar.
-        self.endgame_config = (
-            replace(
-                self.outer_config,
-                outer="efs+newton",
-                tolerance=_FINISH_TOLERANCE * self.outer_config.tolerance,
-            )
-            if self.outer_config.outer == "efs+finish"
-            else self.outer_config
-        )
-        self.beyond_cap: dict[str, float] = {}
-        # Under plain Fellner--Schall a cap whose promotion is refused is held as an
-        # active bound while the other components move (Burke and Moré 1988), so a cap
-        # does not stop them. ``cap_held`` names those caps and ``refused_fit`` is the fit
-        # the last refusal judged. Every stop returns the held caps to the evidence, so
-        # they are judged again where the other components end; ``caps_final`` records
-        # that, and from then on a refusal is the fit's answer.
-        self.cap_held: frozenset[str] = frozenset()
-        self.refused_fit: DenseSolverResult | None = None
-        self.caps_final = False
-        # A multiplicative update keeps every iterate interior, as an interior-point method
-        # does (Zhou, Hu, Zhou and Lange, arXiv 1509.07426), so a component heading for its
-        # upper bound never arrives. One whose working problem falls all the way there is
-        # tried at the bound once (``endpoint_tried``), and the objective and the evidence
-        # at the bound decide. An accepted trial (``endpoint_caps``) holds its components at
-        # their caps like a refused promotion's, so the other components' fits stay off the
-        # face and it is assessed once, where they end. That stop is theirs: ``endgame_due``
-        # returns a search whose endgame waits on the assessment straight to it, and
-        # ``plateau_earned`` keeps a practical plateau through it. The exact gradient in log
-        # lambda vanishes at a cap whatever the multiplier of the bound tau = 1/lambda >= 0,
-        # which is what decides an optimum on it (Mishchenko, Holmgren and Ronnegard, arXiv
-        # 0711.2619, section 4.3), so a stationary endgame hands the caps a trial reached to
-        # the assessor (``handed_over``), whose refusal leaves its verdict standing.
-        # The trial takes at once the fall that component's walk spreads over the rounds
-        # to come. On that fall the walk's rounds are accepted, whatever the other
-        # components' steps do to the objective, up to the plateau the default search
-        # finishes. With the fall taken the same steps can be rejected at every length,
-        # so beside a cap a trial holds a rejected round goes to the finish as that
-        # plateau does. It has earned no plateau (``unearned``), so a finish that stalls
-        # leaves the round's verdict.
-        self.endpoint_tried: set[str] = set()
-        self.endpoint_caps: set[str] = set()
-        self.endgame_due = False
-        self.handed_over = False
-        self.plateau_earned = False
-        self.unearned = False
-        # The objective's fall over the last two accepted Fellner--Schall rounds.
-        self.fall = self.previous_fall = math.inf
-        self.windows = _PlateauWindows()
-        self.accelerator = (
-            WindowedTypeIIAnderson(
-                history=self.outer_config.acceleration_history,
-                max_amplification=self.outer_config.acceleration_max_amplification,
-            )
-            if self.outer_config.acceleration == "multisecant"
-            else None
-        )
+        if not self.estimated_names or not self.state.fit.converged:
+            return self._unsearched_result()
+        self.endgame_config = _endgame_config(self.outer_config)
         while True:
             compact_coefficient_history(
                 self.coefficient_fits,
@@ -596,6 +572,14 @@ class _SmoothingSearch:
                 result = self._fellner_schall_round()
             if result is not None:
                 return result
+
+    def _unsearched_result(self) -> DistributionalEFSResult:
+        """End at the start: nothing is estimated, or its coefficient fit did not converge."""
+        converged = self.state.fit.converged
+        return self._result(
+            converged=False if self.estimated_names else converged,
+            reason="fixed_only" if converged else "coefficient_not_converged",
+        )
 
     def _decide_caps(self) -> DistributionalEFSResult | None:
         """A cap is pressed outward: promote it to an exact face, or answer for the refusal."""
