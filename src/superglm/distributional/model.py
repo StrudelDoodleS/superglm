@@ -907,6 +907,38 @@ class DenseDistributionalModel:
         values = np.broadcast_to(np.asarray(y, dtype=np.float64), (len(theta),))
         return _readonly(np.asarray(family.cdf(values, theta), dtype=np.float64), outside.any(1))
 
+    def predict_pdf(
+        self,
+        X: FrameLike | EagerFrame,
+        y: NDArray | float,
+        *,
+        offsets: Mapping[str, NDArray] | None = None,
+    ) -> NDArray[np.float64]:
+        """Return each row's unit-weight density at ``y``; ``0`` outside the support."""
+        from superglm.distributional.row_law import require_row_law, row_density
+
+        require_row_law(self.family, "predict_pdf")
+        theta, outside = self._predicted_parameters(X, offsets)
+        values = np.broadcast_to(np.asarray(y, dtype=np.float64), (len(theta),))
+        return _readonly_default_prediction(row_density(self.family, values, theta), outside.any(1))
+
+    def predict_mean_excess(
+        self,
+        X: FrameLike | EagerFrame,
+        v: NDArray | float,
+        *,
+        offsets: Mapping[str, NDArray] | None = None,
+    ) -> NDArray[np.float64]:
+        """Return ``E[Y - v | Y > v]`` per row; ``inf`` where the row's mean is infinite."""
+        from superglm.distributional.row_law import require_row_law, row_mean_excess
+
+        require_row_law(self.family, "predict_mean_excess", mean_excess=True)
+        theta, outside = self._predicted_parameters(X, offsets)
+        values = np.broadcast_to(np.asarray(v, dtype=np.float64), (len(theta),))
+        return _readonly_default_prediction(
+            row_mean_excess(self.family, values, theta), outside.any(1)
+        )
+
     def predict_quantile(
         self,
         X: FrameLike | EagerFrame,
