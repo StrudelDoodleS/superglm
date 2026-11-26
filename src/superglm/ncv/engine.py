@@ -49,8 +49,9 @@ factorization", J. Inst. Math. Appl. 23, 1979: the algorithm is stable, the down
 can be an ill-conditioned function of its data).  A factorisation margin therefore decides
 nothing: at or below ``max(sqrt(eps), 2 P gamma_n)`` it only flags the neighbourhood.  The
 margin of a factored system, on its unit diagonal, is the reciprocal of LAPACK's estimate of
-the 1-norm of its inverse (``xPOCON``, ``O(P^2)`` from the Cholesky factor), which is at most
-the smallest eigenvalue up to the estimator's slack, documented as nearly always within ten;
+the 1-norm of its inverse (``xPOCON``, ``O(P^2)`` from the Cholesky factor).  That is at
+most the smallest eigenvalue up to the estimator's slack, whose estimate of the norm is a
+lower bound and in practice within a factor of ten (oneMKL Developer Reference, ``?pocon``);
 the smallest pivot only bounds that eigenvalue from above.  For a single row it is
 ``1 - W_i h_i``, the one eigenvalue of its system that is not one.  A flagged neighbourhood
 is fitted from the rows it keeps.  Its one-step fit is the penalised weighted least-squares
@@ -138,7 +139,11 @@ and penalties identify the model, or more systems needed their kept rows than ``
 DEFAULT_NCV_TOL = 1e-6
 
 KEPT_FITS = 8
-"""Leave-out systems one evaluation fits from their kept rows; each is a pass over the design."""
+"""Leave-out systems one evaluation fits from their kept rows.
+
+Each is a pass of the solver's row factor over the design, so an evaluation that needs more
+is an infeasible trial: a limit on cost, not a tolerance.
+"""
 
 _POCON = get_lapack_funcs("pocon", dtype=np.float64)
 
