@@ -36,6 +36,49 @@ STOP_REASONS: dict[StopReason, str] = {
 }
 """Every way a search ends, with what it means.  Only the first two are a converged search."""
 
+TrialFailure = Literal[
+    "uncertified_mode",
+    "clipped_prediction",
+    "non_finite",
+    "leave_out_rank",
+    "rank_deficient_fit",
+    "kept_rows_limit",
+    "leave_out_refused",
+]
+"""Why a trial of a search gave no criterion; see :data:`TRIAL_FAILURES`."""
+
+TRIAL_FAILURES: dict[TrialFailure, str] = {
+    "uncertified_mode": "the coefficient fit at that smoothing did not converge",
+    "clipped_prediction": (
+        "a held-out prediction was beyond the range in which the link gives a mean without "
+        "clipping it"
+    ),
+    "non_finite": "the criterion or one of its slopes was not a finite number",
+    "leave_out_rank": (
+        "with one neighbourhood held out, the rows that remain and the penalties did not "
+        "identify the model at that smoothing"
+    ),
+    "rank_deficient_fit": (
+        "the coefficient fit was rank deficient and kept no coordinates to evaluate it in"
+    ),
+    "kept_rows_limit": (
+        "more neighbourhoods needed their held-out fit made from the rows that remain than one "
+        "trial makes"
+    ),
+    "leave_out_refused": (
+        "with one neighbourhood held out, the rows that remain did not identify the model, "
+        "though a criterion had been found at another smoothing"
+    ),
+}
+"""Every reason a trial is infeasible, with what it means.
+
+The first five are the engine's (``engine.InfeasibleReason``).  ``"kept_rows_limit"`` is its
+``"leave_out_rank"`` when the trial passed ``engine.KEPT_FITS``, a limit on cost: the model
+may be identified at that smoothing.  ``"leave_out_refused"`` is its
+:class:`~superglm.ncv.engine.LeaveOutRankError` met after a finite criterion; before one it
+is raised and is no trial.
+"""
+
 
 @dataclass
 class NCVResult(REMLResult):
@@ -50,7 +93,8 @@ class NCVResult(REMLResult):
 
     ``converged`` is a first-order stop of a local numerical search, not a proof of a minimum.
     When no finite criterion was found, ``objective`` and ``gradient`` are None and ``lambdas``
-    is the smoothing the search started from.
+    is the smoothing the search started from; ``infeasible_reasons`` says why each trial gave
+    none.
 
     The result holds no design-sized or coefficient-sized array of the search and nothing that
     depends on the basis it ran in: ``pirls_result`` and ``reml_penalties`` are None until a fit
@@ -64,6 +108,8 @@ class NCVResult(REMLResult):
     n_evaluations: int = 0
     #: Evaluations with no certified inner mode or no finite, differentiable criterion.
     infeasible_trials: int = 0
+    #: Those evaluations by reason (:data:`TRIAL_FAILURES`), in the order first met.
+    infeasible_reasons: dict[TrialFailure, int] = field(default_factory=dict)
     #: The criterion's slope in each estimated log smoothing parameter at ``lambdas``.
     gradient: NDArray | None = None
     #: The estimated components' smoothing at the search's first start.
@@ -78,4 +124,4 @@ class NCVResult(REMLResult):
     heldout: Any | None = None
 
 
-__all__ = ["STOP_REASONS", "NCVResult", "StopReason"]
+__all__ = ["STOP_REASONS", "TRIAL_FAILURES", "NCVResult", "StopReason", "TrialFailure"]

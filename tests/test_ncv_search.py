@@ -10,9 +10,12 @@ Tolerances.  ``TOL`` is the search's first-order tolerance: two searches that st
 agree in the criterion to ``10 TOL`` relative (the test plan's bar; the criterion is second
 order in the distance from a minimum).  Bars on EDF and fitted values between two searches are
 empirical, since nothing bounds the smoothing where the criterion is flat; each says what was
-measured.
+measured.  Where one smoothing parameter is searched and the criterion curves at its minimum,
+a first-order stop lies within ``TOL V / V''`` of the stationary point (``stop_reach``), and
+what two searches return may differ by that distance times its own slope in ``log lambda``.
 """
 
+import importlib
 import pickle
 import warnings
 from dataclasses import dataclass, fields, replace
@@ -26,10 +29,11 @@ from scipy.linalg import eigh
 
 from superglm import SuperGLM
 from superglm._lambda_box import LambdaBox
+from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
 from superglm.model.base import model_weight_semantics
 from superglm.model.reml_setup import collect_reml_groups
-from superglm.ncv import from_groups, single_rows
+from superglm.ncv import engine, from_groups, single_rows
 from superglm.ncv import search as search_module
 from superglm.ncv.engine import (
     DEFAULT_NCV_TOL,
@@ -38,13 +42,16 @@ from superglm.ncv.engine import (
     WorkCounts,
     build_problem,
     evaluate,
+    evaluate_fit,
     solve_mode,
 )
-from superglm.ncv.result import STOP_REASONS, NCVResult, StopReason
+from superglm.ncv.result import STOP_REASONS, TRIAL_FAILURES, NCVResult, StopReason, TrialFailure
 from superglm.ncv.search import Descent, edf_share_start, first_order, search
 from superglm.reml.penalty_algebra import build_penalty_context, build_penalty_matrix
 from superglm.reml.result import REMLResult
 from superglm.solvers.mode_score import linear_predictor
+from tests.test_import_compat import _LIBRARIES, _loaded_after, _type_checking_imports
+from tests.test_ncv_engine_rank_cache import one_row_on_the_right, spectral_basis
 
 U = 2.0**-53
 TOL = DEFAULT_NCV_TOL
@@ -424,17 +431,15 @@ def test_penalty_without_a_range_starts_at_its_fallback():
         warnings.simplefilter("error")
         nothing = replace(problem, blocks=((columns, np.zeros_like(S)),))
         np.testing.assert_array_equal(edf_share_start(nothing, fit, box, fallback), fallback)
-        penalty = penalty_matrix(problem, fit.lambdas)
-        D = fit.slope_hessian - penalty
-        flat = D.copy()
+        flat = fit.data_gram.copy()
         flat[columns, columns][0, :] = 0.0
         flat[columns, columns][:, 0] = 0.0
-        singular = replace(fit, slope_hessian=penalty + flat)
-        got = edf_share_start(problem, singular, box, fallback)
+        got = edf_share_start(problem, replace(fit, data_gram=flat), box, fallback)
         block = flat[columns, columns]
         assert got[0] == pytest.approx(np.log(np.trace(block) / np.trace(S)), rel=1e-12)
-        empty = replace(fit, slope_hessian=penalty)
-        np.testing.assert_array_equal(edf_share_start(problem, empty, box, fallback), fallback)
+        for without in (np.zeros_like(flat), None):
+            empty = replace(fit, data_gram=without)
+            np.testing.assert_array_equal(edf_share_start(problem, empty, box, fallback), fallback)
 
 
 @pytest.mark.parametrize("held", [0.0, LambdaBox().floor], ids=["off", "at-the-floor"])
@@ -651,7 +656,7 @@ def test_unsolvable_leave_out_system_is_a_refusal_only_before_any_criterion(monk
     assert raised.value.neighbourhood == 3
     replace_trials(monkeypatch, lambda index, rho: refusal if index == 1 else None)
     result = search(c.problem, c.nb, configured=c.configured).result
-    assert result.infeasible_trials == 1
+    assert result.infeasible_trials == 1 and result.infeasible_reasons == {"leave_out_refused": 1}
     assert_first_order(c, result)
 
 
@@ -738,6 +743,7 @@ def test_search_that_cannot_improve_returns_where_it_stands(monkeypatch):
     assert result.lambda_history[result.objective_history.index(lowest)] == result.lambdas
     assert result.gradient.tolist() == [1.0] and not result.converged
     assert result.infeasible_trials == result.n_evaluations - 2 > 0
+    assert result.infeasible_reasons == {"non_finite": result.infeasible_trials}
 
 
 def test_search_stopped_by_its_step_limit_keeps_its_last_step():
@@ -762,6 +768,7 @@ def test_search_with_no_finite_criterion_invents_no_optimum(monkeypatch):
     assert result.objective is None and result.gradient is None
     assert result.objective_history == [] and result.n_reml_iter == 0
     assert result.infeasible_trials == result.n_evaluations == 2
+    assert result.infeasible_reasons == {"non_finite": 2}
     assert result.lambdas == result.start_lambdas
     assert not result.converged and result.bound_pressure == ()
 
@@ -776,6 +783,8 @@ def test_uncertified_inner_fits_everywhere_are_a_failed_search_at_the_declared_s
     assert result.lambdas == c.configured == result.start_lambdas
     assert outcome.fit is None
     assert result.work["inner_solves"] >= 2
+    assert result.infeasible_reasons == {"uncertified_mode": result.infeasible_trials}
+    assert result.infeasible_trials == result.n_evaluations >= 1
 
 
 def test_zero_criterion_is_its_least_value(monkeypatch):
@@ -836,7 +845,7 @@ def test_result_reads_as_a_reml_result_and_holds_nothing_of_the_search_basis():
     assert result.objective == result.objective_history[-1] == min(result.objective_history)
     assert result.lambda_history[-1] == result.lambdas
     assert result.work["inner_solves"] == result.n_evaluations + 1
-    assert result.work["rows_read"] > 0
+    assert result.work["solves"] > 0 and result.infeasible_reasons == {}
     back = pickle.loads(pickle.dumps(result))
     assert back.lambdas == result.lambdas and back.termination_reason == "gradient"
     assert back.lambda_box == result.lambda_box
@@ -859,3 +868,373 @@ def test_unusable_settings_are_refused_before_any_fit(monkeypatch, settings, mes
     monkeypatch.setattr(search_module, "solve_mode", None)
     with pytest.raises(ValueError, match=message):
         search(c.problem, c.nb, configured=c.configured, **settings)
+
+
+# ── the search on the engine's cache, coordinates and rank verdicts ───────────
+
+
+def test_gaussian_search_reads_its_rows_at_the_first_evaluation_only(monkeypatch):
+    """Groups that are formed and factored: one read forms their cross-products, then none.
+
+    The search asks for no held-out pairs, and neither the provisional fit nor the start value
+    reads a row through the engine, so the whole search reads each row once.
+    """
+    c = curve()
+    problem = replace(c.problem)  # a problem of its own: it holds no cross-products yet
+    sizes, width = c.nb.sizes(), problem.width
+    assert np.all(3 * sizes**2 * width + sizes**3 >= width**3), "a group is not formed and factored"
+    trials = []
+    real = search_module.evaluate
+
+    def spy(*args, **settings):
+        trials.append(real(*args, **settings))
+        return trials[-1]
+
+    monkeypatch.setattr(search_module, "evaluate", spy)
+    result = search(problem, c.nb, configured=c.configured).result
+    assert_first_order(c, result)
+    assert len(trials) == result.n_evaluations >= 3
+    assert [trial.work.rows_read for trial in trials] == [problem.n] + [0] * (len(trials) - 1)
+    assert all(trial.feasible and trial.heldout is None for trial in trials)
+    assert result.work["rows_read"] == problem.n
+    assert result.work["inner_solves"] == len(trials) + 1
+    assert sorted(problem.cache.held) == list(range(c.nb.m))
+
+
+@cache
+def with_twin(family, alias, form) -> Case:
+    """A numeric column, the same column again when ``alias``, then a P-spline; 240 rows.
+
+    The duplicate lies before the spline, so the slopes the fit identifies and the design's
+    columns are numbered differently across the whole of the spline's block.
+    """
+    rng = np.random.default_rng(28)
+    n = 240
+    x = rng.normal(size=n)
+    t = rng.uniform(size=n)
+    signal = np.sin(6 * t) + 0.5 * x
+    y = signal + rng.normal(0, 0.2, n)
+    if family == "poisson":
+        y = rng.poisson(np.exp(signal)).astype(float)
+    frame = pd.DataFrame({"x": x, "twin": x, "t": t})
+    features = {"x": Numeric(), "twin": Numeric(), "t": Spline(kind="ps", n_knots=6)}
+    if not alias:
+        del features["twin"]
+    model = SuperGLM(features=features, family=family, selection_penalty=0, spline_penalty=1.0)
+    nb = single_rows(n) if form == "rows" else from_groups(np.arange(n) % 12, n)
+    return case_of(model, frame[list(features)], y, nb)
+
+
+def data_gram_of(problem, fit):
+    """The data's Gram at ``fit`` from the dense design, its rows centred about their weighted mean."""
+    eta = linear_predictor(problem.dm, fit.result, problem.offset)
+    w = problem.weights * (np.exp(eta) if problem.loss.log_mean else 1.0)
+    X = problem.dm.toarray()
+    X = X - w @ X / w.sum()
+    return X.T @ (w[:, None] * X)
+
+
+def read_at(c: Case, rho):
+    """What is read of the library's fit at ``rho``: each term's EDF and the held-out predictors.
+
+    A term's EDF is ``tr(H^+ D)`` on its columns, ``D`` from the dense rows, so a column the
+    fit did not identify has none.  Also the condition of the Jacobi-scaled Hessian on the
+    slopes the fit identified.
+    """
+    got = evaluate(c.problem, c.nb, np.asarray(rho, dtype=float))
+    assert got.feasible
+    fit = got.fit
+    kept = fit.slope_inverse @ data_gram_of(c.problem, fit)
+    edf = {group.name: float(np.trace(kept[group.sl, group.sl])) for group in c.problem.groups}
+    on = np.flatnonzero(np.any(fit.slope_inverse != 0.0, axis=0))
+    scale = np.sqrt(np.diag(fit.slope_hessian)[on])
+    kappa = np.linalg.cond(fit.slope_hessian[np.ix_(on, on)] / np.outer(scale, scale))
+    return edf, got.heldout.predictor, float(kappa)
+
+
+def stop_reach(c: Case, result, h=0.05) -> float:
+    """How far in ``log lambda`` a first-order stop of a one-parameter search lies from the stationary point.
+
+    ``|V'| <= TOL V`` at the stop, so at most ``TOL V / V''``, the curvature from the engine's
+    slopes ``h`` either side.
+    """
+    rho = log_lambdas(c, result)
+    slope = [evaluate(c.problem, c.nb, rho + s * h).gradient[0] for s in (-1, 1)]
+    curvature = (slope[1] - slope[0]) / (2 * h)
+    assert curvature > 0
+    return TOL * result.objective / curvature
+
+
+def watch_fits(monkeypatch, reshape=lambda fit: fit):
+    """Record every fit a search makes, each reaching the engine as ``reshape`` hands it on."""
+    fits = []
+
+    def solve(problem, rho, **settings):
+        fits.append(reshape(solve_mode(problem, rho, **settings)))
+        return fits[-1]
+
+    def evaluated(problem, nb, rho, *, warm=None, **settings):
+        work = WorkCounts()
+        answer = evaluate_fit(problem, nb, solve(problem, rho, warm=warm, work=work), **settings)
+        answer.work.inner_solves = work.inner_solves
+        answer.work.pirls_iterations = work.pirls_iterations
+        return answer
+
+    monkeypatch.setattr(search_module, "solve_mode", solve)
+    monkeypatch.setattr(search_module, "evaluate", evaluated)
+    return fits
+
+
+@pytest.mark.parametrize("retained", ["columns", "basis"])
+@pytest.mark.parametrize(
+    ("family", "form"), [("gaussian", "rows"), ("gaussian", "groups"), ("poisson", "groups")]
+)
+def test_search_on_an_aliased_design_is_the_search_without_the_alias(
+    monkeypatch, family, form, retained
+):
+    """A duplicated column moves neither the start nor what the search returns.
+
+    Through both forms a rank-deficient fit hands the engine: the solver's representative
+    columns, and a basis of the identified slopes (forced).  The start is the half-range
+    point of the spline's own columns, read in the design's columns in both.
+    """
+    aliased, clean = with_twin(family, True, form), with_twin(family, False, form)
+    want = search(clean.problem, clean.nb, configured=clean.configured).result
+    fits = watch_fits(monkeypatch, spectral_basis if retained == "basis" else lambda fit: fit)
+    got = search(aliased.problem, aliased.nb, configured=aliased.configured).result
+    monkeypatch.undo()
+
+    problem = aliased.problem
+    identified = [np.flatnonzero(np.any(fit.slope_inverse != 0.0, axis=0)) for fit in fits]
+    assert all(fit.result.reml_hessian_rank == problem.width - 1 for fit in fits)
+    if retained == "columns":
+        assert all(kept.tolist() == [0, *range(2, problem.dm.p)] for kept in identified)
+    else:
+        assert all(len(kept) == problem.dm.p for kept in identified)
+    columns, S = problem.blocks[0]
+    assert (columns.start, columns.stop) == (2, problem.dm.p)
+
+    # the start: half the range of the spline's penalty on its own columns, as without the alias
+    lam = got.start_lambdas["t"]
+    hessian = data_gram_of(problem, fits[0])[columns, columns] + lam * S
+    consumed = np.trace(np.linalg.solve(hessian, lam * S))
+    resolved = 64 * np.linalg.cond(hessian) * U
+    assert consumed == pytest.approx(np.linalg.matrix_rank(S) / 2, rel=resolved)
+    assert lam == pytest.approx(want.start_lambdas["t"], rel=resolved)
+
+    # what the search returns: the criterion, the smoothing, each term's EDF, the held-out predictors
+    assert_first_order(aliased, got)
+    assert_first_order(clean, want)
+    assert got.objective == pytest.approx(want.objective, rel=10 * TOL)
+    rho, h = log_lambdas(clean, want), 0.05
+    apart = 4 * stop_reach(clean, want)
+    assert abs(log_lambdas(aliased, got)[0] - rho[0]) <= apart
+    edf, held, kappa = read_at(aliased, log_lambdas(aliased, got))
+    edf_want, held_want, _ = read_at(clean, rho)
+    (edf_low, held_low, _), (edf_high, held_high, _) = (
+        read_at(clean, rho - h),
+        read_at(clean, rho + h),
+    )
+    rounding = 64 * kappa * U
+    for mine, theirs in ((edf["t"], "t"), (edf["x"] + edf["twin"], "x")):
+        moves = abs(edf_high[theirs] - edf_low[theirs]) / (2 * h)
+        assert abs(mine - edf_want[theirs]) <= apart * moves + rounding * problem.dm.p, theirs
+    assert edf["twin"] == 0.0
+    moves = np.max(np.abs(held_high - held_low)) / (2 * h)
+    slack = apart * moves + rounding * np.maximum(1.0, np.abs(held_want))
+    assert np.all(np.abs(held - held_want) <= slack)
+
+
+def test_every_fit_of_a_search_keeps_the_solvers_decomposition(monkeypatch):
+    """The provisional fit and each trial's carry what a rank-deficient fit is evaluated in."""
+    c = with_twin("gaussian", True, "groups")
+    fits = watch_fits(monkeypatch)
+    result = search(c.problem, c.nb, configured=c.configured).result
+    assert len(fits) == result.n_evaluations + 1 >= 3
+    for fit in fits:
+        retained = fit.result.reml_slope_decomposition
+        assert retained is not None and retained.solution_basis is not None
+        assert retained.solution_basis.shape == (c.problem.dm.p, c.problem.dm.p - 1)
+
+
+# ── refused against infeasible ────────────────────────────────────────────────
+
+
+@cache
+def lone_group() -> Case:
+    """The ``curve`` rows with a numeric column that is zero outside group 5.
+
+    With group 5 held out the column is zero on every row that remains, and no penalty sees it.
+    """
+    rng = np.random.default_rng(127)
+    n = 120
+    x = rng.uniform(size=n)
+    y = np.sin(6 * x) + rng.normal(0.0, 0.2, n)
+    group = np.arange(n) % 12
+    frame = pd.DataFrame({"t": x, "only": np.where(group == 5, rng.normal(size=n), 0.0)})
+    model = SuperGLM(
+        features={"t": Spline(kind="ps", n_knots=6), "only": Numeric()},
+        family="gaussian",
+        selection_penalty=0,
+        spline_penalty=1.0,
+    )
+    return case_of(model, frame, y, from_groups(group, n))
+
+
+def test_rows_that_never_identify_the_model_end_the_search_at_its_first_trial(monkeypatch):
+    """The engine's refusal holds at every smoothing, so the first trial raises it and no other runs."""
+    c = lone_group()
+    for rho in (-8.0, 0.0, 8.0):
+        with pytest.raises(LeaveOutRankError, match="group 5 held out"):
+            evaluate(c.problem, c.nb, np.array([rho]), heldout=False)
+    trials = []
+    real = search_module.evaluate
+    monkeypatch.setattr(
+        search_module, "evaluate", lambda *args, **s: trials.append(args[2]) or real(*args, **s)
+    )
+    with pytest.raises(LeaveOutRankError, match="group 5 held out") as refusal:
+        search(c.problem, c.nb, configured=c.configured)
+    assert refusal.value.neighbourhood == 5 and len(trials) == 1
+
+
+def test_trial_past_the_limit_on_kept_rows_fits_is_infeasible_and_says_so(monkeypatch):
+    """Every leave-out system flagged: a trial stops at ``KEPT_FITS`` and the search fails, unrefused.
+
+    The model is identified at every smoothing, which the same flags show once the limit
+    covers every group: each group is then fitted from its kept rows and the search converges
+    on the criterion of the unflagged one.
+    """
+    c = curve()
+    assert c.nb.m > engine.KEPT_FITS
+    free = search(replace(c.problem), c.nb, configured=c.configured).result
+    monkeypatch.setattr(engine._Trial, "questionable", np.inf)
+    result = search(replace(c.problem), c.nb, configured=c.configured).result
+    assert result.termination_reason == "no_finite_criterion" and not result.converged
+    assert result.objective is None and result.infeasible_trials == result.n_evaluations == 2
+    assert result.infeasible_reasons == {"kept_rows_limit": 2}
+    assert result.work["kept_fits"] == 2 * (engine.KEPT_FITS + 1)
+    monkeypatch.setattr(engine, "KEPT_FITS", c.nb.m)
+    afforded = search(replace(c.problem), c.nb, configured=c.configured).result
+    assert afforded.converged and afforded.infeasible_reasons == {}
+    assert afforded.work["kept_fits"] == c.nb.m * afforded.n_evaluations
+    assert afforded.objective == pytest.approx(free.objective, rel=10 * TOL)
+
+
+def test_leave_out_system_unusable_at_one_smoothing_is_one_infeasible_trial():
+    """A start where the penalty is below what the kept rows' factor resolves; the search goes on.
+
+    At ``lambda = exp(-50)`` the penalty alone tells the right-hand columns apart and is 1e-22
+    of the kept rows in their own factor: infeasible there, identified everywhere.
+    """
+    problem, nb = one_row_on_the_right()
+    box = NarrowBox(low=float(np.exp(-60.0)))
+    name = problem.names[0]
+    at_start = evaluate(problem, nb, np.array([-50.0]), heldout=False)
+    assert not at_start.feasible and at_start.infeasible_reason == "leave_out_rank"
+    assert not at_start.past_kept_fits
+    result = search(
+        problem, nb, configured={name: 1.0}, start={name: float(np.exp(-50.0))}, box=box
+    ).result
+    assert np.log(result.start_lambdas[name]) == pytest.approx(-50.0)
+    assert set(result.infeasible_reasons) == {"leave_out_rank"}
+    assert result.infeasible_reasons["leave_out_rank"] == result.infeasible_trials >= 1
+    assert result.objective is not None and result.n_reml_iter >= 1
+    assert result.lambda_history[0] != result.start_lambdas
+
+
+def test_rank_deficient_fit_without_its_coordinates_is_one_infeasible_trial(monkeypatch):
+    """A fit that kept a basis and hands none back gives no trial; the next start is searched."""
+    c = with_twin("gaussian", True, "groups")
+    free = search(c.problem, c.nb, configured=c.configured).result
+
+    def unread(index, rho):
+        if index:
+            return None
+        general = spectral_basis(solve_mode(c.problem, rho))
+        bare = replace(general, result=replace(general.result, reml_slope_decomposition=None))
+        return evaluate_fit(c.problem, c.nb, bare, heldout=False)
+
+    replace_trials(monkeypatch, unread)
+    result = search(c.problem, c.nb, configured=c.configured).result
+    assert result.infeasible_reasons == {"rank_deficient_fit": 1}
+    assert result.objective == pytest.approx(free.objective, rel=10 * TOL)
+    assert_first_order(c, result)
+
+
+def test_trial_failures_are_a_closed_set():
+    theirs = set(get_args(engine.InfeasibleReason))
+    assert set(TRIAL_FAILURES) == set(get_args(TrialFailure))
+    assert set(TRIAL_FAILURES) == theirs | {"kept_rows_limit", "leave_out_refused"}
+
+
+@pytest.mark.parametrize("reason", get_args(engine.InfeasibleReason))
+def test_each_reason_of_the_engine_is_counted_under_its_name(monkeypatch, reason):
+    c = curve()
+    replace_trials(monkeypatch, lambda index, rho: infeasible(reason) if index == 0 else None)
+    result = search(c.problem, c.nb, configured=c.configured).result
+    assert result.infeasible_reasons == {reason: 1} and result.infeasible_trials == 1
+    assert_first_order(c, result)
+
+
+# ── the package ───────────────────────────────────────────────────────────────
+
+SURFACE = {
+    # the neighbourhood structure, its builders and its checks
+    "FEW_NEIGHBOURHOODS",
+    "LevelConflict",
+    "Neighbourhoods",
+    "build_neighbourhoods",
+    "check_leaves_weighted_rows",
+    "check_scores_weighted_rows",
+    "from_groups",
+    "from_neighbours",
+    "from_splitter",
+    "single_rows",
+    "unidentified_levels",
+    "warn_few_neighbourhoods",
+    # the engine
+    "DEFAULT_NCV_TOL",
+    "Evaluation",
+    "HeldOutPairs",
+    "LeaveOutRankError",
+    "ModeFit",
+    "NCVProblem",
+    "WorkCounts",
+    "build_problem",
+    "evaluate",
+    "evaluate_fit",
+    "ncv_mode_bar",
+    # the search and its result
+    "DEFAULT_MAX_NCV_ITER",
+    "SearchOutcome",
+    "search_smoothing",
+    "NCVResult",
+    "STOP_REASONS",
+    "TRIAL_FAILURES",
+}
+
+
+def test_package_exports_what_a_fit_calls():
+    """One list: what the package names, what a type checker reads, and what each module defines."""
+    package = importlib.import_module("superglm.ncv")
+    assert set(package.__all__) == SURFACE
+    table = {(owner, name) for owner, names in package._LAZY_EXPORTS.items() for name in names}
+    assert {name for _, name in table} == SURFACE
+    assert table == _type_checking_imports("superglm.ncv")
+    for owner, name in sorted(table):
+        assert getattr(package, name) is getattr(importlib.import_module(owner), name)
+        assert name in dir(package)
+    assert package.search_smoothing is search and package.search is search_module
+
+
+def test_importing_the_package_loads_none_of_its_modules():
+    """A name costs its import when it is read: the package alone loads no library and no module.
+
+    A neighbourhood builder then loads its own module, and neither the engine, the solvers nor
+    SciPy's optimiser.
+    """
+    ours = ("superglm.ncv.engine", "superglm.ncv.search", "superglm.ncv.neighbourhoods")
+    fitting = ("scipy.optimize", "superglm.solvers", "superglm.reml", *ours)
+    assert _loaded_after("import superglm.ncv", (*_LIBRARIES, *fitting)) == []
+    after = _loaded_after("from superglm.ncv import single_rows", fitting)
+    assert after == ["superglm.ncv.neighbourhoods"]

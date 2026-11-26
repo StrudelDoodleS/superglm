@@ -141,16 +141,13 @@ def test_aliased_design_is_the_model_without_the_alias(family, form, route):
     assert_same_criterion(clean.problem, got, evaluate(clean.problem, nb, ZERO, route=route), kappa)
 
 
-@pytest.mark.parametrize("route", ROUTES, ids=lambda r: r or "cost-rule")
-def test_retained_basis_is_evaluated_as_representative_columns_are(route):
-    """A fit that hands back a basis of its identified slopes gives the same evaluation.
+def spectral_basis(fit):
+    """``fit``, rank deficient by one, handing back a basis of its identified slopes.
 
-    The basis is the spectral one of the duplicated design's slope Hessian, Jacobi scaled,
-    and the fit's inverse the pseudo-inverse on it; the coefficients are left as the solver
-    gave them, one zero on the alias, which differ from the basis's own by a null vector.
+    The basis is the spectral one of its slope Hessian, Jacobi scaled, and the fit's inverse
+    the pseudo-inverse on it; the coefficients are left as the solver gave them, one zero on
+    the alias, which differ from the basis's own by a null vector.
     """
-    aliased, clean = twin("gaussian", True), twin("gaussian", False)
-    fit = solve_mode(aliased.problem, ZERO)
     scale = np.sqrt(np.diag(fit.slope_hessian))
     values, vectors = np.linalg.eigh(fit.slope_hessian / np.outer(scale, scale))
     kept = values > np.sqrt(U) * values[-1]
@@ -162,11 +159,19 @@ def test_retained_basis_is_evaluated_as_representative_columns_are(route):
         estimable_functional_basis=vectors[:, kept] * scale[:, None],
         retained_values=values[kept],
     )
-    general = replace(
+    return replace(
         fit,
         result=replace(fit.result, reml_slope_decomposition=spectral),
         slope_inverse=(basis / values[kept]) @ basis.T,
     )
+
+
+@pytest.mark.parametrize("route", ROUTES, ids=lambda r: r or "cost-rule")
+def test_retained_basis_is_evaluated_as_representative_columns_are(route):
+    """A fit that hands back a basis of its identified slopes gives the same evaluation."""
+    aliased, clean = twin("gaussian", True), twin("gaussian", False)
+    fit = solve_mode(aliased.problem, ZERO)
+    general = spectral_basis(fit)
     for form in ("rows", "groups", "forward"):
         nb, (want, residual, kappa) = twin_reference("gaussian", form)
         got = evaluate_fit(aliased.problem, nb, general, route=route)

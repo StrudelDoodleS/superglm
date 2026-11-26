@@ -36,21 +36,29 @@ outward slope of at least the stopping bar) are reported separately.  Fixed comp
 searched and enter neither.
 
 **Starts.**  The default start is the half-EDF point of :func:`edf_share_start`, a per-penalty
-heuristic, with a caller's start for any estimated component it names.  The criterion is flat
-where every penalty is negligible or dominant, and can be stationary at a maximum, so a start
-at which the search takes no step is not taken as the answer while another start remains: the
-half-EDF point, then the configured smoothing (where the provisional fit was certified), are
-searched in turn until one moves, and the lowest end is returned.  A start with no finite
-criterion passes to the next in the same way.
+heuristic read from the provisional fit's data Gram, with a caller's start for any estimated
+component it names.  The criterion is flat where every penalty is negligible or dominant, and
+can be stationary at a maximum, so a start at which the search takes no step is not taken as
+the answer while another start remains: the half-EDF point, then the configured smoothing
+(where the provisional fit was certified), are searched in turn until one moves, and the
+lowest end is returned.  A start with no finite criterion passes to the next in the same way.
 
 **Infeasible trials.**  A trial with no certified inner mode, or no finite criterion and
 gradient, is never handed to the optimiser as it is: it reads as far above the point the search
 stands on as the step to it promised to go below, with a zero slope, which a line search
 rejects.  The search stands only on feasible points, each lower than the last, so a search
 that fails returns the lowest point it reached with the stop that ended it, and that zero slope
-enters no test.  A leave-out system that cannot be solved before any criterion has been found
-is the engine's refusal (:class:`~superglm.ncv.engine.LeaveOutRankError`) and is raised; later
-it is an infeasible trial.
+enters no test.  Every infeasible trial is counted under its reason
+(:data:`~superglm.ncv.result.TRIAL_FAILURES`), so a search that fails for want of a feasible
+trial says why.  Rows that do not identify the model once a neighbourhood is removed are the
+engine's refusal (:class:`~superglm.ncv.engine.LeaveOutRankError`): true at every smoothing,
+it is raised when it comes before any criterion has been found, and later it is an infeasible
+trial.  A trial the engine could not afford (more kept-rows fits than ``engine.KEPT_FITS``) or
+could not resolve at its smoothing is infeasible and never a refusal.
+
+**Rows read.**  The search asks for no held-out pairs, so a Gaussian model whose neighbourhoods
+are formed and factored reads its rows at the first evaluation only; the pairs are taken once,
+from the fit that is published.
 """
 
 from __future__ import annotations
@@ -77,8 +85,7 @@ from superglm.ncv.engine import (
     solve_mode,
 )
 from superglm.ncv.neighbourhoods import Neighbourhoods
-from superglm.ncv.result import NCVResult, StopReason
-from superglm.reml.penalty_algebra import build_penalty_matrix
+from superglm.ncv.result import NCVResult, StopReason, TrialFailure
 
 DEFAULT_MAX_NCV_ITER = 100
 
@@ -175,7 +182,7 @@ class Descent:
 
     ``ends`` holds, for every start with a finite criterion, the point its search ended on and
     why; ``path`` each such start and each accepted step.  ``warm`` is the last certified inner
-    fit, which starts the next one.
+    fit, which starts the next one.  ``reasons`` counts the infeasible trials by reason.
     """
 
     criterion: Criterion
@@ -188,6 +195,7 @@ class Descent:
     steps: int = 0
     evaluations: int = 0
     infeasible: int = 0
+    reasons: dict[TrialFailure, int] = field(default_factory=dict)
     work: WorkCounts = field(default_factory=WorkCounts)
     _seen: dict[bytes, Point | None] = field(default_factory=dict)
 
@@ -217,8 +225,7 @@ class Descent:
         except LeaveOutRankError:
             if not any(point is not None for point in self._seen.values()):
                 raise
-            self.infeasible += 1
-            return None
+            return self._infeasible("leave_out_refused")
         for count in fields(WorkCounts):
             spent = getattr(self.work, count.name) + getattr(evaluation.work, count.name)
             setattr(self.work, count.name, spent)
@@ -229,9 +236,13 @@ class Descent:
             slopes is not None and np.isfinite(evaluation.value) and np.all(np.isfinite(slopes))
         )
         if not (evaluation.feasible and finite):
-            self.infeasible += 1
-            return None
+            return self._infeasible(_trial_failure(evaluation))
         return Point(rho, float(evaluation.value), np.asarray(slopes, dtype=np.float64))
+
+    def _infeasible(self, reason: TrialFailure) -> None:
+        """Count a trial that gave no point, under ``reason``."""
+        self.infeasible += 1
+        self.reasons[reason] = self.reasons.get(reason, 0) + 1
 
     def first_order(self, point: Point) -> FirstOrder:
         """``point``'s first-order state at this search's tolerance."""
@@ -282,6 +293,22 @@ class Descent:
             return None, "no_finite_criterion"
         lowest = int(np.argmin([point.value for point, _ in self.ends]))
         return self.ends[lowest]
+
+
+def _trial_failure(evaluation: Evaluation) -> TrialFailure:
+    """Why ``evaluation`` gave the search no point.
+
+    The engine's own reason, except that its ``"leave_out_rank"`` at the limit on kept-rows
+    fits is ``"kept_rows_limit"``: a trial it could not afford, not one it could not resolve.
+    An evaluation the engine calls feasible with a value or slope that is not finite is
+    ``"non_finite"``.
+    """
+    reason = evaluation.infeasible_reason
+    if reason is None:
+        return "non_finite"
+    if reason == "leave_out_rank" and evaluation.past_kept_fits:
+        return "kept_rows_limit"
+    return reason
 
 
 def _optimiser_stop(halted: OptimizeResult, max_iter: int) -> StopReason:
@@ -379,11 +406,15 @@ def search(
     first-order tolerance relative to the criterion and ``max_iter`` the limit on accepted
     steps.
 
-    A model with nothing to estimate is evaluated once and the optimiser is not called.
+    Every evaluation is made without held-out pairs: the result holds none, and they are read
+    from the fit published at the returned smoothing (``evaluate_fit``).  A model with nothing
+    to estimate is evaluated once and the optimiser is not called.
     """
     box = _fit_box(problem) if box is None else box
     descent = Descent(
-        criterion=lambda rho, warm: evaluate(problem, nb, rho, warm=warm, route=route),
+        criterion=lambda rho, warm: evaluate(
+            problem, nb, rho, warm=warm, heldout=False, route=route
+        ),
         box=box,
         tol=float(tol),
         max_iter=int(max_iter),
@@ -468,6 +499,7 @@ def _outcome(problem: NCVProblem, descent: Descent, first: NDArray[np.float64]) 
         bound_pressure=() if point is None else order.pressure(problem.names),
         n_evaluations=descent.evaluations,
         infeasible_trials=descent.infeasible,
+        infeasible_reasons=dict(descent.reasons),
         gradient=None if point is None else point.gradient.copy(),
         start_lambdas={
             name: lam for name, lam in _lambdas(problem, first).items() if name in problem.names
@@ -494,7 +526,7 @@ def edf_share_start(
     """``log lambda`` at which each estimated penalty, taken alone, leaves ``share`` of its range.
 
     A heuristic for a start, not an estimate.  For one component with penalty ``S`` on its
-    term's columns and the data's Gram ``D`` on them (``fit``'s Hessian without its penalties),
+    term's columns and the data's Gram ``D`` on them (``fit.data_gram``, the solver's own),
     the eigenvalues ``g_i > 0`` of ``S v = g D v`` give the degrees of freedom its range keeps,
     ``sum_i 1 / (1 + lambda g_i)``, were it the only penalty on that term; the start is the
     ``lambda`` at which that is ``share`` of the range's dimension.  mgcv documents the same
@@ -502,19 +534,20 @@ def edf_share_start(
     penalties that share a term, and correlated terms, each leave less than ``share`` once
     fitted together.
 
+    Both are read in the design's own columns, on the whole of the term, also where the fit is
+    rank deficient: the pair on one term's columns does not depend on the coordinates the fit
+    identified, so a column aliased with another term's leaves a term's start where it is
+    without the alias.
+
     Where ``D`` is not positive definite the single ratio ``tr(S) / tr(D)`` stands for the
     eigenvalues.  A component whose penalty or data Gram has no positive trace has no range
-    this can read, and starts at ``fallback``.
+    this can read, and starts at ``fallback``; so does every component of a fit that carries
+    no data Gram.
     """
-    penalty = build_penalty_matrix(
-        list(problem.dm.group_matrices),
-        problem.groups,
-        fit.lambdas,
-        problem.dm.p,
-        reml_penalties=problem.penalties,
-    )
-    data = fit.slope_hessian - penalty
     rho = np.array(fallback, dtype=np.float64)
+    data = fit.data_gram
+    if data is None:
+        return np.clip(rho, box.log_floor, box.log_ceiling)
     for j, (columns, block) in enumerate(problem.blocks):
         ratios = _penalty_over_data(block, data[columns, columns])
         if ratios is not None:
@@ -553,6 +586,9 @@ def _share_point(ratios: NDArray[np.float64], share: float) -> float:
     return 0.5 * (low + high)
 
 
+search_smoothing = search
+"""``search`` under the name :mod:`superglm.ncv` exports: the package's ``search`` is this module."""
+
 __all__ = [
     "DEFAULT_MAX_NCV_ITER",
     "Descent",
@@ -562,4 +598,5 @@ __all__ = [
     "edf_share_start",
     "first_order",
     "search",
+    "search_smoothing",
 ]

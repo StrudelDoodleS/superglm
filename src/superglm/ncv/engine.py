@@ -402,6 +402,10 @@ class ModeFit:
 
     ``slope_inverse`` and ``slope_hessian`` are ``H_c^+`` and ``H_c`` of the final system, whose
     rows are centred as ``(x - centre_hi) - centre_lo``; with ``1 / sum_w`` the first is ``H^-1``.
+    ``data_gram`` is that system's ``X' W X``, the Hessian without its penalty, as the solver
+    formed it; a fit not made by :meth:`from_solve` may carry none.  All three are in the
+    design's own columns, the ones ``NCVProblem.blocks`` index, whatever the fit's rank: the
+    coordinates a rank-deficient fit identified are read from ``result``, never from a shape.
     """
 
     lambdas: dict[str, float]
@@ -411,6 +415,7 @@ class ModeFit:
     sum_w: float
     centre_hi: NDArray[np.float64]
     centre_lo: NDArray[np.float64] | None
+    data_gram: NDArray[np.float64] | None = None
 
     @classmethod
     def from_solve(
@@ -434,6 +439,7 @@ class ModeFit:
             sum_w=float(cache["sum_W"]),
             centre_hi=centre_hi,
             centre_lo=centre_lo,
+            data_gram=cache.get("centered_XtWX"),
         )
 
     @property
@@ -534,6 +540,11 @@ class Evaluation:
     heldout: HeldOutPairs | None
     fit: ModeFit | None
     work: WorkCounts
+
+    @property
+    def past_kept_fits(self) -> bool:
+        """Whether the trial ended at its limit on kept-rows fits (``KEPT_FITS``), a limit on cost."""
+        return self.work.kept_fits > KEPT_FITS
 
 
 def evaluate(
