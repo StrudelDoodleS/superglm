@@ -456,20 +456,26 @@ def _build_plan(dm) -> LookupPlan | None:
     )
 
 
-def _choose_pairs(terms: list[_Term], codes: NDArray) -> tuple[NDArray, NDArray]:
+def _choose_pairs(
+    terms: list[_Term] | tuple, codes: NDArray, centred: bool = False
+) -> tuple[NDArray, NDArray]:
     """Per term pair, a full table or an accumulation (Li & Wood 2020's choice, as a cost model).
 
     A table costs one access a row plus ``m_t p_t p_u + m_t p_u m_u`` to form;
     an accumulation the window of the other term's row a row plus ``m_t p_t
     p_u``.  Tables are taken while their cells stay under ``_CELL_CAP`` each
     and a quarter of ``max_memory`` in all.  The choice moves cost only: both
-    forms are inside the module's bounds.
+    forms are inside the module's bounds.  ``centred`` prices a raw-read term's window at
+    its table's whole width, as a centred read (:func:`_read_tables`) reads it.
     """
     from superglm._parallel import resolve_max_memory
 
     n = codes.shape[1]
     avg_window = []
     for t, term in enumerate(terms):
+        if centred and term.raw_read:
+            avg_window.append(float(term.raw.shape[1]))
+            continue
         counts = np.bincount(codes[t], minlength=term.raw.shape[0]).astype(np.float64)
         avg_window.append(float(counts @ (term.hi - term.lo)) / max(n, 1))
     budget = resolve_max_memory() // 4
@@ -983,6 +989,9 @@ def _leverage_tables(
     """
     terms = plan.terms
     tables, zero = _read_tables(plan, centre, centred)
+    tab_pairs, acc_pairs = plan.tab_pairs, plan.acc_pairs
+    if centred and any(term.raw_read for term in terms):
+        tab_pairs, acc_pairs = _choose_pairs(terms, plan.codes, centred=True)
     Vz = V @ zero
     e_parts = []
     for term, A in zip(terms, tables, strict=True):
@@ -995,7 +1004,7 @@ def _leverage_tables(
         e -= 2.0 * _rows_times(term, A, Vz[term.columns][:, None])[:, 0]
         e_parts.append(e)
     tab_rows, G_parts, offset = [], [], 0
-    for a, b in plan.tab_pairs:
+    for a, b in tab_pairs:
         A, B = tables[a], tables[b]
         Vab = V[np.ix_(terms[a].columns, terms[b].columns)]
         G = _pair_table(terms[a], A, terms[b], B, 2.0 * Vab)
@@ -1003,7 +1012,7 @@ def _leverage_tables(
         G_parts.append(G.ravel())
         offset += G.size
     acc_rows, Q_parts, offset = [], [], 0
-    for x, y in plan.acc_pairs:
+    for x, y in acc_pairs:
         Q = _rows_times(terms[x], tables[x], 2.0 * V[np.ix_(terms[x].columns, terms[y].columns)])
         acc_rows.append((x, y, offset, tables[y].shape[1]))
         Q_parts.append(Q.ravel())
