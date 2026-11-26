@@ -7,6 +7,8 @@ import json
 import linecache
 import sys
 import textwrap
+import types
+import typing
 
 import numpy as np
 import pytest
@@ -431,6 +433,26 @@ def test_a_constant_imported_under_a_guard_is_followed_to_its_module(fingerprint
     before = fingerprint_of(source, helper="SCALE = 1.0\n")
     assert fingerprint_of(source, helper="SCALE = 1.0\n") == before
     assert fingerprint_of(source, helper="SCALE = 2.0\n") != before
+
+
+def test_numpys_ndarray_alias_enters_alike_in_either_form(fingerprint_of, monkeypatch):
+    """numpy's ``NDArray`` is a subscripted generic before numpy 2.5 and a type
+    alias from 2.5; an oracle annotated with it fingerprints the same under either."""
+    library = types.ModuleType("_oracle_store_library")
+    monkeypatch.setitem(sys.modules, "_oracle_store_library", library)
+    source = (
+        "from _oracle_store_library import NDArray\n"
+        "def oracle(x: NDArray) -> NDArray:\n    return x\n"
+    )
+    fingerprints = []
+    for alias in (
+        np.ndarray[typing.Any, np.dtype[typing.Any]],
+        typing.TypeAliasType("NDArray", np.ndarray),
+    ):
+        library.NDArray = alias
+        monkeypatch.setattr(_oracle_store, "_NDARRAY", alias)
+        fingerprints.append(fingerprint_of(source))
+    assert fingerprints[0] == fingerprints[1]
 
 
 class _OneSlot:
