@@ -611,9 +611,13 @@ def _fit_plan(
             )
     recorded = None if tail is None else tail._fit_settings
     recorded_method = None if recorded is None else recorded["method"]
-    method = (
-        recorded_method if reml is None and recorded is not None else "fit_reml" if reml else "fit"
-    )
+    if reml is not None:
+        method = "fit_reml" if reml else "fit"
+    elif recorded is not None:
+        method = recorded_method
+    else:
+        # An unfitted tail's curves need their smoothing chosen; with none, REML is ``fit``.
+        method = "fit" if tail is None else "fit_reml"
     if recorded is not None and method == recorded_method:
         options = {**{k: v for k, v in recorded.items() if k != "method"}, **options}
     return method, options
@@ -895,7 +899,8 @@ def threshold_stability(
         A ``SuperLSS`` using ``GeneralizedParetoLSS``. A fitted tail is
         refitted with its recorded method (``fit`` or ``fit_reml``) and
         settings unless overridden by ``reml`` or ``fit_options``; an unfitted
-        tail uses ``reml``. ``tail`` itself is never fitted or modified.
+        tail is fitted with ``fit_reml`` unless ``reml=False``. ``tail`` itself
+        is never fitted or modified.
     sample_weight : array-like of shape (n_claims,), optional
         Nonnegative integer frequency counts. Rows with a zero count are
         dropped before losses are validated. Non-unit counts require
@@ -913,8 +918,9 @@ def threshold_stability(
         be fitted; candidates with fewer go to ``result.dropped``.
     reml : bool, optional
         ``True`` fits with ``fit_reml`` and ``False`` with ``fit``. When
-        ``None`` (default), a fitted ``tail`` keeps its recorded method and
-        anything else uses ``fit``.
+        ``None`` (default), a fitted ``tail`` keeps its recorded method, an
+        unfitted ``tail`` uses ``fit_reml`` (which chooses the smoothing of any
+        curves in it), and the default one-scale, one-shape tail uses ``fit``.
     fit_options : mapping, optional
         Extra keyword arguments passed to each fit. Must not contain
         ``"truncation"``, ``"censored"``, or ``"sample_weight"``, which

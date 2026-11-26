@@ -581,7 +581,7 @@ def test_a_fitted_tail_is_refitted_the_way_it_was_fitted():
     np.testing.assert_allclose(line["shape"], _shape_of(by_reml, frame), rtol=1e-10)
     assert abs(_shape_of(by_reml, frame) - _shape_of(by_hand, frame)) > 1e-6  # the two differ
 
-    # the caller's settings come first, and an unfitted tail follows ``reml``
+    # the caller's settings come first; an unfitted tail is fitted by REML unless reml=False
     stiff = {"scale:x#wiggle": 400.0}
     restated = threshold_stability(frame, y, [2.0], tail=fixed, fit_options={"lambdas": stiff})
     by_stiff = _smooth_tail().fit(rows, excess, lambdas=stiff)
@@ -599,8 +599,11 @@ def test_a_fitted_tail_is_refitted_the_way_it_was_fitted():
     np.testing.assert_allclose(
         unfitted.table["shape"].iloc[0], _shape_of(by_reml, frame), rtol=1e-10
     )
+    by_default = threshold_stability(frame, y, [2.0], tail=_smooth_tail())
+    pd.testing.assert_frame_equal(by_default.table, unfitted.table)
     with pytest.raises(ValueError, match="missing penalty lambda names"):
-        threshold_stability(frame, y, [2.0], tail=_smooth_tail())  # the first fit raises as itself
+        # asked for ``fit`` with no smoothing given, the first fit raises as itself
+        threshold_stability(frame, y, [2.0], tail=_smooth_tail(), reml=False)
 
 
 def test_an_array_offset_is_cut_to_the_rows_of_each_candidate():
@@ -683,6 +686,19 @@ def test_a_shape_the_claims_above_do_not_identify_is_dropped_not_banded():
     assert "do not identify the tail shape" in result.dropped.loc[0, "reason"]
     with pytest.raises(ValueError, match="do not identify the tail shape"):
         threshold_stability(frame, y, [1.0], tail=tail)
+
+
+def test_an_unfitted_tail_with_a_curve_is_fitted_by_reml_by_default():
+    """Mutation check: fitting an unfitted tail with ``fit`` refuses its unchosen smoothing."""
+    rng = np.random.default_rng(11)
+    frame = pd.DataFrame({"age": rng.uniform(18.0, 80.0, 3_000)})
+    y = 1_500.0 * np.exp(1.1 * rng.standard_normal(3_000))
+    family = GeneralizedParetoLSS()
+    tail = SuperLSS(family, family.scale(s("age", k=6)), family.shape())
+    default = threshold_stability(frame, y, [3_000.0, 6_000.0], tail=tail)
+    chosen = threshold_stability(frame, y, [3_000.0, 6_000.0], tail=tail, reml=True)
+    pd.testing.assert_frame_equal(default.table, chosen.table)
+    assert default.table["threshold"].tolist() == [3_000.0, 6_000.0]
 
 
 def test_the_band_of_a_shape_with_terms_follows_the_mean_shape_over_the_whole_book():
