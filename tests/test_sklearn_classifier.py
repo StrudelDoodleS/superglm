@@ -82,8 +82,12 @@ class TestClassifierContract:
         assert decision[0] < -90.0
         assert decision[1] > 90.0
         assert decision[1] - decision[0] == pytest.approx(200.0)
-        assert np.all(np.isfinite(probability))
-        assert np.all((probability > 0.0) & (probability < 1.0))
+        # Each row's own probability (#743): e^-100 at one end, and at the other a value
+        # within e^-100 of 1, which float64 rounds to 1.  The unfixed pair was the solver's
+        # clip, 1e-7 and 1 - 1e-7.
+        assert_allclose(probability, 1.0 / (1.0 + np.exp(-decision)), rtol=1e-12)
+        assert 0.0 < probability[0] < 1e-40
+        assert probability[1] == 1.0
 
     def test_predict_proba_consistent_with_predict(self, binary_data):
         X, y = binary_data
