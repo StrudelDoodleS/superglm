@@ -70,9 +70,23 @@ cross-products, its scores and its third-derivative term.  A set of rows of at l
   row as the pairs arrive, while ``2 K <= P``: two products a pair against a block's ``P`` a
   row.
 
-The neighbourhood-sized system and the single-row form multiply each row with the rows of
-its own neighbourhood, and keep their dense blocks.  The compact products and the blocks
-give the same numbers to rounding, so the rule decides cost only.
+- Single rows on a design of lookups and dense columns read only their leverages
+  ``h = z' H^-1 z``, from the term-pair tables with every table centred
+  (``CentredRows.leverages``): the diagonal of ``Z H^-1 Z'`` for a design stored as small
+  tables and indices, as discretised GAM fitting forms it (Wood, Li, Shaddick and Augustin,
+  "Generalized additive models for gigadata", JASA 112, 2017; Li and Wood, Stat. Comput.
+  30, 2020).  A row's step,
+  its prediction and its terms of ``q`` and ``M`` are scalars times ``y = H^-1 z``, so ``q``
+  takes ``Z' v`` for one row weight ``v`` and ``M = sum_k a_k b_k y_k y_k'`` is the weighted
+  Gram ``H^-1 Z' D Z H^-1``, ``D = diag(a b)``: a pass for the leverages, one product and one
+  Gram, where the blocks multiply every row with ``H^-1`` and with itself, matrix-vector work
+  that Wood's appendix C counts against NCV.  A margin ``1 - W h`` whose distance from the
+  dense rows' (the bound ``CentredRows.leverages`` gives) could carry it across the level the
+  inverse resolves is read from its dense row instead, so every decision is the dense rows'.
+
+The neighbourhood-sized system multiplies each row with the rows of its own neighbourhood,
+and keeps its dense blocks.  The compact products and the blocks give the same numbers to
+rounding, so the rule decides cost only.
 
 Rows of zero weight are in no system and no sum; a scored one is predicted at the full fit plus
 the step.  A trial counts only at a usable inner mode (a certified one, or one at the limit of
@@ -216,8 +230,9 @@ weighted rows).  An evaluation holds a block and its solved rows, one more array
 size at most (a stack's ``(u, Delta)`` pairs, or two blocks of pairs from neighbourhoods
 taken one at a time), ``size x size`` per stacked neighbourhood of the block (at most
 ``0.54`` of the block), a handful of ``P x P`` matrices, and row-length vectors: the mode's
-rows and five entries per scored pair.  Single rows the inverse does not resolve take two
-more arrays of a block's size at most through the fit's factor.  A neighbourhood served as a row subset holds that subset's
+rows, five entries per scored pair, and three for single rows served without dense rows.
+Single rows the inverse does not resolve take two more arrays of a block's size at most
+through the fit's factor.  A neighbourhood served as a row subset holds that subset's
 stored form (an index per lookup term, its dense columns) and the solver's plan for it, one
 neighbourhood at a time; the compact third pass adds row-length vectors and reads the design's
 own lookup plan, which the design holds until the fit is published.  Between evaluations only a
@@ -231,7 +246,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -1011,6 +1026,9 @@ class _Trial:
     _held: int = 0
     _subset: tuple[NDArray[np.intp], CentredRows] | None = None
     _block: tuple[NDArray[np.intp], NDArray[np.float64]] | None = None
+    _lean_q: NDArray[np.float64] | None = None
+    _lean_d: NDArray[np.float64] | None = None
+    _lean_rows: int = 0
 
     @classmethod
     def start(
@@ -1524,9 +1542,71 @@ class _Trial:
             self.cross += self._left[:held].T @ self._right[:held]
             self.work.rows_multiplied += held
 
+    def lean(self, rows: NDArray[np.intp]) -> tuple[NDArray[np.float64], float] | None:
+        """Every row's leverage ``z' H^-1 z`` and its bound, where single rows ``rows`` need no dense rows.
+
+        ``None`` unless they are many enough for compact products (``rows.serves_compact``),
+        the design has lookup tables, the fit is of full rank and no third-derivative forms
+        are kept pair by pair (:meth:`keep_forms`).  The leverages are read from the tables
+        in one pass, with the bound ``CentredRows.leverages`` gives on their distance from
+        the dense rows'.  ``q`` and ``M`` then take the rows' terms as row weights
+        (:meth:`lean_pairs`), each added in one pass at the end (:meth:`flush_lean`).
+        """
+        problem = self.problem
+        if (
+            self.coords is not None
+            or self.forms is not None
+            or not serves_compact(len(rows), problem.width)
+        ):
+            return None
+        active = np.zeros(problem.n, dtype=bool)
+        active[rows] = True
+        found = self.design.leverages(self.fit.slope_inverse, active)
+        if found is None:
+            return None
+        slopes, bound = found
+        self._lean_rows = int(np.count_nonzero(active))
+        self.work.rows_streamed += self._lean_rows
+        if self.gradient:
+            self._lean_q, self._lean_d = np.zeros(problem.n), np.zeros(problem.n)
+        return slopes + 1.0 / self.fit.sum_w, bound
+
+    def lean_pairs(
+        self, rows: NDArray[np.intp], weight: NDArray[np.float64], product: NDArray[np.float64]
+    ) -> None:
+        """Hold single rows' ``Z' weight`` for ``q`` and ``sum_k a_k b_k y_k y_k'`` for ``M``, by row.
+
+        ``u_k = b_k y_k`` and ``Delta_k = a_k y_k`` share the solved row ``y_k = H^-1 z_k``,
+        so their sum over the rows is ``H^-1 Z' D Z H^-1`` with ``D = diag(a b)``.
+        """
+        if self._lean_q is not None and self._lean_d is not None:
+            np.add.at(self._lean_q, rows, weight)
+            np.add.at(self._lean_d, rows, product)
+
+    def flush_lean(self) -> None:
+        """Add the held single rows' ``Z' weight`` to ``q`` and ``H^-1 Z' D Z H^-1`` to ``M``.
+
+        One product with the design and one of its weighted Grams (``CentredRows.gram``),
+        the solver's centred system.  ``a b`` is ``l' D'`` over the squared margin, and
+        the held-out step moves the mean away from the response, so the two scores share a
+        sign and ``D`` is nonnegative; a negative entry is taken in a Gram of its own.
+        """
+        values, product = self._lean_q, self._lean_d
+        if values is None or product is None:
+            return
+        self._lean_q = self._lean_d = None
+        design = self.design
+        self.q += design.rmatvec(values)
+        gram = design.gram(np.maximum(product, 0.0))
+        if np.any(product < 0.0):
+            gram = gram - design.gram(np.maximum(-product, 0.0))
+        self.cross += self.apply_inverse(self.apply_inverse(gram).T)
+        self.work.rows_streamed += 2 * self._lean_rows
+
     def rho_gradient(self) -> NDArray[np.float64]:
         """``dV / d rho`` from ``q`` and ``M``, after every neighbourhood has added to them."""
         self.flush()
+        self.flush_lean()
         if self.problem.loss.has_third_derivative:
             self._third_pass()
         z, cross = self.apply_inverse(self.q), self.cross
@@ -1599,15 +1679,16 @@ class _Stack:
 
     ``ks`` are the neighbourhoods; ``rows`` their removed rows and ``slots`` each row's scored
     pair, -1 where it is not scored, both ``(members, size)``.  ``Z`` and ``Y`` are those rows
-    and ``Z H^-1``, ``(members, size, P)`` views of the block.  ``B`` is ``Y Z'`` per member
-    and ``sound`` marks the members the stack solves together.
+    and ``Z H^-1``, ``(members, size, P)`` views of the block, ``None`` for single rows
+    served without dense rows (:func:`_lean_stack`).  ``B`` is ``Y Z'`` per member and
+    ``sound`` marks the members the stack solves together.
     """
 
     ks: NDArray[np.intp]
     rows: NDArray[np.intp]
     slots: NDArray[np.intp]
-    Z: NDArray[np.float64]
-    Y: NDArray[np.float64]
+    Z: NDArray[np.float64] | None
+    Y: NDArray[np.float64] | None
     B: NDArray[np.float64]
     sound: NDArray[np.bool_]
 
@@ -1620,8 +1701,8 @@ class _Stack:
             self.ks[keep],
             self.rows[keep],
             self.slots[keep],
-            self.Z[keep],
-            self.Y[keep],
+            None if self.Z is None else self.Z[keep],
+            None if self.Y is None else self.Y[keep],
             self.B[keep],
             keep[keep],
         )
@@ -1714,6 +1795,32 @@ def _through_factor(
     return leverage, back.T * scale, resolved
 
 
+def _lean_stack(
+    trial: _Trial,
+    lean: tuple[NDArray[np.float64], float],
+    ks: NDArray[np.intp],
+    rows: NDArray[np.intp],
+    slots: NDArray[np.intp],
+) -> _Stack:
+    """A stack of single rows whose leverages the design's tables gave (:meth:`_Trial.lean`).
+
+    A row whose margin ``1 - W h`` clears the level the inverse resolves by ``W`` times
+    the tables' bound, and by the margin's own rounding, clears it on its dense row too: it
+    is solved together, as :func:`_stack` would solve it.  Every other row's leverage is
+    read from its dense row, as :func:`_stack` reads it, and decided there.
+    """
+    held, bound = lean
+    at = rows[:, 0]
+    curvature = trial.curvature[at]
+    leverage = held[at]
+    clear = 1.0 - curvature * leverage - (curvature * bound + 2.0 * EPS) > trial.unresolved
+    if not clear.all():
+        block = trial.read(at[~clear])
+        leverage[~clear] = np.einsum("ij,ij->i", trial.solved(block), block)
+    sound = clear | (1.0 - curvature * leverage > trial.unresolved)
+    return _Stack(ks, rows, slots, None, None, leverage[:, None, None], sound)
+
+
 def _alone(trial: _Trial, nb: Neighbourhoods, stack: _Stack, at: int, stacked: bool) -> None:
     """Member ``at`` of ``stack``, which the stack does not solve.
 
@@ -1722,16 +1829,21 @@ def _alone(trial: _Trial, nb: Neighbourhoods, stack: _Stack, at: int, stacked: b
     member unless ``stacked``, is decided by its own factorisation (:func:`_woodbury`).
     """
     k = int(stack.ks[at])
-    if not stacked or stack.rows.shape[1] > 1:
-        _woodbury(trial, nb, k, stack.rows[at], stack.Z[at], stack.Y[at])
+    Z, Y = stack.Z, stack.Y
+    if (not stacked or stack.rows.shape[1] > 1) and Z is not None and Y is not None:
+        _woodbury(trial, nb, k, stack.rows[at], Z[at], Y[at])
         return
     margin = 1.0 - trial.curvature[stack.rows[at, 0]] * stack.B[at, 0, 0]
     _factor_route(trial, nb, k, flagged=float(margin))
 
 
 def _single_rows(trial: _Trial, stack: _Stack) -> None:
-    """A stack of single rows by the scalar form ``1 - W h``, with no factorisation."""
-    rows, block, solved = stack.rows[:, 0], stack.Z[:, 0], stack.Y[:, 0]
+    """A stack of single rows by the scalar form ``1 - W h``, with no factorisation.
+
+    Rows served without dense rows add to ``q`` and ``M`` as row weights
+    (:meth:`_Trial.lean_pairs`).
+    """
+    rows = stack.rows[:, 0]
     leverage = stack.B[:, 0, 0]
     curvature = trial.curvature[rows]
     denominator = 1.0 - curvature * leverage
@@ -1746,7 +1858,12 @@ def _single_rows(trial: _Trial, stack: _Stack) -> None:
         return
     b = slope / denominator
     xu = b * leverage
-    trial.q += block.T @ (slope + curvature * xu + trial.third[rows] * xu * step)
+    weight = slope + curvature * xu + trial.third[rows] * xu * step
+    if stack.Z is None or stack.Y is None:
+        trial.lean_pairs(rows, weight, a * b)
+        return
+    solved = stack.Y[:, 0]
+    trial.q += stack.Z[:, 0].T @ weight
     trial.pairs(solved, (a * b)[:, None] * solved)
 
 
@@ -1758,7 +1875,9 @@ def _stacked(trial: _Trial, stack: _Stack) -> None:
     member's system as a row of the identity with a zero score: its part of every sum is an
     exact zero, and its prediction is the full fit plus the step.
     """
-    rows, Z, Y, B = stack.rows, stack.Z, stack.Y, stack.B
+    # Only single rows go without their rows (:func:`_lean_stack`).
+    rows, B = stack.rows, stack.B
+    Z, Y = cast(NDArray[np.float64], stack.Z), cast(NDArray[np.float64], stack.Y)
     curvature = trial.curvature[rows]
     root = np.sqrt(curvature)
     system = _systems(B, root)
@@ -1902,29 +2021,41 @@ def _small_route(trial: _Trial, nb: Neighbourhoods, ks: NDArray[np.intp], stacke
     A stack solves together the members it can show sound (:func:`_stack`).  Every other
     member is decided one at a time (:func:`_alone`), in the order of ``ks`` and before the
     block's stacks are solved.  ``stacked`` False is a forced route: every neighbourhood
-    one at a time.
+    one at a time.  Single rows that need no dense rows (:meth:`_Trial.lean`) are left out
+    of the blocks and stacked from their leverages (:func:`_lean_stack`).
     """
     sizes = nb.sizes()[ks]
+    lean = None
+    if stacked and np.any(sizes == 1):
+        lean = trial.lean(_removed(nb, ks[sizes == 1])[0])
     for first, last in _batches(sizes, chunk_rows(trial.problem.width)):
         members, size = ks[first:last], sizes[first:last]
         rows, slots, owner = _removed(nb, members)
         order = np.argsort(size[owner], kind="stable")
         rows, slots = rows[order], slots[order]
-        block = trial.read(rows)
-        solved = trial.solved(block)
+        skip = 0 if lean is None else int(np.count_nonzero(size == 1))
+        block = solved = np.empty((0, trial.width))
+        if skip < len(rows):
+            block = trial.read(rows[skip:])
+            solved = trial.solved(block)
         stacks, stop = [], 0
         for removed in np.unique(size).tolist():
             inside = np.flatnonzero(size == removed)
             start, stop = stop, stop + removed * len(inside)
             shape = (len(inside), removed)
+            these = members[inside]
+            held, at = rows[start:stop].reshape(shape), slots[start:stop].reshape(shape)
+            if lean is not None and removed == 1:
+                stacks.append(_lean_stack(trial, lean, these, held, at))
+                continue
             stack = _stack(
                 trial,
                 stacked,
-                members[inside],
-                rows[start:stop].reshape(shape),
-                slots[start:stop].reshape(shape),
-                block[start:stop].reshape(*shape, -1),
-                solved[start:stop].reshape(*shape, -1),
+                these,
+                held,
+                at,
+                block[start - skip : stop - skip].reshape(*shape, -1),
+                solved[start - skip : stop - skip].reshape(*shape, -1),
             )
             stacks.append(stack)
         alone = [(stack, at) for stack in stacks for at in np.flatnonzero(~stack.sound).tolist()]

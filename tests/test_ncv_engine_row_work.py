@@ -19,6 +19,7 @@ import pytest
 from sklearn.model_selection import KFold
 
 from superglm import SuperGLM
+from superglm._group_matrix._lookup_tables import lookup_plan, table_leverages
 from superglm._roundoff import gamma
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
@@ -259,8 +260,9 @@ def test_compact_rows_are_the_dense_blocks(family, exposure, form, zero_weights)
 def test_lookup_design_reads_its_third_pass_from_tables(family, form, semantics):
     """A design of lookups: the forms ``z' M z`` of any rank come from its term-pair tables.
 
-    Single rows keep their dense first pass and lose the second; a ``select=True`` term,
-    both weight semantics, an offset and rows of zero weight.
+    Single rows read no dense row: their leverages, ``Z' v``, the Gram that is their ``M`` and
+    the third pass are four passes of the stored form.  A ``select=True`` term, both weight
+    semantics, an offset and rows of zero weight.
     """
     b = book(family, semantics)
     nb = book_neighbourhoods(form, b)
@@ -268,11 +270,10 @@ def test_lookup_design_reads_its_third_pass_from_tables(family, form, semantics)
     dense, compact = both(b.problem, nb, rho)
     assert_same_evaluation(b.problem, compact, dense, condition(b.problem, nb, rho, dense.fit))
     weighted = int(b.problem.active.sum())
+    assert compact.work.rows_read == 0
     if form == "rows":
-        assert (dense.work.rows_read, compact.work.rows_read) == (2 * weighted, weighted)
-        assert compact.work.rows_streamed == weighted
-    else:
-        assert compact.work.rows_read == 0
+        assert dense.work.rows_read == 2 * weighted
+        assert compact.work.rows_streamed == 4 * weighted
 
 
 @pytest.mark.parametrize("form", ["cv", "forward", "repeated"])
@@ -497,14 +498,230 @@ def test_sizing_case_reads_each_group_once(monkeypatch):
     assert max(reads) <= block < n and len(reads) == 4
 
 
-def test_lookup_design_reads_single_rows_third_pass_from_tables_at_the_threshold():
-    """Single rows on a design with tables: one dense pass, not two, once the rows are many enough."""
+def test_lookup_design_serves_single_rows_without_dense_rows_at_the_threshold():
+    """Single rows on a design with tables: no dense row once they are many enough, two passes before.
+
+    From the threshold on, the leverages, ``Z' v``, the Gram that is ``M`` and the third pass
+    each take one pass of the stored form.
+    """
     p = searching(book("poisson", n=20_000).problem)
     weighted = int(p.active.sum())
     assert serves_compact(weighted, p.width)
     got = evaluate(p, single_rows(p.n), rho_of(p))
     assert got.feasible
-    assert (got.work.rows_read, got.work.rows_streamed) == (weighted, weighted)
+    assert (got.work.rows_read, got.work.rows_streamed) == (0, 4 * weighted)
+    assert got.work.rows_multiplied == 0
     small = book("poisson")
     few = evaluate(small.problem, single_rows(small.problem.n), rho_of(small.problem))
     assert (few.work.rows_read, few.work.rows_streamed) == (2 * int(small.problem.active.sum()), 0)
+
+
+# ── single rows from the tables ───────────────────────────────────────────────
+
+
+def single_row_neighbourhoods(form, n):
+    """Single rows, a group a row in another order, or groups of one to three rows mixed."""
+    if form == "rows":
+        return single_rows(n)
+    rng = np.random.default_rng(23)
+    if form == "groups of one":
+        return from_groups(rng.permutation(n), n)
+    sizes = np.resize([1, 2, 1, 3, 1], n)
+    labels = np.repeat(np.arange(n), sizes)[:n]
+    return from_groups(rng.permutation(labels), n)
+
+
+def stacked_rows(problem, nb):
+    """Rows of the neighbourhoods of more than one row that the neighbourhood-sized system takes."""
+    sizes = nb.sizes()
+    if nb.drop_rows is None:
+        return 0
+    width = problem.width
+    size = np.minimum(sizes, width)
+    small = 3 * size * size * width + size**3 < width**3
+    weighted = np.bincount(nb.owners()[problem.active[nb.drop_rows]], minlength=nb.m)
+    return int(sizes[small & (sizes > 1) & (weighted > 0)].sum())
+
+
+@pytest.mark.parametrize("form", ["rows", "groups of one", "mixed groups"])
+@pytest.mark.parametrize("family", ["gaussian", "poisson"])
+def test_single_rows_from_tables_are_the_dense_rows(family, form):
+    """Single rows served by their leverages, ``Z' v`` and one Gram: the dense rows' evaluation.
+
+    Rows of zero weight and an offset; among groups of two and three, whose stacks keep their
+    dense blocks, the single rows are left out of those blocks.  The same stacks,
+    factorisations and solves, and the criterion alone is the one with its gradient.
+    """
+    b = book(family)
+    p = b.problem
+    nb = single_row_neighbourhoods(form, p.n)
+    rho = rho_of(p)
+    dense, compact = both(p, nb, rho)
+    assert_same_evaluation(p, compact, dense, condition(p, nb, rho, dense.fit))
+    for count in ("stacks", "stacked", "factorisations", "small_factorisations", "solves"):
+        assert getattr(compact.work, count) == getattr(dense.work, count), count
+    assert compact.work.rows_read == stacked_rows(p, nb)
+    with row_work(COMPACT):
+        alone = evaluate_fit(rebuilt(p), nb, dense.fit, gradient=False, heldout=False)
+    assert alone.gradient is None and alone.value == compact.value
+
+
+@cache
+def dominant(family):
+    """A factor whose base level is three rows of weight 1e-3, and whose level ``b`` holds all but six rows.
+
+    Its contrasts carry the base level's variance, about a thousand, while a row of ``b``
+    centres to entries of a few times 1e-4: ``x' V x - 2 c' V x + c' V c`` subtracts terms of
+    the variance's size to leave the row's leverage.
+    """
+    rng = np.random.default_rng(17)
+    n = 20_000
+    f = rng.permutation(np.array(["a"] * 3 + ["c"] * 3 + ["b"] * (n - 6), dtype=object))
+    age = rng.integers(18, 60, n).astype(float)
+    signal = np.sin(age / 8) + 0.3 * (f == "c")
+    if family == "gaussian":
+        y = signal + rng.normal(0, 0.5, n)
+    else:
+        y = rng.poisson(np.exp(signal - 0.5)).astype(float)
+    weights = np.where(f == "a", 1e-3, 1.0)
+    model = SuperGLM(
+        features={"age": Spline(kind="ps", n_knots=6), "f": Categorical(base="a")},
+        family=family,
+        selection_penalty=0,
+        spline_penalty=1.0,
+    )
+    model.fit(pd.DataFrame({"age": age, "f": f}), y, sample_weight=weights)
+    problem = problem_of(model, y, weights, None)
+    fit = solve_mode(problem, np.zeros(len(problem.names)))
+    Z = augmented_rows(problem.dm, np.arange(n), fit.centre_hi, fit.centre_lo)[:, 1:]
+    V = fit.slope_inverse
+    dense = np.einsum("ij,ij->i", Z @ V, Z)
+    plan = lookup_plan(problem.dm)
+    terms, columns = len(plan.terms), plan.dense_columns.size
+    summed = 1 + terms + plan.n_pairs + columns * (terms + columns + 3)
+    size = np.einsum("ij,ij->i", np.abs(Z) @ np.abs(V), np.abs(Z))
+    unit = gamma(3 * problem.dm.p + summed + 2 * problem.width + 8) * size
+    return problem, fit, dense, unit
+
+
+@pytest.mark.parametrize("family", ["gaussian", "poisson"])
+def test_dominant_level_leverages_are_their_centred_rows(family):
+    """Each row's leverage from the tables is its dense centred row's, within the rounding of its centred entries.
+
+    Within ``gamma_K |z|' |V| |z|`` (``K`` the gather's and the dense product's roundings),
+    and within the bound ``CentredRows.leverages`` gives the engine.
+    """
+    problem, fit, dense, unit = dominant(family)
+    found = CentredRows(problem.dm, fit.centre_hi, fit.centre_lo).leverages(
+        fit.slope_inverse, np.ones(problem.n, dtype=bool)
+    )
+    assert found is not None
+    gap = np.abs(found[0] - dense)
+    assert np.all(gap <= unit), f"{np.max(gap / unit):.3g} of the rounding"
+    assert np.max(gap) <= found[1]
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("family", ["gaussian", "poisson"])
+def test_mutation_dominant_level_read_raw_misses_its_centred_rows(family):
+    """The tables read raw, a categorical's centre kept apart as constants: the rounding bar fails.
+
+    Pins that the fixture tells the two reads apart: read raw, as the REML pass reads them,
+    the dominant level's leverages are more than ten times the bar from their centred rows.
+    """
+    problem, fit, dense, unit = dominant(family)
+    raw = table_leverages(
+        lookup_plan(problem.dm),
+        fit.slope_inverse,
+        fit.centre_hi,
+        fit.centre_lo,
+        np.ones(problem.n, dtype=bool),
+    )
+    assert np.max(np.abs(raw - dense) / unit) > 10.0
+
+
+def single_row_margins(problem, fit):
+    """Each weighted row's margin ``1 - W h`` from its dense row, and ``W`` times the tables' bound."""
+    eta = linear_predictor(problem.dm, fit.result, problem.offset)
+    _, curvature, _ = problem.loss.derivatives(problem.y, problem.weights, eta)
+    rows = np.flatnonzero(problem.active)
+    Z = augmented_rows(problem.dm, rows, fit.centre_hi, fit.centre_lo)
+    solved = Z.copy()
+    solved[:, 0] /= fit.sum_w
+    solved[:, 1:] = Z[:, 1:] @ fit.slope_inverse
+    found = CentredRows(problem.dm, fit.centre_hi, fit.centre_lo).leverages(
+        fit.slope_inverse, problem.active
+    )
+    W = curvature[rows]
+    return 1.0 - W * np.einsum("ij,ij->i", solved, Z), W * found[1] + 2.0 * engine.EPS
+
+
+def forced_level(problem, fit, where):
+    """A level the inverse resolves inside the least margin's band, or between two middle margins."""
+    margin, band = single_row_margins(problem, fit)
+    if where == "beside the least margin":
+        at = int(np.argmin(margin))
+        return margin[at] - 0.5 * band[at], margin, band
+    ordered = np.sort(margin)
+    middle = len(ordered) // 2
+    return 0.5 * (ordered[middle - 1] + ordered[middle]), margin, band
+
+
+@pytest.mark.parametrize("where", ["beside the least margin", "between the middle margins"])
+def test_single_rows_the_level_may_not_clear_are_decided_on_their_dense_rows(where, monkeypatch):
+    """Forced: the level the inverse resolves moved inside one margin's band, or up to half the margins.
+
+    A row whose margin from the tables clears the level by no more than ``W`` times their
+    bound, or not at all, is read densely and decided on that row: below the level it is
+    factored alone, as the dense rows' route factors it.
+    """
+    p = book("poisson").problem
+    nb = single_rows(p.n)
+    fit = solve_mode(p, rho_of(p))
+    level, margin, band = forced_level(p, fit, where)
+    monkeypatch.setattr(engine._Trial, "unresolved", property(lambda self: level))
+    with row_work(DENSE):
+        dense = evaluate_fit(rebuilt(p), nb, fit)
+    with row_work(COMPACT):
+        compact = evaluate_fit(rebuilt(p), nb, fit)
+    assert compact.work.rows_read == int(np.count_nonzero(margin - band <= level)) > 0
+    below = int(np.count_nonzero(margin <= level))
+    assert compact.work.factorisations == dense.work.factorisations == below
+    assert compact.work.kept_fits == dense.work.kept_fits == 0
+    assert_same_evaluation(p, compact, dense, condition(p, nb, rho_of(p), fit))
+
+
+def test_mutation_a_band_of_zero_reads_no_row_beside_the_level(monkeypatch):
+    """Without the tables' bound, the row beside the level is taken from the tables: the count above fails."""
+    p = book("poisson").problem
+    nb = single_rows(p.n)
+    fit = solve_mode(p, rho_of(p))
+    level, _, _ = forced_level(p, fit, "beside the least margin")
+    monkeypatch.setattr(engine._Trial, "unresolved", property(lambda self: level))
+    original = CentredRows.leverages
+
+    def unbounded(self, inverse, active):
+        slopes, _ = original(self, inverse, active)
+        return slopes, 0.0
+
+    monkeypatch.setattr(CentredRows, "leverages", unbounded)
+    with row_work(COMPACT):
+        compact = evaluate_fit(rebuilt(p), nb, fit)
+    assert compact.work.rows_read == 0
+
+
+def test_mutation_single_rows_without_their_gram_miss_the_dense_gradient(monkeypatch):
+    """``M``'s Gram left out of the single rows' terms: the gradient is not the dense rows'."""
+    b = book("poisson")
+    p, nb, rho = b.problem, single_rows(b.problem.n), rho_of(b.problem)
+
+    def without_gram(self):
+        values = self._lean_q
+        if values is not None:
+            self._lean_q = self._lean_d = None
+            self.q += self.design.rmatvec(values)
+
+    monkeypatch.setattr(engine._Trial, "flush_lean", without_gram)
+    dense, compact = both(p, nb, rho)
+    with pytest.raises(AssertionError):
+        assert_same_criterion(p, compact, dense, condition(p, nb, rho, dense.fit))

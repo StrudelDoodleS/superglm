@@ -19,8 +19,9 @@ A row of zero weight is an exact zero in each and its response is never read.  T
 predictor is the one ``predict`` reports: the inverse link of the stabilised predictor, clipped to
 the family's range (``links.stabilize_eta``, ``distributions.clip_mu``).
 
-**Rows without dense blocks.**  :class:`CentredRows` serves ``Z v``, ``Z' v``, ``Z' W Z`` and
-``z' M z`` through the design's stored form, as the solver's own products run, and a set of rows
+**Rows without dense blocks.**  :class:`CentredRows` serves ``Z v``, ``Z' v``, ``Z' W Z``,
+``z' M z`` and the leverages ``z' H^-1 z`` through the design's stored form, as the solver's own
+products run, and a set of rows
 through a row subset of the design.  Setting one up has a fixed cost, so the dense blocks keep
 every set of rows below ``COMPACT_ENTRIES`` entries (:func:`serves_compact`).
 """
@@ -32,8 +33,9 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._group_matrix._lookup_tables import lookup_plan, table_leverages
+from superglm._group_matrix._lookup_tables import lookup_plan, table_leverages, table_row_bound
 from superglm._parallel import resolve_max_memory
+from superglm._roundoff import gamma
 from superglm.distributions import Distribution, Gaussian, Poisson, clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import IdentityLink, Link, LogLink, stabilize_eta
@@ -183,6 +185,50 @@ class CentredRows:
             return None
         slopes = table_leverages(plan, matrix[1:, 1:], self.centre_hi, self.centre_lo, active)
         return slopes + self.matvec(np.concatenate(([matrix[0, 0]], 2.0 * matrix[1:, 0])))
+
+    def leverages(
+        self, inverse: NDArray[np.float64], active: NDArray[np.bool_]
+    ) -> tuple[NDArray[np.float64], float] | None:
+        """``x' inverse x`` on the slopes of each ``active`` row (zero elsewhere), and a bound.
+
+        ``None`` without lookup tables, or for an ``inverse`` whose diagonal is not positive.
+        Read back from the term-pair tables with every table centred before its product
+        (``_lookup_tables.table_leverages``): each entry of a row is a centred entry rounded
+        once, as in :func:`augmented_rows`.  The leverage is never formed as
+        ``x' V x - 2 c' V x + c' V c``, whose terms have a column's own size and whose
+        rounding grows with the square of the column's mean over its spread, as the one-pass
+        variance formula's does (Chan, Golub and LeVeque, "Algorithms for computing the sample
+        variance: analysis and recommendations", Amer. Statist. 37(3), 1983).
+
+        **The bound** is on how far the value lies from the one the dense rows give,
+        ``z' (z H^-1)`` on ``augmented_rows``.  With ``s = diag(inverse)^(1/2)``,
+        ``rho = max(1, max |inverse_ij| / (s_i s_j))`` (one for a positive definite
+        ``inverse``) and ``C`` from ``_lookup_tables.table_row_bound``, every row has
+        ``m' |inverse| m <= rho C^2`` for the magnitudes ``m`` its entries pass through while
+        they are centred.  The gather is within ``gamma_K`` of that sum, ``K = 3p + S + 2``
+        with ``S`` the terms a row sums (``_lookup_tables``); the dense rows' product and
+        dot product add ``gamma_(2P)`` and their centring ``gamma_2``; and the two centrings
+        of one entry differ by roundings of its magnitude, which enter twice.  So the two
+        values are within ``4 gamma_(K + 2P + 6) rho C^2``.
+        """
+        plan = lookup_plan(self.dm)
+        if plan is None:
+            return None
+        inverse = np.asarray(inverse, dtype=np.float64)
+        diagonal = np.diag(inverse)
+        if not (np.all(np.isfinite(inverse)) and np.all(diagonal > 0.0)):
+            return None
+        scale = np.sqrt(diagonal)
+        rho = max(1.0, float(np.max(np.abs(inverse) / np.outer(scale, scale), initial=0.0)))
+        size = table_row_bound(plan, scale, self.centre_hi, self.centre_lo)
+        terms, dense = len(plan.terms), int(plan.dense_columns.size)
+        summed = 1 + terms + plan.n_pairs + dense * (terms + dense + 3)
+        count = 3 * self.dm.p + summed + 2 * (self.dm.p + 1) + 8
+        bound = 4.0 * gamma(count) * rho * size * size
+        slopes = table_leverages(
+            plan, inverse, self.centre_hi, self.centre_lo, active, centred=True
+        )
+        return slopes, bound
 
 
 @dataclass(frozen=True)
