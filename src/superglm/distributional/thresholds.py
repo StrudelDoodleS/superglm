@@ -1,7 +1,7 @@
 """The two plots that guide the choice of a large-loss threshold, and the numbers behind them.
 
-:func:`mean_excess` is the empirical mean excess of the claims with a pointwise band
-(the mean residual life plot). :func:`threshold_stability` fits a generalised Pareto tail
+:func:`~superglm.mean_excess` is the empirical mean excess of the claims with a pointwise band
+(the mean residual life plot). :func:`~superglm.threshold_stability` fits a generalised Pareto tail
 to the excesses over each candidate threshold and reports its shape and its threshold-free
 scale with their bands (the parameter stability plot). Both are read before a
 body-plus-tail model is fitted: the threshold is the lowest above which the mean excess
@@ -250,7 +250,7 @@ class TailLine:
 
 @dataclass(frozen=True, eq=False)
 class MeanExcessFigure:
-    """What :func:`plot_mean_excess` draws: the table, the fitted line and where to shade.
+    """What :func:`~superglm.plot_mean_excess` draws: the table, the fitted line and where to shade.
 
     ``shaded_from`` is the smallest candidate with fewer than ``few_claims`` claims above
     it, or ``None`` when every candidate has that many.
@@ -281,10 +281,10 @@ class MeanExcessFigure:
 
 @dataclass(frozen=True, eq=False)
 class MeanExcessResult:
-    """Empirical mean excess table and settings returned by :func:`mean_excess`.
+    """Empirical mean excess table and settings returned by :func:`~superglm.mean_excess`.
 
     Keeps the distinct positive losses and their frequency counts sorted
-    internally so :meth:`tail_line` and :func:`plot_mean_excess` can fit a tail
+    internally so :meth:`tail_line` and :func:`~superglm.plot_mean_excess` can fit a tail
     above any chosen threshold; those stored losses are omitted from
     :meth:`to_json`.
 
@@ -325,7 +325,7 @@ class MeanExcessResult:
     def tail_line(self, threshold: float) -> TailLine:
         """Fit a one-scale, one-shape generalized Pareto tail above ``threshold``.
 
-        Uses the same engine and default walls as :func:`threshold_stability`
+        Uses the same engine and default walls as :func:`~superglm.threshold_stability`
         on the sorted losses stored in this result, returning the straight mean
         excess line from ``threshold`` to the largest candidate. Refuses with
         ``ValueError`` if ``threshold`` is not finite and positive or leaves
@@ -372,7 +372,7 @@ class MeanExcessResult:
         )
 
     def figure(self, threshold: float | None = None, *, few_claims: int = 50) -> MeanExcessFigure:
-        """Return what :func:`plot_mean_excess` draws; ``threshold`` adds the fitted line."""
+        """Return what :func:`~superglm.plot_mean_excess` draws; ``threshold`` adds the fitted line."""
         line = None if threshold is None else self.tail_line(threshold)
         few = self.table.loc[self.table["n_above"] < few_claims, "threshold"]
         return MeanExcessFigure(
@@ -432,7 +432,7 @@ def mean_excess(
         thinned to at most ``max_points`` evenly in ``log(n_above)``.
     censored : array-like of bool, optional
         Accepted only to refuse flagged rows with a pointer to
-        :func:`threshold_stability`: this function reads complete losses only.
+        :func:`~superglm.threshold_stability`: this function reads complete losses only.
     level : float, default=0.95
         Nominal pointwise coverage of the band, strictly between 0 and 1.
     max_points : int, default=200
@@ -517,7 +517,7 @@ def plot_mean_excess(
     few_claims: int = 50,
     engine: str = "matplotlib",
 ) -> Any:
-    """Draw the empirical mean excess points and pointwise band from :func:`mean_excess`.
+    """Draw the empirical mean excess points and pointwise band from :func:`~superglm.mean_excess`.
 
     Plots the observed mean excess and its pointwise normal-theory band across
     candidate thresholds, shading the right-hand stretch where fewer than
@@ -532,7 +532,7 @@ def plot_mean_excess(
     Parameters
     ----------
     result : MeanExcessResult
-        Output of :func:`mean_excess`.
+        Output of :func:`~superglm.mean_excess`.
     threshold : float, optional
         Chosen candidate threshold to mark with a vertical line and fitted
         generalized Pareto mean excess line.
@@ -767,7 +767,7 @@ def _estimates(model: SuperLSS, threshold: float, z: float, book: _Book | None) 
 
 @dataclass(frozen=True, eq=False)
 class ThresholdStabilityResult:
-    """Generalized Pareto tail fits across candidate thresholds from :func:`threshold_stability`.
+    """Generalized Pareto tail fits across candidate thresholds from :func:`~superglm.threshold_stability`.
 
     Attributes
     ----------
@@ -1080,7 +1080,7 @@ def threshold_stability(
 def plot_threshold_stability(
     result: ThresholdStabilityResult, *, engine: str = "matplotlib"
 ) -> Any:
-    """Draw the tail shape and threshold-free scale from :func:`threshold_stability`.
+    """Draw the tail shape and threshold-free scale from :func:`~superglm.threshold_stability`.
 
     Plots each candidate threshold's fitted shape (or mean fitted shape over
     the book when shape varies across rows) with its pointwise band and shape
@@ -1093,7 +1093,7 @@ def plot_threshold_stability(
     Parameters
     ----------
     result : ThresholdStabilityResult
-        Output of :func:`threshold_stability`.
+        Output of :func:`~superglm.threshold_stability`.
     engine : {"matplotlib", "plotly"}, default="matplotlib"
         Plotting backend.
 

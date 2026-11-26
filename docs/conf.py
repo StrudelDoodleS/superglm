@@ -198,7 +198,7 @@ nitpick_ignore_regex = [
     # ``EditorSession``'s signatures name.
     (
         "py:class",
-        r"superglm\.(" + "distributional\\.(api\\.SuperLSSTrainingTelemetry|checks\\.(binned\\.BinnedCheck(2D)?|calibration\\.(ActualExpected|CalibrationPayload)|compare\\.Comparison)|families\\._predictors\\.(LocationPredictor|MeanPredictor|ScalePredictor|ShapePredictor|SkewPredictor|ThetaPredictor|TweediePredictors)|family\\.(DistributionalFamily|FamilyLikelihoodPlan)|model\\.DenseDistributionalModel|posterior\\.PosteriorDraws|residuals\\.ResidualSet|results\\.fit\\.DistributionalFitResult|surfaces\\.(DensityFan|Portfolio|RiskCurves|Spread)|terms\\.(ParameterTermEffect|TermTest)|timing\\.FitPhaseRecorder)"
+        r"superglm\.(" + "distributional\\.(api\\.SuperLSSTrainingTelemetry|checks\\.(binned\\.BinnedCheck(2D)?|calibration\\.(ActualExpected|CalibrationPayload)|compare\\.Comparison)|families\\._predictors\\.(LocationPredictor|MeanPredictor|ScalePredictor|ShapePredictor|SkewPredictor|ThetaPredictor|TweediePredictors)|family\\.(DistributionalFamily|FamilyLikelihoodPlan)|model\\.DenseDistributionalModel|posterior\\.PosteriorDraws|residuals\\.ResidualSet|results\\.fit\\.DistributionalFitResult|surfaces\\.(DensityFan|Portfolio|RiskCurves|Spread)|row_law\\.DistributionCurve|thresholds\\.(MeanExcessFigure|TailLine)|terms\\.(ParameterTermEffect|TermTest)|timing\\.FitPhaseRecorder)"
         r"|types\.(DiscreteTensorBuildResult|GroupInfo|GroupSlice"
         r"|TensorMarginalInfo)"
         r"|_frame\.EagerFrame"
