@@ -443,6 +443,30 @@ def test_penalty_without_a_range_starts_at_its_fallback():
             np.testing.assert_array_equal(edf_share_start(problem, empty, box, fallback), fallback)
 
 
+@pytest.mark.parametrize("start", [None, {"t": 1.0}], ids=["default", "given"])
+def test_a_declaration_of_zero_searches_as_a_model_declared_without_one(start):
+    """``spline_penalty=0`` has no logarithm: the search is the one from the default declaration.
+
+    Its default start, the start the caller gives, and every step after, are those of a model
+    given no spline penalty, which declares 0.1.  A start of zero is refused.
+    """
+    c = curve()
+    zero = dict.fromkeys(c.problem.names, 0.0)
+    undeclared = dict.fromkeys(c.problem.names, 0.1)
+    assert SuperGLM(features={"t": Spline()}).lambda2 == 0.1
+    got = search(c.problem, c.nb, configured=zero, start=start).result
+    want = search(c.problem, c.nb, configured=undeclared, start=start).result
+    assert got.start_lambdas == want.start_lambdas and got.lambdas == want.lambdas
+    assert got.lambda_history == want.lambda_history and got.objective == want.objective
+    if start is None:
+        default = share_start(replace(c, configured=undeclared))
+        assert np.log(got.start_lambdas["t"]) == pytest.approx(default[0])
+    else:
+        assert got.start_lambdas == pytest.approx(start)
+    with pytest.raises(ValueError, match="given for 't' must be a positive number, got 0.0"):
+        search(c.problem, c.nb, configured=zero, start={"t": 0.0})
+
+
 @pytest.mark.parametrize("held", [0.0, LambdaBox().floor], ids=["off", "at-the-floor"])
 def test_fixed_components_keep_their_values_in_every_inner_fit(monkeypatch, held):
     """A start map moves estimated components only, and a fixed one is in no bound report.

@@ -101,6 +101,9 @@ DEFAULT_MAX_NCV_ITER = 100
 START_SHARE = 0.5
 """The share of a penalty's range the default start leaves unpenalised."""
 
+UNDECLARED_LAMBDA = 0.1
+"""The smoothing a model declares when given none (``SuperGLM(spline_penalty=None)``)."""
+
 MEMORY = 10
 """L-BFGS-B's correction pairs."""
 
@@ -409,7 +412,9 @@ def search(
     """Choose the estimated smoothing parameters of ``problem`` by its criterion over ``nb``.
 
     ``configured`` gives every estimated component the smoothing the model was declared with:
-    the provisional fit is solved there, and it is the last start tried.  ``start`` names
+    the provisional fit is solved there, and it is the last start tried.  A declaration of
+    zero, which has no logarithm, stands at ``UNDECLARED_LAMBDA``, the smoothing a model
+    declares when given none.  ``start`` names
     estimated components by component name and the smoothing to start each from; a name that is
     not an estimated component of ``problem`` is not read, so a fixed component keeps its value
     in every inner fit.  ``box`` defaults to the fit's own (``glm_lambda_box``).  ``tol`` is the
@@ -435,7 +440,9 @@ def search(
             descent.path.append(only)
             descent.ends.append((only, "no_smoothing_parameters"))
         return _outcome(problem, descent, np.zeros(0))
-    declared = np.array([_log_lambda(box, name, configured[name]) for name in problem.names])
+    declared = np.array(
+        [_log_lambda(box, name, configured[name] or UNDECLARED_LAMBDA) for name in problem.names]
+    )
     asked = {
         name: _log_lambda(box, name, lam)
         for name, lam in (start or {}).items()
