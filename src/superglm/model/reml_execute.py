@@ -64,13 +64,17 @@ def _record_reml_trace(best, debug_recorder) -> None:
     """Emit a compact REML summary row."""
     if not _trace_rows_enabled(debug_recorder):
         return
-
+    # Strict JSON: an undefined criterion is null, never a bare NaN token.
+    objective = getattr(best, "objective", None)
+    if objective is not None and not math.isfinite(objective):
+        objective = None
+    objective = None if objective is None else float(objective)
     debug_recorder.append_jsonl(
         "reml",
         {
             "iteration": int(getattr(best, "n_reml_iter", 0) or 0),
-            "objective_before": float(getattr(best, "objective", 0.0)),
-            "objective_after": float(getattr(best, "objective", 0.0)),
+            "objective_before": objective,
+            "objective_after": objective,
             "lambda_max_delta": float(_lambda_max_delta(getattr(best, "lambda_history", None))),
             "converged": bool(getattr(best, "converged", False)),
             "path": "newton",

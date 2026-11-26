@@ -240,6 +240,10 @@ def _float_or_none(value: object) -> float | None:
     return float(value)
 
 
+def _float_or_nan(value: object) -> float:
+    return float("nan") if value is None else float(value)
+
+
 def _int_or_none(value: object) -> int | None:
     if value is None:
         return None
@@ -333,8 +337,9 @@ def plot_reml_debug_trajectory(
     import matplotlib.pyplot as plt
 
     iterations = [int(row["iteration"]) for row in run.reml_rows]
-    objective_before = [float(row["objective_before"]) for row in run.reml_rows]
-    objective_after = [float(row["objective_after"]) for row in run.reml_rows]
+    # an undefined criterion is recorded as null and plotted as a gap
+    objective_before = [_float_or_nan(row["objective_before"]) for row in run.reml_rows]
+    objective_after = [_float_or_nan(row["objective_after"]) for row in run.reml_rows]
     lambda_names = run.lambda_names
 
     fig, axes = plt.subplots(2, 1, figsize=(10.0, 7.2), sharex=True)

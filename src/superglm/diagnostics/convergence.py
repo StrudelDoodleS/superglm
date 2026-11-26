@@ -249,9 +249,9 @@ _REML_REASON_TEXT = {
     "line_search_failed": "no smoothing step improved the REML score",
     "line_search_stalled": "no smoothing step improved the REML score",
     "mean_space_boundary": (
-        "the penalized maximum holds fitted means on the boundary of the family's mean "
-        "space at every smoothing parameter the search can reach, and the REML score is "
-        "not defined there"
+        "the penalized maximum held fitted means on the boundary of the family's mean "
+        "space at the smoothing parameters the search tried (up to the upper bound), and "
+        "the REML score is not defined there"
     ),
 }
 
@@ -287,6 +287,12 @@ def stop_report(result: Any, *, smoothing: bool = False, refit_reason: str | Non
             converged = reason in _REML_CONVERGED_REASONS
     elif not smoothing and reason == "max_iter":
         evidence = {"test": "iteration_limit", "iteration_limit": iterations}
+    elif not smoothing and reason == "mean_space_boundary":
+        evidence = {
+            "test": "mean_space_boundary",
+            "boundary_row_count": int(getattr(result, "mean_space_boundary_rows", 0)),
+            "unresolved_direction": bool(getattr(result, "mean_space_boundary_unresolved", False)),
+        }
     return {
         "reason": reason,
         "converged": converged,

@@ -681,7 +681,8 @@ def optimize_discrete_reml_cached_w(
     # A trial whose unclipped predictor leaves the link's domain has no REML
     # objective (it would be scored on clipped means) and is refused. No trial
     # state warm-starts a solve.
-    domain_violation = pair_of(distribution, link).link_domain_violation
+    pair = pair_of(distribution, link)
+    domain_violation = pair.link_domain_violation
     _n_domain_refused_trials = 0
     # score-test stops refused because a concave shoulder was live
     _n_concave_stop_refusals = 0
@@ -906,7 +907,98 @@ def optimize_discrete_reml_cached_w(
         )
         print(f"  REML bootstrap: lambdas=[{boot_lam_str}]")
 
+    def working_fit(candidate_lambdas: dict[str, float], iteration: int):
+        """One working-model update at these smoothing parameters, from the warm state."""
+        nonlocal _t_pirls
+        S_cand = (
+            None
+            if use_structured
+            else build_penalty_matrix(
+                dm.group_matrices,
+                groups,
+                candidate_lambdas,
+                p,
+                reml_penalties=penalties,
+            )
+        )
+        _t0 = _time.perf_counter()
+        cache: dict = {}
+        pirls_result, XtWX_S_inv, XtWX = fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=sample_weight,
+            family=distribution,
+            link=link,
+            groups=groups,
+            lambda2=candidate_lambdas,
+            offset=offset_arr,
+            beta_init=warm_beta,
+            intercept_init=warm_intercept,
+            _centred_init=warm_centred,
+            max_iter=1,
+            tol=pirls_tol,
+            return_xtwx=True,
+            compute_rank_info=False,
+            _return_working_system=True,
+            _working_newton=working_newton,
+            _compute_fit_statistics=False,
+            _deviance_init=warm_deviance,
+            profile=profile,
+            cache_out=cache,
+            direct_solve=direct_solve,
+            S_override=S_cand,
+            reml_penalties=penalties,
+            debug_recorder=debug_recorder,
+            debug_context={"phase": "candidate", "reml_iteration": iteration},
+            trace_run=trace_run,
+            trace_purpose="reml_candidate",
+            separation="record",
+            weight_semantics=weight_semantics,
+            _clip_rows=clip_rows,
+        )
+        _t_pirls += _time.perf_counter() - _t0
+        return S_cand, pirls_result, XtWX_S_inv, XtWX, cache
+
+    def cold_fit(candidate_lambdas: dict[str, float], iteration: int):
+        """The full penalized fit at these smoothing parameters from a cold start."""
+        nonlocal _t_pirls
+        _t0 = _time.perf_counter()
+        S_cold = (
+            None
+            if use_structured
+            else build_penalty_matrix(
+                dm.group_matrices, groups, candidate_lambdas, p, reml_penalties=penalties
+            )
+        )
+        result, _, _ = fit_irls_direct(
+            X=dm,
+            y=y,
+            weights=sample_weight,
+            family=distribution,
+            link=link,
+            groups=groups,
+            lambda2=candidate_lambdas,
+            offset=offset_arr,
+            max_iter=max_pirls_iter,
+            tol=pirls_tol,
+            return_xtwx=True,
+            compute_rank_info=False,
+            _compute_fit_statistics=False,
+            profile=profile,
+            direct_solve=direct_solve,
+            S_override=S_cold,
+            reml_penalties=penalties,
+            debug_recorder=debug_recorder,
+            debug_context={"phase": "mean_space_restoration", "reml_iteration": iteration},
+            separation="record",
+            weight_semantics=weight_semantics,
+            _clip_rows=clip_rows,
+        )
+        _t_pirls += _time.perf_counter() - _t0
+        return result
+
     # === POI loop: one PIRLS step + one Newton lambda step ===
+    n_mean_space_restorations = 0
     prev_obj = np.inf
     current_roundoff = None
     stop_evidence = None
@@ -929,54 +1021,52 @@ def optimize_discrete_reml_cached_w(
         cand_lambdas.update(fixed_lambdas)
 
         # --- Step 1: One PIRLS step (W update) ---
-        S_cand = (
-            None
-            if use_structured
-            else build_penalty_matrix(
-                dm.group_matrices,
-                groups,
-                cand_lambdas,
-                p,
-                reml_penalties=penalties,
-            )
-        )
-
-        _t0 = _time.perf_counter()
-        cache = {}
-        pirls_result, XtWX_S_inv, XtWX = fit_irls_direct(
-            X=dm,
-            y=y,
-            weights=sample_weight,
-            family=distribution,
-            link=link,
-            groups=groups,
-            lambda2=cand_lambdas,
-            offset=offset_arr,
-            beta_init=warm_beta,
-            intercept_init=warm_intercept,
-            _centred_init=warm_centred,
-            max_iter=1,
-            tol=pirls_tol,
-            return_xtwx=True,
-            compute_rank_info=False,
-            _return_working_system=True,
-            _working_newton=working_newton,
-            _compute_fit_statistics=False,
-            _deviance_init=warm_deviance,
-            profile=profile,
-            cache_out=cache,
-            direct_solve=direct_solve,
-            S_override=S_cand,
-            reml_penalties=penalties,
-            debug_recorder=debug_recorder,
-            debug_context={"phase": "candidate", "reml_iteration": poi_iter + 1},
-            trace_run=trace_run,
-            trace_purpose="reml_candidate",
-            separation="record",
-            weight_semantics=weight_semantics,
-            _clip_rows=clip_rows,
-        )
-        _t_pirls += _time.perf_counter() - _t0
+        S_cand, pirls_result, XtWX_S_inv, XtWX, cache = working_fit(cand_lambdas, poi_iter + 1)
+        if (
+            pirls_result.termination_reason == "mean_space_boundary"
+            and pair.mean_space_violation is not None
+        ):
+            # No interior mode here, as in direct.py: a cold full fit confirms
+            # it (a warm one-step update can overshoot), then every estimated
+            # penalty rises in doubling log-steps until a cold fit is interior.
+            restoration_step = 1.0
+            rho_at_boundary = rho_clipped
+            cold = cold_fit(cand_lambdas, poi_iter + 1)
+            while cold.termination_reason == "mean_space_boundary":
+                if not bool(np.any(estimated_mask & (rho_clipped < log_hi))):
+                    termination_reason = "mean_space_boundary"
+                    break
+                rho_clipped = np.where(
+                    estimated_mask,
+                    np.clip(rho_at_boundary + restoration_step, log_lo, log_hi),
+                    rho_at_boundary,
+                )
+                restoration_step *= 2.0
+                n_mean_space_restorations += 1
+                cand_lambdas = lambdas.copy()
+                for name, val in zip(group_names, np.exp(rho_clipped), strict=False):
+                    cand_lambdas[name] = box.clip(val)
+                cand_lambdas.update(fixed_lambdas)
+                cold = cold_fit(cand_lambdas, poi_iter + 1)
+            rho = rho_clipped
+            if restoration_step > 1.0:
+                previous_step, previous_idx = np.inf, None
+            warm_beta, warm_intercept = cold.beta.copy(), float(cold.intercept)
+            warm_centred, warm_deviance = centred_warm_start(cold), float(cold.deviance)
+            if termination_reason == "mean_space_boundary":
+                # No penalty moves the rows: the criterion is undefined there.
+                pirls_result, candidate_group_matrices = cold, dm.group_matrices
+                if lambda_history[-1] != cand_lambdas:
+                    lambda_history.append(cand_lambdas.copy())
+                stop_evidence = {
+                    "test": "mean_space_boundary",
+                    "iter": poi_iter + 1,
+                    "boundary_row_count": int(cold.mean_space_boundary_rows),
+                    "unresolved_direction": bool(cold.mean_space_boundary_unresolved),
+                    "estimated_at_upper_bound": bool(np.any(estimated_mask)),
+                }
+                break
+            S_cand, pirls_result, XtWX_S_inv, XtWX, cache = working_fit(cand_lambdas, poi_iter + 1)
         # The candidate is one working-model update; its convergence flag says
         # the working model has settled at these lambdas (a stationary mode).
         candidate_mode_stationary = bool(pirls_result.converged)
@@ -1291,6 +1381,10 @@ def optimize_discrete_reml_cached_w(
                 # objective arm agrees the mode has stabilized and no term is
                 # held on the looser bar of a guard-stopped coefficient fit.
                 continue
+            # The evidence reads the gradient under the hold set the stop used.
+            candidate_convergence = candidate_convergence.under_holds(
+                mask_frozen_stop_gradient(proj_grad_d, frozen_d, objective=obj, tolerance=_tol)
+            )
             converged = True
             termination_reason = "active_set_stationary"
             break
@@ -1868,12 +1962,13 @@ def optimize_discrete_reml_cached_w(
             converged=converged,
             lambda_history=lambda_history,
             objective_history=objective_history,
-            objective=float(obj),
+            objective=None if termination_reason == "mean_space_boundary" else float(obj),
             curvature_source=reml_curvature,
             termination_reason=termination_reason,
             reml_penalties=penalties,
             lambda_box=box,
             bound_pressure=last_bound_pressure,
+            mean_space_restorations=n_mean_space_restorations,
         )
 
     if stop_evidence is None and not all_lambdas_fixed:
@@ -1979,29 +2074,35 @@ def optimize_discrete_reml_cached_w(
     final_tensor_pair_evals = evaluate_tensor_pair_logdet_summaries(
         tensor_pair_summaries, final_lambdas
     )
-    final_obj = reml_laml_objective(
-        dm,
-        distribution,
-        link,
-        groups,
-        y,
-        final_result,
-        final_lambdas,
-        sample_weight,
-        offset_arr,
-        XtWX=final_xtwx,
-        penalty_caches=penalty_caches,
-        log_det_H=identified.log_det(final_inv, final_result.log_det_H, final_dense),
-        hessian_rank=(
-            identified.rank(final_result.reml_hessian_rank, final_inv, final_dense)
-            if identified
-            else None
-        ),
-        S_override=S_final,
-        reml_penalties=penalties,
-        tensor_pair_evaluations=final_tensor_pair_evals,
-        scale_profile=scale_profile,
-        weight_semantics=weight_semantics,
+    # A boundary stop has no criterion to evaluate (see the loop's restoration).
+    boundary_stop = termination_reason == "mean_space_boundary"
+    final_obj = (
+        None
+        if boundary_stop
+        else reml_laml_objective(
+            dm,
+            distribution,
+            link,
+            groups,
+            y,
+            final_result,
+            final_lambdas,
+            sample_weight,
+            offset_arr,
+            XtWX=final_xtwx,
+            penalty_caches=penalty_caches,
+            log_det_H=identified.log_det(final_inv, final_result.log_det_H, final_dense),
+            hessian_rank=(
+                identified.rank(final_result.reml_hessian_rank, final_inv, final_dense)
+                if identified
+                else None
+            ),
+            S_override=S_final,
+            reml_penalties=penalties,
+            tensor_pair_evaluations=final_tensor_pair_evals,
+            scale_profile=scale_profile,
+            weight_semantics=weight_semantics,
+        )
     )
     _t_objective += _time.perf_counter() - _t0
     # Publish the final refit; the POI loop's working-model surrogates must
@@ -2009,10 +2110,11 @@ def optimize_discrete_reml_cached_w(
     best_obj = final_obj
     best_lambdas = final_lambdas.copy()
     best_pirls = final_result
-    lambda_history.append(final_lambdas.copy())
-    objective_history.append(
-        float(final_obj.value if isinstance(final_obj, REMLObjectiveEvaluation) else final_obj)
-    )
+    if not boundary_stop:
+        lambda_history.append(final_lambdas.copy())
+        objective_history.append(
+            float(final_obj.value if isinstance(final_obj, REMLObjectiveEvaluation) else final_obj)
+        )
 
     if profile is not None:
         if _bootstrap_component_stats:
@@ -2082,7 +2184,7 @@ def optimize_discrete_reml_cached_w(
         converged=converged,
         lambda_history=lambda_history,
         objective_history=objective_history,
-        objective=float(best_obj),
+        objective=None if best_obj is None else float(best_obj),
         curvature_source=reml_curvature,
         termination_reason=termination_reason,
         tweedie_scale_data=tweedie_rows(scale_profile),
@@ -2090,4 +2192,5 @@ def optimize_discrete_reml_cached_w(
         lambda_box=box,
         bound_pressure=last_bound_pressure,
         stop_evidence=stop_evidence,
+        mean_space_restorations=n_mean_space_restorations,
     )

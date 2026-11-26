@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -727,6 +727,12 @@ class REMLCandidateConvergence:
     objective_change: float
     converged: bool
     gradient_bar: float = math.nan
+
+    def under_holds(self, projected_gradient: NDArray) -> REMLCandidateConvergence:
+        """This comparison with its gradient read under another hold set."""
+        projected = np.asarray(projected_gradient, dtype=np.float64)
+        norm = float(np.max(np.abs(projected))) if projected.size else 0.0
+        return replace(self, projected_gradient_norm=norm)
 
     def stop_evidence(
         self,

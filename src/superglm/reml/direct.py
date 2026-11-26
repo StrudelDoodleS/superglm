@@ -882,7 +882,9 @@ def optimize_direct_reml(
         if termination_reason == "mean_space_boundary":
             # No penalty can move the rows: the unpenalized part holds them at
             # the boundary, where the criterion is undefined. Published, disclosed.
-            best_pirls, best_obj, best_lambdas = pirls_result, np.nan, cand_lambdas.copy()
+            best_pirls, best_obj, best_lambdas = pirls_result, None, cand_lambdas.copy()
+            if lambda_history[-1] != cand_lambdas:
+                lambda_history.append(cand_lambdas.copy())
             stop_evidence = {
                 "test": "mean_space_boundary",
                 "iter": n_iter,
@@ -1499,7 +1501,11 @@ def optimize_direct_reml(
                 # warm-started settle at the same lambdas.
                 continue
             # All components frozen: converged (a genuinely all-flat model; the
-            # compound criterion usually fires first).
+            # compound criterion usually fires first). The evidence reads the
+            # gradient under this iteration's hold set, the one the stop used.
+            candidate_convergence = candidate_convergence.under_holds(
+                mask_frozen_stop_gradient(proj_grad, frozen, objective=obj, tolerance=_tol)
+            )
             converged = True
             termination_reason = "active_set_stationary"
             break
@@ -2221,7 +2227,7 @@ def optimize_direct_reml(
         n_reml_iter=n_iter,
         converged=converged,
         lambda_history=lambda_history,
-        objective=float(best_obj),
+        objective=None if best_obj is None else float(best_obj),
         objective_history=objective_history,
         curvature_source="observed" if use_observed_geometry else "fisher",
         termination_reason=termination_reason,

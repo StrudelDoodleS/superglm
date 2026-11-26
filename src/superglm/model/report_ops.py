@@ -75,9 +75,10 @@ def _standardized_column(matrix, index, positive, weights, sqrt_weights):
     if maximum == 0.0:
         return None
     with np.errstate(under="ignore"):
-        # Power-of-two scaling keeps large offsets from degrading centring.
+        # Power-of-two scaling, then two weighted centring passes: the second
+        # removes the first's rounding, and no single row sets the centre.
         values = np.ldexp(values, -np.frexp(maximum)[1])
-        values -= values[0]
+        values = values - np.dot(weights, values)
         values -= np.dot(weights, values)
         values *= sqrt_weights
         maximum = np.max(np.abs(values))
@@ -85,6 +86,35 @@ def _standardized_column(matrix, index, positive, weights, sqrt_weights):
             return None
         values /= maximum
         return values / np.linalg.norm(values)
+
+
+def _null_pairs(basis: np.ndarray, rcond: float) -> list[tuple[int, int]]:
+    """Row pairs ``(i, j)`` that alone carry a direction of ``span(basis)``.
+
+    Independent of the basis chosen for that span. A pair qualifies when the
+    unit null vector closest to its two coordinates, ``w = Q u`` with ``u``
+    the top right singular vector of ``Q[[i, j]]``, has every other entry
+    within ``rcond`` of its larger pair entry and both pair entries above it.
+    ``w`` is formed directly, so no ``1 - s**2`` cancellation enters.
+    """
+    Q = np.linalg.qr(basis, mode="reduced")[0]
+    row_sq = np.einsum("ij,ij->i", Q, Q)
+    # a column that is a null direction by itself pairs with nothing
+    loaded = np.flatnonzero(
+        (row_sq > rcond**2 * np.max(row_sq, initial=0.0)) & (row_sq < 1.0 - 1e-6)
+    )
+    R = Q[loaded]
+    # The pair's top squared singular value, at most a + b + 2|c|, must be 1.
+    reach = row_sq[loaded, None] + row_sq[None, loaded] + 2.0 * np.abs(R @ R.T)
+    pairs = []
+    for a, b in zip(*np.nonzero(np.triu(reach >= 1.0 - 1e-6, k=1)), strict=True):
+        i, j = int(loaded[a]), int(loaded[b])
+        w = Q @ np.linalg.svd(Q[[i, j]])[2][0]
+        top, low = sorted((abs(w[i]), abs(w[j])), reverse=True)
+        rest = np.abs(np.delete(w, [i, j]))
+        if np.max(rest, initial=0.0) <= rcond * top and low > rcond * top:
+            pairs.append((i, j))
+    return pairs
 
 
 def _rank_dependencies(model, result, specs) -> tuple[list, list]:
@@ -102,8 +132,12 @@ def _rank_dependencies(model, result, specs) -> tuple[list, list]:
 
     groups = {column: group for group in model._groups for column in range(group.start, group.end)}
     dependencies: list[list[str]] = []
-    pairs: set[tuple[int, ...]] = set()
     with np.errstate(under="ignore"):
+        scaled = null if equilibrated is not None else null * data.column_scale[:, None]
+        pairs = {
+            tuple(sorted((int(rank.selected_columns[i]), int(rank.selected_columns[j]))))
+            for i, j in _null_pairs(scaled, SHARED_RANK_POLICY.factor_rcond)
+        }
         for direction in null.T:
             # The rank cut is in equilibrated coordinates. Use the same scale
             # before deciding which entries of a discarded direction to name.
@@ -115,8 +149,6 @@ def _rank_dependencies(model, result, specs) -> tuple[list, list]:
             terms = list(dict.fromkeys(groups[i].feature_name for i in columns))
             if terms not in dependencies:
                 dependencies.append(terms)
-            if len(columns) == 2:
-                pairs.add(columns)
 
     aliases: list[dict] = []
     if pairs and model._dm is not None and model._fit_weights is not None:

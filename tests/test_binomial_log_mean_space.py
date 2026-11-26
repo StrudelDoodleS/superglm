@@ -254,12 +254,24 @@ def test_reml_reaches_the_interior_maximum_on_both_backends(monkeypatch) -> None
     assert abs(objectives[0] - objectives[1]) <= 2.0 * tolerance * (1.0 + abs(objectives[0]))
 
 
-def test_reml_returns_a_maximum_on_the_boundary_and_says_why() -> None:
+def _assert_no_published_criterion(model: SuperGLM) -> None:
+    """A boundary mode's REML score is undefined, and no reader is handed one."""
+    from superglm.model.telemetry_ops import metrics_for_logging
+
+    assert model._reml_result.objective is None
+    assert model.reml_diagnostics()["objective"] is None
+    assert "train.reml.objective" not in metrics_for_logging(model)
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "binned"])
+def test_reml_returns_a_maximum_on_the_boundary_and_says_why(discrete: bool) -> None:
     """An unpenalized level whose rows are all events is at probability one at every lambda.
 
-    #461: the exact search published nothing here (``ObservedModeNotConvergedError``)
-    while the binned search returned the same fit disclosed. Both now return it,
-    not converged, with the stop and its row count in the convergence report.
+    #461: the exact search published nothing here (``ObservedModeNotConvergedError``),
+    and the binned search ran to ``max_reml_iter`` scoring boundary states. Both
+    engines now raise the penalty to its upper bound, stop on the boundary, and
+    return the fit not converged, with no REML score, the stop and its row count
+    in the convergence report, and the same disclosure.
     """
     rng = np.random.default_rng(3)
     n = 3000
@@ -277,21 +289,117 @@ def test_reml_returns_a_maximum_on_the_boundary_and_says_why() -> None:
         family="binomial",
         link="log",
         features={"region": Categorical(base="first"), "x": Numeric(), "g": RandomEffect()},
+        discrete=discrete,
     )
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         model.fit_reml(X, y)
     messages = [str(w.message) for w in caught if w.category is ConvergenceWarning]
-    assert any("score is not defined there" in message for message in messages)
+    assert len(messages) == 1
+    assert "because the penalized maximum held fitted means on the boundary" in messages[0]
+    assert "score is not defined there" in messages[0]
     assert any(
         "region[C]" in str(w.message) for w in caught if w.category is WeakIdentificationWarning
     )
-    assert not model._reml_result.converged
-    smoothing = model.diagnostics()["_model"]["convergence"]["smoothing"]
+    assert model._reml_result.converged is False
+    report = model.diagnostics()["_model"]["convergence"]
+    smoothing = report["smoothing"]
     assert smoothing["reason"] == "mean_space_boundary"
+    assert smoothing["converged"] is False
     assert smoothing["evidence"]["test"] == "mean_space_boundary"
     assert smoothing["evidence"]["boundary_row_count"] >= 1
+    coefficients = report["coefficients"]
+    assert coefficients["reason"] == "mean_space_boundary"
+    assert coefficients["evidence"] == {
+        "test": "mean_space_boundary",
+        "boundary_row_count": model.result.mean_space_boundary_rows,
+        "unresolved_direction": False,
+    }
+    assert coefficients["evidence"]["boundary_row_count"] >= 1
+    _assert_no_published_criterion(model)
+    # no score for the boundary visit, which ends the published history
+    assert model._reml_result.objective_history == []
+    assert model._reml_result.lambda_history[-1] == model._reml_result.lambdas
     assert np.isfinite(model.predict(X)).all()
+
+
+def _ceiling_rows() -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
+    """Sol on #461: five grouped binomial rows with an interior mode at a moderate penalty.
+
+    Each row of ``trials`` and ``events`` is an event row and a non-event row
+    weighted by their counts; the last has no non-events.
+    """
+    x = [0.0, 1.0, 10.0, 11.0, 12.0]
+    g = ["A", "A", "B", "B", "B"]
+    trials = [100.0, 100.0, 100.0, 100.0, 1.0]
+    events = [10.0, 10.0, 90.0, 90.0, 1.0]
+    rows = [
+        (xi, gi, response, weight)
+        for xi, gi, n, e in zip(x, g, trials, events, strict=True)
+        for response, weight in ((1.0, e), (0.0, n - e))
+        if weight > 0.0
+    ]
+    frame = pd.DataFrame(rows, columns=["x", "g", "y", "w"])
+    return frame[["x", "g"]], frame["y"].to_numpy(), frame["w"].to_numpy()
+
+
+def _ceiling_fit(start: float) -> tuple[SuperGLM, list]:
+    X, y, trials = _ceiling_rows()
+    model = SuperGLM(
+        family="binomial",
+        link="log",
+        direct_solve="gram",
+        features={"x": Numeric(), "g": RandomEffect()},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit_reml(X, y, sample_weight=trials, max_reml_iter=1, lambda2_init={"g": start})
+    return model, caught
+
+
+def test_a_boundary_at_the_ceiling_claims_only_the_parameters_tried() -> None:
+    """Sol's P2 on #461: the restoration only raises penalties, so it cannot rule out an
+    interior mode below them. Started at the ceiling the fit stops on the boundary and
+    says so of the smoothing parameters it tried; started low the same model has an
+    interior mode with a finite REML score.
+    """
+    ceiling, caught = _ceiling_fit(1e30)
+    assert ceiling._reml_result.termination_reason == "mean_space_boundary"
+    messages = [str(w.message) for w in caught if w.category is ConvergenceWarning]
+    assert any("at the smoothing parameters the search tried" in m for m in messages)
+    assert not any("every smoothing parameter" in m for m in messages)
+
+    interior, _ = _ceiling_fit(0.1)
+    assert interior._reml_result.termination_reason != "mean_space_boundary"
+    assert float(np.max(interior.predict(_ceiling_rows()[0]))) < 0.95
+    assert math.isfinite(interior._reml_result.objective)
+
+
+def test_a_boundary_trace_row_is_strict_json(tmp_path, monkeypatch) -> None:
+    """Sol's P3 on #461: the debug trace wrote a bare NaN for the undefined criterion."""
+    import json
+
+    from superglm._debug import get_debug_level, set_debug_level
+
+    def refuse(token: str) -> float:
+        raise ValueError(f"non-standard JSON token {token}")
+
+    previous = get_debug_level()
+    monkeypatch.setenv("SUPERGLM_DEBUG_DIR", str(tmp_path))
+    set_debug_level(2)
+    try:
+        model, _ = _ceiling_fit(1e30)
+    finally:
+        set_debug_level(previous)
+    assert model._reml_result.termination_reason == "mean_space_boundary"
+    (trace,) = tmp_path.glob("*reml.jsonl")
+    rows = [
+        json.loads(line, parse_constant=refuse)
+        for line in trace.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert rows and rows[-1]["objective_before"] is None
+    assert rows[-1]["objective_after"] is None
 
 
 _FACE_LAMBDA = 0.2
@@ -2402,6 +2510,9 @@ def test_reml_returns_an_all_events_light_cut_naming_its_rows() -> None:
     assert evidence["test"] == "mean_space_boundary"
     assert evidence["boundary_row_count"] == len(light)
     assert evidence["unresolved_direction"] is True
+    _assert_no_published_criterion(model)
+    # the terminal boundary visit is in the history the fit publishes
+    assert model._reml_result.lambda_history[-1] == model._reml_result.lambdas
 
 
 def test_the_pull_carries_the_null_basis_error() -> None:
