@@ -440,6 +440,10 @@ class _Fingerprint:
     def _named(self, item: Any) -> None:
         # Only the name: a library's module layout moves between versions, and
         # its code is not the oracle's.
+        if getattr(item, "__origin__", None) in (np.ndarray, _NDARRAY):
+            # ``NDArray[...]``, whose origin is ``ndarray`` before numpy 2.5 and the alias from it
+            self._put("external", "NDArray")
+            return
         name = getattr(item, "__qualname__", None) or getattr(item, "__name__", None)
         self._put("external", name or type(item).__qualname__)
 
