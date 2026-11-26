@@ -223,7 +223,8 @@ def test_polars_floor_job_runs_the_declared_floor_with_the_matrix_extras() -> No
 def test_dependency_floor_job_runs_the_quick_suite_at_lowest_direct_on_the_oldest_python() -> None:
     """One job installs every direct dependency at its declared floor, with the
     matrix's extras, on the oldest Python pyproject.toml admits, and runs the
-    quick suite in that environment without letting uv re-sync it."""
+    quick suite in that environment, against the committed lock, without letting
+    uv re-sync it."""
     job = yaml.safe_load((_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"][
         "dependency-floors"
     ]
@@ -239,6 +240,8 @@ def test_dependency_floor_job_runs_the_quick_suite_at_lowest_direct_on_the_oldes
     )
     (suite,) = [run for run in runs if "run_test_suite.py" in run]
     assert suite.startswith("uv run --no-sync python scripts/run_test_suite.py")
+    # The suite's lock checks read the committed lock, not the floor resolution.
+    assert runs.index("git checkout -- uv.lock") in range(runs.index(sync) + 1, runs.index(suite))
     assert '-m "not slow and not browser and not docs"' in suite
     assert all(run.startswith("uv run --no-sync ") for run in runs if run.startswith("uv run"))
 
