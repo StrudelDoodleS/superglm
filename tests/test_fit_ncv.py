@@ -6,7 +6,8 @@ Newton step assembled densely from the kept rows alone, taken from the published
 public predictions (``tests.test_ncv_engine.KeptRows``).  The published model is compared with
 the public ``fit`` on a clone that declares the chosen smoothing.  Events a search cannot be
 relied on to reach (a stop at its step limit aside) are forced: a final fit short of its
-certificate, a smoothing parameter on a bound, a search with no criterion.
+certificate, a smoothing parameter on a bound, a search with no criterion, and coefficient
+fits at the limit of float64 on either side of the acceptance bar.
 
 Tolerances.  ``U`` is the unit roundoff and ``kappa`` the 2-norm condition number of the
 Jacobi-scaled penalised Hessian a comparison goes through, computed here.  Two exact
