@@ -488,12 +488,22 @@ Read the three rows plainly:
   per coefficient drop to 5.0 with large quarter-book folds (140 rows, 4
   groups, 28 coefficients). Treat Poisson `fit_ncv` carefully on very small
   books or very large folds.
-- **Fitting cost**: `fit_ncv` typically takes about three to four times as long
-  as `fit_reml`. On the public French motor book (freMTPL2), measured on one
-  machine with default threads: `fit_reml` takes 3.9 to 4.0 s, `fit_ncv` with
-  five folds takes 10.6 to 11.0 s, and `fit_ncv` with each policy held out
-  takes 14.1 to 16.0 s. When the two methods choose the same curves, that extra
-  work buys nothing.
+- **Fitting cost**: `fit_ncv` typically takes about three times as long as
+  `fit_reml`. On the public French motor book (freMTPL2), measured on one
+  machine with default threads: `fit_reml` takes 4.6 s, `fit_ncv` with five
+  folds of policies takes 12.5 s (about 2.7 times `fit_reml`), and `fit_ncv`
+  with each policy held out takes 16.2 s (about 3.5 times `fit_reml`). It stays
+  within a few times `fit_reml` because each evaluation of the held-out
+  criterion costs about one ordinary coefficient fit plus a cheap update per
+  held-out group. When the two methods choose the same curves, that extra work
+  buys nothing.
+
+  ```{figure} ../images/ncv/cost_motor.png
+  :name: fig-ncv-cost-motor
+  :alt: Horizontal bars of wall time on the French motor book: fit_reml 4.6 s, fit_ncv with five folds of policies 12.5 s, fit_ncv with each policy held out 16.2 s.
+
+  Wall time of one complete fit of a Poisson claim frequency model to 80% of the French motor book (542,406 policies, 68 coefficients), on one machine with default threads. Each case ran twice, alternating; the bar is the mean and the circles are the two runs.
+  ```
 - **Standard errors and scale**: `fit_ncv` chooses the smoothing parameters and
   then publishes the ordinary fit at those smoothing parameters. Standard
   errors, effective degrees of freedom and the Pearson scale are the same ones
