@@ -87,6 +87,11 @@ def _pin(monkeypatch, splice, body=BODY, tail=TAIL, q=Q):
         ),
     )
     monkeypatch.setattr(splice.exceedance, "predict", lambda X, **kw: np.broadcast_to(q, (len(X),)))
+    monkeypatch.setattr(
+        splice.exceedance,
+        "_predict_with_complement",
+        lambda X, **kw: (np.broadcast_to(q, (len(X),)), np.broadcast_to(1 - q, (len(X),))),
+    )
 
 
 def _gamma(mean, cv):

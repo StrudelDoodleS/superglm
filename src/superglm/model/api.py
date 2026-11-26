@@ -1780,7 +1780,9 @@ class SuperGLM:
 
         The deviance, likelihoods, Pearson statistic and ``residuals()`` are
         computed from the model's predictions on ``X``, the values ``predict``
-        returns.  They do not depend on object identity: equal copies of the
+        returns, except on a binomial row priced outside the range the solver
+        works in (the :class:`ModelMetrics` notes say how it is read).
+        They do not depend on object identity: equal copies of the
         training data and a saved and reloaded model give the same values as
         the objects the model was fitted on.  Leverage-based diagnostics do
         depend on it.  On the fit's own objects, ``leverage``, the standardized
@@ -2523,6 +2525,20 @@ class SuperGLM:
         """Private exact canonical predictor on the response scale."""
         return base.predict_exact(self, X, offset, random_effects=random_effects)
 
+    def _predict_with_complement(
+        self, X: FrameLike, offset: NDArray | None = None
+    ) -> tuple[NDArray, NDArray]:
+        """``predict``'s means and ``1 - mean``, each at the row's own predictor.
+
+        For a reader of a binary model's other class (``base.predict_with_complement``).
+        """
+        frame = as_eager_frame(X)
+        pair = base.predict_with_complement(self, frame, offset)
+        from superglm.model.estimability_ops import disclose_non_estimable
+
+        disclose_non_estimable(self, frame, "conditional")
+        return pair
+
     def predict(
         self,
         X: FrameLike,
@@ -2550,7 +2566,11 @@ class SuperGLM:
         Returns
         -------
         NDArray
-            Predicted mean on the response scale (inverse-link of eta).
+            Predicted mean on the response scale (inverse-link of eta). A
+            binomial model under the logit, probit or cloglog link returns
+            the link's inverse with no floor or cap: a row priced at 1e-16
+            predicts 1e-16. Float64 ends it: a row within 1e-16 of certainty
+            predicts exactly 1.0, and one below about 1e-308 can predict 0.0.
 
         Warns
         -----

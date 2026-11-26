@@ -10,7 +10,7 @@ from superglm.editor.apply import model_for_split_scoring
 from superglm.editor.cv import FINAL_NOT_RUN, cv_report_payload, diagnose_report_payload
 from superglm.editor.diagnose import fit_trace
 from superglm.editor.display import fold_chart_display
-from superglm.editor.evaluation import evaluation_datasets
+from superglm.editor.evaluation import edited_statistics_dataset, evaluation_datasets
 from superglm.editor.lss.validation import LSS_METRIC_LABELS, lss_split_reason
 from superglm.editor.lss.view import is_lss
 from superglm.editor.metrics import METRIC_LABELS, compute_dataset_metrics
@@ -261,7 +261,9 @@ def _split_metrics(session) -> list[dict[str, Any]]:
     reference_model = getattr(session, "reference_model", session.model)
     if reference_model is None:
         return []
-    edited_model = model_for_split_scoring(session.model, session.terms)
+    edited_model = model_for_split_scoring(
+        session.model, session.terms, edited_statistics_dataset(session)
+    )
     metric_pairs: dict[str, tuple[dict[str, float | str], dict[str, float | str]]] = {}
     for dataset in evaluation_datasets(session):
         original = compute_dataset_metrics(reference_model, dataset)

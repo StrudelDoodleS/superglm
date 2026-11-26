@@ -66,6 +66,8 @@ from superglm.solvers.clip_rows import (
     held_likelihood_rows,
     likelihood_null_eta,
     on_likelihood_rows,
+    unheld_weights,
+    weighted_deviance_sum,
 )
 from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
 from superglm.solvers.irls_direct import fit_irls_direct
@@ -612,7 +614,7 @@ def _compute_fit_stats(
             distribution,
             y,
             mu,
-            physical_weights,
+            unheld_weights(held, physical_weights),
             solver_result,
             weight_semantics=weight_semantics,
         )
@@ -620,7 +622,7 @@ def _compute_fit_stats(
             distribution,
             y,
             null_mu,
-            physical_weights,
+            unheld_weights(null_held, physical_weights),
             solver_result,
             weight_semantics=weight_semantics,
         )
@@ -646,23 +648,36 @@ def _compute_fit_stats(
         null_ll = float(np.sum(null_logpdf))
     else:
         ll = weighted_log_likelihood(
-            distribution, y, mu, weights, phi, weight_semantics=weight_semantics
+            distribution,
+            y,
+            mu,
+            unheld_weights(held, weights),
+            phi,
+            weight_semantics=weight_semantics,
         )
         null_ll = weighted_log_likelihood(
-            distribution, y, null_mu, weights, phi, weight_semantics=weight_semantics
+            distribution,
+            y,
+            null_mu,
+            unheld_weights(null_held, weights),
+            phi,
+            weight_semantics=weight_semantics,
         )
+    # each sum reads the held rows beside the others' (``clip_rows.unheld_weights``)
     pearson = pearson_chi2(
-        distribution=distribution, y=y, mu=mu, sample_weight=weights, variance_floor=0.0
+        distribution=distribution,
+        y=y,
+        mu=mu,
+        sample_weight=unheld_weights(held, weights),
+        variance_floor=0.0,
     )
-    null_dev = weighted_row_sum(weights, distribution.deviance_unit, y, null_mu)
-    dev = weighted_row_sum(weights, distribution.deviance_unit, y, mu)
+    null_dev = weighted_deviance_sum(distribution, y, weights, null_mu, null_held)
+    dev = weighted_deviance_sum(distribution, y, weights, mu, held)
     if held is not None:
-        ll -= 0.5 * held.deviance_gap(physical_weights)
-        dev += held.deviance_gap(weights)
-        pearson += held.pearson_gap(weights)
+        ll += held.log_likelihood_sum(physical_weights)
+        pearson += held.pearson_sum(weights)
     if null_held is not None:
-        null_ll -= 0.5 * null_held.deviance_gap(physical_weights)
-        null_dev += null_held.deviance_gap(weights)
+        null_ll += null_held.log_likelihood_sum(physical_weights)
     expl_dev = _explained_deviance(dev, null_dev, y, null_mu, weights)
 
     return FitStats(

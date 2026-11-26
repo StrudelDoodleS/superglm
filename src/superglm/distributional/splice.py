@@ -325,11 +325,11 @@ def _restore_splice(version: int, models: _Components) -> SplitSplice:
 
 def _window_probability(u: float, y: NDArray, survival: bool, law: tuple) -> NDArray:
     """``P(Y > y)`` or ``P(Y <= y)`` per row of predicted components ``law``."""
-    family, tail_family, body, tail, q, valid = law
+    family, tail_family, body, tail, q, mass, valid = law
     out = np.full(len(q), np.nan)
     out[valid & (y <= 0.0)] = float(survival)
     boundary = valid & (y == u)
-    out[boundary] = q[boundary] if survival else 1.0 - q[boundary]
+    out[boundary] = q[boundary] if survival else mass[boundary]
     below = valid & (y > 0.0) & (y < u)
     if np.any(below):
         params, z, p = body[below], y[below], q[below]
@@ -337,13 +337,14 @@ def _window_probability(u: float, y: NDArray, survival: bool, law: tuple) -> NDA
         lo, hi = (z, u) if survival else (0.0, z)
         log_ratio = _log_window(family, lo, hi, params) - log_norm
         conditional = np.exp(np.minimum(log_ratio, 0.0))
-        out[below] = (1.0 - p) * conditional + (p if survival else 0.0)
+        out[below] = mass[below] * conditional + (p if survival else 0.0)
     above = valid & (y > u) & np.isfinite(y) & (q > 0.0)
     if np.any(above):
-        log_sf = np.log(q[above]) + tail_family.log_window_probability(
-            y[above] - u, np.inf, tail[above]
-        )
-        out[above] = np.exp(log_sf) if survival else -np.expm1(log_sf)
+        log_sf = tail_family.log_window_probability(y[above] - u, np.inf, tail[above])
+        if survival:
+            out[above] = np.exp(np.log(q[above]) + log_sf)
+        else:
+            out[above] = np.minimum(mass[above] - q[above] * np.expm1(log_sf), 1.0)
     out[valid & (y > u) & ((q == 0.0) | (y == np.inf))] = float(not survival)
     return out
 
@@ -553,14 +554,15 @@ class SplitSplice:
         tail = self.tail.predict_parameters(X, offsets=offsets.get("tail_offsets")).to_numpy()
         offset = offsets.get("exceedance_offset")
         _aligned(as_eager_frame(X), offset, "exceedance_offset")
-        q = self.exceedance.predict(X, offset=offset)
+        # the body's mass 1 - q at the row's own predictor: q can round to 1 above it
+        q, mass = self.exceedance._predict_with_complement(X, offset=offset)
         family = self.body._require_fitted().family
         tail_family = self.tail._require_fitted().family
         assert isinstance(family, GammaLS | LogNormalLS) and isinstance(
             tail_family, GeneralizedParetoLSS
         )
         valid = (q >= 0.0) & (q <= 1.0) & np.all(np.isfinite(body) & np.isfinite(tail), axis=1)
-        return family, tail_family, body, tail, q, valid
+        return family, tail_family, body, tail, q, mass, valid
 
     def _probability(
         self, X: FrameLike, y: ArrayLike, survival: bool, offsets: _Offsets
@@ -583,9 +585,8 @@ class SplitSplice:
         p = _row_values(X, p, "p")
         if np.any(~((p > 0.0) & (p < 1.0))):
             raise ValueError("quantile probabilities must lie strictly inside (0, 1)")
-        family, _, body, tail, q, valid = self._predict_components(X, offsets)
+        family, _, body, tail, q, cut, valid = self._predict_components(X, offsets)
         u = self.threshold
-        cut = 1.0 - q
         out = np.full(len(q), np.nan)
         out[valid & (p == cut)] = u
         below = valid & (p < cut)
@@ -614,17 +615,17 @@ class SplitSplice:
 
     def predict(self, X: FrameLike, **offsets: Unpack[_Offsets]) -> NDArray:
         """Return each row's mean loss on the original scale."""
-        family, _, body, tail, q, valid = self._predict_components(X, offsets)
+        family, _, body, tail, q, mass, valid = self._predict_components(X, offsets)
         u = self.threshold
         out = np.full(len(q), np.nan)
         out[valid] = q[valid] * u
-        in_body = valid & (q < 1.0)
+        in_body = valid & (mass > 0.0)
         if np.any(in_body):
             params = body[in_body]
             log_mean = _log_body_moment(family, 0.0, u, params) - _log_window(
                 family, 0.0, u, params
             )
-            out[in_body] += (1.0 - q[in_body]) * np.exp(np.minimum(log_mean, np.log(u)))
+            out[in_body] += mass[in_body] * np.exp(np.minimum(log_mean, np.log(u)))
         in_tail = valid & (q > 0.0)
         scale, shape = tail[in_tail].T
         with np.errstate(over="ignore"):
@@ -639,7 +640,7 @@ class SplitSplice:
         w = _row_values(X, limit, "limit")
         if np.any(~np.isfinite(a) | ~np.isfinite(w) | (w < 0.0)):
             raise ValueError("attachment and limit must be finite and limit nonnegative")
-        family, tail_family, body, tail, q, valid = self._predict_components(X, offsets)
+        family, tail_family, body, tail, q, mass, valid = self._predict_components(X, offsets)
         u = self.threshold
         # Keep widths explicitly: a small layer can have a+limit rounded to a.
         certain = np.minimum(np.maximum(-a, 0.0), w)
@@ -648,9 +649,9 @@ class SplitSplice:
         below_u = np.minimum(np.maximum(u - a, 0.0), remaining)
         tail_width = remaining - below_u
         out = np.where(valid, certain + q * below_u, np.nan)
-        below = valid & (below_u > 0.0) & (q < 1.0)
+        below = valid & (below_u > 0.0) & (mass > 0.0)
         if np.any(below):
-            out[below] += (1.0 - q[below]) * _body_layer(
+            out[below] += mass[below] * _body_layer(
                 family, a[below], below_u[below], u, body[below]
             )
         above = valid & (tail_width > 0.0) & (q > 0.0)
@@ -858,7 +859,7 @@ class SplitSplice:
 
     def _density(self, y: NDArray, in_tail: NDArray, law: tuple) -> NDArray:
         """The density at ``y``, read from the tail where ``in_tail`` and the body elsewhere."""
-        family, tail_family, body, tail, q, valid = law
+        family, tail_family, body, tail, q, mass, valid = law
         u = self.threshold
         refuse_missing(y, "predict_pdf")
         out = np.where(valid, 0.0, np.nan)
@@ -868,7 +869,7 @@ class SplitSplice:
             log_f = row_log_density(family, y[rows], body[rows], positions=rows)
             log_body = log_f - _log_window(family, 0.0, u, body[rows])
             with np.errstate(over="ignore"):
-                out[rows] = (1.0 - q[rows]) * np.exp(log_body)
+                out[rows] = mass[rows] * np.exp(log_body)
         above = valid & in_tail & np.isfinite(y)
         if np.any(above):
             rows = np.flatnonzero(above)
@@ -879,7 +880,7 @@ class SplitSplice:
 
     def _mean_excess(self, v: NDArray, law: tuple) -> NDArray:
         """``E[Y - v | Y > v]``: the tail's line from the threshold, a ratio of positive terms below."""
-        family, _, body, tail, q, valid = law
+        family, _, body, tail, q, mass, valid = law
         u = self.threshold
         scale, shape = tail.T
         out = np.full(len(q), np.nan)
@@ -890,11 +891,11 @@ class SplitSplice:
         if np.any(below):
             # S(v) = 1 for v below 0, so e(v) = e(0) - v there.
             a = np.maximum(v[below], 0.0)
-            params, p = body[below], q[below]
+            params, p, body_mass = body[below], q[below], mass[below]
             log_ratio = _log_window(family, a, u, params) - _log_window(family, 0.0, u, params)
-            survival = (1.0 - p) * np.exp(np.minimum(log_ratio, 0.0)) + p
+            survival = body_mass * np.exp(np.minimum(log_ratio, 0.0)) + p
             layer = (
-                (1.0 - p) * _body_layer(family, a, u - a, u, params)
+                body_mass * _body_layer(family, a, u - a, u, params)
                 + p * (u - a)
                 + p * scale[below] / (1.0 - shape[below])
             )
@@ -912,7 +913,7 @@ class SplitSplice:
     ) -> DistributionCurve:
         grid = check_curve_request(len(as_eager_frame(row)), kind, y, n_points, caller)
         law = self._predict_components(row, offsets)
-        family, tail_family, body, tail, q, valid = law
+        family, tail_family, body, tail, q, mass, valid = law
         u = self.threshold
         empty = np.empty(0)
         if grid is None:
@@ -932,7 +933,7 @@ class SplitSplice:
         points = np.concatenate([body_grid, tail_grid])
         in_tail = np.arange(len(points)) >= len(body_grid)
         take = np.zeros(len(points), dtype=np.intp)
-        rows = (family, tail_family, body[take], tail[take], q[take], valid[take])
+        rows = (family, tail_family, body[take], tail[take], q[take], mass[take], valid[take])
         if kind == "density":
             values = self._density(points, in_tail, rows)
         elif kind == "survival":

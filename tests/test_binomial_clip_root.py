@@ -1364,6 +1364,44 @@ def test_an_edit_that_moves_a_row_past_the_clip_is_scored_on_the_likelihood():
         np.testing.assert_allclose(printed[name], reference, rtol=1e-9, err_msg=name)
 
 
+@pytest.mark.pins_behaviour
+def test_a_draft_and_its_saved_edit_score_other_rows_alike():
+    """Pins: an editor draft and its saved edit give the same predictions the same score.
+
+    The fit holds its event at an offset of -18 against its outcome and reads
+    the likelihood's rows.  Moving level ``b`` by +4 puts that row at -13.8,
+    clear of the clip, so the saved model reads the clipped rows again.  A
+    draft that kept the fit's record instead scores two validation rows past
+    the clip, which agree with their outcomes, from the likelihood: 2.6e-20
+    of deviance where the saved model prints 4.0e-7.
+    """
+    from superglm.editor import edit
+    from superglm.editor.metrics import metrics_payload
+    from superglm.editor.reports import validation_report_payload
+    from superglm.solvers.clip_rows import on_likelihood_rows
+
+    model, frame, y, weights, offset = _factor_fit(-18.0)
+    held_out = pd.DataFrame({"a": ["b", "b"]}), np.array([0.0, 1.0]), np.ones(2)
+    held_out_offset = np.array([-50.0, 50.0])
+    session = edit(
+        model,
+        train_data=(frame, y, weights, offset),
+        validation_data=(*held_out, held_out_offset),
+    )
+    session.select_indices("a", [1])
+    session.shift("a", 4.0)
+    saved = session.to_model()
+    assert on_likelihood_rows(model.result) and not on_likelihood_rows(saved.result)
+    assert _factor_eta(saved, frame, offset)[-1] > math.log(1e-7)  # the control: it is clear
+    scored = saved.metrics(*held_out[:2], sample_weight=held_out[2], offset=held_out_offset)
+    np.testing.assert_allclose(scored.deviance, 4e-7, rtol=1e-6)
+    draft = metrics_payload(session, "deviance", dataset="validation")
+    np.testing.assert_allclose(draft["metrics"]["edited"]["deviance"], scored.deviance, rtol=1e-12)
+    splits = {split["name"]: split for split in validation_report_payload(session)["splits"]}
+    reported = splits["validation"]["metrics"]["edited"]["deviance"]
+    np.testing.assert_allclose(reported, scored.deviance, rtol=1e-12)
+
+
 @pytest.mark.parametrize("same_frame", [True, False])
 def test_a_monotonised_fit_that_holds_a_row_is_scored_on_the_likelihood(same_frame):
     """A shape repair of a fit with an event at -35 prints the likelihood's figures.

@@ -193,9 +193,13 @@ def _per_obs_log_likelihood(
     none is not evaluated and reads 0, whatever its mean or response, so it
     cannot reach the caller's sums as an overflow or a NaN.
     """
+    from superglm.model.base import score_rows
+
     measure = sample_weight if measure is None else measure
     mu = _get_mu(model, X, y, offset, sample_weight=measure, what=what)
     y = np.asarray(y, dtype=float)
+    # a binomial row past the solver's clip is read from the likelihood at its own predictor
+    mu, held = score_rows(model, X, offset, y, measure, mu)
     carried = None if measure is None else np.asarray(measure, dtype=np.float64) > 0.0
     if carried is not None and not np.all(carried):
         # Each row's density is its own, so the carried rows' are the same evaluated alone.
@@ -206,8 +210,16 @@ def _per_obs_log_likelihood(
             np.asarray(mu)[carried],
             None if sample_weight is None else np.asarray(sample_weight)[carried],
         )
+    else:
+        density = _row_log_densities(model, y, mu, sample_weight)
+    if held is None:
         return density
-    return _row_log_densities(model, y, mu, sample_weight)
+    # Read the weighted log density directly before deviance can overflow.
+    mass = np.ones(y.shape) if sample_weight is None else np.asarray(sample_weight, dtype=float)
+    exact = held.weighted_log_likelihood(mass)
+    if carried is not None:
+        exact = np.where(carried[held.index], exact, 0.0)
+    return held.patched(density, exact)
 
 
 def _row_log_densities(model: SuperGLM, y: NDArray, mu: NDArray, sample_weight) -> NDArray:

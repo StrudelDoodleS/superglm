@@ -14,7 +14,6 @@ import scipy.spatial
 from numpy.typing import NDArray
 from scipy.special import gammaln
 
-from superglm._utils import weighted_row_sum
 from superglm._weight_units import (
     dispersion_standard_deviation,
     likelihood_scale,
@@ -85,6 +84,8 @@ from superglm.solvers.clip_rows import (
     exported_information,
     held_likelihood_rows,
     on_likelihood_rows,
+    unheld_weights,
+    weighted_deviance_sum,
 )
 from superglm.solvers.dispersion import likelihood_scale_method, scale_method
 from superglm.solvers.mode_score import corrected_two_pass_pair
@@ -532,10 +533,15 @@ class ModelMetrics:
     on whether ``X``, ``y``, ``sample_weight`` and ``offset`` are the objects
     the model was fitted on: a discrete fit's own mean belongs to its binned
     design, which ``predict`` does not reproduce.  ``SuperGLM.summary``
-    reports the fit's own statistics instead.  One exception: a binomial fit
-    that converged on the likelihood in the linear predictor, because the
-    solver's clip held a row against its outcome, reads every row past that
-    clip from the likelihood there, where ``predict`` floors the mean at 1e-7.
+    reports the fit's own statistics instead.  One kind of row is not read
+    at ``predict``'s mean: a logit, probit or cloglog binomial row priced
+    outside the range the solver works in, which is 1e-7 to 1 - 1e-7, or to
+    1 - 2e-7 under cloglog.  Where a row of positive weight out there
+    contradicts its outcome, on these rows or at the end of the fit, every
+    such row is read from the likelihood at its own linear predictor, and a
+    loss float64 cannot hold is reported as infinite.  Where none does, they
+    are read at the edge of that range, as the fit's own statistics read
+    them: at most 4e-7 of deviance a unit of weight above the likelihood's.
 
     On the frame a model was fitted on, leverage and effective degrees of
     freedom come from the fit itself, and so do the standardized residuals
@@ -666,9 +672,15 @@ class ModelMetrics:
                 f"y has {len(self._y)} rows but X predicts {len(self._mu)}; "
                 "they must describe the same observations"
             )
-        from superglm.model.base import require_priced_rows
+        from superglm.model.base import require_priced_rows, score_rows
 
         require_priced_rows(model, self._mu, self._weights, "the deviance and likelihood")
+        if _mu is None:
+            # a binomial row past the solver's clip is read from the likelihood (``_held``)
+            frame = cast("FrameLike | EagerFrame", self._X)  # validated by predict()
+            self._mu, self.__dict__["_held"] = score_rows(
+                model, frame, offset, self._y, self._weights, self._mu
+            )
 
         # `explain_ops.metrics` sets `_contract_checked` when the caller passed the verified
         # training arrays: the fit already checked them, so do not report the condition twice.
@@ -802,31 +814,32 @@ class ModelMetrics:
 
     @cached_property
     def _held(self) -> HeldRows | None:
-        """These rows the working clip holds, for a fit on the likelihood's rows; else ``None``.
+        """These rows the working clip holds, where they are read from the likelihood; else ``None``.
 
-        Such a fit converged on the likelihood in the unclipped predictor
-        (``solvers.clip_rows``), so its deviance, likelihoods, Pearson statistic
-        and residuals read the held rows there, not at ``predict``'s floored mean.
+        The deviance, likelihoods, Pearson statistic and residuals read such a
+        row in the unclipped predictor (``solvers.clip_rows``), not at the
+        clipped mean the sums hold.  ``base.score_rows`` gives them for
+        ``predict``'s means; a mean the caller passed is read from the
+        likelihood only by a fit that ended on its rows.
         """
         if not on_likelihood_rows(self._result):
             return None
         return held_likelihood_rows(self._family, self._link, self._y, self._raw_eta)
 
     def _weighted_deviance(self, weights: NDArray, mu: NDArray, held: HeldRows | None) -> float:
-        total = weighted_row_sum(weights, self._family.deviance_unit, self._y, mu)
-        return total if held is None else total + held.deviance_gap(weights)
+        return weighted_deviance_sum(self._family, self._y, weights, mu, held)
 
     def _log_likelihood(self, mu: NDArray, held: HeldRows | None) -> float:
         value = unit_log_likelihood(
             self._family,
             self._y,
             mu,
-            self._weights,
+            unheld_weights(held, self._weights),
             self._result,
             weight_semantics=self._weight_semantics,
             report_contract=not self._contract_checked,
         )
-        return value if held is None else value - 0.5 * held.deviance_gap(self._weights)
+        return value if held is None else value + held.log_likelihood_sum(self._weights)
 
     @cached_property
     def deviance(self) -> float:
@@ -850,7 +863,7 @@ class ModelMetrics:
             self._family,
             self._link,
             weight_semantics=self._weight_semantics,
-            likelihood_rows=on_likelihood_rows(self._result),
+            likelihood_rows=on_likelihood_rows(self._result) or self._held is not None,
         )
 
     @property
@@ -927,15 +940,15 @@ class ModelMetrics:
         )
 
     def _pearson_chi2(self, weights: NDArray) -> float:
+        held = self._held
         total = pearson_chi2(
             distribution=self._family,
             y=self._y,
             mu=self._mu,
-            sample_weight=weights,
+            sample_weight=unheld_weights(held, weights),
             variance_floor=0.0,
         )
-        held = self._held
-        return total if held is None else total + held.pearson_gap(weights)
+        return total if held is None else total + held.pearson_sum(weights)
 
     @cached_property
     def pearson_chi2(self) -> float:
@@ -996,11 +1009,11 @@ class ModelMetrics:
         held = self._held
 
         if kind == "deviance":
-            sign, d = self._signed_deviance_units
             if self._geometry_weight_exponent:
-                residual = sign * np.sqrt(self._geometry_prior_weights * d)
-                return np.ldexp(residual, -(self._geometry_weight_exponent // 2))
-            return sign * np.sqrt(w * d)
+                sign, d = self._signed_weighted_deviance(self._geometry_prior_weights)
+                return np.ldexp(sign * np.sqrt(d), -(self._geometry_weight_exponent // 2))
+            sign, d = self._signed_weighted_deviance(w)
+            return sign * np.sqrt(d)
 
         if kind == "pearson":
             V = family.variance(mu)
@@ -1025,15 +1038,21 @@ class ModelMetrics:
             "Use 'deviance', 'pearson', 'response', 'working', or 'quantile'."
         )
 
-    @property
-    def _signed_deviance_units(self) -> tuple[NDArray, NDArray]:
-        """Per row, the sign of ``y - mu`` and the unit deviance."""
+    def _signed_weighted_deviance(self, weights: NDArray) -> tuple[NDArray, NDArray]:
+        """Per row, the sign of ``y - mu`` and ``weights`` times the unit deviance.
+
+        A held row's product is its own (``HeldRows.weighted_deviance``): an exact 0 at
+        weight 0, where a unit deviance float64 cannot hold would give ``0 * inf``.
+        """
         sign = np.sign(self._y - self._mu)
-        d = self._family.deviance_unit(self._y, self._mu)
+        d = weights * self._family.deviance_unit(self._y, self._mu)
         held = self._held
         if held is None:
             return sign, d
-        return held.patched(sign, np.sign(held.residual)), held.patched(d, held.deviance)
+        return (
+            held.patched(sign, np.sign(held.residual)),
+            held.patched(d, held.weighted_deviance(weights)),
+        )
 
     def _quantile_residuals(self, seed: int | None = 42) -> NDArray:
         """Randomized quantile residuals (Dunn & Smyth 1996).
@@ -1619,33 +1638,81 @@ class ModelMetrics:
         constrained fit's active face evaluates them on the rows projected on it
         (``_face_projection``).
         """
+        W, sum_w, forms, augmented = self._hat_rows()
+        if sum_w <= 0.0:
+            return np.zeros(self.n_obs)
+        if forms is None:
+            return np.clip(W / sum_w, 0.0, 1.0)
+        return np.clip(W * forms if augmented else W / sum_w + W * forms, 0.0, 1.0)
+
+    def _hat_rows(self) -> tuple[NDArray, float, NDArray | None, bool]:
+        """``W``, ``sum W`` and each row's quadratic form ``q`` of ``_hat_diag``.
+
+        ``h = W / sum W + W q`` with ``q`` about the working-weighted centre, or ``h = W
+        q`` where the last entry says ``q`` holds the intercept (a structured fit's
+        augmented factor).  ``q`` is ``None`` with no total weight or no column.
+        """
         X_a, W, _, augmented, _ = self._active_info
         W = np.asarray(W, dtype=np.float64)
         sum_w = float(np.sum(W))
-        if sum_w <= 0.0:
-            return np.zeros(self.n_obs)
-        if X_a.shape[1] == 0:
-            return np.clip(W / sum_w, 0.0, 1.0)
+        if sum_w <= 0.0 or X_a.shape[1] == 0:
+            return W, sum_w, None, False
         factor = getattr(augmented, "augmented_factor", None)
         forms = getattr(factor, "row_quadratic_forms", None)
         projection = self._face_projection
         if projection is not None:
             rows, _, inverse, _ = projection
             center = weighted_center(rows, W)
-            h = W / sum_w + W * quadratic_form_diagonal(rows, inverse, center=center)
-        elif forms is not None:
-            h = W * augmented_row_quadratic_forms(X_a, forms)
+            return W, sum_w, quadratic_form_diagonal(rows, inverse, center=center), False
+        if forms is not None:
+            return W, sum_w, augmented_row_quadratic_forms(X_a, forms), True
+        slopes = getattr(augmented, "slopes", None)
+        slopes = np.asarray(augmented)[1:, 1:] if slopes is None else np.asarray(slopes)
+        rank_info = getattr(self._result, "rank_info", None)
+        if rank_info is not None and rank_info.face is not None:
+            # The fit's own rows: leverage is the face fit's, while ``augmented`` is the
+            # covariance, which holds no shape row.
+            slopes = rank_info.augmented_inverse()
+        center = weighted_center(X_a, W)
+        return W, sum_w, quadratic_form_diagonal(X_a, slopes, center=center), False
+
+    def _held_cooks_distance(self, held: HeldRows, denom: NDArray) -> NDArray:
+        """Cook's distance on held rows from the likelihood score.
+
+        There ``h = W g`` with ``W = w p'^2 / (p (1 - p))`` the likelihood's information
+        (``_active_info``) and ``g`` the row's form of ``_hat_rows``, so ``w r^2 h`` is
+        ``(w s)^2 g`` for the likelihood's score ``s``. Combining binary exponents
+        preserves the result when intermediate products leave the float64 range.
+        """
+        _, sum_w, forms, augmented = self._hat_rows()
+        index = held.index
+        share = 1.0 / sum_w if sum_w > 0.0 else 0.0
+        if forms is None:
+            form = np.full(index.shape, share)
         else:
-            slopes = getattr(augmented, "slopes", None)
-            slopes = np.asarray(augmented)[1:, 1:] if slopes is None else np.asarray(slopes)
-            rank_info = getattr(self._result, "rank_info", None)
-            if rank_info is not None and rank_info.face is not None:
-                # The fit's own rows: leverage is the face fit's, while ``augmented`` is the
-                # covariance, which holds no shape row.
-                slopes = rank_info.augmented_inverse()
-            center = weighted_center(X_a, W)
-            h = W / sum_w + W * quadratic_form_diagonal(X_a, slopes, center=center)
-        return np.clip(h, 0.0, 1.0)
+            form = forms[index] if augmented else share + forms[index]
+        weights = self._weights[index]
+        active = (weights > 0.0) & (form > 0.0)
+        weight, score, form = weights[active], held.score[active], form[active]
+        denominator = denom[index][active]
+        w, w_exp = np.frexp(weight)
+        s, s_exp = np.frexp(score)
+        g, g_exp = np.frexp(form)
+        d, d_exp = np.frexp(denominator)
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            distance = np.ldexp((w * s) ** 2 * g / d, 2 * (w_exp + s_exp) + g_exp - d_exp)
+            # At finite eta only the cloglog non-event score can overflow.
+            far = np.isneginf(score)
+            if np.any(far):
+                log_score = held.eta[active][far] + np.log1p(-held.y[active][far])
+                distance[far] = np.exp(
+                    2 * (np.log(weight[far]) + log_score)
+                    + np.log(form[far])
+                    - np.log(denominator[far])
+                )
+        rows = np.zeros_like(weights)
+        rows[active] = distance
+        return rows
 
     @property
     def leverage(self) -> NDArray:
@@ -1678,7 +1745,11 @@ class ModelMetrics:
         phi = self.phi
         denom = (1.0 - h) ** 2 * p * phi
         denom = np.where(denom > 0, denom, np.inf)
-        return r_p**2 * h / denom
+        held = self._held
+        if held is None or self._current_information_underflowed:
+            return r_p**2 * h / denom
+        with np.errstate(over="ignore", invalid="ignore"):
+            return held.patched(r_p**2 * h / denom, self._held_cooks_distance(held, denom))
 
     @cached_property
     def std_deviance_residuals(self) -> NDArray:
@@ -1713,9 +1784,8 @@ class ModelMetrics:
     def _unit_standardized_residuals(self, kind):
         weights = self._geometry_prior_weights
         if kind == "deviance":
-            sign, d = self._signed_deviance_units
-            magnitude = np.sqrt(weights * d)
-            r = sign * magnitude
+            sign, d = self._signed_weighted_deviance(weights)
+            r = sign * np.sqrt(d)
         else:
             r = np.sqrt(weights) * (self._y - self._mu) / np.sqrt(self._family.variance(self._mu))
             if self._held is not None:

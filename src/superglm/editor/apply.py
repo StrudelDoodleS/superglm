@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._utils import weighted_row_sum
+from superglm._family_link import pair_of
 from superglm._weight_units import likelihood_scale
 from superglm.editor.display import display_for, is_edited, transform_for_link, unit_tolerance
 from superglm.editor.errors import EditorValueError, no_quote_message
@@ -163,6 +163,8 @@ def apply_edits_to_model_copy_with_data(
 
     Where a scoring row of positive weight has no quote (``predict`` gives it
     NaN), the edit stands with unavailable fit statistics and a row-level reason.
+    So it does where a binomial row read from the likelihood has a loss past float64
+    (``_LOSS_PAST_FLOAT64``); any other edit without a finite deviance is refused.
 
     A SuperLSS is revised from the rows its view holds; ``X``, ``y``,
     ``sample_weight`` and ``offset`` are not read.
@@ -207,6 +209,8 @@ def apply_edits_to_model_copy_with_data(
         )
         if scored is None:
             reason = "This model has no fit statistics. Supply both X and y to score the model."
+        elif scored.likelihood_eta is not None and not np.isfinite(edited_model._result.deviance):
+            reason = _LOSS_PAST_FLOAT64
     except NoPredictedMeanError as error:
         reason = (
             f"This model has no fit statistics. {no_quote_message(error)} "
@@ -218,6 +222,14 @@ def apply_edits_to_model_copy_with_data(
 
         _maybe_release_fit_state(edited_model)
     return revision.commit()
+
+
+#: Why an edit has no fit statistics where a binomial scoring row's loss is infinite in float64.
+_LOSS_PAST_FLOAT64 = (
+    "This model has no fit statistics. It gives the outcome of at least one scoring row a "
+    "probability too small for float64 to hold, so its deviance is infinite. "
+    "Adjust the curve or undo the edit to restore the statistics."
+)
 
 
 def _changed_terms(model, terms: dict[str, EditableTerm]) -> list[EditableTerm]:
@@ -241,8 +253,13 @@ def _stage_glm_revision(model, changed_terms: list[EditableTerm], *, keep_pinned
     return revision
 
 
-def model_for_split_scoring(model, terms: dict[str, EditableTerm]):
-    """Build a private predictor for split evidence, without publishing fit statistics."""
+def model_for_split_scoring(model, terms: dict[str, EditableTerm], dataset=None):
+    """Build a private predictor for split evidence, without publishing fit statistics.
+
+    ``dataset`` holds the rows a saved edit is scored on (``edited_statistics_dataset``):
+    the predictor reads the rows the working clip holds as that saved model will
+    (``_record_clip_rows``), so a draft and its saved edit give one predictor one score.
+    """
     if is_lss(model):
         from superglm.editor.lss.apply import lss_model_with_edits
 
@@ -251,7 +268,41 @@ def model_for_split_scoring(model, terms: dict[str, EditableTerm]):
     if not changed_terms:
         return model
     copied = _copy_model_for_editor_edits(model, share_transient_state=True)
-    return _stage_glm_revision(copied, changed_terms, keep_pinned=False).model
+    edited = _stage_glm_revision(copied, changed_terms, keep_pinned=False).model
+    _record_clip_rows(edited, dataset)
+    return edited
+
+
+def _record_clip_rows(model, dataset) -> None:
+    """Record on an edited model which rows it reads where the working clip holds one.
+
+    ``_refresh_fit_statistics``'s test (``clip_rows.rescored_held_rows``) on the rows of
+    ``dataset``, without its statistics.  One prediction of those rows for a logit, probit
+    or cloglog binomial, nothing for any other model.  With no rows, or a weighted row
+    without a mean, the model keeps the fit's record, as a saved edit does there.
+    """
+    from superglm.model.base import clipped_rows, predict_priced, unpriced_rows
+    from superglm.solvers.clip_rows import record_rescored, rescored_held_rows
+
+    family, link = model._distribution, model._link
+    if dataset is None or not pair_of(family, link).tail_rows:
+        return
+    y = np.asarray(dataset.y, dtype=np.float64).ravel()
+    weights = (
+        np.ones(y.size)
+        if dataset.sample_weight is None
+        else np.asarray(dataset.sample_weight, dtype=np.float64).ravel()
+    )
+    offset = None if dataset.offset is None else np.asarray(dataset.offset, dtype=np.float64)
+    predicted = predict_priced(model, dataset.X, offset)
+    if np.any(unpriced_rows(model, predicted) & (weights != 0.0)):
+        return
+    _, eta = clipped_rows(model, dataset.X, offset, predicted)
+    held = None if eta is None else rescored_held_rows(family, link, y, weights, eta)
+    for result_name in ("_result", "_solver_result"):
+        result = getattr(model, result_name, None)
+        if result is not None:
+            record_rescored(result, held is not None)
 
 
 def statistics_scoring_data(request):
@@ -704,7 +755,7 @@ def _refresh_fit_statistics(
     from the likelihood where one is held against its outcome, else at the clipped mean.
     """
     from superglm.model.base import (
-        predict_eta_raw_exact,
+        clipped_rows,
         predict_priced,
         require_priced_rows,
         response_mean,
@@ -716,7 +767,12 @@ def _refresh_fit_statistics(
         _required_fit_columns,
     )
     from superglm.model.input_validation import validate_fit_input
-    from superglm.solvers.clip_rows import clip_may_hold, record_rescored, rescored_held_rows
+    from superglm.solvers.clip_rows import (
+        clip_may_hold,
+        record_rescored,
+        rescored_held_rows,
+        weighted_deviance_sum,
+    )
 
     if (X is None) != (y is None):
         raise EditorValueError("Explicit scoring data requires both X and y.")
@@ -815,10 +871,12 @@ def _refresh_fit_statistics(
         and model._dm.n == y_arr.size
         and (X_ref is retained_X_ref or X_ref is None)
     )
-    eta_raw = None
     if X_ref is not None and not can_use_fitted_design:
         # The check below names any row without a mean, so predict's warning would repeat it.
-        mu = predict_priced(model, X_ref, offset_arr)
+        # Past the clip the statistics' sums read the clipped mean, not predict's.
+        mu, eta_raw = clipped_rows(
+            model, X_ref, offset_arr, predict_priced(model, X_ref, offset_arr)
+        )
     elif getattr(model, "_dm", None) is not None and model._dm.n == y_arr.size:
         solver_result = (
             model._solver_pirls_result() if model._solver_result is not None else model.result
@@ -847,13 +905,8 @@ def _refresh_fit_statistics(
     )
     unit_weights = np.ldexp(weights, exponent) if exponent else weights
     held = None
-    if clip_may_hold(model._distribution, model._link, mu):
+    if eta_raw is not None and clip_may_hold(model._distribution, model._link, mu):
         # A mean at the clip: the test needs the predictor the clip moved.
-        if eta_raw is None:
-            assert X_ref is not None  # the mean is predict's
-            eta_raw = np.asarray(
-                predict_eta_raw_exact(model, X_ref, offset_arr, warn=False), dtype=np.float64
-            )
         held = rescored_held_rows(model._distribution, model._link, y_arr, weights, eta_raw)
     null_mu, null_held = _null_state(
         y_arr,
@@ -864,9 +917,7 @@ def _refresh_fit_statistics(
         weight_semantics=model_weight_semantics(model),
         likelihood_rows=held is not None,
     )
-    deviance = weighted_row_sum(unit_weights, model._distribution.deviance_unit, y_arr, mu)
-    if held is not None:
-        deviance += held.deviance_gap(unit_weights)
+    deviance = weighted_deviance_sum(model._distribution, y_arr, unit_weights, mu, held)
     if exponent:
         deviance = float(np.ldexp(deviance, -exponent))
     scored = ScoredRows(None if held is None else eta_raw, null_held)

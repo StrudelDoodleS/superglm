@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from superglm._family_link import pair_of
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm._warn import warn_caller
 from superglm.distributions import Binomial, Distribution, clip_mu
@@ -54,6 +55,13 @@ from superglm.penalties.group_elastic_net import GroupElasticNet
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.penalties.ridge import Ridge
 from superglm.penalties.sparse_group_lasso import SparseGroupLasso
+from superglm.solvers.clip_rows import (
+    HeldRows,
+    clip_may_hold,
+    scored_held_rows,
+    tail_complement,
+    weighted_deviance_sum,
+)
 from superglm.solvers.dispersion import model_weight_semantics, validate_weight_semantics
 from superglm.solvers.pirls import PIRLSResult
 from superglm.terms import TermInput, check_column_label, check_column_texts, normalize_terms
@@ -613,7 +621,7 @@ def predict_eta_raw_exact(
 
 
 def _eta_to_mu(model, eta: NDArray[np.floating]) -> NDArray:
-    """Map stabilized eta to the public response scale."""
+    """Map stabilized eta to the solver's clipped mean."""
     return clip_mu(model._link.inverse(eta), model._distribution)
 
 
@@ -637,10 +645,12 @@ def _no_mean_rows(model, eta: NDArray[np.floating]) -> NDArray[np.bool_]:
 
 
 def response_mean(model, eta: NDArray[np.floating]) -> NDArray[np.float64]:
-    """The response mean of a raw linear predictor, as ``predict`` returns it.
+    """The mean the solver's rows hold at a raw linear predictor, which a score's sums read.
 
     NaN on the rows with no mean (``_no_mean_rows``); every other row is the
-    stabilized inverse ``predict`` has always returned.  This is the one
+    stabilized, clipped inverse.  That is ``predict``'s value except on a
+    binomial row the working clip holds (``predict_exact``), which a score
+    reads from the likelihood (``held_score_rows``).  This is the one
     conversion for every reader that forms its own linear predictor.
     """
     return _response_mean_and_missing(model, eta)[0]
@@ -959,6 +969,66 @@ def predict_priced(
     return mu
 
 
+def held_score_rows(
+    model, y, weights: NDArray | None, eta: NDArray, mu: NDArray
+) -> HeldRows | None:
+    """The rows of a score at the raw predictor ``eta`` that are read from the likelihood, or ``None``.
+
+    ``mu`` is ``response_mean`` of ``eta``, which the score's sums read on every
+    other row; the caller adds the held rows' own (``HeldRows.deviance_sum``).  The
+    rule is the fit's own (``clip_rows.scored_held_rows``): a binomial row the
+    working clip holds is read at its own predictor, as ``predict`` returns
+    it.  A mean clear of the clip costs one comparison.
+    """
+    family, link = model._distribution, model._link
+    if not clip_may_hold(family, link, mu):
+        return None
+    weights = np.ones(np.shape(mu)) if weights is None else weights
+    return scored_held_rows(model.result, family, link, y, weights, eta)
+
+
+def scored_deviance(model, y, weights: NDArray, eta: NDArray, mu: NDArray) -> float:
+    """``sum w d(y, mu)`` on rows scored at the raw predictor ``eta``, with its ``held_score_rows``."""
+    held = held_score_rows(model, y, weights, eta, mu)
+    return weighted_deviance_sum(model._distribution, y, weights, mu, held)
+
+
+def clipped_rows(
+    model, X: EagerFrame | FrameLike, offset: NDArray | None, mu: NDArray
+) -> tuple[NDArray, NDArray | None]:
+    """``predict``'s means ``mu`` on the rows ``X`` as a score's sums read them, and their raw predictor.
+
+    Past the working clip ``predict`` returns a probability no mean-based sum
+    can hold (``1 - mu`` rounds to 0), so the sums read the clipped mean there
+    (``response_mean``), formed with the predictor that says which rows are
+    held.  With no mean past the clip, as for every model but a logit, probit
+    or cloglog binomial with a row in a tail, ``mu`` itself and ``None``: one
+    comparison, and the predictor is not formed.
+    """
+    link = getattr(model, "_link", None)  # a scorer's stand-in model may have none
+    if link is None or not clip_may_hold(model._distribution, link, mu):
+        return mu, None
+    eta = np.asarray(predict_eta_raw_exact(model, X, offset, warn=False), dtype=np.float64)
+    return response_mean(model, eta), eta
+
+
+def score_rows(
+    model,
+    X: EagerFrame | FrameLike,
+    offset: NDArray | None,
+    y,
+    weights: NDArray | None,
+    mu: NDArray,
+) -> tuple[NDArray, HeldRows | None]:
+    """``clipped_rows`` of ``predict``'s means ``mu``, and the rows a score reads from the likelihood.
+
+    The sums' mean and its ``held_score_rows``, whose own sums the caller adds;
+    ``mu`` itself and ``None`` with no mean past the clip.
+    """
+    mu, eta = clipped_rows(model, X, offset, mu)
+    return mu, None if eta is None else held_score_rows(model, y, weights, eta, mu)
+
+
 def predict_exact(
     model,
     X: EagerFrame | FrameLike,
@@ -971,13 +1041,36 @@ def predict_exact(
 
     A row with no mean (``_no_mean_rows``, read on the raw linear predictor
     before the fit's stabilizer can move it) predicts NaN, with one warning
-    unless ``warn`` is false; every other row is unchanged.
+    unless ``warn`` is false; every other row is unchanged.  A binomial under
+    the logit, probit or cloglog link returns the link's inverse at each row's
+    own predictor: the band and the ``1e-7`` mean floor belong to the solver's
+    iteration, and a row inside both is the same bit for bit.
     """
     eta = predict_eta_raw_exact(model, X, offset, random_effects=random_effects, warn=warn)
+    if pair_of(model._distribution, model._link).tail_rows:
+        # no predictor is outside these links' domain
+        return model._link.inverse(eta)
     mu, missing = _response_mean_and_missing(model, eta)
     if warn and np.any(missing) and not _NO_MEAN_WARNING_QUIET.get():
         warn_caller(_no_mean_warning(model, eta, missing))
     return mu
+
+
+def predict_with_complement(
+    model, X: EagerFrame | FrameLike, offset: NDArray | None = None
+) -> tuple[NDArray, NDArray]:
+    """``predict_exact``'s means and their complements ``1 - mean``.
+
+    A binomial under the logit, probit or cloglog link forms the complement at
+    the row's own predictor, as it forms the mean (``clip_rows.tail_complement``):
+    a mean that rounds to 1 keeps the complement float64 holds.  Any other
+    model's is the difference.
+    """
+    if not pair_of(model._distribution, model._link).tail_rows:
+        mu = predict_exact(model, X, offset)
+        return mu, 1.0 - mu
+    eta = predict_eta_raw_exact(model, X, offset)
+    return model._link.inverse(eta), tail_complement(model._link, eta)
 
 
 def resolve_penalty(

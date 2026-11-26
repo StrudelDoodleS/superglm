@@ -1001,13 +1001,20 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         return self
 
     def predict_proba(self, X) -> NDArray:
-        """Return class probabilities, shape ``(n_samples, 2)``."""
+        """Return class probabilities, shape ``(n_samples, 2)``.
+
+        Under the logit, probit and cloglog links each column is formed at the
+        row's linear predictor with no floor or cap; scikit-learn's
+        ``LogisticRegression`` has none either.  A class within 1e-16 of certain
+        is returned as exactly 1.0 while the other column keeps its own small
+        value; a probability below about 1e-308 can be returned as exactly 0.0.
+        """
         X_frame, feature_cols, offset_array = _prepare_predict(self, X)
-        p1 = self._model.predict(
+        p1, p0 = self._model._predict_with_complement(
             _select_feature_frame(X_frame, feature_cols),
             offset=offset_array,
         )
-        return np.column_stack([1 - p1, p1])
+        return np.column_stack([p0, p1])
 
     def predict(self, X) -> NDArray:
         """Return class labels (0 or 1) using the threshold."""

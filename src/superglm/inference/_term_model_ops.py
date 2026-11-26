@@ -342,16 +342,21 @@ def drop1(
     def deviance_in_units(fitted, frame):
         if not exponent:
             return fitted.result.deviance
-        from superglm._utils import weighted_row_sum
+        from superglm.model.base import score_rows
+        from superglm.solvers.clip_rows import weighted_deviance_sum
 
         # Re-form from the fitting means, predicting on the supplied frame
         # after row retirement. Lifting a rounded subnormal deviance afterwards
-        # cannot recover the digits its ratio needs.
-        mu = fitted._fit_mu
+        # cannot recover the digits its ratio needs. A prediction is read as the
+        # fit's deviance reads it: a binomial row past the solver's clip at the
+        # clipped mean, or from the likelihood where the fit holds one (``score_rows``).
+        mu, held = fitted._fit_mu, None
         if mu is None:
-            mu = fitted.predict(frame, offset=offset)
-        return weighted_row_sum(
-            np.ldexp(diagnostic_weights, exponent), fitted._distribution.deviance_unit, y, mu
+            mu, held = score_rows(
+                fitted, frame, offset, y, diagnostic_weights, fitted.predict(frame, offset=offset)
+            )
+        return weighted_deviance_sum(
+            fitted._distribution, y, np.ldexp(diagnostic_weights, exponent), mu, held
         )
 
     if exponent:

@@ -293,7 +293,7 @@ def _drop_term_holdout(
     if model._result is None:
         raise RuntimeError("Model must be fitted.")
 
-    from superglm._utils import contract_weights, weighted_row_sum
+    from superglm._utils import contract_weights
     from superglm._warn import warn_caller
     from superglm.distributions import validate_response
     from superglm.model import base
@@ -397,12 +397,14 @@ def _drop_term_holdout(
             contributions[term["name"]].append(constant_addend(pieces, centre_shifts[term["name"]]))
             centre_shifts[term["name"]] = 0.0
 
-    # Each predictor's means as predict forms them (``base.response_mean``). A weighted
-    # row the full model gives no mean leaves every comparison, named in a warning, so
-    # each term's delta is read on the same rows. A term whose removal leaves further
-    # rows with no mean reports its delta as unavailable (NaN) with their count: read
-    # without them, it would leave out the rows that removing the term prices worst.
-    mu_full, unpriced = base._response_mean_and_missing(model, accumulated.finish() + offset_arr)
+    # Each predictor's deviance as a score reads it (``base.scored_deviance``): at the
+    # means its sums hold, a binomial row past the solver's clip from the likelihood. A
+    # weighted row the full model gives no mean leaves every comparison, named in a
+    # warning, so each term's delta is read on the same rows. A term whose removal leaves
+    # further rows with no mean reports its delta as unavailable (NaN) with their count:
+    # read without them, it would leave out the rows that removing the term prices worst.
+    eta_full = accumulated.finish() + offset_arr
+    mu_full, unpriced = base._response_mean_and_missing(model, eta_full)
     left_out = unpriced & (w != 0.0)
     if np.any(left_out):
         if not np.any(w[~left_out]):
@@ -410,16 +412,16 @@ def _drop_term_holdout(
         warn_caller(base.left_out_message(model, left_out, "the holdout term drop"))
         w = np.where(left_out, 0.0, w)
     carried = w != 0.0
-    dev_full = weighted_row_sum(w, dist.deviance_unit, y_arr, mu_full)
+    dev_full = base.scored_deviance(model, y_arr, w, eta_full, mu_full)
     rows = []
     unavailable = []
     for term in terms:
-        mu_drop, missing = base._response_mean_and_missing(
-            model,
+        eta_drop = (
             accumulated.finish(without=contributions[term["name"]])
             - centre_shifts[term["name"]]
-            + offset_arr,
+            + offset_arr
         )
+        mu_drop, missing = base._response_mean_and_missing(model, eta_drop)
         n_missing = int(np.count_nonzero(missing & carried))
         if n_missing:
             unavailable.append(f"{term['name']!r} ({n_missing})")
@@ -428,7 +430,7 @@ def _drop_term_holdout(
                 "feature": term["name"],
                 "delta_deviance": np.nan
                 if n_missing
-                else weighted_row_sum(w, dist.deviance_unit, y_arr, mu_drop) - dev_full,
+                else base.scored_deviance(model, y_arr, w, eta_drop, mu_drop) - dev_full,
                 "rows_without_mean": n_missing,
             }
         )
