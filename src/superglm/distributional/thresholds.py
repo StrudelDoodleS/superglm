@@ -1008,6 +1008,8 @@ def threshold_stability(
                 rows,
                 options,
             )
+            # The reference book can name a level this candidate's claims no longer reach.
+            estimates = _estimates(model, float(u), z, book)
         except ValueError as error:
             if lowest:
                 raise
@@ -1026,7 +1028,7 @@ def threshold_stability(
                 "threshold": float(u),
                 "n_above": n_above,
                 "n_censored": n_censored,
-                **_estimates(model, float(u), z, book),
+                **estimates,
                 "notes": " | ".join(notes),
             }
         )

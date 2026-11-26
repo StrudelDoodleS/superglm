@@ -648,6 +648,27 @@ def test_a_level_with_no_claim_left_drops_that_candidate_with_the_fits_reason():
         threshold_stability(frame, y, [2.0], tail=tail)
 
 
+def test_a_shape_level_lost_above_a_candidate_drops_only_that_candidate():
+    # a shape by group over three groups: C has no claim above 2, A and B still do
+    rng = np.random.default_rng(123)
+    y = (
+        0.2
+        + np.r_[
+            _gpd(rng, 100, 0.3, scale=0.1),
+            _gpd(rng, 300, 0.3, scale=3.0),
+            _gpd(rng, 300, 0.2, scale=3.0),
+        ]
+    )
+    frame = pd.DataFrame({"group": ["C"] * 100 + ["A"] * 300 + ["B"] * 300})
+    assert y[:100].max() < 2.0 and np.sum(y[100:400] > 2.0) > 50 and np.sum(y[400:] > 2.0) > 50
+    family = GeneralizedParetoLSS()
+    tail = SuperLSS(family, family.scale(), family.shape(cat("group")))
+    result = threshold_stability(frame, y, [0.2, 2.0], tail=tail)
+    assert result.table["threshold"].tolist() == [0.2]
+    assert result.dropped["threshold"].tolist() == [2.0]
+    assert result.dropped.loc[0, "n_above"] == np.sum(y > 2.0)
+
+
 def test_the_band_of_a_shape_with_terms_follows_the_mean_shape_over_the_whole_book():
     frame, y = _book(2_500, seed=64)
     rng = np.random.default_rng(64)
