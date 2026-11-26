@@ -347,6 +347,44 @@ def test_prediction_replacements_validate_original_labels_and_retained_raw_value
         model.predict_parameters(X, offsets={"location": "a"})
 
 
+def test_replacement_offsets_score_each_row_at_its_own_offset():
+    """Each row's log score is -log N(y; location, scale) at the parameters its own
+    replacement offset gives (scipy's density), and each A/E bin's expected count sums
+    those locations; offsets taken from other rows, or the training offsets, or none,
+    would still give finite numbers. The parameters are formed here from the fitted
+    coefficients, the design [1, x] and the documented links (identity location,
+    ``log(scale - scale_floor)``), not from the library's prediction path."""
+    from scipy import stats
+
+    X, y = _data()
+    model = _model(X.a.to_numpy(), scale=None).fit(X, y)
+    # Differs from the training offset a by 0.25 - a/2, between 0.05 and 0.45, on every row.
+    replacement = 0.5 * X.a.to_numpy() + 0.25
+    values = replacement.tolist()
+    values[2] = "dropped"
+    weights = np.ones(len(X))
+    weights[2] = 0
+    offsets = {"location": values}
+    coef = model.coef_
+    location = coef["location:(intercept)"] + coef["location:x"] * X.x.to_numpy() + replacement
+    scale = np.full(len(X), model.family.scale_floor + np.exp(coef["scale:(intercept)"]))
+    kept = weights > 0
+
+    result = model.scores(X, y, which=("log",), sample_weight=weights, offsets=offsets)
+    expected_log = -stats.norm.logpdf(y, location, scale)
+    # A log density of magnitude ~1 rounds in a handful of operations.
+    np.testing.assert_allclose(
+        result["log"].to_numpy()[kept], expected_log[kept], rtol=64 * np.finfo(float).eps
+    )
+
+    ae = model.actual_expected(X, y, "x", sample_weight=weights, offsets=offsets)
+    bins = np.clip(np.searchsorted(ae.edges, X.x.to_numpy(), side="right") - 1, 0, len(ae.n) - 1)
+    # A row of zero weight is not counted in its bin.
+    np.testing.assert_array_equal(np.bincount(bins[kept], minlength=len(ae.n)), ae.n)
+    expected_counts = np.bincount(bins, weights=weights * location, minlength=len(ae.n))
+    np.testing.assert_allclose(ae.expected, expected_counts, rtol=64 * len(X) * np.finfo(float).eps)
+
+
 def test_column_declarations_do_not_block_editor_refit_without_replacement_data():
     from superglm.editor.lss.availability import refit_reason
 

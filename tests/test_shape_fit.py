@@ -4,6 +4,7 @@ import warnings
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.special import xlogy
 
 from superglm import (
     BSplineSmooth,
@@ -170,6 +171,21 @@ def _native_curve(model, name: str, grid: np.ndarray, order: int) -> np.ndarray:
     return shape_derivative_matrix(spec, grid, order) @ model.result.beta[group.sl]
 
 
+def _poisson_deviance(y, mu) -> float:
+    y = np.asarray(y, dtype=np.float64)
+    return float(2.0 * np.sum(xlogy(y, y / mu) - (y - mu)))
+
+
+def _assert_keeps_most_of_the_free_fit(model, free, X, y) -> None:
+    """The shaped fit gains at least half the deviance the free fit gains over a
+    constant, so a curve the rules have held flat (gain 0) cannot pass. The rules cost
+    only where the truth breaks them, a minority of the rows here."""
+    null = _poisson_deviance(y, np.full(len(y), np.mean(y)))
+    shaped = _poisson_deviance(y, model.predict(X))
+    unshaped = _poisson_deviance(y, free.predict(X))
+    assert null - shaped >= 0.5 * (null - unshaped)
+
+
 def _rising_then_dipping(n: int = 20_000, seed: int = 41) -> tuple[pd.DataFrame, np.ndarray]:
     rng = np.random.default_rng(seed)
     x = rng.uniform(0.0, 10.0, n)
@@ -203,6 +219,10 @@ def test_increasing_concave_fit(kind):
     # Mutation: the same data without the rules dips at the top.
     free = fit(None)
     assert np.min(_native_curve(free, "x", grid, 1)) < 0.0
+    # The truth rises by 0.8 (1 - e^-3.5) = 0.78 up to x = 7; with 20 000 rows the
+    # fitted rise is within a few hundredths of it, and a constant curve has none.
+    assert np.ptp(f) > 0.5 * 0.8 * (1.0 - np.exp(-3.5))
+    _assert_keeps_most_of_the_free_fit(model, free, X, y)
 
 
 def _assert_u_shape(model, name: str = "age") -> None:
@@ -239,6 +259,17 @@ def test_u_with_flat_bottom_fit(kind):
     grid = np.linspace(25.0, 40.0, 500)
     f = _native_curve(free, "age", grid, 0)
     assert np.ptp(f) > 1e3 * U * np.max(np.abs(f))
+    # Outside the span the warning reports flat, the truth falls at 0.08 a year below 25
+    # and rises at 0.02 a year above 40; with 20 000 rows the fit recovers each change
+    # to within a few hundredths, where a term held flat recovers none.
+    (message,) = [str(w.message) for w in seen if "holds on" in str(w.message)]
+    lo, hi = (float(v) for v in re.search(r"holds on \[([^,]+), ([^\]]+)\]", message).groups())
+    f_ends = _native_curve(model, "age", np.array([17.0, lo, hi, 80.0]), 0)
+    fall, rise = 0.08 * (min(lo, 25.0) - 17.0), 0.02 * (80.0 - max(hi, 40.0))
+    assert fall + rise > 0.4, "the flat span must leave most of the truth's movement"
+    assert f_ends[0] - f_ends[1] > 0.5 * fall - 0.05
+    assert f_ends[3] - f_ends[2] > 0.5 * rise - 0.05
+    _assert_keeps_most_of_the_free_fit(model, free, X, y)
 
 
 def test_natural_cr_flat_warning_names_the_flat_boundary_span():

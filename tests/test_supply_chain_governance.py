@@ -6,6 +6,7 @@ import tomllib
 from datetime import datetime
 from pathlib import Path
 
+import pytest
 import yaml
 from packaging.version import Version
 
@@ -658,3 +659,73 @@ def test_cache_cleanup_deletes_only_a_closed_pull_requests_own_caches():
     assert "uses" not in step  # nothing from the pull request is checked out or run
     assert step["env"]["REF"] == "refs/pull/${{ github.event.pull_request.number }}/merge"
     assert '--ref "$REF"' in step["run"] and 'gh cache delete "$id"' in step["run"]
+
+
+def _release_verifier():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "verify_release_artifacts", ROOT / "scripts" / "verify_release_artifacts.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(
+    ("defect", "message"),
+    [
+        (None, None),
+        ("wheel_missing_asset", "Missing editor assets"),
+        ("sdist_missing_asset", "Missing editor assets"),
+        ("parent_entry", "Unexpected entries"),
+        ("repository_only", "Repository-only entries"),
+    ],
+)
+def test_release_verifier_accepts_complete_archives_and_rejects_each_defect(
+    tmp_path, defect, message
+):
+    """Built archives pass only when every editor asset ships and nothing else is wrong;
+    a verifier that never rejected a missing asset would let a release ship a dead editor."""
+    import io
+    import tarfile
+    import zipfile
+
+    verifier = _release_verifier()
+    source = tmp_path / "source"
+    assets = ["index.html", "main.js", "styles/tokens.css"]
+    for asset in assets:
+        path = source / "src/superglm/editor/app" / asset
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+    dist = tmp_path / "dist"
+    dist.mkdir()
+
+    wheel_names = ["superglm/__init__.py"] + [f"superglm/editor/app/{a}" for a in assets]
+    root = "superglm-0.0.0"
+    sdist_names = [f"{root}/pyproject.toml", f"{root}/src/superglm/__init__.py"] + [
+        f"{root}/src/superglm/editor/app/{a}" for a in assets
+    ]
+    if defect == "wheel_missing_asset":
+        wheel_names.remove("superglm/editor/app/main.js")
+    elif defect == "sdist_missing_asset":
+        sdist_names.remove(f"{root}/src/superglm/editor/app/styles/tokens.css")
+    elif defect == "parent_entry":
+        wheel_names.append("superglm/../evil.py")
+    elif defect == "repository_only":
+        sdist_names.append(f"{root}/tests/test_x.py")
+
+    with zipfile.ZipFile(dist / "superglm-0.0.0-py3-none-any.whl", "w") as wheel:
+        for name in wheel_names:
+            wheel.writestr(name, "x")
+    with tarfile.open(dist / f"{root}.tar.gz", "w:gz") as sdist:
+        for name in sdist_names:
+            info = tarfile.TarInfo(name)
+            info.size = 1
+            sdist.addfile(info, io.BytesIO(b"x"))
+
+    if message is None:
+        verifier.verify_release_artifacts(dist, source_root=source)
+    else:
+        with pytest.raises(ValueError, match=message):
+            verifier.verify_release_artifacts(dist, source_root=source)

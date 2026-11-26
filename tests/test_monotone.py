@@ -185,6 +185,34 @@ class TestApplyMonotonePostfit:
         violations = np.sum(diffs < -0.01 * np.mean(mu))
         assert violations < 15
 
+    @pytest.mark.parametrize(
+        ("data", "direction"),
+        [("increasing_poisson_data", "increasing"), ("decreasing_poisson_data", "decreasing")],
+    )
+    def test_binding_repair_keeps_the_fitted_trend(self, request, data, direction):
+        """A repair of a fit that moves by about 2.7 with small dips moves by about as
+        much; publishing the zero curve, which is monotone too, would pass a feasibility check."""
+        X, y, sample_weight = request.getfixturevalue(data)
+        constraint = getattr(Constraint.postfit, direction)
+        m = SuperGLM(
+            family="poisson",
+            features={"signal": Spline(n_knots=15, constraint=constraint)},
+            selection_penalty=0.0,
+        )
+        m.fit(X, y, sample_weight=sample_weight)
+        grid = pd.DataFrame({"signal": np.linspace(0.5, 9.5, 400)})
+        sign = 1.0 if direction == "increasing" else -1.0
+        before = sign * np.log(m.predict(grid))
+        largest_drop = float(np.max(np.maximum.accumulate(before) - before))
+        assert 0.0 < largest_drop < 0.25 * np.ptp(before), "fixture needs a small binding dip"
+
+        m.apply_monotone_postfit(X, sample_weight=sample_weight)
+        after = sign * np.log(m.predict(grid))
+        # A monotone curve within the largest drop of the fit keeps all but twice that
+        # drop of its range, here at least half of it; the repair's own metric may
+        # move it further than the closest curve in the sup norm, but not to flat.
+        assert np.ptp(after) > 0.5 * np.ptp(before)
+
     def test_idempotency(self, increasing_poisson_data):
         X, y, sample_weight = increasing_poisson_data
         m = SuperGLM(

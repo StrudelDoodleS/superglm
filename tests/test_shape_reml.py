@@ -39,6 +39,9 @@ def test_qp_convex_fit_reml_auto_lambda_constrained_refit():
     assert model._reml_lambdas["x"] > 0.0
     assert np.min(group.constraints.A @ beta) >= -qp_tolerance
     assert certificate.minimum_scaled_slack >= -certificate_tolerance
+    # The truth y = x is convex and in the spline's null space, and the noise SD is
+    # 1e-3: the fit recovers the line to a few thousandths, a held-flat term by 0.5.
+    assert np.max(np.abs(model.predict(df) - x)) < 0.01
 
 
 def test_scop_concave_fit_reml_discrete_estimates_lambda():
@@ -53,6 +56,9 @@ def test_scop_concave_fit_reml_discrete_estimates_lambda():
     ).fit_reml(df, y)
 
     assert model._reml_lambdas["x"] > 0.0
+    # The noise-free concave parabola lies in the cubic P-spline space, where the rule
+    # is slack: the fit recovers it, while a term held straight misses it by about 0.1.
+    assert np.max(np.abs(model.predict(df) - y)) < 0.01
 
 
 @pytest.mark.parametrize(
