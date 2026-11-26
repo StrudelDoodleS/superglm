@@ -58,7 +58,7 @@ from superglm.diagnostics.convergence import (
     warn_ncv_nonconvergence,
 )
 from superglm.diagnostics.separation import refuses_on_publication
-from superglm.distributions import resolve_distribution
+from superglm.distributions import resolve_distribution, scale_is_known
 from superglm.links import resolve_link
 from superglm.model import fit_method, runtime_canonicalize
 from superglm.model.fit_ops import (
@@ -544,7 +544,7 @@ def _publish(
 
     # The decomposition serves the held-out evaluation; a published result carries none.
     result = replace(terminal.result, reml_slope_decomposition=None)
-    if getattr(model._distribution, "scale_known", True) and result.phi != 1.0:
+    if scale_is_known(model._distribution) and result.phi != 1.0:
         result = replace(result, phi=1.0)
     model._result = result
     model._reml_lambdas = lambdas
