@@ -599,7 +599,7 @@ def curve_model(family="gaussian", **settings):
 def curve_fit():
     b = curve_book()
     model, caught = run(curve_model(), b, groups=b.labels)
-    assert not caught
+    assert not caught, messages(caught)
     return model
 
 
@@ -1345,7 +1345,7 @@ def test_response_units_do_not_move_the_chosen_curve():
     """The response in units 10,000 times smaller chooses the same EDF and the same curve."""
     b, plain = curve_book(), curve_fit()
     small, caught = run(curve_model(), replace(b, y=1e-4 * b.y), groups=b.labels)
-    assert not caught
+    assert not caught, messages(caught)
     apart, edf, moves = stops_apart(plain, b)
     rounding = 64 * hessian_condition(plain, b) * U
     mine, theirs = small.ncv_diagnostics(), plain.ncv_diagnostics()
@@ -1434,7 +1434,7 @@ def at_zero(name):
     """A book as it is, its fit, and how far another first-order stop of its search may lie."""
     b = curve_book() if name == "curve" else twin_book()
     model, caught = run(curve_model(), b, groups=b.labels)
-    assert not caught
+    assert not caught, messages(caught)
     return b, model, stops_apart(model, b), hessian_condition(model, b)
 
 
@@ -1675,7 +1675,7 @@ def test_duplicated_column_fits_as_the_model_without_it():
     frame = b.frame.assign(twin=b.frame.x)[["x", "twin", "t"]]
     features = {"x": Numeric(), "twin": Numeric(), "t": Spline(kind="ps", n_knots=6)}
     aliased, caught = run(model_of(features=features), b, frame=frame, groups=b.labels)
-    assert not caught
+    assert not caught, messages(caught)
     assert not aliased.result.rank_info.coefficient_estimable().all()
     apart, edf, moves = stops_apart(clean, b)
     rounding = 64 * hessian_condition(clean, b) * U
