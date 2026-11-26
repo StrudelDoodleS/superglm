@@ -35,6 +35,9 @@ dependencies = [
     "pandas>=2.2.2",
     "narwhals>=2.17.0",
     "numba>=0.62",
+    # Imported directly (llvmlite.binding.add_symbol registers LAPACK for numba
+    # kernels); numba pins the minor, and 0.45 is the one numba 0.62 needs.
+    "llvmlite>=0.45",
     "matplotlib>=3.10",
     "scikit-learn>=1.4.2",
     "joblib>=1.6.0",
@@ -42,6 +45,8 @@ dependencies = [
     "threadpoolctl>=3.1",
     "openpyxl>=3.1",
     "fastapi>=0.115",
+    # Imported directly for its HTTPException; 0.37.2 is fastapi 0.115's own floor.
+    "starlette>=0.37.2",
     "uvicorn>=0.30",
 ]
 
@@ -94,6 +99,8 @@ plotting = [
 # server.
 notebook = [
     "anywidget>=0.10",
+    # The notebook view declares its synced state with traitlets directly.
+    "traitlets>=5.0",
 ]
 
 [tool.uv]
