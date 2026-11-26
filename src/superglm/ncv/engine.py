@@ -1480,8 +1480,8 @@ class _Stack:
 
     ``ks`` are the neighbourhoods; ``rows`` their removed rows and ``slots`` each row's scored
     pair, -1 where it is not scored, both ``(members, size)``.  ``Z`` and ``Y`` are those rows
-    and ``Z H^-1``, ``(members, size, P)`` views of the block.  ``B`` is ``Y Z'`` per member,
-    ``None`` on a forced route, and ``sound`` marks the members the stack solves together.
+    and ``Z H^-1``, ``(members, size, P)`` views of the block.  ``B`` is ``Y Z'`` per member
+    and ``sound`` marks the members the stack solves together.
     """
 
     ks: NDArray[np.intp]
@@ -1489,15 +1489,23 @@ class _Stack:
     slots: NDArray[np.intp]
     Z: NDArray[np.float64]
     Y: NDArray[np.float64]
-    B: NDArray[np.float64] | None
+    B: NDArray[np.float64]
     sound: NDArray[np.bool_]
 
     def solved_together(self) -> _Stack:
         """The members marked sound, as a stack of their own."""
-        if self.sound.all():
+        keep = self.sound
+        if keep.all():
             return self
-        parts = (self.ks, self.rows, self.slots, self.Z, self.Y, self.B, self.sound)
-        return _Stack(*(part[self.sound] for part in parts))
+        return _Stack(
+            self.ks[keep],
+            self.rows[keep],
+            self.slots[keep],
+            self.Z[keep],
+            self.Y[keep],
+            self.B[keep],
+            keep[keep],
+        )
 
 
 def _systems(B: NDArray[np.float64], root: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -1540,8 +1548,6 @@ def _stack(
     docstring): taken alone they would be factored and not flagged.
     """
     size = rows.shape[1]
-    if not stacked:
-        return _Stack(ks, rows, slots, Z, Y, None, np.zeros(len(ks), dtype=bool))
     curvature = trial.curvature[rows]
     if size == 1:
         B = np.einsum("ij,ij->i", Y[:, 0], Z[:, 0])[:, None, None]
@@ -1549,18 +1555,18 @@ def _stack(
     else:
         B = np.matmul(Y, Z.transpose(0, 2, 1))
         sound = _dominant(_systems(B, np.sqrt(curvature)), np.sqrt(size) * trial.questionable)
-    return _Stack(ks, rows, slots, Z, Y, B, sound)
+    return _Stack(ks, rows, slots, Z, Y, B, sound & stacked)
 
 
-def _alone(trial: _Trial, nb: Neighbourhoods, stack: _Stack, at: int) -> None:
+def _alone(trial: _Trial, nb: Neighbourhoods, stack: _Stack, at: int, stacked: bool) -> None:
     """Member ``at`` of ``stack``, which the stack does not solve.
 
     A single row is flagged by its margin ``1 - W h`` (:func:`_factor_route`); any other
-    member, and every member of a forced route, is decided by its own factorisation
+    member, and every member unless ``stacked``, is decided by its own factorisation
     (:func:`_woodbury`).
     """
     k = int(stack.ks[at])
-    if stack.B is None or stack.rows.shape[1] > 1:
+    if not stacked or stack.rows.shape[1] > 1:
         _woodbury(trial, nb, k, stack.rows[at], stack.Z[at], stack.Y[at])
         return
     margin = 1.0 - trial.curvature[stack.rows[at, 0]] * stack.B[at, 0, 0]
@@ -1767,7 +1773,7 @@ def _small_route(trial: _Trial, nb: Neighbourhoods, ks: NDArray[np.intp], stacke
             stacks.append(stack)
         alone = [(stack, at) for stack in stacks for at in np.flatnonzero(~stack.sound).tolist()]
         for stack, at in sorted(alone, key=lambda member: member[0].ks[member[1]]):
-            _alone(trial, nb, stack, at)
+            _alone(trial, nb, stack, at, stacked)
         for stack in stacks:
             if stack.sound.any():
                 solve = _single_rows if stack.rows.shape[1] == 1 else _stacked
