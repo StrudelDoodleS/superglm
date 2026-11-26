@@ -340,10 +340,11 @@ def _window_probability(u: float, y: NDArray, survival: bool, law: tuple) -> NDA
         out[below] = mass[below] * conditional + (p if survival else 0.0)
     above = valid & (y > u) & np.isfinite(y) & (q > 0.0)
     if np.any(above):
-        log_sf = np.log(q[above]) + tail_family.log_window_probability(
-            y[above] - u, np.inf, tail[above]
-        )
-        out[above] = np.exp(log_sf) if survival else -np.expm1(log_sf)
+        log_sf = tail_family.log_window_probability(y[above] - u, np.inf, tail[above])
+        if survival:
+            out[above] = np.exp(np.log(q[above]) + log_sf)
+        else:
+            out[above] = np.minimum(mass[above] - q[above] * np.expm1(log_sf), 1.0)
     out[valid & (y > u) & ((q == 0.0) | (y == np.inf))] = float(not survival)
     return out
 

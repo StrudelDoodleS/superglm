@@ -1623,13 +1623,13 @@ class ModelMetrics:
         center = weighted_center(X_a, W)
         return W, sum_w, quadratic_form_diagonal(X_a, slopes, center=center), False
 
-    def _held_pearson_leverage(self, held: HeldRows) -> NDArray:
-        """On the held rows, the squared weighted Pearson residual times the leverage.
+    def _held_cooks_distance(self, held: HeldRows, denom: NDArray) -> NDArray:
+        """Cook's distance on held rows from the likelihood score.
 
         There ``h = W g`` with ``W = w p'^2 / (p (1 - p))`` the likelihood's information
         (``_active_info``) and ``g`` the row's form of ``_hat_rows``, so ``w r^2 h`` is
-        ``(w s)^2 g`` for the likelihood's score ``s``.  The product of the two is
-        ``inf * 0`` where the residual overflows and the information underflows.
+        ``(w s)^2 g`` for the likelihood's score ``s``. Combining binary exponents
+        preserves the result when intermediate products leave the float64 range.
         """
         _, sum_w, forms, augmented = self._hat_rows()
         index = held.index
@@ -1638,10 +1638,28 @@ class ModelMetrics:
             form = np.full(index.shape, share)
         else:
             form = forms[index] if augmented else share + forms[index]
-        weighted_score = self._weights[index] * held.score
-        with np.errstate(over="ignore", invalid="ignore"):
-            rows = weighted_score * weighted_score * form
-        return np.where((self._weights[index] > 0.0) & (form > 0.0), rows, 0.0)
+        weights = self._weights[index]
+        active = (weights > 0.0) & (form > 0.0)
+        weight, score, form = weights[active], held.score[active], form[active]
+        denominator = denom[index][active]
+        w, w_exp = np.frexp(weight)
+        s, s_exp = np.frexp(score)
+        g, g_exp = np.frexp(form)
+        d, d_exp = np.frexp(denominator)
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            distance = np.ldexp((w * s) ** 2 * g / d, 2 * (w_exp + s_exp) + g_exp - d_exp)
+            # At finite eta only the cloglog non-event score can overflow.
+            far = np.isneginf(score)
+            if np.any(far):
+                log_score = held.eta[active][far] + np.log1p(-held.y[active][far])
+                distance[far] = np.exp(
+                    2 * (np.log(weight[far]) + log_score)
+                    + np.log(form[far])
+                    - np.log(denominator[far])
+                )
+        rows = np.zeros_like(weights)
+        rows[active] = distance
+        return rows
 
     @property
     def leverage(self) -> NDArray:
@@ -1678,8 +1696,7 @@ class ModelMetrics:
         if held is None or self._current_information_underflowed:
             return r_p**2 * h / denom
         with np.errstate(over="ignore", invalid="ignore"):
-            influence = held.patched(r_p**2 * h, self._held_pearson_leverage(held))
-        return influence / denom
+            return held.patched(r_p**2 * h / denom, self._held_cooks_distance(held, denom))
 
     @cached_property
     def std_deviance_residuals(self) -> NDArray:

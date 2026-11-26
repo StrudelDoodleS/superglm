@@ -97,6 +97,27 @@ def test_exact_splice_and_boundary(monkeypatch, fitted):
     )
 
 
+def test_splice_cdf_keeps_body_mass_just_above_threshold(monkeypatch, fitted):
+    u = fitted.threshold
+    eta = 37.0
+    x = _frame(2)
+    y = np.array([u, np.nextafter(u, np.inf)])
+    offset = np.full(len(x), eta - fitted.exceedance.result.intercept)
+    monkeypatch.setattr(
+        fitted.tail,
+        "predict_parameters",
+        lambda frame, **kw: pd.DataFrame(
+            np.broadcast_to([350.0, 0.25], (len(frame), 2)), columns=["scale", "shape"]
+        ),
+    )
+    odds = np.exp(-eta)
+    expected = (odds + stats.genpareto.cdf(y - u, 0.25, scale=350.0)) / (1.0 + odds)
+    actual = fitted.predict_cdf(x, y, exceedance_offset=offset)
+
+    assert actual[1] > actual[0]
+    np.testing.assert_allclose(actual, expected, rtol=2 * np.spacing(eta), atol=0.0)
+
+
 def test_population_layer_matches_the_570_probe(monkeypatch):
     X, y, _ = _sample()
     shape = 1 / 1.2**2

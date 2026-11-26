@@ -541,6 +541,51 @@ def test_cooks_distance_past_float64_is_formed_from_the_score(link):
     np.testing.assert_allclose(metrics.cooks_distance, expected, rtol=1e-8)
 
 
+@pytest.mark.parametrize("exponent", [530, -550])
+@pytest.mark.filterwarnings("ignore:.*non-integral sample_weight")
+def test_tail_cooks_distance_scales_with_frequency_weight(exponent):
+    """The score square can overflow or underflow before the information form is applied."""
+    model = _fit("logit")
+    x = np.array([-1.0, 0.0, 1.0, 0.0])
+    y = np.array([1.0, 0.0, 1.0, 0.0])
+    eta = np.array([-20.0, 0.0, 0.0, 0.0])
+    offset = eta - _predictor(model, x, 0.0)
+    scale = 2.0**exponent
+
+    p = expit(eta)
+    information = p * expit(-eta)
+    design = np.column_stack([np.ones(len(x)), x])
+    gram = design.T @ (design * information[:, None])
+    form = np.sum(design.T * np.linalg.solve(gram, design.T), axis=0)
+    h = information * form
+    expected = (y - p) ** 2 * form / ((1.0 - h) ** 2 * design.shape[1])
+
+    metrics = model.metrics(
+        pd.DataFrame({"x": x}), y, sample_weight=np.full(len(x), scale), offset=offset
+    )
+    rtol = 64 * np.finfo(float).eps * np.linalg.cond(gram)
+    np.testing.assert_allclose(metrics.cooks_distance[0] / scale, expected[0], rtol=rtol, atol=0.0)
+
+
+@pytest.mark.filterwarnings("ignore:.*non-integral sample_weight")
+def test_tail_cooks_distance_can_weight_a_cloglog_score_that_overflows():
+    model = _fit("cloglog")
+    x = np.array([-1.0, 0.0, 1.0, 0.0])
+    y = np.array([0.0, 0.0, 1.0, 0.0])
+    eta = np.array([800.0, 0.0, 0.0, 0.0])
+    offset = eta - _predictor(model, x, 0.0)
+    weights = np.array([np.exp(-680.0), 1.0, 1.0, 1.0])
+    design = np.column_stack([np.ones(len(x)), x])
+    # The first row has zero information. On the other rows, p' = 1 - p = e^-1.
+    gram = (design[1:].T @ design[1:]) / np.expm1(1.0)
+    form = design[0] @ np.linalg.solve(gram, design[0])
+    expected = np.exp(2.0 * (eta[0] + np.log(weights[0]))) * form / design.shape[1]
+
+    metrics = model.metrics(pd.DataFrame({"x": x}), y, sample_weight=weights, offset=offset)
+    rtol = 4 * np.spacing(eta[0]) + 64 * np.finfo(float).eps * np.linalg.cond(gram)
+    np.testing.assert_allclose(metrics.cooks_distance[0], expected, rtol=rtol, atol=0.0)
+
+
 @pytest.mark.pins_behaviour
 def test_drop1_of_a_fit_that_kept_no_state_reads_the_fits_own_deviance():
     """Pins: ``drop1`` under weights of ``2^-600`` re-forms the fit's deviance without its state.
