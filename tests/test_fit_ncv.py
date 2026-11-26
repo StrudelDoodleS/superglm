@@ -1184,8 +1184,14 @@ def test_a_solver_route_fit_refuses_is_refused_before_any_solve_with_fit_s_reaso
     assert sum(solves.values()) == 0 and fit_method.method_of(model) is None
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("route", ["gram", "qr"])
 def test_a_solver_route_fit_accepts_is_the_published_fit_s_route(route):
+    """Pins that a route ``fit`` accepts (``gram``, ``qr``) is honoured, not refused.
+
+    The published fit is solved on it and the search converges; only a route ``fit``
+    refuses is refused up front (the test above).
+    """
     b = curve_book()
     model, _ = run(curve_model(direct_solve=route), b, groups=b.labels)
     assert model.result.direct_backend == route and model.ncv_diagnostics()["converged"]
