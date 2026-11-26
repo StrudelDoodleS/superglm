@@ -20,6 +20,7 @@ from superglm.inference._term_helpers import (
 )
 from superglm.inference.covariance import covariance_selected_diagonal
 from superglm.inference.summary import _CoefRow
+from superglm.model import fit_method
 from superglm.model.fit_state import (
     edited_statistics_fallback_note,
     edited_statistics_unavailable,
@@ -299,7 +300,7 @@ def summary(
         penalty_name += " + SEL"
 
     meta = model._last_fit_meta or {}
-    method_parts = ["REML" if meta.get("method") == "fit_reml" else "ML"]
+    method_parts = [fit_method.traits_of(model).summary_label]
     if meta.get("discrete"):
         method_parts.append("discrete")
     method_str = ", ".join(method_parts)
@@ -824,7 +825,7 @@ def _build_editor_stale_coef_rows(model) -> list[_CoefRow]:
 
 def rules_enforced(model) -> bool:
     """False for a model last fitted by ``fit_path``, which fits every term without its rows."""
-    return (getattr(model, "_last_fit_meta", None) or {}).get("method") != "fit_path"
+    return fit_method.traits_of(model).enforces_caps
 
 
 def shape_repaired_feature_names(model) -> dict:

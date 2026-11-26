@@ -79,6 +79,9 @@ class REMLResult:
     # holds another estimate (``estimate_p(fit_mode="reml")`` publishes the ML ``phi_hat``
     # for its densities); variance components pair lambda with it. None elsewhere.
     variance_component_phi: float | None = None
+    # The smoothing criterion the search minimised (``fit_method.FitMethodTraits.criterion``);
+    # a result saved before the field reads the class default.
+    criterion: str = "reml"
 
 
 def _map_beta_between_bases(

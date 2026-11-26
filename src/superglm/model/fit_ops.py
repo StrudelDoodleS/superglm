@@ -1779,7 +1779,9 @@ def fit(
             published=published,
         )
     if precision:
-        workspace.model._last_fit_meta["initial_precision"] = precision
+        from superglm.model import fit_method
+
+        fit_method.annotate(workspace.model, initial_precision=precision)
     candidate = capture_fit_state(
         workspace,
         model,
@@ -1882,7 +1884,9 @@ def _fit_in_workspace(
     runtime_canonicalize.canonicalize_fitted_model(model)
     _warn_unresolved_rows(model)
 
-    model._last_fit_meta = {"method": "fit", "discrete": model._discrete}
+    from superglm.model import fit_method
+
+    fit_method.record(model, "fit")
     _maybe_release_fit_state(model)
     return model
 
@@ -2015,7 +2019,9 @@ def _fit_path_in_workspace(
         offset_ref=offset_ref,
     )
     runtime_canonicalize.canonicalize_fitted_model(model)
-    model._last_fit_meta = {"method": "fit_path", "discrete": model._discrete}
+    from superglm.model import fit_method
+
+    fit_method.record(model, "fit_path")
     intercept_path = runtime_canonicalize.canonicalize_intercept_path(
         model,
         path_data["coef_path"],
@@ -2169,7 +2175,9 @@ def fit_reml(
             workspace.model._retain_fit_state = False
             _maybe_release_fit_state(workspace.model)
     if precision:
-        workspace.model._last_fit_meta["initial_precision"] = precision
+        from superglm.model import fit_method
+
+        fit_method.annotate(workspace.model, initial_precision=precision)
     _disclose_data_rank_route(workspace.model)
     candidate = capture_fit_state(
         workspace,
@@ -2339,7 +2347,9 @@ def _fit_reml_in_workspace(
             offset_ref=offset_ref,
         )
         _canonicalize_fitted_model(model, _profile)
-        model._last_fit_meta = {"method": "fit_reml", "discrete": model._discrete}
+        from superglm.model import fit_method
+
+        fit_method.record(model, "fit_reml")
         _maybe_release_fit_state(model)
         return debug_recorder
 

@@ -95,6 +95,7 @@ from superglm.editor.terms import (
 )
 from superglm.editor.unseen import UnseenChoice
 from superglm.features.rebuild import base_names_level, clone_with_replaced_features
+from superglm.model import fit_method
 from superglm.model_selection import CrossValidationResult
 from superglm.solvers.dispersion import model_weight_semantics
 
@@ -1635,8 +1636,7 @@ class EditorSession:
             raise RuntimeError("Fit response data was not retained on the source model.")
 
         profile_model = self.model._clone_without_features(set())
-        if getattr(self.model, "_last_fit_meta", None) is not None:
-            profile_model._last_fit_meta = dict(self.model._last_fit_meta)
+        fit_method.copy_record(self.model, profile_model)
 
         key = parameter.lower().replace("-", "_")
         if key in {"tweedie", "tweedie_p", "p"}:

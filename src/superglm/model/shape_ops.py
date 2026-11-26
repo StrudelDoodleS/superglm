@@ -19,6 +19,7 @@ from superglm.distributions import (
 from superglm.features.constraint import rules_of
 from superglm.group_matrix import DesignMatrix, GroupMatrix
 from superglm.links import IdentityLink
+from superglm.model import fit_method
 from superglm.model.fit_state import (
     FittedStateRevision,
     canonical_intercept_shift,
@@ -1705,7 +1706,7 @@ def _refresh_repaired_scale_and_statistics(
     likelihood_method = ML_AT_MEAN
     if scale_is_known(distribution):
         pass
-    elif getattr(model, "_last_fit_meta", {}).get("method") == "fit_reml":
+    elif fit_method.traits_of(model).profiles_scale:
         from superglm.model.reml_finalize import profiled_likelihood_scale
 
         likelihood_phi, likelihood_method = profiled_likelihood_scale(

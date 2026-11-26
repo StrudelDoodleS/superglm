@@ -1104,12 +1104,15 @@ def finalize_reml_fit(
     )
     model._solver_result = corrected
 
-    meta = {"method": "fit_reml", "discrete": model._discrete}
-    meta["direct_backend"] = corrected.direct_backend
-    meta["direct_fallback_reason"] = corrected.direct_fallback_reason
+    from superglm.model import fit_method
+
+    meta = {
+        "direct_backend": corrected.direct_backend,
+        "direct_fallback_reason": corrected.direct_fallback_reason,
+    }
     if qp_passthrough:
         meta["lambda_strategy"] = "qp_passthrough"
-    model._last_fit_meta = meta
+    fit_method.record(model, "fit_reml", **meta)
 
     restore_qp_group_state(model, qp_saved_state)
     return lambdas, n_reml_iter, converged

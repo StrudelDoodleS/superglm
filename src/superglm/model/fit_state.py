@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 
 from superglm._roundoff import gamma
+from superglm.model import fit_method
 from superglm.solvers.dispersion import model_weight_semantics
 
 if TYPE_CHECKING:
@@ -1007,6 +1008,7 @@ def _validate_workspace_result(
     reml_result = getattr(work_model, "_reml_result", None)
     if reml_result is not None and getattr(reml_result, "pirls_result", None) is not solver_result:
         raise RuntimeError("fit candidate REML result does not reference its solver result")
+    fit_method.check_search_result(work_model)
     selection_penalty = getattr(fitted_penalty(work_model), "lambda1", None)
     if selection_penalty is None or not np.isfinite(selection_penalty):
         raise RuntimeError("fit candidate is missing its resolved selection penalty")

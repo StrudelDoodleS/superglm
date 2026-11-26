@@ -17,6 +17,7 @@ from superglm.diagnostics.convergence import (
 )
 from superglm.features.categorical import Categorical
 from superglm.features.constraint import rules_of
+from superglm.model import fit_method
 from superglm.model.fit_state import edited_statistics_unavailable
 
 
@@ -82,7 +83,7 @@ def reml_diagnostics(model) -> dict[str, Any]:
             "lambda_history": [],
             "profile": profile,
         }
-        if (getattr(model, "_last_fit_meta", None) or {}).get("method") == "fit_reml":
+        if fit_method.traits_of(model).criterion is not None:
             # The ConvergenceWarning points here; the coefficient fit is the
             # only stage, so its stop is the terminal fit's.
             result = getattr(model, "_result", None)
@@ -245,7 +246,7 @@ def _model_config(model) -> dict[str, Any]:
 def _fit_payload(model, result) -> dict[str, Any]:
     fit_meta = dict(getattr(model, "_last_fit_meta", None) or {})
     payload = {
-        "method": fit_meta.get("method"),
+        "method": fit_method.method_of(model),
         "fit_meta": fit_meta,
         "deviance": float(result.deviance),
         "effective_df": float(result.effective_df),
