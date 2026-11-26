@@ -45,6 +45,14 @@ def chunk_rows(width: int) -> int:
     return max(256, budget // (3 * 8 * max(width, 1)))
 
 
+def cache_allowance() -> int:
+    """Bytes a problem may keep between evaluations: a quarter of ``max_memory``.
+
+    Separate from an evaluation's working blocks (``chunk_rows``) and from its results.
+    """
+    return resolve_max_memory() // 4
+
+
 def row_chunks(rows: NDArray[np.intp], width: int) -> list[NDArray[np.intp]]:
     """``rows`` in consecutive pieces of at most ``chunk_rows(width)``."""
     size = chunk_rows(width)
@@ -80,6 +88,11 @@ class RowLoss:
     def has_third_derivative(self) -> bool:
         """Whether ``l'''`` is not identically zero."""
         return self.log_mean
+
+    @property
+    def quadratic(self) -> bool:
+        """Whether ``l`` is quadratic in ``eta``, so that ``l''`` is the weight at every fit."""
+        return not self.log_mean
 
     def mean(self, eta: NDArray[np.float64]) -> NDArray[np.float64]:
         """The mean ``predict`` reports for the predictor ``eta``."""
