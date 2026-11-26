@@ -427,7 +427,7 @@ class TestRelativities:
         import superglm.inference.coef_tables as coef_tables
 
         source = Path(coef_tables.__file__).read_text()
-        branch = source.split("elif isinstance(spec, Piecewise):", 1)[1]
+        branch = source.split("def piecewise_rows(", 1)[1]
         comment = " ".join(branch.split("knots = spec._knots", 1)[0].replace("#", " ").split())
         assert "unpenalized" in comment
         assert "selection shrinkage" in comment or "selection_penalty" in comment

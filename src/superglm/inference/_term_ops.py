@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from functools import cache
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -84,6 +85,519 @@ def _centered_se(
     )
 
 
+@cache
+def _term_reports() -> tuple[tuple[type, Any], ...]:
+    """Each main-effect class's report, in the order the classes are tested."""
+    from superglm.features.categorical import Categorical
+    from superglm.features.numeric import Numeric
+    from superglm.features.ordered_categorical import OrderedCategorical
+    from superglm.features.piecewise import Piecewise
+    from superglm.features.polynomial import Polynomial
+    from superglm.features.random_effect import RandomEffect
+    from superglm.features.spline import _SplineBase
+
+    return (
+        (RandomEffect, _TermReport.random_effect),
+        (OrderedCategorical, _TermReport.ordered),
+        (_SplineBase, _TermReport.spline),
+        (Categorical, _TermReport.categorical),
+        (Polynomial, _TermReport.polynomial),
+        (Numeric, _TermReport.numeric),
+        (Piecewise, _TermReport.piecewise),
+    )
+
+
+@dataclass(kw_only=True, eq=False)
+class _TermReport:
+    """One main effect's ``term_inference``: its arguments, and one report per feature class."""
+
+    name: str
+    spec: Any
+    result: PIRLSResult
+    groups: list[GroupSlice]
+    specs: dict[str, Any]
+    interaction_specs: dict[str, Any]
+    covariance_fn: Any
+    reml_lambdas: dict[str, float] | None
+    lambda2: float
+    group_edf: dict[str, float] | None
+    with_se: bool
+    simultaneous: bool
+    n_points: int
+    alpha: float
+    n_sim: int
+    seed: int
+    centering: str
+    determines: Any
+
+    def __post_init__(self) -> None:
+        import scipy.spatial
+        from scipy.stats import norm
+
+        name, groups = self.name, self.groups
+        self.beta = self.result.beta
+        self.feature_groups = [g for g in groups if g.feature_name == name]
+        self.beta_combined = np.concatenate([self.beta[g.sl] for g in self.feature_groups])
+        # Deliberately FEATURE-wide, unlike the smooth row's `active` in coef_tables and the
+        # export: this one gates the level table, and a free special is genuinely still
+        # fitted when the spline block is dropped. The smooth's own survival is
+        # `smooth_active`.
+        self.selected_names = selected_group_name_set(self.result, groups)
+        self.active = any(group.name in self.selected_names for group in self.feature_groups)
+        self.smooth_active = any(
+            group.name in self.selected_names for group in spline_groups(self.feature_groups)
+        )
+        self.Cov_active = self.active_groups_cov = None
+        if self.with_se and self.active:
+            self.Cov_active, self.active_groups_cov = self.covariance_fn()
+        # Per-group edf, over the SMOOTH's blocks, as coef_tables and report_ops scope it:
+        # TermInference.edf is the copy the editor context bar and the plot data read.
+        self.edf = _compute_term_edf(name, spline_groups(self.feature_groups), self.group_edf)
+        self.lam = _resolve_term_lambda(name, self.feature_groups, self.reml_lambdas, self.lambda2)
+        self.z_alpha = float(norm.ppf(1.0 - self.alpha / 2.0))
+
+    def inference(self) -> TermInference:
+        for kind, report in _term_reports():
+            if isinstance(self.spec, kind):
+                return report(self)
+        raise TypeError(f"Unknown feature type: {type(self.spec).__name__}")
+
+    # ── Errors ────────────────────────────────────────────────────
+
+    def feature_errors(self, **options: Any) -> NDArray | None:
+        """The term's standard errors (``feature_se_from_cov``), or ``None`` without them."""
+        if not (self.with_se and self.active and self.Cov_active is not None):
+            return None
+        assert self.active_groups_cov is not None
+        return feature_se_from_cov(
+            self.name,
+            self.Cov_active,
+            self.active_groups_cov,
+            self.result,
+            self.groups,
+            self.specs,
+            self.interaction_specs,
+            **options,
+        )
+
+    def interval(self, log_rel: NDArray, se: NDArray | None) -> tuple[Any, Any]:
+        """The pointwise interval on the relativity scale, or ``None`` without errors."""
+        if se is None:
+            return None, None
+        return (
+            _maybe_array(_safe_exp(log_rel - self.z_alpha * se)),
+            _maybe_array(_safe_exp(log_rel + self.z_alpha * se)),
+        )
+
+    def centred_errors(self, **options: Any) -> NDArray | None:
+        """The errors of the mean-centred report (``_centered_se``)."""
+        return _centered_se(
+            self.centering,
+            self.name,
+            self.Cov_active,
+            self.active_groups_cov,
+            self.result,
+            self.groups,
+            self.specs,
+            self.interaction_specs,
+            **options,
+        )
+
+    # ── Reports ───────────────────────────────────────────────────
+
+    def random_effect(self) -> TermInference:
+        raw = self.spec.reconstruct(self.beta_combined)
+        levels = raw["levels"]
+        log_rels = np.asarray([raw["effects"][level] for level in levels])
+        se = self.feature_errors()
+        ci_lo, ci_hi = self.interval(log_rels, se)
+        return _recenter_term(
+            TermInference(
+                name=self.name,
+                kind="categorical",
+                active=self.active,
+                levels=levels,
+                log_relativity=log_rels,
+                relativity=np.exp(log_rels),
+                se_log_relativity=se,
+                ci_lower=ci_lo,
+                ci_upper=ci_hi,
+                absorbs_intercept=False,
+                centering_mode="population_zero",
+                edf=self.edf,
+                smoothing_lambda=self.lam,
+                alpha=self.alpha,
+            ),
+            self.centering,
+            se_centered=self.centred_errors(),
+        )
+
+    def ordered(self) -> TermInference:
+        """K levels with SEs against the base level, and on a spline basis the fitted curve.
+
+        A step-mode pickle reaches here and raises the migration error from
+        ``spec.reconstruct``.  Specials are free levels with no position on the spline
+        axis: they stay out of ``level_x`` and are flagged for the renderers instead,
+        matched on the labels ``reconstruct`` exported, not on ``spec._specials``, which is
+        string-coerced (``specials=[9]`` holds "9" there and 9 in ``levels``).  The base
+        level is already at 0/1, so the report is not recentred.
+        """
+        from superglm.features.factor_smooth import with_population_curve
+        from superglm.features.spline import _SplineBase
+
+        spec, name = self.spec, self.name
+        inner = spec._spline
+        raw = with_population_curve(
+            spec.reconstruct(self.beta_combined),
+            name,
+            self.interaction_specs,
+            self.groups,
+            self.beta,
+            spec,
+        )
+        levels = raw["levels"]
+        level_log_rels = np.array([raw["level_log_relativities"][lv] for lv in levels])
+        special_labels = set(raw.get("special_levels") or ())
+        se = self.feature_errors()
+        if se is not None:
+            se = withhold_undetermined(
+                se,
+                self.determines,
+                lambda: ordered_level_contrasts(
+                    spec,
+                    name,
+                    self.feature_groups,
+                    self.interaction_specs,
+                    len(self.beta),
+                    self.selected_names,
+                ),
+            )
+        ci_lo, ci_hi = self.interval(level_log_rels, se)
+        curve = (
+            self.ordered_curve(raw, [lv for lv in levels if lv not in special_labels])
+            if self.smooth_active
+            else None
+        )
+        report = TermInference(
+            name=name,
+            kind="categorical",
+            active=self.active,
+            levels=levels,
+            log_relativity=level_log_rels,
+            relativity=np.array([raw["level_relativities"][lv] for lv in levels]),
+            se_log_relativity=se,
+            ci_lower=ci_lo,
+            ci_upper=ci_hi,
+            absorbs_intercept=False,
+            centering_mode="base_level",
+            edf=self.edf,
+            smoothing_lambda=self.lam,
+            smooth_curve=curve,
+            level_is_special=(
+                np.array([lv in special_labels for lv in levels], dtype=bool)
+                if special_labels
+                else None
+            ),
+            # A Piecewise or Polynomial inner basis has no knot strategy or B-spline degree;
+            # the editor reads None as "no spline metadata", which is exactly true.
+            spline=_build_spline_metadata(inner) if isinstance(inner, _SplineBase) else None,
+            monotone=rules_of(spec).describe() or None,
+            alpha=self.alpha,
+        )
+        if spec._grouping is None:
+            return report
+        return _expand_grouped_term(report, spec._grouping, spec._original_level_to_value)
+
+    def ordered_curve(self, raw: dict, smooth_levels: list) -> SmoothCurve:
+        """An ordered spline's fitted curve, with its errors when the term carries them.
+
+        The curve is a statement about the spline block alone, so its errors are too: the
+        free-level block is filtered out of the covariance groups.
+        """
+        spec = self.spec
+        inner = spec._spline
+        level_x = np.array([raw["level_values"][lv] for lv in smooth_levels])
+        if not (self.with_se and self.Cov_active is not None):
+            return SmoothCurve(
+                x=raw["x"],
+                log_relativity=raw["log_relativity"],
+                relativity=raw["relativity"],
+                level_x=level_x,
+            )
+        assert self.active_groups_cov is not None
+        smooth_groups = spline_groups(self.feature_groups)
+        smooth_active_cov = [
+            ag
+            for ag in self.active_groups_cov
+            if not (ag.feature_name == self.name and ag.subgroup_type == "special")
+        ]
+        reference_x = np.array([raw["level_values"][spec._base_level]], dtype=np.float64)
+        curve_se = _spline_se(
+            inner,
+            self.name,
+            smooth_groups,
+            smooth_active_cov,
+            self.Cov_active,
+            x_eval=raw["x"],
+            reference_x=reference_x,
+        )
+        curve_se = withhold_undetermined(
+            curve_se,
+            self.determines,
+            lambda: term_contrasts(
+                np.asarray(inner.transform(raw["x"]), dtype=np.float64)
+                - np.asarray(inner.transform(reference_x), dtype=np.float64),
+                smooth_groups,
+                len(self.beta),
+                self.selected_names,
+            ),
+        )
+        ci_lo, ci_hi = self.interval(raw["log_relativity"], curve_se)
+        return SmoothCurve(
+            x=raw["x"],
+            log_relativity=raw["log_relativity"],
+            relativity=raw["relativity"],
+            level_x=level_x,
+            se_log_relativity=curve_se,
+            ci_lower=ci_lo,
+            ci_upper=ci_hi,
+        )
+
+    def spline(self) -> TermInference:
+        from superglm.features.factor_smooth import with_population_curve
+
+        spec, name = self.spec, self.name
+        raw = spec.reconstruct(self.beta_combined, n_points=self.n_points)
+        # the population curve when an sz term moves it, as its errors are
+        raw = with_population_curve(raw, name, self.interaction_specs, self.groups, self.beta, spec)
+        log_rel = raw["log_relativity"]
+        se = self.feature_errors(n_points=self.n_points)
+        ci_lo, ci_hi = self.interval(log_rel, se)
+        ci_lo_sim = ci_hi_sim = c_sim = None
+        if se is not None and self.simultaneous:
+            bands, c_sim = simultaneous_band_and_critical_value(
+                name,
+                result=self.result,
+                groups=self.groups,
+                specs=self.specs,
+                interaction_specs=self.interaction_specs,
+                covariance_fn=self.covariance_fn,
+                alpha=self.alpha,
+                n_sim=self.n_sim,
+                n_points=self.n_points,
+                seed=self.seed,
+                center=self.centering == "mean",
+            )
+            ci_lo_sim = bands["ci_lower_simultaneous"].values
+            ci_hi_sim = bands["ci_upper_simultaneous"].values
+        return _recenter_term(
+            TermInference(
+                name=name,
+                kind="spline",
+                active=self.active,
+                x=raw["x"],
+                log_relativity=log_rel,
+                relativity=raw["relativity"],
+                se_log_relativity=se,
+                ci_lower=ci_lo,
+                ci_upper=ci_hi,
+                ci_lower_simultaneous=ci_lo_sim,
+                ci_upper_simultaneous=ci_hi_sim,
+                critical_value_simultaneous=c_sim,
+                absorbs_intercept=spec.absorbs_intercept,
+                edf=self.edf,
+                smoothing_lambda=self.lam,
+                spline=_build_spline_metadata(spec),
+                monotone=rules_of(spec).describe() or None,
+                monotone_repaired=False,  # caller can override if repairs exist
+                alpha=self.alpha,
+            ),
+            self.centering,
+            se_centered=self.centred_errors(n_points=self.n_points),
+        )
+
+    def categorical(self) -> TermInference:
+        """One row per level; the separated levels and the levels a mean-centred report
+        centres on come from one reading of the fit's separation record."""
+        from superglm.features.factor_smooth import with_population_curve
+        from superglm.model.separated_levels import level_flags, separation_flags
+
+        spec, name = self.spec, self.name
+        raw = with_population_curve(
+            spec.reconstruct(self.beta_combined),
+            name,
+            self.interaction_specs,
+            self.groups,
+            self.beta,
+            spec,
+        )
+        levels = raw["levels"]
+        log_rels = np.array([raw["log_relativities"][lv] for lv in levels])
+        flags = separation_flags(self.groups, self.specs, self.interaction_specs)
+        separated, centre_on = level_flags(
+            self.groups,
+            self.specs,
+            self.interaction_specs,
+            name,
+            levels,
+            centering=self.centering,
+            flags=flags,
+        )
+        se = self.feature_errors(flags=flags)
+        ci_lo, ci_hi = self.interval(log_rels, se)
+        report = _recenter_term(
+            TermInference(
+                name=name,
+                kind="categorical",
+                active=self.active,
+                levels=levels,
+                log_relativity=log_rels,
+                relativity=np.array([raw["relativities"][lv] for lv in levels]),
+                se_log_relativity=se,
+                ci_lower=ci_lo,
+                ci_upper=ci_hi,
+                absorbs_intercept=False,
+                centering_mode="base_level",
+                edf=self.edf,
+                smoothing_lambda=self.lam,
+                monotone=rules_of(spec).describe() or None,
+                alpha=self.alpha,
+                separated=separated,
+            ),
+            self.centering,
+            centre_on=centre_on,
+            se_centered=self.centred_errors(flags=flags),
+        )
+        if spec._grouping is None:
+            return report
+        return _expand_grouped_term(report, spec._grouping)
+
+    def polynomial(self) -> TermInference:
+        # Reconstructed at the caller's resolution, as ``feature_se_from_cov`` reads it, so
+        # the curve and its errors have one length at every ``n_points``.
+        raw = self.spec.reconstruct(self.beta_combined, n_points=self.n_points)
+        log_rel = raw["log_relativity"]
+        se = self.feature_errors(n_points=self.n_points)
+        ci_lo, ci_hi = self.interval(log_rel, se)
+        return _recenter_term(
+            TermInference(
+                name=self.name,
+                kind="polynomial",
+                active=self.active,
+                x=raw["x"],
+                log_relativity=log_rel,
+                relativity=raw["relativity"],
+                se_log_relativity=se,
+                ci_lower=ci_lo,
+                ci_upper=ci_hi,
+                absorbs_intercept=True,
+                edf=self.edf,
+                smoothing_lambda=self.lam,
+                alpha=self.alpha,
+            ),
+            self.centering,
+            se_centered=self.centred_errors(n_points=self.n_points),
+        )
+
+    def numeric(self) -> TermInference:
+        raw = self.spec.reconstruct(self.beta_combined)
+        log_rel = np.array([raw["coef"]])
+        se = self.feature_errors()
+        ci_lo = ci_hi = None
+        if se is not None:
+            # Unclipped, as ``reconstruct`` exponentiates the point, so the interval
+            # contains the point out to float64's range.
+            with np.errstate(over="ignore", under="ignore"):
+                ci_lo = np.exp(log_rel - self.z_alpha * se)
+                ci_hi = np.exp(log_rel + self.z_alpha * se)
+        return _recenter_term(
+            TermInference(
+                name=self.name,
+                kind="numeric",
+                active=self.active,
+                log_relativity=log_rel,
+                relativity=np.array([raw["relativity_per_unit"]]),
+                se_log_relativity=se,
+                ci_lower=_maybe_array(ci_lo),
+                ci_upper=_maybe_array(ci_hi),
+                absorbs_intercept=False,
+                centering_mode="none",
+                edf=self.edf,
+                smoothing_lambda=self.lam,
+                alpha=self.alpha,
+            ),
+            self.centering,
+        )
+
+    def piecewise(self) -> TermInference:
+        """The term at its knots, with the full per-knot covariance for the band between them.
+
+        ``sqrt(diag)`` of the knot covariance IS the per-knot SE (the same basis map as
+        ``feature_se_from_cov``'s Piecewise branch), so the two stay one computation.  It
+        is also why no ``se_centered`` is passed: ``_recenter_term`` transforms the
+        published covariance and reads the centred errors off its diagonal.
+        """
+        from superglm.inference.covariance import BinaryScaledCovariance
+
+        raw = self.spec.reconstruct(self.beta_combined)
+        knots = raw["knots"]
+        log_rel = raw["log_relativity"]
+        Cov_active, exponent = self.Cov_active, 0
+        if isinstance(Cov_active, BinaryScaledCovariance):
+            Cov_active, exponent = Cov_active.base, Cov_active.exponent
+        se = knot_cov = None
+        if self.with_se and self.active and Cov_active is not None:
+            assert self.active_groups_cov is not None
+            knot_cov = piecewise_knot_covariance(
+                self.name, Cov_active, self.active_groups_cov, self.specs
+            )
+            se = (
+                np.sqrt(np.maximum(np.diag(knot_cov), 0.0))
+                if knot_cov is not None
+                else np.zeros(knots.size)
+            )
+        ci_lo, ci_hi = self.interval(log_rel, se)
+        inference = _recenter_term(
+            TermInference(
+                name=self.name,
+                kind="piecewise",
+                active=self.active,
+                # The knot vector itself, not a display grid: a piecewise term is exactly
+                # determined by its values at the knots, so the curve, the editor handles
+                # and the workbook rows are the same J+2 points.
+                x=knots,
+                log_relativity=log_rel,
+                relativity=_maybe_array(_safe_exp(log_rel)),
+                se_log_relativity=se,
+                ci_lower=ci_lo,
+                ci_upper=ci_hi,
+                knot_covariance=knot_cov,
+                absorbs_intercept=False,
+                centering_mode="base_knot",
+                # The MEASURED edf, not the nominal J+1, which holds only while the group
+                # carries no shrinkage; J+1 is for callers that asked for no edf at all.
+                edf=self.edf if self.edf is not None else float(self.spec._non_base_indices.size),
+                # No smoothing lambda, never the global lambda2 fallback: the group carries
+                # no penalty matrix, and selection shrinkage is not a smoothing lambda.
+                smoothing_lambda=None,
+                alpha=self.alpha,
+            ),
+            self.centering,
+        )
+        if not exponent or inference.se_log_relativity is None:
+            return inference
+        errors = np.ldexp(inference.se_log_relativity, exponent // 2)
+        with np.errstate(over="ignore"):
+            knot_cov = np.ldexp(inference.knot_covariance, exponent)
+        return replace(
+            inference,
+            se_log_relativity=errors,
+            knot_covariance=knot_cov,
+            ci_lower=_safe_exp(inference.log_relativity - self.z_alpha * errors),
+            ci_upper=_safe_exp(inference.log_relativity + self.z_alpha * errors),
+        )
+
+
 # ── Main Entry Point ──────────────────────────────────────────────
 
 
@@ -158,28 +672,12 @@ def term_inference(
     """
     if centering not in _VALID_CENTERING:
         raise ValueError(f"centering must be one of {_VALID_CENTERING}, got {centering!r}")
-
-    from superglm.features.categorical import Categorical
-    from superglm.features.factor_smooth import with_population_curve
-    from superglm.features.numeric import Numeric
-    from superglm.features.ordered_categorical import OrderedCategorical
-    from superglm.features.piecewise import Piecewise
-    from superglm.features.polynomial import Polynomial
-    from superglm.features.random_effect import RandomEffect
-    from superglm.features.spline import _SplineBase
-
-    beta = result.beta
-    feature_groups = [g for g in groups if g.feature_name == name]
-
-    # ── Ambiguity check ───────────────────────────────────────────
     if name in specs and name in interaction_specs:
         raise ValueError(
             f"Ambiguous name {name!r}: exists as both a main effect "
             f"and an interaction. Use the feature or interaction spec "
             f"directly to disambiguate."
         )
-
-    # ── Interaction dispatch ─────────────────────────────────────
     if name in interaction_specs:
         return _interaction_inference(
             name,
@@ -188,649 +686,29 @@ def term_inference(
             interaction_specs=interaction_specs,
             specs=specs,
         )
-
     spec = specs.get(name)
     if spec is None:
         raise KeyError(f"Feature not found: {name}")
-
-    # Check active. Deliberately FEATURE-wide, unlike the smooth-row `active` in
-    # coef_tables and the export: this one gates the level table, and a free
-    # special is genuinely still fitted when the spline block is dropped. The
-    # smooth's own survival is `smooth_active` below.
-    beta_combined = np.concatenate([beta[g.sl] for g in feature_groups])
-    selected_names = selected_group_name_set(result, groups)
-    active = any(group.name in selected_names for group in feature_groups)
-    smooth_active = any(group.name in selected_names for group in spline_groups(feature_groups))
-
-    # Covariance (lazy, only if needed)
-    Cov_active = active_groups_cov = None
-    if with_se and active:
-        Cov_active, active_groups_cov = covariance_fn()
-
-    # Per-group edf, over the SMOOTH's blocks. coef_tables and report_ops both
-    # scope this quantity the same way, and TermInference.edf is the copy that
-    # reaches the editor context bar and the plot data -- so summing the free
-    # block in here as well made one fitted term report two different edfs
-    # depending on which surface you read it from.
-    edf = _compute_term_edf(name, spline_groups(feature_groups), group_edf)
-
-    # Per-group lambda
-    lam = _resolve_term_lambda(name, feature_groups, reml_lambdas, lambda2)
-
-    z_alpha = float(__import__("scipy").stats.norm.ppf(1.0 - alpha / 2.0))
-
-    # ── RandomEffect ─────────────────────────────────────────────
-    if isinstance(spec, RandomEffect):
-        raw = spec.reconstruct(beta_combined)
-        levels = raw["levels"]
-        log_rels = np.asarray([raw["effects"][level] for level in levels])
-        rels = np.exp(log_rels)
-        se = ci_lo = ci_hi = None
-        if with_se and active and Cov_active is not None:
-            assert active_groups_cov is not None
-            se = feature_se_from_cov(
-                name,
-                Cov_active,
-                active_groups_cov,
-                result,
-                groups,
-                specs,
-                interaction_specs,
-            )
-            ci_lo = _safe_exp(log_rels - z_alpha * se)
-            ci_hi = _safe_exp(log_rels + z_alpha * se)
-        return _recenter_term(
-            TermInference(
-                name=name,
-                kind="categorical",
-                active=active,
-                levels=levels,
-                log_relativity=log_rels,
-                relativity=rels,
-                se_log_relativity=se,
-                ci_lower=_maybe_array(ci_lo),
-                ci_upper=_maybe_array(ci_hi),
-                absorbs_intercept=False,
-                centering_mode="population_zero",
-                edf=edf,
-                smoothing_lambda=lam,
-                alpha=alpha,
-            ),
-            centering,
-            se_centered=_centered_se(
-                centering,
-                name,
-                Cov_active,
-                active_groups_cov,
-                result,
-                groups,
-                specs,
-                interaction_specs,
-            ),
-        )
-
-    # ── OrderedCategorical ────────────────────────────────────────
-    if isinstance(spec, OrderedCategorical):
-        if spec.basis == "spline":
-            # Spline mode: primary output is categorical (K levels with SEs),
-            # plus a smooth_curve for plotting the fitted spline.
-            inner = spec._spline
-            raw = with_population_curve(
-                spec.reconstruct(beta_combined), name, interaction_specs, groups, beta, spec
-            )
-            levels = raw["levels"]
-            level_log_rels = np.array([raw["level_log_relativities"][lv] for lv in levels])
-            level_rels = np.array([raw["level_relativities"][lv] for lv in levels])
-
-            # Specials are free levels with no position on the spline axis: they
-            # stay out of level_x and are flagged for the renderers instead.
-            #
-            # Match on the labels `reconstruct` itself exported, NOT on
-            # `spec._specials`: the latter is string-coerced at construction, so
-            # for `order=[1, ..., 9], specials=[9]` it holds "9" while `levels`
-            # holds 9. `9 in {"9"}` is False, every level then reads
-            # not-special, and `raw["level_values"][9]` -- keyed on the smooth
-            # levels alone -- raises KeyError three lines further down.
-            special_labels = set(raw.get("special_levels") or ())
-            level_is_special = (
-                np.array([lv in special_labels for lv in levels], dtype=bool)
-                if special_labels
-                else None
-            )
-            smooth_levels = [lv for lv in levels if lv not in special_labels]
-
-            # Per-level SEs (at K category positions)
-            se = ci_lo = ci_hi = None
-            curve = None
-            # `active` gates the LEVEL table (a free special is still fitted when
-            # the curve is gone); `smooth_active` gates the CURVE. Without the
-            # second, dropping the spline block while the unpenalized special
-            # survives left every spline group filtered out of the SE call, so
-            # `_spline_se` returned zeros and a SmoothCurve was emitted anyway --
-            # a plot then renders an active-looking smooth, with zero-width bands,
-            # for a block that selection removed.
-            # `active` gates the LEVEL table (a free special is still fitted when
-            # the curve is gone); `smooth_active` gates the CURVE. Without the
-            # second, dropping the spline block while the unpenalized special
-            # survives leaves every spline group filtered out of the SE call, so
-            # `_spline_se` returns zeros and a SmoothCurve is emitted anyway -- a
-            # plot then renders an active-looking smooth, with zero-width bands,
-            # for a block that selection removed.
-            if with_se and active and Cov_active is not None:
-                assert active_groups_cov is not None
-                se = feature_se_from_cov(
-                    name,
-                    Cov_active,
-                    active_groups_cov,
-                    result,
-                    groups,
-                    specs,
-                    interaction_specs,
-                )
-                se = withhold_undetermined(
-                    se,
-                    determines,
-                    lambda: ordered_level_contrasts(
-                        spec, name, feature_groups, interaction_specs, len(beta), selected_names
-                    ),
-                )
-                ci_lo = _safe_exp(level_log_rels - z_alpha * se)
-                ci_hi = _safe_exp(level_log_rels + z_alpha * se)
-
-                # Continuous curve for plotting (ordered levels only), emitted
-                # only if the SPLINE block survived selection. Otherwise every
-                # spline group is filtered out of the SE call below, _spline_se
-                # returns zeros, and the curve renders as an active-looking smooth
-                # with zero-width bands for a block that was dropped.
-                if smooth_active:
-                    level_x = np.array([raw["level_values"][lv] for lv in smooth_levels])
-                    assert active_groups_cov is not None
-                    # The curve is a statement about the spline block alone; its SE
-                    # must be too.  feature_se_from_cov's level SEs are unaffected —
-                    # that path transforms through the OC spec at full p+s width.
-                    smooth_feature_groups = spline_groups(feature_groups)
-                    smooth_active_cov = [
-                        ag
-                        for ag in active_groups_cov
-                        if not (ag.feature_name == name and ag.subgroup_type == "special")
-                    ]
-                    reference_x = np.array(
-                        [raw["level_values"][spec._base_level]], dtype=np.float64
-                    )
-                    curve_se = _spline_se(
-                        inner,
-                        name,
-                        smooth_feature_groups,
-                        smooth_active_cov,
-                        Cov_active,
-                        x_eval=raw["x"],
-                        reference_x=reference_x,
-                    )
-                    curve_se = withhold_undetermined(
-                        curve_se,
-                        determines,
-                        lambda: term_contrasts(
-                            np.asarray(inner.transform(raw["x"]), dtype=np.float64)
-                            - np.asarray(inner.transform(reference_x), dtype=np.float64),
-                            smooth_feature_groups,
-                            len(beta),
-                            selected_names,
-                        ),
-                    )
-                    curve = SmoothCurve(
-                        x=raw["x"],
-                        log_relativity=raw["log_relativity"],
-                        relativity=raw["relativity"],
-                        level_x=level_x,
-                        se_log_relativity=curve_se,
-                        ci_lower=_maybe_array(
-                            _safe_exp(raw["log_relativity"] - z_alpha * curve_se)
-                        ),
-                        ci_upper=_maybe_array(
-                            _safe_exp(raw["log_relativity"] + z_alpha * curve_se)
-                        ),
-                    )
-            elif smooth_active:
-                # No SEs requested but still provide the curve shape
-                level_x = np.array([raw["level_values"][lv] for lv in smooth_levels])
-                curve = SmoothCurve(
-                    x=raw["x"],
-                    log_relativity=raw["log_relativity"],
-                    relativity=raw["relativity"],
-                    level_x=level_x,
-                )
-
-            # Spline-shaped metadata exists only for a spline inner basis; a
-            # Piecewise/Polynomial inner has no knot strategy or B-spline
-            # degree to report, and the editor treats a None here as
-            # "no spline metadata", which is exactly true.
-            from superglm.features.spline import _SplineBase
-
-            spline_meta = _build_spline_metadata(inner) if isinstance(inner, _SplineBase) else None
-            # OrderedCategorical: base level already shifted to 0/1 — skip recentering
-            ti_result = TermInference(
-                name=name,
-                kind="categorical",
-                active=active,
-                levels=levels,
-                log_relativity=level_log_rels,
-                relativity=level_rels,
-                se_log_relativity=se,
-                ci_lower=_maybe_array(ci_lo),
-                ci_upper=_maybe_array(ci_hi),
-                absorbs_intercept=False,
-                centering_mode="base_level",
-                edf=edf,
-                smoothing_lambda=lam,
-                smooth_curve=curve,
-                level_is_special=level_is_special,
-                spline=spline_meta,
-                monotone=rules_of(spec).describe() or None,
-                alpha=alpha,
-            )
-            if spec._grouping is not None:
-                ti_result = _expand_grouped_term(
-                    ti_result, spec._grouping, spec._original_level_to_value
-                )
-            return ti_result
-        else:
-            # Step mode: categorical-style output
-            raw = with_population_curve(
-                spec.reconstruct(beta_combined), name, interaction_specs, groups, beta, spec
-            )
-            levels = raw["levels"]
-            log_rels = np.array([raw["log_relativities"][lv] for lv in levels])
-            rels = np.array([raw["relativities"][lv] for lv in levels])
-
-            se = ci_lo = ci_hi = None
-            # `active` gates the LEVEL table (a free special is still fitted when
-            # the curve is gone); `smooth_active` gates the CURVE. Without the
-            # second, dropping the spline block while the unpenalized special
-            # survives left every spline group filtered out of the SE call, so
-            # `_spline_se` returned zeros and a SmoothCurve was emitted anyway --
-            # a plot then renders an active-looking smooth, with zero-width bands,
-            # for a block that selection removed.
-            if with_se and active and Cov_active is not None:
-                assert active_groups_cov is not None
-                se = feature_se_from_cov(
-                    name,
-                    Cov_active,
-                    active_groups_cov,
-                    result,
-                    groups,
-                    specs,
-                    interaction_specs,
-                )
-                se = withhold_undetermined(
-                    se,
-                    determines,
-                    lambda: ordered_level_contrasts(
-                        spec, name, feature_groups, interaction_specs, len(beta), selected_names
-                    ),
-                )
-                ci_lo = _safe_exp(log_rels - z_alpha * se)
-                ci_hi = _safe_exp(log_rels + z_alpha * se)
-
-            # OrderedCategorical: base level already at 0/1 — skip recentering
-            ti_result = TermInference(
-                name=name,
-                kind="categorical",
-                active=active,
-                levels=levels,
-                log_relativity=log_rels,
-                relativity=rels,
-                se_log_relativity=se,
-                ci_lower=_maybe_array(ci_lo),
-                ci_upper=_maybe_array(ci_hi),
-                absorbs_intercept=False,
-                centering_mode="base_level",
-                edf=edf,
-                smoothing_lambda=lam,
-                alpha=alpha,
-            )
-            if spec._grouping is not None:
-                ti_result = _expand_grouped_term(
-                    ti_result, spec._grouping, spec._original_level_to_value
-                )
-            return ti_result
-
-    # ── Spline ───────────────────────────────────────────────────
-    if isinstance(spec, _SplineBase):
-        raw = spec.reconstruct(beta_combined, n_points=n_points)
-        # the population curve when an sz term moves it (#432), as its errors are
-        raw = with_population_curve(raw, name, interaction_specs, groups, beta, spec)
-        x_grid = raw["x"]
-        log_rel = raw["log_relativity"]
-        rel = raw["relativity"]
-
-        se = ci_lo = ci_hi = None
-        ci_lo_sim = ci_hi_sim = c_sim = None
-
-        if with_se and active and Cov_active is not None:
-            assert active_groups_cov is not None
-            se = feature_se_from_cov(
-                name,
-                Cov_active,
-                active_groups_cov,
-                result,
-                groups,
-                specs,
-                interaction_specs,
-                n_points=n_points,
-            )
-            ci_lo = _safe_exp(log_rel - z_alpha * se)
-            ci_hi = _safe_exp(log_rel + z_alpha * se)
-
-            if simultaneous:
-                bands, c_sim = simultaneous_band_and_critical_value(
-                    name,
-                    result=result,
-                    groups=groups,
-                    specs=specs,
-                    interaction_specs=interaction_specs,
-                    covariance_fn=covariance_fn,
-                    alpha=alpha,
-                    n_sim=n_sim,
-                    n_points=n_points,
-                    seed=seed,
-                    center=centering == "mean",
-                )
-                ci_lo_sim = bands["ci_lower_simultaneous"].values
-                ci_hi_sim = bands["ci_upper_simultaneous"].values
-
-        spline_meta = _build_spline_metadata(spec)
-
-        return _recenter_term(
-            TermInference(
-                name=name,
-                kind="spline",
-                active=active,
-                x=x_grid,
-                log_relativity=log_rel,
-                relativity=rel,
-                se_log_relativity=se,
-                ci_lower=_maybe_array(ci_lo),
-                ci_upper=_maybe_array(ci_hi),
-                ci_lower_simultaneous=ci_lo_sim,
-                ci_upper_simultaneous=ci_hi_sim,
-                critical_value_simultaneous=c_sim,
-                absorbs_intercept=spec.absorbs_intercept,
-                edf=edf,
-                smoothing_lambda=lam,
-                spline=spline_meta,
-                monotone=rules_of(spec).describe() or None,
-                monotone_repaired=False,  # caller can override if repairs exist
-                alpha=alpha,
-            ),
-            centering,
-            se_centered=_centered_se(
-                centering,
-                name,
-                Cov_active,
-                active_groups_cov,
-                result,
-                groups,
-                specs,
-                interaction_specs,
-                n_points=n_points,
-            ),
-        )
-
-    # ── Categorical ──────────────────────────────────────────────
-    elif isinstance(spec, Categorical):
-        raw = with_population_curve(
-            spec.reconstruct(beta_combined), name, interaction_specs, groups, beta, spec
-        )
-        levels = raw["levels"]
-        log_rels = np.array([raw["log_relativities"][lv] for lv in levels])
-        rels = np.array([raw["relativities"][lv] for lv in levels])
-        # the levels reported blank, and the levels a mean-centred report centres on,
-        # from one reading of the fit's separation record
-        from superglm.model.separated_levels import level_flags, separation_flags
-
-        flags = separation_flags(groups, specs, interaction_specs)
-        separated, centre_on = level_flags(
-            groups, specs, interaction_specs, name, levels, centering=centering, flags=flags
-        )
-
-        se = ci_lo = ci_hi = None
-        if with_se and active and Cov_active is not None:
-            assert active_groups_cov is not None
-            se = feature_se_from_cov(
-                name,
-                Cov_active,
-                active_groups_cov,
-                result,
-                groups,
-                specs,
-                interaction_specs,
-                flags=flags,
-            )
-            ci_lo = _safe_exp(log_rels - z_alpha * se)
-            ci_hi = _safe_exp(log_rels + z_alpha * se)
-
-        ti_result = _recenter_term(
-            TermInference(
-                name=name,
-                kind="categorical",
-                active=active,
-                levels=levels,
-                log_relativity=log_rels,
-                relativity=rels,
-                se_log_relativity=se,
-                ci_lower=_maybe_array(ci_lo),
-                ci_upper=_maybe_array(ci_hi),
-                absorbs_intercept=False,
-                centering_mode="base_level",
-                edf=edf,
-                smoothing_lambda=lam,
-                monotone=rules_of(spec).describe() or None,
-                alpha=alpha,
-                separated=separated,
-            ),
-            centering,
-            centre_on=centre_on,
-            se_centered=_centered_se(
-                centering,
-                name,
-                Cov_active,
-                active_groups_cov,
-                result,
-                groups,
-                specs,
-                interaction_specs,
-                flags=flags,
-            ),
-        )
-        if spec._grouping is not None:
-            ti_result = _expand_grouped_term(ti_result, spec._grouping)
-        return ti_result
-
-    # ── Polynomial ───────────────────────────────────────────────
-    elif isinstance(spec, Polynomial):
-        # ``n_points`` FORWARDED, as the spline branch above forwards it.
-        # ``feature_se_from_cov`` below honours the caller's resolution, so
-        # reconstructing at the default 200 beside it left the two vectors
-        # different lengths and ``ci_lo = _safe_exp(log_rel - z_alpha * se)``
-        # raised for every resolution but the default -- taking ``plot``,
-        # ``plot_data`` and the editor session down with it (issue #295).
-        raw = spec.reconstruct(beta_combined, n_points=n_points)
-        x_grid = raw["x"]
-        log_rel = raw["log_relativity"]
-        rel = raw["relativity"]
-
-        se = ci_lo = ci_hi = None
-        if with_se and active and Cov_active is not None:
-            assert active_groups_cov is not None
-            se = feature_se_from_cov(
-                name,
-                Cov_active,
-                active_groups_cov,
-                result,
-                groups,
-                specs,
-                interaction_specs,
-                n_points=n_points,
-            )
-            ci_lo = _safe_exp(log_rel - z_alpha * se)
-            ci_hi = _safe_exp(log_rel + z_alpha * se)
-
-        return _recenter_term(
-            TermInference(
-                name=name,
-                kind="polynomial",
-                active=active,
-                x=x_grid,
-                log_relativity=log_rel,
-                relativity=rel,
-                se_log_relativity=se,
-                ci_lower=_maybe_array(ci_lo),
-                ci_upper=_maybe_array(ci_hi),
-                absorbs_intercept=True,
-                edf=edf,
-                smoothing_lambda=lam,
-                alpha=alpha,
-            ),
-            centering,
-            se_centered=_centered_se(
-                centering,
-                name,
-                Cov_active,
-                active_groups_cov,
-                result,
-                groups,
-                specs,
-                interaction_specs,
-                n_points=n_points,
-            ),
-        )
-
-    # ── Numeric ──────────────────────────────────────────────────
-    elif isinstance(spec, Numeric):
-        raw = spec.reconstruct(beta_combined)
-        log_rel = np.array([raw["coef"]])
-        rel = np.array([raw["relativity_per_unit"]])
-
-        se = ci_lo = ci_hi = None
-        if with_se and active and Cov_active is not None:
-            assert active_groups_cov is not None
-            se = feature_se_from_cov(
-                name,
-                Cov_active,
-                active_groups_cov,
-                result,
-                groups,
-                specs,
-                interaction_specs,
-            )
-            # Unclipped, as ``reconstruct`` exponentiates the point, so the
-            # interval contains the point out to float64's range.
-            with np.errstate(over="ignore", under="ignore"):
-                ci_lo = np.exp(log_rel - z_alpha * se)
-                ci_hi = np.exp(log_rel + z_alpha * se)
-
-        return _recenter_term(
-            TermInference(
-                name=name,
-                kind="numeric",
-                active=active,
-                log_relativity=log_rel,
-                relativity=rel,
-                se_log_relativity=se,
-                ci_lower=_maybe_array(ci_lo),
-                ci_upper=_maybe_array(ci_hi),
-                absorbs_intercept=False,
-                centering_mode="none",
-                edf=edf,
-                smoothing_lambda=lam,
-                alpha=alpha,
-            ),
-            centering,
-        )
-
-    # ── Piecewise ────────────────────────────────────────────────
-    elif isinstance(spec, Piecewise):
-        raw = spec.reconstruct(beta_combined)
-        knots = raw["knots"]
-        log_rel = raw["log_relativity"]
-
-        se = ci_lo = ci_hi = None
-        knot_cov = None
-        from superglm.inference.covariance import BinaryScaledCovariance
-
-        exponent = 0
-        if isinstance(Cov_active, BinaryScaledCovariance):
-            Cov_active, exponent = Cov_active.base, Cov_active.exponent
-        if with_se and active and Cov_active is not None:
-            assert active_groups_cov is not None
-            # The full per-knot covariance, not just its diagonal: plotting
-            # needs the off-diagonal terms to evaluate the band between knots
-            # exactly.  sqrt(diag) IS the per-knot SE (same basis map as
-            # feature_se_from_cov's Piecewise branch), so the two stay one
-            # computation rather than two that can drift.  It is also why this
-            # branch passes no `se_centered`: it publishes the covariance of
-            # its own reported vector, so `_recenter_term` transforms that and
-            # reads the centered errors off the diagonal.
-            knot_cov = piecewise_knot_covariance(name, Cov_active, active_groups_cov, specs)
-            se = (
-                np.sqrt(np.maximum(np.diag(knot_cov), 0.0))
-                if knot_cov is not None
-                else np.zeros(knots.size)
-            )
-            ci_lo = _safe_exp(log_rel - z_alpha * se)
-            ci_hi = _safe_exp(log_rel + z_alpha * se)
-
-        inference = _recenter_term(
-            TermInference(
-                name=name,
-                kind="piecewise",
-                active=active,
-                # x is the knot vector itself, not a display grid: a piecewise
-                # term is exactly determined by its values at the knots, so the
-                # curve, the editor handles and the workbook rows are the same
-                # J+2 points rather than three resamplings of one function.
-                x=knots,
-                log_relativity=log_rel,
-                relativity=_maybe_array(_safe_exp(log_rel)),
-                se_log_relativity=se,
-                ci_lower=_maybe_array(ci_lo),
-                ci_upper=_maybe_array(ci_hi),
-                knot_covariance=knot_cov,
-                absorbs_intercept=False,
-                centering_mode="base_knot",
-                # Report the MEASURED edf, not the nominal J+1.  The design
-                # states edf is fixed at J+1; that holds only while the group
-                # carries no shrinkage, and GroupInfo.penalized is True here, so
-                # a selection_penalty does shrink this block.  Measuring keeps
-                # the claim true where it applies and honest where it does not;
-                # the J+1 fallback is for callers that asked for no edf at all.
-                edf=edf if edf is not None else float(spec._non_base_indices.size),
-                # No smoothing lambda, never the global lambda2 fallback: the
-                # group carries no penalty matrix, so lambda2 contributes no
-                # smoothing penalty to this block, and reporting it would leak
-                # a nonexistent smoothing parameter into TermInference, editor
-                # metadata and plot payloads.  Selection shrinkage is a
-                # different object and is not a smoothing lambda either.
-                smoothing_lambda=None,
-                alpha=alpha,
-            ),
-            centering,
-        )
-        if exponent and inference.se_log_relativity is not None:
-            errors = np.ldexp(inference.se_log_relativity, exponent // 2)
-            with np.errstate(over="ignore"):
-                knot_cov = np.ldexp(inference.knot_covariance, exponent)
-            inference = replace(
-                inference,
-                se_log_relativity=errors,
-                knot_covariance=knot_cov,
-                ci_lower=_safe_exp(inference.log_relativity - z_alpha * errors),
-                ci_upper=_safe_exp(inference.log_relativity + z_alpha * errors),
-            )
-        return inference
-
-    else:
-        raise TypeError(f"Unknown feature type: {type(spec).__name__}")
+    return _TermReport(
+        name=name,
+        spec=spec,
+        result=result,
+        groups=groups,
+        specs=specs,
+        interaction_specs=interaction_specs,
+        covariance_fn=covariance_fn,
+        reml_lambdas=reml_lambdas,
+        lambda2=lambda2,
+        group_edf=group_edf,
+        with_se=with_se,
+        simultaneous=simultaneous,
+        n_points=n_points,
+        alpha=alpha,
+        n_sim=n_sim,
+        seed=seed,
+        centering=centering,
+        determines=determines,
+    ).inference()
 
 
 __all__ = [

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import textwrap
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from html import escape as html_escape
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import numpy as np
 
@@ -286,11 +287,11 @@ _SEPARATED_NOTE_BODY = (
     "as a RandomEffect, to price it."
 )
 _SEPARATED_NOTE = f"{_SEPARATED_TAG}: " + _SEPARATED_NOTE_BODY[0].lower() + _SEPARATED_NOTE_BODY[1:]
-_WALD_NOTE = (
-    "Note: smooth p-values use Wood (2013) Bayesian test.\n"
+_PARAMETRIC_WALD_NOTE = (
     "Parametric p-values are Wald approximations.\n"
     "For borderline significance, use a likelihood ratio test."
 )
+_WALD_NOTE = "Note: smooth p-values use Wood (2013) Bayesian test.\n" + _PARAMETRIC_WALD_NOTE
 _EDITOR_STALE_NOTE = (
     "Editor edits applied: coefficient standard errors, confidence intervals, "
     "and p-values are suppressed because they belong to the original fitted "
@@ -394,6 +395,145 @@ def _format_ascii_number(value: float | None, *, decimals: int, width: int) -> s
     raise ValueError(f"{numeric!r} cannot be represented in an ASCII field of width {width}")
 
 
+#: The coefficient columns' minimum widths: six numbers, then Sig and the advisory tag.
+_COEF_FIELD_WIDTHS = (10, 10, 8, 8, 9, 9, 3, 3)
+_STRUCTURED_KIND_LABELS = {
+    "random_effect": "random effect",
+    "factor_smooth_fs": "factor smooth (fs)",
+    "factor_smooth_sz": "factor smooth (sz)",
+}
+_LOW_CREDIBILITY_HEADING = "? Low-credibility levels, and the experience behind each:"
+
+
+@dataclass(frozen=True)
+class _Markup:
+    """How a renderer spells what the text and HTML summaries share."""
+
+    escape: Callable[[str], str]
+    lam: str
+    dash: str
+    less: str
+    chi2: str
+
+
+_TEXT = _Markup(escape=str, lam="lam", dash="-", less="<", chi2="chi2")
+_HTML = _Markup(escape=html_escape, lam="&lambda;", dash="&ndash;", less="&lt;", chi2="&chi;&sup2;")
+
+
+class _GroupText(NamedTuple):
+    """A group-test row in one renderer's markup."""
+
+    kind: str
+    text: str
+    has_test: bool
+    stars: str
+    detail: str
+
+
+def _row_kind(row: _CoefRow) -> str:
+    """Which of the table's row shapes a row takes."""
+    if row.structured_kind is not None:
+        return "structured"
+    if row.is_spline:
+        return "group"
+    if row.is_reference:
+        return "reference"
+    if (
+        row.coef is not None
+        and row.se is not None
+        and (row.se > 0 or (row.p is None and row.ci_low is not None and row.ci_high is not None))
+    ):
+        return "estimated"
+    return "blank"
+
+
+def _structured_text(row: _CoefRow, markup: _Markup) -> str:
+    """A structured term's one-line description; its levels have a dedicated report."""
+    structured_kind = cast(str, row.structured_kind)
+    kind = _STRUCTURED_KIND_LABELS.get(structured_kind, structured_kind.replace("_", " "))
+    detail = [f"{row.n_params} params"]
+    if row.n_levels is not None:
+        detail.insert(0, f"{row.n_levels} levels")
+    if row.edf is not None:
+        detail.append(f"edf={row.edf:.1f}")
+    detail.extend(f"{markup.escape(name)}={value:.2g}" for name, value in row.smoothing_lambdas)
+    return f"[{markup.escape(kind)}, {', '.join(detail)}; use dedicated term report]"
+
+
+def _group_text(row: _CoefRow, markup: _Markup) -> _GroupText:
+    """A group-test row's bracketed test and its detail line (edf, lambda, curve SE, rules)."""
+    has_test = bool(
+        row.active
+        and row.wald_chi2 is not None
+        and np.isfinite(row.wald_chi2)
+        and row.wald_p is not None
+        and np.isfinite(row.wald_p)
+    )
+    kind = _GROUP_TEST_KIND_LABELS.get(row.subgroup_type or "", "spline")
+    params = f"{row.n_params} params"
+    if not row.active:
+        return _GroupText(kind, f"[{kind}, {params}, inactive]", False, "", "")
+    detail = [f"rank={row.n_params}"]
+    if row.edf is not None:
+        detail.append(f"edf={row.edf:.1f}")
+    if row.smoothing_lambda is not None:
+        detail.append(f"{markup.lam}={row.smoothing_lambda:.2g}")
+    if row.curve_se_min is not None and not np.isnan(row.curve_se_min):
+        detail.append(f"curve SE: {row.curve_se_min:.2f}{markup.dash}{row.curve_se_max:.2f}")
+    if row.monotone is not None:
+        detail.append(markup.escape(_rules_text(row)))
+    if not has_test:
+        return _GroupText(kind, f"[{kind}, {params}, active]", False, "", ", ".join(detail))
+    assert row.wald_p is not None
+    p_text = f"{row.wald_p:.3f}" if row.wald_p >= 0.001 else f"{markup.less}0.001"
+    df_text = f"{row.ref_df:.1f}" if row.ref_df is not None else str(row.n_params)
+    text = f"[{kind}, {params}, {markup.chi2}({df_text})={row.wald_chi2:.1f}, p={p_text}]"
+    return _GroupText(kind, text, True, _sig_stars(row.wald_p), ", ".join(detail))
+
+
+def _ascii_numbers(row: _CoefRow | _BasisDetailRow) -> tuple[str, ...]:
+    """The six numeric fields of a coefficient or basis-detail row, each within its width."""
+    z_decimals = 1 if row.z is not None and np.isfinite(row.z) and abs(row.z) >= 100 else 3
+    values = (row.coef, row.se, row.z, row.p, row.ci_low, row.ci_high)
+    decimals = (4, 4, z_decimals, 3, 3, 3)
+    return tuple(
+        _format_ascii_number(value, decimals=places, width=width)
+        for value, places, width in zip(values, decimals, _COEF_FIELD_WIDTHS[:6], strict=True)
+    )
+
+
+def _html_number(value: float | None, decimals: int = 3) -> str:
+    """A finite value at ``decimals`` places, else ``---``."""
+    return f"{value:.{decimals}f}" if value is not None and np.isfinite(value) else "---"
+
+
+def _plain(text: str) -> str:
+    return text
+
+
+def _with_breaks(text: str) -> str:
+    return text.replace("\n", "<br>")
+
+
+def _escaped_with_breaks(text: str) -> str:
+    return html_escape(text).replace("\n", "<br>")
+
+
+# Each footer note's style: the text summary wraps the long free-text ones; the HTML
+# summary gives each its colour and escaping.  HTML shows no penalty abbreviations.
+_TEXT_WRAPPED_NOTES = frozenset({"warning", "shared_cell"})
+_HTML_NOTES: dict[str, tuple[str, Callable[[str], str]] | None] = {
+    "legend": ("color:#666;border:none;", _plain),
+    "low_credibility": ("color:#c60;border:none;", _with_breaks),
+    "separated": ("color:#c60;border:none;", _escaped_with_breaks),
+    "abbrevs": None,
+    "warning": ("color:#c60;white-space:normal;border:none;", html_escape),
+    "editor": ("color:#8a4b00;font-style:italic;border:none;", _plain),
+    "shared_cell": ("white-space:normal;border:none;", html_escape),
+    "method": ("color:#888;font-style:italic;border:none;", _with_breaks),
+}
+
+
 class ModelSummary:
     """Formatted model summary with ASCII and HTML output.
 
@@ -404,6 +544,9 @@ class ModelSummary:
     - ``summary['fit']`` — dict access (backward compat)
     - ``'fit' in summary`` — membership test (backward compat)
     - ``summary.to_dict()`` — full dict
+
+    Both renderers read one layout: the header rows (``_header_rows``), each row's shape
+    (``_row_kind``) and text, and the footer notes (``_notes``); each adds only markup.
     """
 
     def __init__(
@@ -470,17 +613,16 @@ class ModelSummary:
             return f"{v:.4f}"
         return str(v)
 
-    # ── ASCII output ──────────────────────────────────────────────
+    # ── The layout both renderers read ────────────────────────────
 
-    def __str__(self) -> str:
-        info = self._info
-        half = self._alpha / 2.0
-        _fmt = self._fmt_scalar
-        display_rows = self._display_rows
-        has_level_groups = bool(self._level_groups)
-        has_level_fit = any(row.level_fit is not None for row in display_rows)
+    def _header_rows(self, *, suffix_on_parametric: bool) -> list[tuple[str, str, str, str]]:
+        """The header's (label, value, label, value) rows.
 
-        # Compute EDF breakdown from coef rows
+        The effective-df cell names its smooth share when some EDF is smooth; the text
+        summary also does when the EDF is all parametric (``suffix_on_parametric``), the
+        HTML summary does not.
+        """
+        info, fmt = self._info, self._fmt_scalar
         smooth_edf = sum(
             r.edf
             for r in self._coef_rows
@@ -491,971 +633,543 @@ class ModelSummary:
             for r in self._coef_rows
             if not _is_smooth_group_row(r) and r.structured_kind is None and r.edf is not None
         )
-        total_edf = info["effective_df"]
-        edf_str = _fmt(total_edf)
-        if smooth_edf > 0 or parametric_edf > 0:
-            edf_str = f"{_fmt(total_edf)} ({_fmt(smooth_edf)} smooth)"
-
-        # Build header rows first (needed to compute minimum width)
-        conv_str = f"{info['converged']} ({info['n_iter']} iter)"
+        edf_text = fmt(info["effective_df"])
+        if smooth_edf > 0 or (suffix_on_parametric and parametric_edf > 0):
+            edf_text = f"{fmt(info['effective_df'])} ({fmt(smooth_edf)} smooth)"
         rows = [
             ("Family", info["family"], "No. Observations", str(info["n_obs"])),
-            ("Link", info["link"], "Df (effective)", edf_str),
+            ("Link", info["link"], "Df (effective)", edf_text),
             ("Method", _display_method(info.get("method", "ML")), "Penalty", info["penalty"]),
             (
                 "Scale (phi)",
-                _scale_cell(info, _fmt),
+                _scale_cell(info, fmt),
                 "Pearson chi2",
-                _fmt(info.get("pearson_chi2", "")),
+                fmt(info.get("pearson_chi2", "")),
             ),
-            ("Log-Likelihood", _fmt(info["log_likelihood"]), "AIC", _fmt(info["aic"])),
-            ("AICc", _fmt(info["aicc"]), "BIC", _fmt(info["bic"])),
-            ("EBIC", _fmt(info["ebic"]), "Converged", conv_str),
-            ("Deviance", _fmt(info["deviance"]), "", ""),
+            ("Log-Likelihood", fmt(info["log_likelihood"]), "AIC", fmt(info["aic"])),
+            ("AICc", fmt(info["aicc"]), "BIC", fmt(info["bic"])),
+            (
+                "EBIC",
+                fmt(info["ebic"]),
+                "Converged",
+                f"{info['converged']} ({info['n_iter']} iter)",
+            ),
+            ("Deviance", fmt(info["deviance"]), "", ""),
         ]
         if info.get("weight_semantics"):
             rows.append(("Weights", f"{info['weight_semantics']} weights", "", ""))
-        rows.extend(_robust_covariance_header_rows(info, _fmt))
-        rows.extend(_likelihood_scale_rows(info, _fmt))
-
-        # NB theta profile row
+        rows.extend(_robust_covariance_header_rows(info, fmt))
+        rows.extend(_likelihood_scale_rows(info, fmt))
         if "nb_theta" in info:
-            theta_str = _format_profile_estimate(
+            theta = _format_profile_estimate(
                 info["nb_theta"], info["nb_theta_ci"], info["nb_theta_ci_status"]
             )
-            rows.append(("Theta", theta_str, *_profile_nll_cell(info, "nb_profile_nll")))
-
-        # Tweedie p profile row
+            rows.append(("Theta", theta, *_profile_nll_cell(info, "nb_profile_nll")))
         if "tweedie_p" in info:
-            p_str = _format_profile_estimate(
-                info["tweedie_p"],
-                info.get("tweedie_p_ci"),
-                info.get("tweedie_p_ci_status"),
+            p_text = _format_profile_estimate(
+                info["tweedie_p"], info.get("tweedie_p_ci"), info.get("tweedie_p_ci_status")
             )
-            rows.append(("Tweedie p", p_str, *_profile_nll_cell(info, "tweedie_profile_nll")))
+            rows.append(("Tweedie p", p_text, *_profile_nll_cell(info, "tweedie_profile_nll")))
+        return rows
 
-        # Compute content width from coefficient columns AND header values
-        # Every coefficient field has an explicit leading separator.  Widths
-        # remain minimum alignment widths, never implicit column boundaries.
-        coef_field_widths = (10, 10, 8, 8, 9, 9, 3, 3)
-        name_w = max(len(r.name) for r in display_rows) if display_rows else 10
-        basis_name_w = max(
-            (
-                len(f"  Coef {basis_row.basis_index + 1}")
-                for basis_rows in self._basis_detail.values()
-                for basis_row in basis_rows
-            ),
-            default=0,
-        )
-        name_w = max(name_w, basis_name_w, len("Term"), 10)
-        level_group_w = (
-            max(len("Level group"), *(len(row.level_group) for row in display_rows))
-            if has_level_groups
-            else 0
-        )
-        level_fit_w = (
-            max(len("Fit"), *(len(row.level_fit or "") for row in display_rows)) + 2
-            if has_level_fit
-            else 0
-        )
-        coef_W = (
-            name_w + level_group_w + level_fit_w + sum(coef_field_widths) + len(coef_field_widths)
-        )
+    def _column_names(self) -> tuple[str, ...]:
+        half = self._alpha / 2.0
+        return ("coef", "std err", "z", "P>|z|", f"[{half:.3f}", f"{1 - half:.3f}]", "Sig")
 
-        # Header layout: "{k1:20}{v1:>val}  {k2:20}{v2:>val}" → need val >= max value len
-        # Each half = 20 (key) + val; total = 20 + val + 2 + 20 + val = 42 + 2*val
-        max_val = max(max(len(v1), len(v2)) for _, v1, _, v2 in rows if v2) if rows else 0
-        header_W = 42 + 2 * max_val
-
-        W = max(coef_W, header_W)  # content width
-        F = W + 2  # fill width (between border chars, includes padding spaces)
-
-        # Box-drawing characters (avoid backslash in f-strings for Python <3.12)
-        _D = "\u2550"  # ═ double horizontal
-        _S = "\u2500"  # ─ single horizontal
-        _TL = "\u2554"  # ╔
-        _TR = "\u2557"  # ╗
-        _BL = "\u255a"  # ╚
-        _BR = "\u255d"  # ╝
-        _V = "\u2551"  # ║
-        _ML = "\u2560"  # ╠
-        _MR = "\u2563"  # ╣
-        _SL = "\u255f"  # ╟
-        _SR = "\u2562"  # ╢
-        _LT = "\u2561"  # ╡
-        _RT = "\u255e"  # ╞
-
-        # Box-drawing helpers
-        def _top(text: str = "") -> str:
-            if text:
-                pad = F - len(text)
-                left = pad // 2
-                right = pad - left
-                return f"{_TL}{_D * left}{text}{_D * right}{_TR}"
-            return f"{_TL}{_D * F}{_TR}"
-
-        def _mid() -> str:
-            return f"{_ML}{_D * F}{_MR}"
-
-        def _thin() -> str:
-            return f"{_SL}{_S * F}{_SR}"
-
-        def _group_sep(name: str) -> str:
-            label = f"{_LT} {name} {_RT}"
-            label_cols = len(name) + 4
-            pad = F - label_cols
-            left = pad // 2
-            right = pad - left
-            return f"{_ML}{_D * left}{label}{_D * right}{_MR}"
-
-        def _row(text: str) -> str:
-            return f"{_V} {text:<{W}s} {_V}"
-
-        def _bot() -> str:
-            return f"{_BL}{_D * F}{_BR}"
-
-        def _coef_prefix(row: _CoefRow, *, name: str | None = None) -> str:
-            prefix = f"{row.name if name is None else name:<{name_w}s}"
-            if has_level_groups:
-                prefix += f"{row.level_group if name is None else '':>{level_group_w}s}"
-            if has_level_fit:
-                fit = (row.level_fit or "") if name is None else ""
-                prefix += f"{fit:>{level_fit_w}s}"
-            return prefix
-
-        def _coef_fields(
-            coef: str,
-            se: str,
-            z: str,
-            p: str,
-            ci_low: str,
-            ci_high: str,
-            sig: str = "",
-            advisory: str = "",
-        ) -> str:
-            numeric = (coef, se, z, p, ci_low, ci_high)
-            rendered = "".join(
-                f" {value:>{width}s}"
-                for value, width in zip(numeric, coef_field_widths[:6], strict=True)
-            )
-            return f"{rendered} {sig or '---':<3s} {advisory or '---':<3s}"
-
-        lines: list[str] = []
-
-        # Title
-        lines.append(_top(" SuperGLM Results "))
-
-        # Header key-value pairs
-        val_w = (W - 42) // 2
-        val_l = val_w
-        val_r = W - 42 - val_w  # absorb odd remainder
-
-        def _header_row(k1: str, v1: str, k2: str, v2: str) -> str:
-            left = f"{k1 + ':':<20s}{v1:>{val_l}s}"
-            right_label = f"{k2 + ':':<20s}" if k2 else " " * 20
-            right = f"{right_label}{v2:>{val_r}s}"
-            return _row(f"{left}  {right}")
-
-        for k1, v1, k2, v2 in rows:
-            lines.append(_header_row(k1, v1, k2, v2))
-        lines.append(_mid())
-
-        # Coefficient table header
-        hdr_prefix = f"{'Term':<{name_w}s}"
-        if has_level_groups:
-            hdr_prefix += f"{'Level group':>{level_group_w}s}"
-        if has_level_fit:
-            hdr_prefix += f"{'Fit':>{level_fit_w}s}"
-        hdr = hdr_prefix + _coef_fields(
-            "coef",
-            "std err",
-            "z",
-            "P>|z|",
-            "[" + f"{half:.3f}",
-            f"{1 - half:.3f}" + "]",
-            "Sig",
-            _LOW_CREDIBILITY_TAG,
-        )
-        lines.append(_row(hdr))
-        lines.append(_thin())
-
-        # Coefficient rows with group separators
-        level_rules = _level_rule_notes(display_rows)
-        prev_group = None
-        for row in display_rows:
-            # Emit group separator when the group changes (blank rows for breathing room)
-            if row.group and row.group != prev_group:
-                if prev_group is not None:
-                    lines.append(_row(""))
-                lines.append(_group_sep(row.group))
-                lines.append(_row(""))
-                if row.group in level_rules:
-                    lines.append(_row(f"  {level_rules[row.group]}"))
-            prev_group = row.group
-
-            if row.structured_kind is not None:
-                kind = {
-                    "random_effect": "random effect",
-                    "factor_smooth_fs": "factor smooth (fs)",
-                    "factor_smooth_sz": "factor smooth (sz)",
-                }.get(row.structured_kind, row.structured_kind.replace("_", " "))
-                detail = [f"{row.n_params} params"]
-                if row.n_levels is not None:
-                    detail.insert(0, f"{row.n_levels} levels")
-                if row.edf is not None:
-                    detail.append(f"edf={row.edf:.1f}")
-                detail.extend(f"{name}={value:.2g}" for name, value in row.smoothing_lambdas)
-                lines.append(
-                    _row(
-                        f"{_coef_prefix(row)}  "
-                        f"[{kind}, {', '.join(detail)}; use dedicated term report]"
-                    )
-                )
-                continue
-
-            if row.is_spline:
-                has_test = (
-                    row.active
-                    and row.wald_chi2 is not None
-                    and np.isfinite(row.wald_chi2)
-                    and row.wald_p is not None
-                    and np.isfinite(row.wald_p)
-                )
-                kind = _GROUP_TEST_KIND_LABELS.get(row.subgroup_type or "", "spline")
-                param_label = f"{row.n_params} params"
-                # Build detail line: edf, lambda, curve SE, monotone
-                detail_parts = []
-                detail_parts.append(f"rank={row.n_params}")
-                if row.edf is not None:
-                    detail_parts.append(f"edf={row.edf:.1f}")
-                if row.smoothing_lambda is not None:
-                    detail_parts.append(f"lam={row.smoothing_lambda:.2g}")
-                if row.active and row.curve_se_min is not None and not np.isnan(row.curve_se_min):
-                    detail_parts.append(f"curve SE: {row.curve_se_min:.2f}-{row.curve_se_max:.2f}")
-                if row.monotone is not None:
-                    detail_parts.append(_rules_text(row))
-                detail_str = ", ".join(detail_parts)
-
-                if has_test:
-                    assert row.wald_p is not None
-                    p_str = f"{row.wald_p:.3f}" if row.wald_p >= 0.001 else "<0.001"
-                    stars = _sig_stars(row.wald_p)
-                    if row.ref_df is not None:
-                        df_str = f"{row.ref_df:.1f}"
-                    else:
-                        df_str = str(row.n_params)
-                    spline_text = (
-                        f"[{kind}, {param_label}, chi2({df_str})={row.wald_chi2:.1f}, p={p_str}]"
-                    )
-                    # Placed at the header's own Sig offset: a group row hand-builds its line, and padding to
-                    # the box edge put stars in the advisory field. ``_coef_fields`` emits six numeric fields
-                    # each preceded by a space, then a space and the 3-wide Sig.
-                    row_prefix = _coef_prefix(row)
-                    sig_col = len(row_prefix) + sum(coef_field_widths[:6]) + 7
-                    # Elided rather than allowed to push the stars right: a clamped pad slides them out of Sig
-                    # on a long group text and overruns the box. ``room`` is exactly the space before Sig (two
-                    # characters go to the gap after the term name).
-                    room = sig_col - len(row_prefix) - 2
-                    overflow = len(spline_text) - room
-                    if overflow > 0:
-                        # The kind is elided, not the ``p=`` tail: the console is the only place the whole-term
-                        # p-value appears, and the HTML row prints it in full, so cutting it would make the two
-                        # renderers disagree.
-                        keep = len(kind) - overflow - 1
-                        if keep >= 1:
-                            spline_text = spline_text.replace(f"[{kind},", f"[{kind[:keep]}…,", 1)
-                        else:
-                            spline_text = spline_text[: max(room - 1, 0)] + "…"
-                    prefix = f"{row_prefix}  {spline_text}"
-                    pad = max(sig_col - len(prefix), 0)
-                    lines.append(_row(f"{prefix}{'':<{pad}s}{stars:<3s} {'':<3s}"))
-                    if detail_str:
-                        lines.append(
-                            _row(f"{'':<{name_w + level_group_w + level_fit_w}s}    {detail_str}")
-                        )
-                elif row.active:
-                    spline_text = f"[{kind}, {param_label}, active]"
-                    lines.append(_row(f"{_coef_prefix(row)}  {spline_text}"))
-                    if detail_str:
-                        lines.append(
-                            _row(f"{'':<{name_w + level_group_w + level_fit_w}s}    {detail_str}")
-                        )
-                else:
-                    spline_text = f"[{kind}, {param_label}, inactive]"
-                    lines.append(_row(f"{_coef_prefix(row)}  {spline_text}"))
-
-                # Coefficient detail rows (only for detail="full")
-                if self._detail == "full" and row.name in self._basis_detail:
-                    for br in self._basis_detail[row.name]:
-                        b_stars = _sig_stars(br.p)
-                        b_label = f"  Coef {br.basis_index + 1}"
-                        bz_decimals = (
-                            1 if br.z is not None and np.isfinite(br.z) and abs(br.z) >= 100 else 3
-                        )
-                        lines.append(
-                            _row(
-                                f"{_coef_prefix(row, name=b_label)}"
-                                + _coef_fields(
-                                    _format_ascii_number(
-                                        br.coef,
-                                        decimals=4,
-                                        width=coef_field_widths[0],
-                                    ),
-                                    _format_ascii_number(
-                                        br.se,
-                                        decimals=4,
-                                        width=coef_field_widths[1],
-                                    ),
-                                    _format_ascii_number(
-                                        br.z,
-                                        decimals=bz_decimals,
-                                        width=coef_field_widths[2],
-                                    ),
-                                    _format_ascii_number(
-                                        br.p,
-                                        decimals=3,
-                                        width=coef_field_widths[3],
-                                    ),
-                                    _format_ascii_number(
-                                        br.ci_low,
-                                        decimals=3,
-                                        width=coef_field_widths[4],
-                                    ),
-                                    _format_ascii_number(
-                                        br.ci_high,
-                                        decimals=3,
-                                        width=coef_field_widths[5],
-                                    ),
-                                    b_stars,
-                                )
-                            )
-                        )
-
-            elif row.is_reference:
-                lines.append(
-                    _row(
-                        f"{_coef_prefix(row)}"
-                        + _coef_fields("0.0000", "ref", "---", "---", "---", "---")
-                    )
-                )
-            elif (
-                row.coef is not None
-                and row.se is not None
-                and (
-                    row.se > 0
-                    or (row.p is None and row.ci_low is not None and row.ci_high is not None)
-                )
-            ):
-                stars = _sig_stars(row.p)
-                advisory = "?" if row.quasi_separated else ""
-                z_decimals = (
-                    1 if row.z is not None and np.isfinite(row.z) and abs(row.z) >= 100 else 3
-                )
-                lines.append(
-                    _row(
-                        f"{_coef_prefix(row)}"
-                        + _coef_fields(
-                            _format_ascii_number(
-                                row.coef,
-                                decimals=4,
-                                width=coef_field_widths[0],
-                            ),
-                            _format_ascii_number(
-                                row.se,
-                                decimals=4,
-                                width=coef_field_widths[1],
-                            ),
-                            _format_ascii_number(
-                                row.z,
-                                decimals=z_decimals,
-                                width=coef_field_widths[2],
-                            ),
-                            _format_ascii_number(
-                                row.p,
-                                decimals=3,
-                                width=coef_field_widths[3],
-                            ),
-                            _format_ascii_number(
-                                row.ci_low,
-                                decimals=3,
-                                width=coef_field_widths[4],
-                            ),
-                            _format_ascii_number(
-                                row.ci_high,
-                                decimals=3,
-                                width=coef_field_widths[5],
-                            ),
-                            stars,
-                            advisory,
-                        )
-                    )
-                )
-            else:
-                coef_str = _format_ascii_number(
-                    row.coef,
-                    decimals=4,
-                    width=coef_field_widths[0],
-                )
-                lines.append(
-                    _row(
-                        f"{_coef_prefix(row)}"
-                        + _coef_fields(
-                            coef_str,
-                            "---",
-                            "---",
-                            "---",
-                            "---",
-                            "---",
-                            advisory=_SEPARATED_TAG if row.separated else "",
-                        )
-                    )
-                )
-
-        lines.append(_bot())
-        if self._level_display == "grouped" and self._level_groups:
-            groups_by_feature: dict[str, list[Any]] = {}
+    def _level_group_legends(self) -> dict[str, list[Any]]:
+        """Each grouped feature's fitted level groups, when levels are shown grouped."""
+        legends: dict[str, list[Any]] = {}
+        if self._level_display == "grouped":
             for item in self._level_groups:
-                groups_by_feature.setdefault(item.feature, []).append(item)
-            for feature, feature_groups in groups_by_feature.items():
-                mapping = "; ".join(
-                    f"{item.group_id} = {', '.join(item.members)}" for item in feature_groups
-                )
-                legend = f"Level groups ({feature}): {mapping}"
-                lines.extend(
-                    textwrap.wrap(
-                        legend,
-                        width=max(60, min(W + 2, 100)),
-                        subsequent_indent="  ",
-                    )
-                )
-        lines.append(_SIG_LEGEND)
-        has_low_credibility = any(r.quasi_separated for r in display_rows)
-        if has_low_credibility:
-            lines.append(_LOW_CREDIBILITY_NOTE)
-        if any(r.separated for r in display_rows):
-            lines.append(_SEPARATED_NOTE)
+                legends.setdefault(item.feature, []).append(item)
+        return legends
+
+    def _notes(self) -> list[tuple[str, str]]:
+        """The footer notes, each with its style, in the order both renderers print them."""
+        info, rows = self._info, self._display_rows
+        notes = [("legend", _SIG_LEGEND)]
+        if any(r.quasi_separated for r in rows):
+            notes.append(("low_credibility", _LOW_CREDIBILITY_NOTE))
+        if any(r.separated for r in rows):
+            notes.append(("separated", _SEPARATED_NOTE))
         abbrevs = info.get("penalty_abbrevs", {})
         if abbrevs:
-            lines.append("; ".join(f"{k}: {v}" for k, v in abbrevs.items()))
+            notes.append(("abbrevs", "; ".join(f"{k}: {v}" for k, v in abbrevs.items())))
         for note in (info.get("convergence_note"), info.get("standard_error_note")):
             if note:
-                lines.extend(textwrap.wrap(note, width=max(60, min(W + 2, 100))))
-        for note in _editor_notes(info):
-            lines.append(note)
-        for note in info.get("shared_cell_rows") or ():
-            lines.extend(textwrap.wrap(note, width=max(60, min(W + 2, 100))))
-        has_smooth = any(_is_smooth_group_row(r) for r in self._coef_rows)
+                notes.append(("warning", note))
+        notes.extend(("editor", note) for note in _editor_notes(info))
+        notes.extend(("shared_cell", note) for note in info.get("shared_cell_rows") or ())
         if not info.get("editor_inference_stale", False):
-            if info.get("covariance_method"):
-                lines.append(_robust_covariance_note(info, has_smooth=has_smooth))
-            elif has_smooth:
-                lines.append(_WALD_NOTE)
-            else:
-                lines.append(
-                    "Parametric p-values are Wald approximations.\n"
-                    "For borderline significance, use a likelihood ratio test."
-                )
+            notes.append(("method", self._method_note()))
+        return notes
 
-        # Low-credibility footnote
-        low_credibility_rows = [
-            r for r in display_rows if r.quasi_separated and r.level_n_obs is not None
+    def _method_note(self) -> str:
+        """What the p-values are: robust, Wood's test beside Wald, or Wald alone."""
+        has_smooth = any(_is_smooth_group_row(r) for r in self._coef_rows)
+        if self._info.get("covariance_method"):
+            return _robust_covariance_note(self._info, has_smooth=has_smooth)
+        return _WALD_NOTE if has_smooth else _PARAMETRIC_WALD_NOTE
+
+    def _low_credibility_levels(self) -> list[tuple[str, int, float]]:
+        """Each flagged level's label, row count and exposure percentage."""
+        return [
+            (
+                _low_credibility_label(r),
+                r.level_n_obs,
+                r.level_exposure_share * 100 if r.level_exposure_share is not None else 0,
+            )
+            for r in self._display_rows
+            if r.quasi_separated and r.level_n_obs is not None
         ]
-        if low_credibility_rows:
-            lines.append("")
-            lines.append("? Low-credibility levels, and the experience behind each:")
-            for r in low_credibility_rows:
-                exp_pct = r.level_exposure_share * 100 if r.level_exposure_share is not None else 0
-                lines.append(
-                    f"    {_low_credibility_label(r)}: {r.level_n_obs} obs ({exp_pct:.2f}% exposure)"
-                )
 
+    # ── ASCII output ──────────────────────────────────────────────
+
+    def __str__(self) -> str:
+        header = self._header_rows(suffix_on_parametric=True)
+        box = _TextBox(self, header)
+        lines = [box.top(" SuperGLM Results ")]
+        lines.extend(box.header_row(*cells) for cells in header)
+        lines.append(box.mid())
+        columns = box.prefix("Term", "Level group", "Fit")
+        names = self._column_names()
+        lines.append(box.row(columns + box.fields(names[:6], names[6], _LOW_CREDIBILITY_TAG)))
+        lines.append(box.thin())
+        lines.extend(self._text_body(box))
+        lines.append(box.bot())
+        lines.extend(self._text_footer(box.W))
         return "\n".join(lines)
 
     def __repr__(self) -> str:
         return self.__str__()
 
+    def _text_body(self, box: _TextBox) -> list[str]:
+        """The coefficient rows, under a separator wherever the group changes."""
+        lines: list[str] = []
+        level_rules = _level_rule_notes(self._display_rows)
+        prev_group = None
+        for row in self._display_rows:
+            if row.group and row.group != prev_group:
+                if prev_group is not None:
+                    lines.append(box.row(""))
+                lines.extend((box.group_sep(row.group), box.row("")))
+                if row.group in level_rules:
+                    lines.append(box.row(f"  {level_rules[row.group]}"))
+            prev_group = row.group
+            lines.extend(self._text_row(box, row))
+        return lines
+
+    def _text_row(self, box: _TextBox, row: _CoefRow) -> list[str]:
+        prefix = box.prefix(row.name, row.level_group, row.level_fit or "")
+        kind = _row_kind(row)
+        if kind == "structured":
+            return [box.row(f"{prefix}  {_structured_text(row, _TEXT)}")]
+        if kind == "group":
+            return self._text_group_row(box, row, prefix)
+        if kind == "reference":
+            return [box.row(prefix + box.fields(("0.0000", "ref", "---", "---", "---", "---")))]
+        if kind == "estimated":
+            advisory = "?" if row.quasi_separated else ""
+            return [box.row(prefix + box.fields(_ascii_numbers(row), _sig_stars(row.p), advisory))]
+        coef = _format_ascii_number(row.coef, decimals=4, width=_COEF_FIELD_WIDTHS[0])
+        advisory = _SEPARATED_TAG if row.separated else ""
+        return [box.row(prefix + box.fields((coef, *("---",) * 5), advisory=advisory))]
+
+    def _text_group_row(self, box: _TextBox, row: _CoefRow, prefix: str) -> list[str]:
+        group = _group_text(row, _TEXT)
+        if group.has_test:
+            lines = [box.row(box.sig_aligned(prefix, group))]
+        else:
+            lines = [box.row(f"{prefix}  {group.text}")]
+        if group.detail:
+            lines.append(box.row(f"{box.prefix('')}    {group.detail}"))
+        if self._detail == "full":
+            for br in self._basis_detail.get(row.name, ()):
+                label = box.prefix(f"  Coef {br.basis_index + 1}")
+                lines.append(box.row(label + box.fields(_ascii_numbers(br), _sig_stars(br.p))))
+        return lines
+
+    def _text_footer(self, width: int) -> list[str]:
+        wrap_width = max(60, min(width + 2, 100))
+        lines: list[str] = []
+        for feature, items in self._level_group_legends().items():
+            mapping = "; ".join(f"{item.group_id} = {', '.join(item.members)}" for item in items)
+            legend = f"Level groups ({feature}): {mapping}"
+            lines.extend(textwrap.wrap(legend, width=wrap_width, subsequent_indent="  "))
+        for style, note in self._notes():
+            if style in _TEXT_WRAPPED_NOTES:
+                lines.extend(textwrap.wrap(note, width=wrap_width))
+            else:
+                lines.append(note)
+        levels = self._low_credibility_levels()
+        if levels:
+            lines.extend(("", _LOW_CREDIBILITY_HEADING))
+            lines.extend(
+                f"    {label}: {n_obs} obs ({share:.2f}% exposure)"
+                for label, n_obs, share in levels
+            )
+        return lines
+
     # ── HTML output ───────────────────────────────────────────────
 
     def _repr_html_(self) -> str:
-        info = self._info
-        half = self._alpha / 2.0
-        _fmt = self._fmt_scalar
-        display_rows = self._display_rows
-        has_level_groups = bool(self._level_groups)
-        has_level_fit = any(row.level_fit is not None for row in display_rows)
-        extra_cols = int(has_level_groups) + int(has_level_fit)
-        ncols = 9 + extra_cols
-
-        css = "border-collapse:collapse;font-family:monospace;font-size:13px;margin:8px 0;"
-        cell = "padding:3px 8px;text-align:right;border:none;"
-        cell_l = "padding:3px 8px;text-align:left;border:none;"
-        hdr_cell = "padding:3px 8px;text-align:right;font-weight:bold;border:none;"
-        hdr_cell_l = "padding:3px 8px;text-align:left;font-weight:bold;border:none;"
-        sep_style = "border-bottom:1px solid #999;"
-        label_style = "padding:3px 8px;text-align:left;font-weight:bold;color:#555;border:none;"
-        sig_cell = "padding:3px 4px;text-align:left;border:none;"
-
-        def _level_group_cell(row: _CoefRow) -> str:
-            if not has_level_groups:
-                return ""
-            return f'<td style="{cell_l}">{html_escape(row.level_group)}</td>'
-
-        def _level_fit_cell(row: _CoefRow) -> str:
-            if not has_level_fit:
-                return ""
-            return f'<td style="{cell_l}">{html_escape(row.level_fit or "")}</td>'
-
-        parts: list[str] = []
-        parts.append(f'<table style="{css}">')
-
-        # Title
-        parts.append(
-            f'<tr><td colspan="{ncols}" style="text-align:center;font-weight:bold;'
+        page = _HtmlTable(self)
+        parts = [
+            f'<table style="{_HTML_TABLE_STYLE}">',
+            f'<tr><td colspan="{page.ncols}" style="text-align:center;font-weight:bold;'
             f'padding:8px;font-size:15px;border-bottom:2px solid #333;">'
-            f"SuperGLM Results</td></tr>"
-        )
-
-        # Compute EDF breakdown (same as ASCII path)
-        smooth_edf_html = sum(
-            r.edf
-            for r in self._coef_rows
-            if (_is_smooth_group_row(r) or r.structured_kind is not None) and r.edf is not None
-        )
-        total_edf_html = info["effective_df"]
-        edf_str_html = _fmt(total_edf_html)
-        if smooth_edf_html > 0:
-            edf_str_html = f"{_fmt(total_edf_html)} ({_fmt(smooth_edf_html)} smooth)"
-
-        # Header rows
-        conv_str = f"{info['converged']} ({info['n_iter']} iter)"
-        header_rows = [
-            ("Family", info["family"], "No. Observations", str(info["n_obs"])),
-            ("Link", info["link"], "Df (effective)", edf_str_html),
-            ("Method", _display_method(info.get("method", "ML")), "Penalty", info["penalty"]),
-            (
-                "Scale (phi)",
-                _scale_cell(info, _fmt),
-                "Pearson chi2",
-                _fmt(info.get("pearson_chi2", "")),
-            ),
-            ("Log-Likelihood", _fmt(info["log_likelihood"]), "AIC", _fmt(info["aic"])),
-            ("AICc", _fmt(info["aicc"]), "BIC", _fmt(info["bic"])),
-            ("EBIC", _fmt(info["ebic"]), "Converged", conv_str),
-            ("Deviance", _fmt(info["deviance"]), "", ""),
+            f"SuperGLM Results</td></tr>",
         ]
-        if info.get("weight_semantics"):
-            header_rows.append(("Weights", f"{info['weight_semantics']} weights", "", ""))
-        header_rows.extend(_robust_covariance_header_rows(info, _fmt))
-        header_rows.extend(_likelihood_scale_rows(info, _fmt))
-
-        # NB theta profile row
-        if "nb_theta" in info:
-            theta_str = _format_profile_estimate(
-                info["nb_theta"], info["nb_theta_ci"], info["nb_theta_ci_status"]
-            )
-            header_rows.append(("Theta", theta_str, *_profile_nll_cell(info, "nb_profile_nll")))
-
-        # Tweedie p profile row
-        if "tweedie_p" in info:
-            p_str = _format_profile_estimate(
-                info["tweedie_p"],
-                info.get("tweedie_p_ci"),
-                info.get("tweedie_p_ci_status"),
-            )
-            header_rows.append(
-                ("Tweedie p", p_str, *_profile_nll_cell(info, "tweedie_profile_nll"))
-            )
-        for k1, v1, k2, v2 in header_rows:
-            right_label = f"{k2}:" if k2 else ""
-            parts.append(
-                f"<tr>"
-                f'<td style="{label_style}">{k1}:</td>'
-                f'<td style="{cell}">{v1}</td>'
-                f'<td style="{cell}"></td>'
-                f'<td style="{label_style}">{right_label}</td>'
-                f'<td colspan="{ncols - 4}" style="{cell}">{v2}</td>'
-                f"</tr>"
-            )
-
-        # Separator
-        parts.append(f'<tr><td colspan="{ncols}" style="{sep_style}"></td></tr>')
-
-        # Coefficient table header
-        col_names = [""]
-        if has_level_groups:
-            col_names.append("Level group")
-        if has_level_fit:
-            col_names.append("Fit")
-        col_names.extend(
-            [
-                "coef",
-                "std err",
-                "z",
-                "P>|z|",
-                f"[{half:.3f}",
-                f"{1 - half:.3f}]",
-                "Sig",
-                _LOW_CREDIBILITY_TAG,
-            ]
+        parts.extend(
+            page.header_row(*cells) for cells in self._header_rows(suffix_on_parametric=False)
         )
-        parts.append("<tr>")
-        parts.append(f'<td style="{hdr_cell_l}">{col_names[0]}</td>')
-        first_numeric = 1 + extra_cols
-        for cn in col_names[1:first_numeric]:
-            parts.append(f'<td style="{hdr_cell_l}">{cn}</td>')
-        for cn in col_names[first_numeric:-1]:
-            parts.append(f'<td style="{hdr_cell}">{cn}</td>')
-        parts.append(f'<td style="{hdr_cell_l}">{col_names[-1]}</td>')
-        parts.append("</tr>")
-        parts.append(f'<tr><td colspan="{ncols}" style="{sep_style}"></td></tr>')
-
-        # Coefficient rows with group separators
-        group_sep_style = (
-            "padding:2px 8px;text-align:left;font-weight:bold;color:#555;"
-            "border-top:1px solid #bbb;border-bottom:none;font-size:12px;"
+        parts.append(page.separator())
+        parts.extend(page.column_header(self._column_names()))
+        parts.append(page.separator())
+        parts.extend(self._html_body(page))
+        parts.extend(
+            page.level_group_legend(feature, items)
+            for feature, items in self._level_group_legends().items()
         )
-        level_rules = _level_rule_notes(display_rows)
-        prev_group = None
-        for row in display_rows:
-            if row.group and row.group != prev_group:
-                parts.append(
-                    f'<tr><td colspan="{ncols}" style="{group_sep_style}">'
-                    f"{html_escape(row.group)}</td></tr>"
-                )
-                if row.group in level_rules:
-                    parts.append(
-                        f'<tr><td colspan="{ncols}" style="padding:0 8px 2px;'
-                        f'font-size:11px;color:#555;">{html_escape(level_rules[row.group])}</td></tr>'
-                    )
-            prev_group = row.group
-
-            if row.structured_kind is not None:
-                kind = {
-                    "random_effect": "random effect",
-                    "factor_smooth_fs": "factor smooth (fs)",
-                    "factor_smooth_sz": "factor smooth (sz)",
-                }.get(row.structured_kind, row.structured_kind.replace("_", " "))
-                detail = [f"{row.n_params} params"]
-                if row.n_levels is not None:
-                    detail.insert(0, f"{row.n_levels} levels")
-                if row.edf is not None:
-                    detail.append(f"edf={row.edf:.1f}")
-                detail.extend(
-                    f"{html_escape(name)}={value:.2g}" for name, value in row.smoothing_lambdas
-                )
-                text = f"[{html_escape(kind)}, {', '.join(detail)}; use dedicated term report]"
-                parts.append(
-                    f"<tr>"
-                    f'<td style="{cell_l}">{html_escape(row.name)}</td>'
-                    f"{_level_group_cell(row)}"
-                    f"{_level_fit_cell(row)}"
-                    f'<td colspan="{ncols - 1 - extra_cols}" '
-                    f'style="{cell_l};color:#666;font-style:italic;">{text}</td>'
-                    f"</tr>"
-                )
-                continue
-
-            if row.is_spline:
-                has_test = (
-                    row.active
-                    and row.wald_chi2 is not None
-                    and np.isfinite(row.wald_chi2)
-                    and row.wald_p is not None
-                    and np.isfinite(row.wald_p)
-                )
-                kind = _GROUP_TEST_KIND_LABELS.get(row.subgroup_type or "", "spline")
-                param_label = f"{row.n_params} params"
-                # Build detail suffix: edf, lambda, curve SE, monotone
-                detail_parts = []
-                detail_parts.append(f"rank={row.n_params}")
-                if row.edf is not None:
-                    detail_parts.append(f"edf={row.edf:.1f}")
-                if row.smoothing_lambda is not None:
-                    detail_parts.append(f"&lambda;={row.smoothing_lambda:.2g}")
-                if row.active and row.curve_se_min is not None and not np.isnan(row.curve_se_min):
-                    detail_parts.append(
-                        f"curve SE: {row.curve_se_min:.2f}&ndash;{row.curve_se_max:.2f}"
-                    )
-                if row.monotone is not None:
-                    detail_parts.append(html_escape(_rules_text(row)))
-                detail_str = ", ".join(detail_parts)
-                detail_html = (
-                    f"<br><span style='font-size:11px;'>{detail_str}</span>" if detail_str else ""
-                )
-
-                if has_test:
-                    assert row.wald_p is not None
-                    p_str = f"{row.wald_p:.3f}" if row.wald_p >= 0.001 else "&lt;0.001"
-                    stars = _sig_stars(row.wald_p)
-                    if row.ref_df is not None:
-                        df_str = f"{row.ref_df:.1f}"
-                    else:
-                        df_str = str(row.n_params)
-                    text = (
-                        f"[{kind}, "
-                        f"{param_label}, "
-                        f"&chi;&sup2;({df_str})={row.wald_chi2:.1f}, "
-                        f"p={p_str}]{detail_html}"
-                    )
-                    parts.append(
-                        f"<tr>"
-                        f'<td style="{cell_l}">{html_escape(row.name)}</td>'
-                        f"{_level_group_cell(row)}"
-                        f"{_level_fit_cell(row)}"
-                        f'<td colspan="{ncols - 3 - extra_cols}" '
-                        f'style="{cell_l};color:#666;'
-                        f'font-style:italic;">{text}</td>'
-                        f'<td style="{sig_cell}">{stars}</td>'
-                        f'<td style="{sig_cell}"></td>'
-                        f"</tr>"
-                    )
-                elif row.active:
-                    text = f"[{kind}, {param_label}, active]{detail_html}"
-                    parts.append(
-                        f"<tr>"
-                        f'<td style="{cell_l}">{html_escape(row.name)}</td>'
-                        f"{_level_group_cell(row)}"
-                        f"{_level_fit_cell(row)}"
-                        f'<td colspan="{ncols - 1 - extra_cols}" '
-                        f'style="{cell_l};color:#666;'
-                        f'font-style:italic;">{text}</td></tr>'
-                    )
-                else:
-                    text = f"[{kind}, {param_label}, inactive]"
-                    parts.append(
-                        f"<tr>"
-                        f'<td style="{cell_l}">{html_escape(row.name)}</td>'
-                        f"{_level_group_cell(row)}"
-                        f"{_level_fit_cell(row)}"
-                        f'<td colspan="{ncols - 1 - extra_cols}" '
-                        f'style="{cell_l};color:#666;'
-                        f'font-style:italic;">{text}</td></tr>'
-                    )
-
-                # HTML coefficient-detail disclosure
-                if row.name in self._basis_detail:
-                    open_attr = " open" if self._detail == "full" else ""
-                    inner_rows = []
-                    for br in self._basis_detail[row.name]:
-                        b_stars = _sig_stars(br.p)
-                        b_se_text = f"{br.se:.4f}" if np.isfinite(br.se) else "---"
-                        b_z_text = (
-                            f"{br.z:.3f}" if br.z is not None and np.isfinite(br.z) else "---"
-                        )
-                        b_p_text = (
-                            f"{br.p:.3f}" if br.p is not None and np.isfinite(br.p) else "---"
-                        )
-                        b_ci_lo_text = (
-                            f"{br.ci_low:.3f}"
-                            if br.ci_low is not None and np.isfinite(br.ci_low)
-                            else "---"
-                        )
-                        b_ci_hi_text = (
-                            f"{br.ci_high:.3f}"
-                            if br.ci_high is not None and np.isfinite(br.ci_high)
-                            else "---"
-                        )
-                        inner_rows.append(
-                            f"<tr>"
-                            f"<td style='padding:1px 6px;'>{br.basis_index + 1}</td>"
-                            f"<td style='padding:1px 6px;'>{br.coef:.4f}</td>"
-                            f"<td style='padding:1px 6px;'>{b_se_text}</td>"
-                            f"<td style='padding:1px 6px;'>{b_z_text}</td>"
-                            f"<td style='padding:1px 6px;'>{b_p_text}</td>"
-                            f"<td style='padding:1px 6px;'>{b_ci_lo_text}</td>"
-                            f"<td style='padding:1px 6px;'>{b_ci_hi_text}</td>"
-                            f"<td style='padding:1px 6px;'>{b_stars}</td>"
-                            f"<td style='padding:1px 6px;'></td>"
-                            f"</tr>"
-                        )
-                    inner_table = (
-                        "<table style='width:100%;font-size:11px;color:#555;"
-                        "border-collapse:collapse;margin:2px 0;'>"
-                        "<tr>"
-                        "<th style='padding:1px 6px;text-align:left;'>#</th>"
-                        "<th style='padding:1px 6px;'>coef</th>"
-                        "<th style='padding:1px 6px;'>std err</th>"
-                        "<th style='padding:1px 6px;'>z</th>"
-                        "<th style='padding:1px 6px;'>P&gt;|z|</th>"
-                        "<th style='padding:1px 6px;'>[ci_lo</th>"
-                        "<th style='padding:1px 6px;'>ci_hi]</th>"
-                        "<th style='padding:1px 6px;'>Sig</th>"
-                        f"<th style='padding:1px 6px;'>{_LOW_CREDIBILITY_TAG}</th>"
-                        "</tr>" + "".join(inner_rows) + "</table>"
-                    )
-                    parts.append(
-                        f'<tr><td colspan="{ncols}" style="padding:0;border:none;">'
-                        f"<details{open_attr}>"
-                        f"<summary style='cursor:pointer;font-size:11px;color:#888;"
-                        f"padding:2px 8px;'>&#x25B6; coefficient detail</summary>"
-                        f"{inner_table}"
-                        f"</details></td></tr>"
-                    )
-
-            elif row.is_reference:
-                parts.append(
-                    f"<tr>"
-                    f'<td style="{cell_l}">{html_escape(row.name)}</td>'
-                    f"{_level_group_cell(row)}"
-                    f"{_level_fit_cell(row)}"
-                    f'<td style="{cell}">0.0000</td>'
-                    f'<td style="{cell}">ref</td>'
-                    f'<td style="{cell}">---</td>'
-                    f'<td style="{cell}">---</td>'
-                    f'<td style="{cell}">---</td>'
-                    f'<td style="{cell}">---</td>'
-                    f'<td style="{sig_cell}"></td>'
-                    f'<td style="{sig_cell}"></td>'
-                    f"</tr>"
-                )
-            elif (
-                row.coef is not None
-                and row.se is not None
-                and (
-                    row.se > 0
-                    or (row.p is None and row.ci_low is not None and row.ci_high is not None)
-                )
-            ):
-                stars = _sig_stars(row.p)
-                advisory = "?" if row.quasi_separated else ""
-                z_text = f"{row.z:.3f}" if row.z is not None and np.isfinite(row.z) else "---"
-                p_text = f"{row.p:.3f}" if row.p is not None and np.isfinite(row.p) else "---"
-                ci_low_text = (
-                    f"{row.ci_low:.3f}"
-                    if row.ci_low is not None and np.isfinite(row.ci_low)
-                    else "---"
-                )
-                ci_high_text = (
-                    f"{row.ci_high:.3f}"
-                    if row.ci_high is not None and np.isfinite(row.ci_high)
-                    else "---"
-                )
-                parts.append(
-                    f"<tr>"
-                    f'<td style="{cell_l}">{html_escape(row.name)}</td>'
-                    f"{_level_group_cell(row)}"
-                    f"{_level_fit_cell(row)}"
-                    f'<td style="{cell}">{row.coef:.4f}</td>'
-                    f'<td style="{cell}">{row.se:.4f}</td>'
-                    f'<td style="{cell}">{z_text}</td>'
-                    f'<td style="{cell}">{p_text}</td>'
-                    f'<td style="{cell}">{ci_low_text}</td>'
-                    f'<td style="{cell}">{ci_high_text}</td>'
-                    f'<td style="{sig_cell}">{stars}</td>'
-                    f'<td style="{sig_cell}">{advisory}</td>'
-                    f"</tr>"
-                )
-            else:
-                coef_str = f"{row.coef:.4f}" if row.coef is not None else "---"
-                parts.append(
-                    f"<tr>"
-                    f'<td style="{cell_l}">{html_escape(row.name)}</td>'
-                    f"{_level_group_cell(row)}"
-                    f"{_level_fit_cell(row)}"
-                    f'<td style="{cell}">{coef_str}</td>'
-                    f'<td style="{cell}">---</td>'
-                    f'<td style="{cell}">---</td>'
-                    f'<td style="{cell}">---</td>'
-                    f'<td style="{cell}">---</td>'
-                    f'<td style="{cell}">---</td>'
-                    f'<td style="{sig_cell}"></td>'
-                    f'<td style="{sig_cell}">{_SEPARATED_TAG if row.separated else ""}</td>'
-                    f"</tr>"
-                )
-
-        if self._level_display == "grouped" and self._level_groups:
-            groups_by_feature: dict[str, list[Any]] = {}
-            for item in self._level_groups:
-                groups_by_feature.setdefault(item.feature, []).append(item)
-            for feature, feature_groups in groups_by_feature.items():
-                mapping_html = "; ".join(
-                    f"<strong>{html_escape(item.group_id)}</strong> = "
-                    f"{', '.join(html_escape(member) for member in item.members)}"
-                    for item in feature_groups
-                )
-                parts.append(
-                    f'<tr><td colspan="{ncols}" style="padding:4px 8px;'
-                    f'white-space:normal;overflow-wrap:anywhere;border:none;" '
-                    f'aria-label="Level groups for {html_escape(feature, quote=True)}">'
-                    f"<strong>Level groups ({html_escape(feature)}):</strong> "
-                    f"{mapping_html}</td></tr>"
-                )
-
-        # Bottom border + legend
-        parts.append(f'<tr><td colspan="{ncols}" style="border-bottom:2px solid #333;"></td></tr>')
         parts.append(
-            f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
-            f'color:#666;border:none;">{_SIG_LEGEND}</td></tr>'
+            f'<tr><td colspan="{page.ncols}" style="border-bottom:2px solid #333;"></td></tr>'
         )
-        has_low_credibility = any(r.quasi_separated for r in display_rows)
-        if has_low_credibility:
-            # The only multi-line note in this renderer that used to keep its
-            # source newlines, which HTML collapses into one paragraph.  Hoisted
-            # so the conversion reads the same way as the Wald note's below.
-            advisory_note_html = _LOW_CREDIBILITY_NOTE.replace("\n", "<br>")
-            parts.append(
-                f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
-                f'color:#c60;border:none;">{advisory_note_html}</td></tr>'
+        for style, note in self._notes():
+            rendering = _HTML_NOTES[style]
+            if rendering is not None:
+                parts.append(page.note(rendering[0], rendering[1](note)))
+        levels = self._low_credibility_levels()
+        if levels:
+            lines = [_LOW_CREDIBILITY_HEADING]
+            lines.extend(
+                f"&nbsp;&nbsp;&nbsp;&nbsp;{html_escape(label)}: {n_obs} obs ({share:.2f}% exposure)"
+                for label, n_obs, share in levels
             )
-        if any(r.separated for r in display_rows):
-            separated_note_html = html_escape(_SEPARATED_NOTE).replace("\n", "<br>")
-            parts.append(
-                f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
-                f'color:#c60;border:none;">{separated_note_html}</td></tr>'
-            )
-        for note in (info.get("convergence_note"), info.get("standard_error_note")):
-            if note:
-                parts.append(
-                    f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
-                    f'color:#c60;white-space:normal;border:none;">'
-                    f"{html_escape(note)}</td></tr>"
-                )
-        for note in _editor_notes(info):
-            parts.append(
-                f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
-                f'color:#8a4b00;font-style:italic;border:none;">{note}</td></tr>'
-            )
-        for note in info.get("shared_cell_rows") or ():
-            parts.append(
-                f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
-                f'white-space:normal;border:none;">{html_escape(note)}</td></tr>'
-            )
-        has_smooth = any(_is_smooth_group_row(r) for r in self._coef_rows)
-        if not info.get("editor_inference_stale", False):
-            if info.get("covariance_method"):
-                note_text = _robust_covariance_note(info, has_smooth=has_smooth)
-            elif has_smooth:
-                note_text = _WALD_NOTE
-            else:
-                note_text = (
-                    "Parametric p-values are Wald approximations.\n"
-                    "For borderline significance, use a likelihood ratio test."
-                )
-            note_html = note_text.replace("\n", "<br>")
-            parts.append(
-                f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
-                f'color:#888;font-style:italic;border:none;">{note_html}</td></tr>'
-            )
-        # Low-credibility footnote
-        low_credibility_rows = [
-            r for r in display_rows if r.quasi_separated and r.level_n_obs is not None
-        ]
-        if low_credibility_rows:
-            advisory_lines = ["? Low-credibility levels, and the experience behind each:"]
-            for r in low_credibility_rows:
-                exp_pct = r.level_exposure_share * 100 if r.level_exposure_share is not None else 0
-                advisory_lines.append(
-                    f"&nbsp;&nbsp;&nbsp;&nbsp;{html_escape(_low_credibility_label(r))}: "
-                    f"{r.level_n_obs} obs ({exp_pct:.2f}% exposure)"
-                )
-            advisory_html = "<br>".join(advisory_lines)
-            parts.append(
-                f'<tr><td colspan="{ncols}" style="padding:4px 8px;font-size:11px;'
-                f'color:#c60;border:none;">{advisory_html}</td></tr>'
-            )
-
+            parts.append(page.note("color:#c60;border:none;", "<br>".join(lines)))
         parts.append("</table>")
         return "\n".join(parts)
+
+    def _html_body(self, page: _HtmlTable) -> list[str]:
+        parts: list[str] = []
+        level_rules = _level_rule_notes(self._display_rows)
+        prev_group = None
+        for row in self._display_rows:
+            if row.group and row.group != prev_group:
+                parts.append(page.group_separator(row.group))
+                if row.group in level_rules:
+                    parts.append(page.rule_line(level_rules[row.group]))
+            prev_group = row.group
+            parts.extend(self._html_row(page, row))
+        return parts
+
+    def _html_row(self, page: _HtmlTable, row: _CoefRow) -> list[str]:
+        kind = _row_kind(row)
+        if kind == "structured":
+            return [page.text_row(row, _structured_text(row, _HTML))]
+        if kind == "group":
+            return self._html_group_row(page, row)
+        if kind == "reference":
+            return [page.numeric_row(row, ("0.0000", "ref", "---", "---", "---", "---"))]
+        if kind == "estimated":
+            numbers = (
+                f"{row.coef:.4f}",
+                f"{row.se:.4f}",
+                *(_html_number(value) for value in (row.z, row.p, row.ci_low, row.ci_high)),
+            )
+            advisory = "?" if row.quasi_separated else ""
+            return [page.numeric_row(row, numbers, _sig_stars(row.p), advisory)]
+        coef = f"{row.coef:.4f}" if row.coef is not None else "---"
+        advisory = _SEPARATED_TAG if row.separated else ""
+        return [page.numeric_row(row, (coef, *("---",) * 5), advisory=advisory)]
+
+    def _html_group_row(self, page: _HtmlTable, row: _CoefRow) -> list[str]:
+        group = _group_text(row, _HTML)
+        detail = f"<br><span style='font-size:11px;'>{group.detail}</span>" if group.detail else ""
+        if group.has_test:
+            parts = [page.text_row(row, group.text + detail, stars=group.stars)]
+        else:
+            parts = [page.text_row(row, group.text + detail)]
+        if row.name in self._basis_detail:
+            parts.append(
+                page.basis_detail(self._basis_detail[row.name], open_=self._detail == "full")
+            )
+        return parts
+
+
+class _TextBox:
+    """The text summary's box: its column widths and the lines drawn with them."""
+
+    def __init__(self, summary: ModelSummary, header: list[tuple[str, str, str, str]]):
+        rows = summary._display_rows
+        basis_name_w = max(
+            (
+                len(f"  Coef {basis_row.basis_index + 1}")
+                for basis_rows in summary._basis_detail.values()
+                for basis_row in basis_rows
+            ),
+            default=0,
+        )
+        name_w = max(len(r.name) for r in rows) if rows else 10
+        self.name_w = max(name_w, basis_name_w, len("Term"), 10)
+        self.level_group_w = (
+            max(len("Level group"), *(len(row.level_group) for row in rows))
+            if summary._level_groups
+            else 0
+        )
+        self.level_fit_w = (
+            max(len("Fit"), *(len(row.level_fit or "") for row in rows)) + 2
+            if any(row.level_fit is not None for row in rows)
+            else 0
+        )
+        coef_W = (
+            self.name_w
+            + self.level_group_w
+            + self.level_fit_w
+            + sum(_COEF_FIELD_WIDTHS)
+            + len(_COEF_FIELD_WIDTHS)
+        )
+        # Each header half is a 20-wide label and a value: 42 + 2 * the longest value.
+        max_val = max(max(len(v1), len(v2)) for _, v1, _, v2 in header if v2) if header else 0
+        self.W = max(coef_W, 42 + 2 * max_val)  # content width
+        self.F = self.W + 2  # fill width between the border characters
+        self.val_l = (self.W - 42) // 2
+        self.val_r = self.W - 42 - self.val_l  # absorbs an odd remainder
+
+    def top(self, text: str) -> str:
+        pad = self.F - len(text)
+        left = pad // 2
+        return f"╔{'═' * left}{text}{'═' * (pad - left)}╗"
+
+    def mid(self) -> str:
+        return f"╠{'═' * self.F}╣"
+
+    def thin(self) -> str:
+        return f"╟{'─' * self.F}╢"
+
+    def bot(self) -> str:
+        return f"╚{'═' * self.F}╝"
+
+    def group_sep(self, name: str) -> str:
+        pad = self.F - (len(name) + 4)
+        left = pad // 2
+        return f"╠{'═' * left}╡ {name} ╞{'═' * (pad - left)}╣"
+
+    def row(self, text: str) -> str:
+        return f"║ {text:<{self.W}s} ║"
+
+    def header_row(self, k1: str, v1: str, k2: str, v2: str) -> str:
+        left = f"{k1 + ':':<20s}{v1:>{self.val_l}s}"
+        right_label = f"{k2 + ':':<20s}" if k2 else " " * 20
+        return self.row(f"{left}  {right_label}{v2:>{self.val_r}s}")
+
+    def prefix(self, name: str, level_group: str = "", fit: str = "") -> str:
+        """The term-name column, then the level-group and Fit columns when shown."""
+        text = f"{name:<{self.name_w}s}"
+        if self.level_group_w:
+            text += f"{level_group:>{self.level_group_w}s}"
+        if self.level_fit_w:
+            text += f"{fit:>{self.level_fit_w}s}"
+        return text
+
+    def fields(self, numbers: Sequence[str], sig: str = "", advisory: str = "") -> str:
+        """The six numeric fields, Sig and the advisory tag, each after its own space."""
+        rendered = "".join(
+            f" {value:>{width}s}"
+            for value, width in zip(numbers, _COEF_FIELD_WIDTHS[:6], strict=True)
+        )
+        return f"{rendered} {sig or '---':<3s} {advisory or '---':<3s}"
+
+    def sig_aligned(self, prefix: str, group: _GroupText) -> str:
+        """A group-test line with its stars at the header's own Sig offset.
+
+        The text is elided rather than allowed to push the stars right, where a clamped
+        pad would slide them out of Sig and overrun the box.  ``room`` is the space
+        before Sig, less the two-character gap after the term name.  The kind is elided,
+        not the ``p=`` tail: the console is the only place the whole-term p-value
+        appears, and the HTML row prints it in full.
+        """
+        sig_col = len(prefix) + sum(_COEF_FIELD_WIDTHS[:6]) + 7
+        room = sig_col - len(prefix) - 2
+        text = group.text
+        overflow = len(text) - room
+        if overflow > 0:
+            keep = len(group.kind) - overflow - 1
+            if keep >= 1:
+                text = text.replace(f"[{group.kind},", f"[{group.kind[:keep]}…,", 1)
+            else:
+                text = text[: max(room - 1, 0)] + "…"
+        line = f"{prefix}  {text}"
+        pad = max(sig_col - len(line), 0)
+        return f"{line}{'':<{pad}s}{group.stars:<3s} {'':<3s}"
+
+
+_HTML_TABLE_STYLE = "border-collapse:collapse;font-family:monospace;font-size:13px;margin:8px 0;"
+_HTML_CELL = "padding:3px 8px;text-align:right;border:none;"
+_HTML_CELL_LEFT = "padding:3px 8px;text-align:left;border:none;"
+_HTML_HEADER_CELL = "padding:3px 8px;text-align:right;font-weight:bold;border:none;"
+_HTML_HEADER_CELL_LEFT = "padding:3px 8px;text-align:left;font-weight:bold;border:none;"
+_HTML_LABEL = "padding:3px 8px;text-align:left;font-weight:bold;color:#555;border:none;"
+_HTML_SIG_CELL = "padding:3px 4px;text-align:left;border:none;"
+_HTML_GROUP_SEPARATOR = (
+    "padding:2px 8px;text-align:left;font-weight:bold;color:#555;"
+    "border-top:1px solid #bbb;border-bottom:none;font-size:12px;"
+)
+_HTML_DETAIL_CELL = "<td style='padding:1px 6px;'>{}</td>"
+
+
+class _HtmlTable:
+    """The HTML summary's table: its column count and the rows drawn with it."""
+
+    def __init__(self, summary: ModelSummary):
+        rows = summary._display_rows
+        self.has_level_groups = bool(summary._level_groups)
+        self.has_level_fit = any(row.level_fit is not None for row in rows)
+        self.extra_cols = int(self.has_level_groups) + int(self.has_level_fit)
+        self.ncols = 9 + self.extra_cols
+
+    def header_row(self, k1: str, v1: str, k2: str, v2: str) -> str:
+        right_label = f"{k2}:" if k2 else ""
+        return (
+            f"<tr>"
+            f'<td style="{_HTML_LABEL}">{k1}:</td>'
+            f'<td style="{_HTML_CELL}">{v1}</td>'
+            f'<td style="{_HTML_CELL}"></td>'
+            f'<td style="{_HTML_LABEL}">{right_label}</td>'
+            f'<td colspan="{self.ncols - 4}" style="{_HTML_CELL}">{v2}</td>'
+            f"</tr>"
+        )
+
+    def separator(self) -> str:
+        return f'<tr><td colspan="{self.ncols}" style="border-bottom:1px solid #999;"></td></tr>'
+
+    def column_header(self, numeric: tuple[str, ...]) -> list[str]:
+        """The column labels: the term and level columns left-aligned, the numbers right."""
+        left = [""]
+        if self.has_level_groups:
+            left.append("Level group")
+        if self.has_level_fit:
+            left.append("Fit")
+        return [
+            "<tr>",
+            *(f'<td style="{_HTML_HEADER_CELL_LEFT}">{name}</td>' for name in left),
+            *(f'<td style="{_HTML_HEADER_CELL}">{name}</td>' for name in numeric),
+            f'<td style="{_HTML_HEADER_CELL_LEFT}">{_LOW_CREDIBILITY_TAG}</td>',
+            "</tr>",
+        ]
+
+    def group_separator(self, group: str) -> str:
+        return (
+            f'<tr><td colspan="{self.ncols}" style="{_HTML_GROUP_SEPARATOR}">'
+            f"{html_escape(group)}</td></tr>"
+        )
+
+    def rule_line(self, text: str) -> str:
+        return (
+            f'<tr><td colspan="{self.ncols}" style="padding:0 8px 2px;'
+            f'font-size:11px;color:#555;">{html_escape(text)}</td></tr>'
+        )
+
+    def prefix(self, row: _CoefRow) -> str:
+        """The term-name cell, then the level-group and Fit cells when shown."""
+        cells = f'<td style="{_HTML_CELL_LEFT}">{html_escape(row.name)}</td>'
+        if self.has_level_groups:
+            cells += f'<td style="{_HTML_CELL_LEFT}">{html_escape(row.level_group)}</td>'
+        if self.has_level_fit:
+            cells += f'<td style="{_HTML_CELL_LEFT}">{html_escape(row.level_fit or "")}</td>'
+        return cells
+
+    def text_row(self, row: _CoefRow, text: str, *, stars: str | None = None) -> str:
+        """A row whose description spans the numeric columns; ``stars`` keeps Sig and LC."""
+        span = self.ncols - 1 - self.extra_cols - (0 if stars is None else 2)
+        cell = (
+            f'<td colspan="{span}" style="{_HTML_CELL_LEFT};color:#666;font-style:italic;">'
+            f"{text}</td>"
+        )
+        if stars is None:
+            return f"<tr>{self.prefix(row)}{cell}</tr>"
+        return (
+            f"<tr>{self.prefix(row)}{cell}"
+            f'<td style="{_HTML_SIG_CELL}">{stars}</td><td style="{_HTML_SIG_CELL}"></td></tr>'
+        )
+
+    def numeric_row(
+        self, row: _CoefRow, numbers: tuple[str, ...], sig: str = "", advisory: str = ""
+    ) -> str:
+        cells = "".join(f'<td style="{_HTML_CELL}">{value}</td>' for value in numbers)
+        return (
+            f"<tr>{self.prefix(row)}{cells}"
+            f'<td style="{_HTML_SIG_CELL}">{sig}</td><td style="{_HTML_SIG_CELL}">{advisory}</td>'
+            f"</tr>"
+        )
+
+    def basis_detail(self, rows: list[_BasisDetailRow], *, open_: bool) -> str:
+        """A spline row's per-coefficient detail, as a disclosure open under ``detail="full"``."""
+        inner_rows = [
+            "<tr>"
+            + "".join(
+                _HTML_DETAIL_CELL.format(text)
+                for text in (
+                    br.basis_index + 1,
+                    f"{br.coef:.4f}",
+                    f"{br.se:.4f}" if np.isfinite(br.se) else "---",
+                    _html_number(br.z),
+                    _html_number(br.p),
+                    _html_number(br.ci_low),
+                    _html_number(br.ci_high),
+                    _sig_stars(br.p),
+                    "",
+                )
+            )
+            + "</tr>"
+            for br in rows
+        ]
+        headers = (
+            "coef",
+            "std err",
+            "z",
+            "P&gt;|z|",
+            "[ci_lo",
+            "ci_hi]",
+            "Sig",
+            _LOW_CREDIBILITY_TAG,
+        )
+        inner_table = (
+            "<table style='width:100%;font-size:11px;color:#555;"
+            "border-collapse:collapse;margin:2px 0;'>"
+            "<tr><th style='padding:1px 6px;text-align:left;'>#</th>"
+            + "".join(f"<th style='padding:1px 6px;'>{name}</th>" for name in headers)
+            + "</tr>"
+            + "".join(inner_rows)
+            + "</table>"
+        )
+        return (
+            f'<tr><td colspan="{self.ncols}" style="padding:0;border:none;">'
+            f"<details{' open' if open_ else ''}>"
+            f"<summary style='cursor:pointer;font-size:11px;color:#888;"
+            f"padding:2px 8px;'>&#x25B6; coefficient detail</summary>"
+            f"{inner_table}"
+            f"</details></td></tr>"
+        )
+
+    def level_group_legend(self, feature: str, items: list[Any]) -> str:
+        mapping = "; ".join(
+            f"<strong>{html_escape(item.group_id)}</strong> = "
+            f"{', '.join(html_escape(member) for member in item.members)}"
+            for item in items
+        )
+        return (
+            f'<tr><td colspan="{self.ncols}" style="padding:4px 8px;'
+            f'white-space:normal;overflow-wrap:anywhere;border:none;" '
+            f'aria-label="Level groups for {html_escape(feature, quote=True)}">'
+            f"<strong>Level groups ({html_escape(feature)}):</strong> "
+            f"{mapping}</td></tr>"
+        )
+
+    def note(self, style: str, content: str) -> str:
+        return (
+            f'<tr><td colspan="{self.ncols}" style="padding:4px 8px;font-size:11px;'
+            f'{style}">{content}</td></tr>'
+        )
 
 
 _EDITOR_SHAPE_NOTE = (

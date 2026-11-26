@@ -281,6 +281,21 @@ def covariance_selected_diagonal(covariance, indices: NDArray) -> NDArray:
     return np.diag(np.asarray(covariance))[selected]
 
 
+def augmented_group_indices(active_group) -> NDArray[np.intp]:
+    """An active group's rows in an augmented covariance, whose row 0 is the intercept's."""
+    return np.arange(1 + active_group.start, 1 + active_group.end, dtype=np.intp)
+
+
+def augmented_group_block(covariance, active_group) -> NDArray:
+    """An active group's block of an augmented covariance."""
+    return covariance_selected_block(covariance, augmented_group_indices(active_group))
+
+
+def augmented_group_diagonal(covariance, active_group) -> NDArray:
+    """An active group's variances on an augmented covariance."""
+    return covariance_selected_diagonal(covariance, augmented_group_indices(active_group))
+
+
 def covariance_factor_smooth_raw_level_block(
     covariance,
     public_group_indices: NDArray,
