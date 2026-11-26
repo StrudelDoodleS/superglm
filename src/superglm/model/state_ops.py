@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from functools import partial
 from typing import cast
@@ -647,6 +648,43 @@ def rank_standard_error_mask(model, rank_info) -> NDArray:
     return standard_error_mask(model, rank_info.augmented, rank_info.coefficient_estimable)
 
 
+def _record_coefficient_mask(model) -> NDArray | None:
+    """Which coefficients the default covariance shows a standard error for, from the fit's
+    rank record or structured state; ``None`` for a fit with neither.
+    """
+    solver = model._solver_pirls_result()
+    state, rank_info = retained_linear_state(model), solver.rank_info
+    if getattr(solver, "scop_inference", None) is not None:
+        if rank_info is None:
+            return np.ones(len(solver.beta), dtype=bool)
+        return cast(NDArray, rank_info.coefficient_estimable())
+    if isinstance(state, StructuredLinearSystemState):
+        factor = state.profiled_factor
+        # an sz factor reads the data's null space on the balance tree of the data
+        # (SumToZeroTreeFactor.coefficient_estimable)
+        return standard_error_mask(
+            model,
+            factor,
+            lambda: (
+                factor.coefficient_estimable()
+                if isinstance(factor, ProfiledSumToZeroTreeFactor)
+                else centered_operator_coefficient_estimable(state.centered_data_operator)
+            ),
+        )
+    return None if rank_info is None else rank_standard_error_mask(model, rank_info)
+
+
+def fit_coefficient_mask(model) -> NDArray:
+    """``fit_inference_info``'s ``coefficient_estimable`` without forming the rest of that
+    record: the cached record's, else ``_record_coefficient_mask``, else the record's.
+    """
+    if "_fit_inference_info" not in model.__dict__:
+        mask = _record_coefficient_mask(model)
+        if mask is not None:
+            return mask
+    return cast(NDArray, model._fit_inference_info["coefficient_estimable"])
+
+
 def fit_contrast_estimable(model, inference: dict):
     """``is_estimable`` of the decomposition ``inference``'s coefficient mask was read from,
     over the fitted coefficients, or ``None`` for a fit without one.
@@ -673,37 +711,46 @@ def rank_intercept_centre(model, rank_info) -> NDArray:
 def fit_intercept_centre(model, inference: dict) -> NDArray | None:
     """``build_coef_rows``' ``intercept_centre`` beside ``fit_contrast_estimable``, or ``None``.
 
-    ``None`` for a fit without a rank record and for a structured fit, whose geometry
-    centres shifted moments and decides contrasts of its border columns alone.
+    A structured fit's is its factor's column mean ``xtw / sum_w``, the mean its geometry
+    reads (``_structured_contrast_estimable``), less the same shift to the public
+    columns.  ``None`` for a fit without a rank record.
     """
     if inference.get("structured_covariance"):
-        return None
+        factor = retained_linear_state(model).profiled_factor
+        width = len(factor.xtw)
+        return factor.xtw / factor.sum_w - _public_intercept_shift(model, model._groups, width)
     rank_info = model._solver_pirls_result().rank_info
     return None if rank_info is None else rank_intercept_centre(model, rank_info)
 
 
 def _structured_contrast_estimable(
-    inference: dict, state, contrast: NDArray, design_rows: bool = False
+    inference: dict, state, contrast: NDArray, intercept: float = 0.0, design_rows: bool = False
 ) -> bool:
     """Whether a structured fit's data determine ``contrast``, by its coefficient mask's rule.
 
     The mask's geometry (``fit_inference_info``) is formed again on the first contrast a
     reader asks about, and kept in ``inference``, the fit's inference record: it lives and
-    is dropped with that record.  With ``design_rows``, ``contrast`` marks a term's
-    coefficients and the answer is of its fitted function (``function_estimable``).
+    is dropped with that record.  ``intercept`` is ``RankInfo.is_estimable``'s, which the
+    geometry decides with its columns' mean (``BorderNullSpace.is_estimable``).  With
+    ``design_rows``, ``contrast`` marks a term's coefficients and the answer is of its
+    fitted function (``function_estimable``).
     """
+    factor = state.profiled_factor
     decision = inference.get("contrast_estimability")
     if decision is None:
-        factor = state.profiled_factor
         decision = (
             factor.border_estimability()
             if isinstance(factor, ProfiledSumToZeroTreeFactor)
-            else centered_operator_contrast_estimability(state.centered_data_operator)
+            else centered_operator_contrast_estimability(
+                state.centered_data_operator, factor.xtw / factor.sum_w
+            )
         )
         inference["contrast_estimability"] = decision
     if design_rows:
         return decision.function_estimable(np.asarray(contrast, dtype=bool))
-    return decision.is_estimable(contrast)
+    if isinstance(decision, RankDecomposition):
+        return decision.is_estimable(contrast, abs(intercept) / math.sqrt(factor.sum_w))
+    return decision.is_estimable(contrast, intercept)
 
 
 def refit_shows_every_standard_error(model, penalized=None) -> bool:
@@ -786,13 +833,11 @@ def fit_inference_info(model):
         if rank_info is not None:
             X_active, active_groups = _rank_active_state(model, rank_info)
             selected = np.asarray(rank_info.selected_columns, dtype=np.intp)
-            coefficient_estimable = rank_info.coefficient_estimable()
         else:
             X_active, active_groups, selected = _grouped_active_state(
                 model,
                 {group.name for group in model._groups},
             )
-            coefficient_estimable = np.ones(len(solver.beta), dtype=bool)
         inverse = np.asarray(scop_inference.coefficient_inverse)[np.ix_(selected, selected)]
         augmented_indices = np.concatenate(([0], selected + 1))
         augmented = np.asarray(scop_inference.augmented_inverse)[
@@ -819,7 +864,7 @@ def fit_inference_info(model):
             "edf": edf,
             "edf1": edf1,
             "group_edf_map": dict(scop_inference.group_edf),
-            "coefficient_estimable": coefficient_estimable,
+            "coefficient_estimable": _record_coefficient_mask(model),
         }
     if isinstance(linear_state, StructuredLinearSystemState):
         inverse, augmented, active_groups = _structured_covariance_state(
@@ -843,19 +888,7 @@ def fit_inference_info(model):
             "edf": edf,
             "edf1": edf1,
             "group_edf_map": group_edf_map,
-            # an sz factor reads the data's null space on the balance tree of
-            # the data (SumToZeroTreeFactor.coefficient_estimable)
-            "coefficient_estimable": standard_error_mask(
-                model,
-                linear_state.profiled_factor,
-                lambda: (
-                    linear_state.profiled_factor.coefficient_estimable()
-                    if isinstance(linear_state.profiled_factor, ProfiledSumToZeroTreeFactor)
-                    else centered_operator_coefficient_estimable(
-                        linear_state.centered_data_operator
-                    )
-                ),
-            ),
+            "coefficient_estimable": _record_coefficient_mask(model),
             "structured_covariance": True,
         }
     if solver.rank_info is not None:
@@ -876,7 +909,7 @@ def fit_inference_info(model):
                 "edf": np.array([]),
                 "edf1": np.array([]),
                 "group_edf_map": dict(rank_info.group_edf),
-                "coefficient_estimable": rank_standard_error_mask(model, rank_info),
+                "coefficient_estimable": _record_coefficient_mask(model),
             }
         if data_gram is None:
             data_gram = _rank_centered_data_gram(X_active, W)
@@ -892,7 +925,7 @@ def fit_inference_info(model):
             "edf": edf,
             "edf1": edf1,
             "group_edf_map": dict(rank_info.group_edf),
-            "coefficient_estimable": rank_standard_error_mask(model, rank_info),
+            "coefficient_estimable": _record_coefficient_mask(model),
         }
 
     X_active, active_groups, inverse, augmented, data_gram, profile_inverse, data_rank = (

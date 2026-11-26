@@ -22,6 +22,7 @@ import pandas as pd
 import pytest
 
 from superglm import (
+    Categorical,
     FactorSmooth,
     GroupLasso,
     Numeric,
@@ -216,11 +217,14 @@ def _design(model):
     return np.column_stack([np.ones(model._dm.n), *[g.toarray() for g in model._dm.group_matrices]])
 
 
-def _rank_gain(model, contrasts):
-    """How much the slope contrasts raise the rank of ``[1, X]`` when appended."""
+def _rank_gain(model, contrasts, rtol=None):
+    """How much the slope contrasts raise the rank of ``[1, X]`` when appended.
+
+    ``rtol`` is the singular-value cut relative to the largest, numpy's default when omitted.
+    """
     design = _design(model)
     stacked = np.vstack([design, np.column_stack([np.zeros(len(contrasts)), contrasts])])
-    return int(np.linalg.matrix_rank(stacked) - np.linalg.matrix_rank(design))
+    return int(np.linalg.matrix_rank(stacked, rtol=rtol) - np.linalg.matrix_rank(design, rtol=rtol))
 
 
 @pytest.mark.parametrize("degrees", [None, [2, 2], [3, 2]])
@@ -1075,6 +1079,318 @@ def test_an_intercept_is_decided_with_its_own_weight_not_by_what_a_zero_mean_rou
     assert np.linalg.matrix_rank(design) == np.linalg.matrix_rank(design[:, 1:])
     for row in _intercept_rows(model, shifted, y):
         assert row.se is None and row.ci_low is None and row.estimable is False
+
+
+def _curve_contrasts(model, name, x):
+    """Spline term ``name``'s curve at ``x`` as rows over the fitted slopes."""
+    group = next(g for g in model._groups if g.name == name)
+    rows = np.zeros((len(x), len(model.result.beta)))
+    rows[:, group.sl] = np.asarray(model._specs[name].transform(np.asarray(x)), dtype=float)
+    return rows
+
+
+def test_curves_of_twin_splines_carry_no_error_on_any_reader() -> None:
+    """Twin splines on one column: no point of either curve is determined (issue #752).
+
+    Moving the effect between the twins leaves the fit, so each curve point raises the
+    design's rank when appended.  ``term_inference`` and ``relativities(with_se=True)``,
+    native and centred, give NaN errors and intervals around a finite curve, no
+    simultaneous band is drawn, and the summaries print no curve-error range.  At
+    09fe0c01d the readers gave errors from 0.60 to 2.84, as the ordered twins did
+    before #740.
+    """
+    model, X, y = _numeric_twin_fit(["u", "v"], "spline")
+    for name in ("u", "v"):
+        assert _rank_gain(model, _curve_contrasts(model, name, [0.25, 0.75])) > 0
+        for centering in ("native", "mean"):
+            inference = model.term_inference(name, centering=centering)
+            assert np.all(np.isnan(inference.se_log_relativity)), (name, centering)
+            assert np.all(np.isnan(inference.ci_lower)) and np.all(np.isnan(inference.ci_upper))
+            assert np.isfinite(inference.log_relativity).all()
+            frame = model.relativities(with_se=True, centering=centering)[name]
+            assert frame["se_log_relativity"].isna().all(), (name, centering)
+        banded = model.term_inference(name, simultaneous=True, n_sim=200)
+        assert banded.ci_lower_simultaneous is None and banded.ci_upper_simultaneous is None
+    other = X.iloc[:120].reset_index(drop=True), y[:120] + 0.5
+    for summary in (
+        model.summary(),
+        model.metrics(X, y).summary(),
+        model.metrics(*other).summary(),
+    ):
+        for row in _numeric_test_rows(summary, ("u", "v")).values():
+            assert np.isnan(row.curve_se_min) and np.isnan(row.curve_se_max), row.name
+        assert "curve SE" not in str(summary)
+
+
+def test_a_self_aliased_spline_keeps_the_curve_errors_its_data_determine() -> None:
+    """Three support points determine a spline's curve at those points and nowhere else (#752).
+
+    Each curve point is decided on its own: at a support point it is a design row's
+    part, which leaves the design's rank when appended, and keeps its error; between
+    them the unpenalized fit has no information, the point raises the rank, and its
+    error is NaN.  The centred curve subtracts the grid's mean, which the fit does not
+    determine, so every centred error is NaN.  At 09fe0c01d every error was a figure.
+
+    The rank is cut at ``1e-10`` of the largest singular value: the basis is formed to
+    about ``1e-13`` of it, where numpy's default cut also sits, and a point between the
+    support points adds a singular value of the design's own size.
+    """
+    model, X, _ = _three_point_spline()
+    inference = model.term_inference("x", n_points=11)
+    support = np.isin(inference.x, [0.0, 0.4, 1.0])
+    assert support.sum() == 3
+    gains = [_rank_gain(model, _curve_contrasts(model, "x", [x]), 1e-10) for x in inference.x]
+    np.testing.assert_array_equal(np.asarray(gains) == 0, support)
+    errors = np.asarray(inference.se_log_relativity)
+    np.testing.assert_array_equal(np.isfinite(errors), support)
+    assert np.all(errors[support] > 0.0)
+    centred = model.term_inference("x", n_points=11, centering="mean").se_log_relativity
+    assert np.all(np.isnan(centred))
+
+
+@pytest.mark.pins_behaviour
+def test_a_single_spline_keeps_its_curve_errors() -> None:
+    """Control (pins): one unaliased spline keeps every curve error.
+
+    ``term_inference`` and ``relativities`` give ``sqrt(diag(M V M'))`` with ``M`` the
+    basis on the grid (less its column means when centred) and ``V`` the term's
+    covariance block, to the rounding of that product; the summary prints their range,
+    the one 09fe0c01d gave, and the simultaneous band is drawn.
+    """
+    model, X, y = _numeric_twin_fit(["u"], "spline")
+    covariance, active = model._coef_covariance
+    block = covariance[np.ix_(*[np.arange(active[0].start, active[0].end)] * 2)]
+    inference = model.term_inference("u")
+    M = np.asarray(model._specs["u"].transform(inference.x), dtype=float)
+    for centering, basis in (("native", M), ("mean", M - M.mean(axis=0))):
+        expected = np.sqrt(np.maximum(np.sum((basis @ block) * basis, axis=1), 0.0))
+        got = model.term_inference("u", centering=centering).se_log_relativity
+        np.testing.assert_allclose(got, expected, rtol=1e-12)
+        frame = model.relativities(with_se=True, centering=centering)["u"]
+        np.testing.assert_array_equal(frame["se_log_relativity"].to_numpy(), got)
+    native = np.asarray(inference.se_log_relativity)
+    np.testing.assert_allclose(
+        [native.min(), native.max()], [0.12079868655384633, 0.2486961468140573], rtol=1e-6
+    )
+    banded = model.term_inference("u", simultaneous=True, n_sim=200)
+    assert np.all(banded.ci_upper_simultaneous >= banded.ci_upper)
+    for summary in (model.summary(), model.metrics(X, y).summary()):
+        row = _numeric_test_rows(summary, ("u",))["u"]
+        np.testing.assert_allclose(
+            [row.curve_se_min, row.curve_se_max], [native.min(), native.max()], rtol=1e-9
+        )
+
+
+_INTERACTION_KINDS = {
+    "spline by level": (lambda: Spline(n_knots=5), "c", "wood"),
+    "tensor": (lambda: Spline(n_knots=4), "w", "wood"),
+    "polynomial by level": (lambda: Polynomial(degree=2), "c", "chi2"),
+    "polynomial by polynomial": (lambda: Polynomial(degree=3), "w", "chi2"),
+}
+
+
+def _interaction_fit(kind, twin):
+    """``x`` crossed with a second term, as each kind of interaction with a whole-term
+    test; with ``twin``, a second copy ``x2`` of ``x`` crossed with it too."""
+    main, other, _ = _INTERACTION_KINDS[kind]
+    rng = np.random.default_rng(0)
+    x = np.tile(np.linspace(0.0, 1.0, 40), 12)
+    c = np.tile(np.repeat(["p", "q", "r"], 40), 4)
+    w = rng.uniform(0.0, 1.0, len(x))
+    y = np.sin(3.0 * x) * (1.0 + (c == "q")) + 0.5 * w + np.cos(np.arange(float(len(x))))
+    names = ["x", "x2"] if twin else ["x"]
+    X = pd.DataFrame({name: x for name in names})
+    features = {name: main() for name in names}
+    if other == "c":
+        X["c"], features["c"] = c, Categorical()
+    else:
+        X["w"] = w
+        features["w"] = Spline(n_knots=4) if kind == "tensor" else Polynomial(degree=2)
+    model = SuperGLM(
+        family="gaussian", features=features, interactions=[(name, other) for name in names]
+    )
+    return model.fit(X, y), X, y
+
+
+def _interaction_rows(model, summary):
+    names = {g.name for g in model._groups if g.feature_name in model._interaction_specs}
+    return {r.name: r for r in summary._coef_rows if r.coef is None and r.name in names}
+
+
+@pytest.mark.parametrize("kind", list(_INTERACTION_KINDS))
+def test_twin_interactions_carry_no_whole_term_test(kind) -> None:
+    """Twin interactions: no whole-term test is formed on any default summary (issue #752).
+
+    ``x:c`` beside ``x2:c`` on a copy of ``x`` (and likewise against ``w``): moving the
+    effect between the twins leaves the fit.  Wood's test of a by-level spline or a
+    tensor is of the block's fitted function, and the chi-square of a by-level
+    polynomial or a large polynomial product is of ``beta_block = 0``; both raise the
+    design's rank when appended.  The rule is the one inside the two test helpers, which
+    these four producers reach without stating it.  At 09fe0c01d the default summary
+    showed Wood p 0.999 on ``x:c[q]`` and 1.0 on ``x:w``, chi2 20.65 (p = 3e-5) on the
+    polynomial ``x:c[q]`` and 0.657 on the polynomial ``x:w``, with NaN on their twins;
+    the robust summary left the two chi-squares blank but flagged them estimable.
+    """
+    model, X, y = _interaction_fit(kind, twin=True)
+    design = _design(model)
+    width = len(model.result.beta)
+    for group in model._groups:
+        if group.feature_name not in model._interaction_specs:
+            continue
+        function = np.zeros((len(design), width))
+        function[:, group.sl] = design[:, 1 + group.start : 1 + group.end]
+        tested = function if _INTERACTION_KINDS[kind][2] == "wood" else np.eye(width)[group.sl]
+        assert _rank_gain(model, tested) > 0, group.name
+    other = X.iloc[:360].reset_index(drop=True), y[:360] + 0.5
+    summaries = [model.summary(), model.metrics(X, y).summary(), model.metrics(*other).summary()]
+    if _INTERACTION_KINDS[kind][2] == "chi2":
+        summaries.append(model.summary(covariance=model.sandwich_covariance()))
+    for summary in summaries:
+        rows = _interaction_rows(model, summary)
+        assert len(rows) == (4 if _INTERACTION_KINDS[kind][1] == "c" else 2)
+        for row in rows.values():
+            assert row.wald_chi2 is None and row.wald_p is None and row.ref_df is None, row.name
+            assert row.estimable is False, row.name
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("kind", list(_INTERACTION_KINDS))
+def test_a_single_interaction_keeps_its_whole_term_test(kind) -> None:
+    """Control (pins): one unaliased interaction keeps its whole-term test on both summaries.
+
+    The polynomial rows are the Wald chi-square ``b' V^-1 b`` of their unpenalized block,
+    ``V`` the Gaussian ``phi (X'X)^-1`` block; the spline rows are Wood's test, at the
+    figures 09fe0c01d gave.
+    """
+    model, X, y = _interaction_fit(kind, twin=False)
+    wood = {
+        "spline by level": {
+            "x:c[q]": (21.01900558308689, 5.834075571440447),
+            "x:c[r]": (3.2500155228990493, 5.834075571440447),
+        },
+        "tensor": {"x:w": (11.219280813499378, 24.983943859133674)},
+    }
+    design = _design(model)
+    coef, *_ = np.linalg.lstsq(design, y, rcond=None)
+    residual = y - design @ coef
+    V = float(residual @ residual) / (len(y) - design.shape[1]) * np.linalg.inv(design.T @ design)
+    for summary in (model.summary(), model.metrics(X, y).summary()):
+        rows = _interaction_rows(model, summary)
+        for group in model._groups:
+            if group.feature_name not in model._interaction_specs:
+                continue
+            row = rows[group.name]
+            assert row.estimable is True
+            if kind in wood:
+                np.testing.assert_allclose(
+                    [row.wald_chi2, row.ref_df], wood[kind][group.name], rtol=1e-6
+                )
+                continue
+            block = slice(1 + group.start, 1 + group.end)
+            expected = float(coef[block] @ np.linalg.solve(V[block, block], coef[block]))
+            np.testing.assert_allclose([row.wald_chi2, row.ref_df], [expected, group.size], 1e-8)
+
+
+_INTERCEPT_COLUMNS = {
+    # x and 3 - x span the constant
+    "spanning": lambda x, a: {"x": x, "z": 3.0 - x},
+    # a and 3 a, symmetric about zero, are collinear and do not span it
+    "collinear": lambda x, a: {"x": a, "z": 3.0 * a},
+    "alone": lambda x, a: {"x": x},
+}
+
+
+def _intercept_fit(term, columns, direct_solve="auto"):
+    """Numeric terms on ``columns`` beside a structured ``term`` on 40 levels (``_structured_fit``'s)."""
+    rng = np.random.default_rng(0)
+    n = 720
+    level = np.tile(np.repeat(np.arange(40), 2), 9)
+    half = rng.integers(-(2**50), 2**50, n // 2) / 2**50
+    x = rng.uniform(0.0, 3.0, n)
+    z = 0.5 + 0.5 * np.sin(0.7 * np.arange(float(n)))
+    X = pd.DataFrame({"g": level.astype(str), "s": z})
+    numeric = _INTERCEPT_COLUMNS[columns](x, np.r_[half, -half])
+    X = X.assign(**numeric)
+    y = 1.0 + 0.5 * x + 2.0 * np.cos(level) + z + rng.normal(size=n)
+    features: dict = {"g": RandomEffect()} if term == "random effect" else {}
+    features.update({name: Numeric() for name in numeric})
+    interactions = []
+    if term != "random effect":
+        features["s"] = Spline(n_knots=5)
+        interactions.append(FactorSmooth("s", group="g", basis=term, k=5))
+    model = SuperGLM(
+        family="gaussian", features=features, interactions=interactions, direct_solve=direct_solve
+    )
+    return model.fit_reml(X, y), X, y
+
+
+def _intercept_share_of_the_null_space(model):
+    """The largest weight a null direction of ``[1, X]`` puts on the intercept."""
+    _, s, vt = np.linalg.svd(_design(model))
+    null = vt[int(np.sum(s > s[0] * 1e-10)) :]
+    return float(np.max(np.abs(null[:, 0]), initial=0.0))
+
+
+@pytest.mark.parametrize(
+    ("term", "columns"),
+    [
+        ("random effect", "spanning"),
+        ("fs", "spanning"),
+        ("sz", "spanning"),
+        ("random effect", "collinear"),
+        ("fs", "collinear"),
+    ],
+)
+def test_structured_fits_show_no_error_on_an_intercept_their_data_leave_open(term, columns) -> None:
+    """A structured fit decides its reported intercept on its own data, as a dense fit does (#752).
+
+    The reported intercept weighs every column's mean, the structured ones included, which
+    the compact geometry read as outside its border and left undecided: only the ordered
+    terms' base-level part was.  Beside ``x`` and ``3 - x`` the columns span the constant;
+    beside any aliased pair, a random effect's or an ``fs`` smooth's levels, which only
+    their penalty holds, alias it too.  A null direction of ``[1, X]`` then moves the
+    intercept, and the default and metrics summaries keep its estimate with no error,
+    flagged ``estimable=False``, the dense fit's answer.  At 09fe0c01d the random effect
+    beside ``x`` and ``3 - x`` showed SE 0.233.
+    """
+    model, X, y = _intercept_fit(term, columns)
+    assert model._fit_inference_info.get("structured_covariance")
+    assert _intercept_share_of_the_null_space(model) > 0.01
+    dense, _, _ = _intercept_fit(term, columns, direct_solve="gram")
+    assert not dense._fit_inference_info.get("structured_covariance")
+    assert dense.summary()._coef_rows[0].se is None
+    for summary in (model.summary(), model.metrics(X, y).summary()):
+        row = summary._coef_rows[0]
+        assert row.name == "Intercept" and np.isfinite(row.coef)
+        assert row.se is None and row.z is None and row.p is None and row.ci_low is None
+        assert row.estimable is False
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize(
+    ("term", "columns"),
+    [("sz", "collinear"), ("random effect", "alone"), ("fs", "alone"), ("sz", "alone")],
+)
+def test_structured_fits_keep_an_intercept_they_determine(term, columns) -> None:
+    """Control (pins): a structured fit keeps the dense fit's intercept error where it is determined.
+
+    Beside one numeric term the penalized fit is certified and every error is shown.  An
+    ``sz`` smooth's levels sum to zero, so beside a collinear pair that does not span the
+    constant no null direction of ``[1, X]`` moves the intercept: the geometry decides
+    the columns' mean on its level coordinates and keeps the error.
+    """
+    model, X, y = _intercept_fit(term, columns)
+    assert model._fit_inference_info.get("structured_covariance")
+    if columns == "collinear":
+        assert not np.all(model._fit_inference_info["coefficient_estimable"])
+        assert _intercept_share_of_the_null_space(model) < 1e-8
+    dense, _, _ = _intercept_fit(term, columns, direct_solve="gram")
+    expected = dense.summary()._coef_rows[0]
+    assert expected.estimable is True
+    for summary in (model.summary(), model.metrics(X, y).summary()):
+        row = summary._coef_rows[0]
+        assert row.estimable is True
+        np.testing.assert_allclose(row.se, expected.se, rtol=1e-9)
 
 
 def test_editor_stale_summary_keeps_the_basis_vocabulary(segmented_model) -> None:

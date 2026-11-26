@@ -40,18 +40,56 @@ class BorderNullSpace:
     ``factor_rcond``, as the mask says; a contrast when its equilibrated projection is,
     relative to its own norm (``RankDecomposition.is_estimable``).  The structured rows
     are not kept, so a contrast that weighs a structured coordinate reads as not
-    determined, the answer of its coefficients' mask alone.
+    determined, the answer of its coefficients' mask alone.  One such contrast is kept:
+    ``centre``, the columns' mean, which the reported intercept weighs on every
+    coordinate (``with_centre``).
     """
 
     indices: NDArray
     column_scale: NDArray
     basis: NDArray
+    centre: NDArray | None = None
+    centre_along: NDArray | None = None
+    centre_size: float = 0.0
 
-    def is_estimable(self, contrast: NDArray) -> bool:
+    def with_centre(
+        self, centre: NDArray, at: NDArray, scale: NDArray, basis: NDArray, total: float
+    ) -> BorderNullSpace:
+        """This null space with ``centre``'s share on the structured coordinates ``at``.
+
+        ``scale`` and ``basis`` are those coordinates' column scales and rows of the null
+        basis, and ``total`` the weight the columns were centred with.  The share is
+        ``centre``'s equilibrated projection there, and its size the centred intercept's:
+        the centre over the scales, and the unit weight on the centred constant column of
+        scale ``sqrt(total)``.  A centre on a structured column of scale zero, the
+        intercept's alias, leaves no share: the intercept then reads as not determined.
+        """
+        weights, scaled = centre[at], scale > 0.0
+        if np.any(weights[~scaled] != 0.0):
+            return replace(self, centre=centre)
+        equilibrated = weights[scaled] / scale[scaled]
+        size = float(np.hypot(np.linalg.norm(equilibrated), 1.0 / np.sqrt(total)))
+        return replace(
+            self, centre=centre, centre_along=equilibrated @ basis[scaled], centre_size=size
+        )
+
+    def is_estimable(self, contrast: NDArray, intercept: float = 0.0) -> bool:
+        """Whether the data determine ``intercept * a + contrast @ beta`` (``RankInfo.is_estimable``).
+
+        ``a`` is the intercept beside the centred columns.  With ``intercept``, ``contrast``
+        may weigh each structured coordinate by ``-intercept * centre``, as the reported
+        intercept does: that part's projection and size are ``with_centre``'s.
+        """
         contrast = np.asarray(contrast, dtype=np.float64)
         outside = np.ones(len(contrast), dtype=bool)
         outside[self.indices] = False
-        if np.any(contrast[outside] != 0.0):
+        structured, share = contrast[outside], None
+        if intercept:
+            if self.centre is None or self.centre_along is None:
+                return False
+            structured = structured + intercept * self.centre[outside]
+            share = intercept * self.centre_along
+        if np.any(structured != 0.0):
             return False
         border = contrast[self.indices]
         tiny = np.finfo(np.float64).tiny
@@ -61,7 +99,11 @@ class BorderNullSpace:
             return False
         equilibrated = border[scaled] / self.column_scale[scaled]
         projection = equilibrated @ self.basis[scaled]
-        tolerance = SHARED_RANK_POLICY.factor_rcond * max(float(np.linalg.norm(equilibrated)), tiny)
+        size = float(np.linalg.norm(equilibrated))
+        if share is not None:
+            projection = projection - share
+            size = float(np.hypot(size, intercept * self.centre_size))
+        tolerance = SHARED_RANK_POLICY.factor_rcond * max(size, tiny)
         return bool(np.linalg.norm(projection) <= tolerance)
 
     def function_estimable(self, columns: NDArray) -> bool:
@@ -258,8 +300,11 @@ def _independent_block_centered_estimability(
 
 def _independent_block_centered_geometry(
     operator: CenteredBlockOperator,
+    centre: NDArray | None = None,
 ) -> tuple[NDArray, BorderNullSpace]:
-    """``_independent_block_centered_estimability`` and the border null space it reads."""
+    """``_independent_block_centered_estimability`` and the border null space it reads,
+    with ``centre``'s share on the structured coordinates when given (``with_centre``).
+    """
     raw = operator.raw
     if isinstance(raw, SymmetricBlockOperator):
         D = raw.d[:, None, None]
@@ -333,7 +378,16 @@ def _independent_block_centered_geometry(
         & (structured_column_scale > 0.0)
         & (np.linalg.norm(lifted_basis, axis=2) <= SHARED_RANK_POLICY.factor_rcond)
     )
-    return result, BorderNullSpace(raw.small_indices, small_column_scale[1:], small_basis[1:])
+    border = BorderNullSpace(raw.small_indices, small_column_scale[1:], small_basis[1:])
+    if centre is not None:
+        border = border.with_centre(
+            centre,
+            structured_indices.ravel(),
+            structured_column_scale.ravel(),
+            lifted_basis.reshape(-1, lifted_basis.shape[-1]),
+            operator.total,
+        )
+    return result, border
 
 
 def _refined_local_solves(D: NDArray, inverses: NDArray, cross: NDArray) -> tuple[NDArray, NDArray]:
@@ -376,6 +430,7 @@ def _nested_centered_estimability(
 def _nested_centered_geometry(
     operator: CenteredBlockOperator,
     raw: NestedDataOperator,
+    centre: NDArray | None = None,
 ) -> tuple[NDArray, BorderNullSpace]:
     """Estimability of a nested chain's data geometry by the §6 reduction.
 
@@ -384,7 +439,9 @@ def _nested_centered_geometry(
     it is in the single-level geometry with the leaf level dominant.  Every
     chain coordinate is non-estimable in the data sense: each node is a parent
     or a child in some ``z = e_p - sum_{c in ch(p)} e_c`` with ``M z = 0``, and
-    the roots alias the intercept.
+    the roots alias the intercept.  A node's column is the sum of its leaves',
+    so ``centre`` on the chain is its leaves' on the leaf effects, where its
+    share is read (``BorderNullSpace.with_centre``).
     """
     q, leaves = len(raw.small_indices), raw.tree.sizes[-1]
     leaf_indices = raw.structured_indices[raw.tree.offsets[-2] :]
@@ -405,10 +462,11 @@ def _nested_centered_geometry(
         total=operator.total,
         center=np.concatenate((border_cross / operator.total, operator.center[leaf_indices])),
     )
-    leaf_estimable, border = _independent_block_centered_geometry(leaf_operator)
+    leaf_centre = None if centre is None else np.concatenate((np.zeros(q), centre[leaf_indices]))
+    leaf_estimable, border = _independent_block_centered_geometry(leaf_operator, leaf_centre)
     result = np.zeros(operator.shape[0], dtype=bool)
     result[raw.small_indices] = leaf_estimable[:q]
-    return result, replace(border, indices=raw.small_indices)
+    return result, replace(border, indices=raw.small_indices, centre=centre)
 
 
 def _orthonormal_column_span(values: NDArray) -> NDArray:
@@ -672,18 +730,20 @@ def centered_operator_coefficient_estimable(
 
 def centered_operator_contrast_estimability(
     operator: CenteredBlockOperator,
+    centre: NDArray,
 ) -> BorderNullSpace | RankDecomposition:
     """``centered_operator_coefficient_estimable``'s rule on contrasts, as ``.is_estimable``.
 
-    The same geometry decides: the compact one a contrast of the border coordinates
-    (``BorderNullSpace``), the dense fallback any contrast.
+    The same geometry decides: the compact one a contrast of the border coordinates and
+    the reported intercept, which weighs the columns' mean ``centre`` on every
+    coordinate (``BorderNullSpace``); the dense fallback any contrast.
     """
     from superglm.solvers._structured.nested import NestedDataOperator
 
     try:
         if isinstance(operator.raw, NestedDataOperator):
-            return _nested_centered_geometry(operator, operator.raw)[1]
-        return _independent_block_centered_geometry(operator)[1]
+            return _nested_centered_geometry(operator, operator.raw, centre)[1]
+        return _independent_block_centered_geometry(operator, centre)[1]
     except np.linalg.LinAlgError as error:
         _require_dense_fallback_budget(operator, error)
         return decompose_gram(materialize_compact_operator(operator)).estimability_only()

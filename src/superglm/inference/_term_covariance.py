@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Hashable, Mapping
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
@@ -213,7 +213,15 @@ def _level_rows(spec, levels, held, columns) -> NDArray:
 
 
 def _held_level_se(
-    spec, name, feature_groups, active_groups, Cov_active, interaction_specs, *, center: bool
+    spec,
+    name,
+    feature_groups,
+    active_groups,
+    Cov_active,
+    interaction_specs,
+    *,
+    center: bool,
+    determines: Determinacy | None = None,
 ) -> NDArray | None:
     """The level errors of a main term an ``sz`` term folds, or ``None``.
 
@@ -221,7 +229,8 @@ def _held_level_se(
     (``factor_smooth.with_held_group_levels``), so each reported level is
     ``(L_l - L_base) gamma`` with ``L`` the term's rows at its levels and a
     held level's row the identified rows' mean: the errors are those of that
-    map, and centring maps it through ``I - 11'/n``.
+    map, and centring maps it through ``I - 11'/n``.  ``determines`` leaves NaN
+    each one it does not determine (``withhold_undetermined``).
     """
     active_subs = [ag for ag in active_groups if ag.feature_name == name]
     record = _held_levels(spec, name, interaction_specs) if active_subs else None
@@ -235,36 +244,18 @@ def _held_level_se(
     if center:
         L = L - L.mean(axis=0)
     variance = np.einsum("ij,jk,ik->i", L, Cov_g, L, optimize=True)
-    return cast(NDArray, np.sqrt(np.maximum(variance, 0.0)))
+    se = cast(NDArray, np.sqrt(np.maximum(variance, 0.0)))
+    return withhold_undetermined(se, determines, feature_groups[0].start + columns, L)
 
 
-def ordered_level_contrasts(
-    spec, name, feature_groups, interaction_specs, width: int, selected
-) -> NDArray:
-    """Each level ``feature_se_from_cov`` reports for ordered ``spec``, over ``width`` coefficients.
-
-    Row ``l`` is ``L_l - L_base`` (``_level_rows``, a held level's the identified levels'
-    mean) on the term's groups ``selected`` names, and zero on the others, whose
-    coefficients the selected model holds at zero.
+class Determinacy(NamedTuple):
+    """What ``contrast_determined`` reads of a covariance: its coefficient mask over the
+    fitted coefficients, and the decider of the decomposition the mask came from
+    (``RankDecomposition.is_estimable``), or ``None``.
     """
-    levels = list(spec._ordered_levels)
-    record = _held_levels(spec, name, interaction_specs)
-    L = _level_rows(spec, levels, None if record is None else record[1:], slice(None))
-    return term_contrasts(L, feature_groups, width, selected)
 
-
-def term_contrasts(rows: NDArray, feature_groups, width: int, selected) -> NDArray:
-    """``rows`` over a term's ``feature_groups`` (columns in their order) as contrasts over
-    ``width`` coefficients, zero on the groups ``selected`` does not name: the selected
-    model holds those at zero.
-    """
-    contrasts = np.zeros((len(rows), width))
-    start = 0
-    for group in feature_groups:
-        if group.name in selected:
-            contrasts[:, group.sl] = rows[:, start : start + group.size]
-        start += group.size
-    return contrasts
+    coefficient_estimable: NDArray
+    contrast_estimable: Callable[..., bool] | None
 
 
 def contrast_determined(
@@ -307,11 +298,23 @@ def function_determined(
     return contrast_estimable is not None and bool(contrast_estimable(columns, design_rows=True))
 
 
-def withhold_undetermined(se: NDArray, determines, contrasts) -> NDArray:
-    """``se`` with NaN at each row of ``contrasts()`` that ``determines`` does not determine."""
-    if determines is None:
+def withhold_undetermined(
+    se: NDArray, determines: Determinacy | None, columns: NDArray, rows: NDArray
+) -> NDArray:
+    """``se`` with NaN where ``determines`` leaves its row of ``rows`` open (``contrast_determined``).
+
+    ``rows`` is the map the errors were formed with, over the fitted coefficients
+    ``columns``, which are a term's active ones: the selected model holds its others at
+    zero.  A mask that shows all of ``columns`` determines every row, and none is decided
+    apart; ``None`` reports every one.
+    """
+    if determines is None or np.all(determines.coefficient_estimable[columns]):
         return se
-    determined = np.array([determines(contrast) for contrast in contrasts()], dtype=bool)
+    contrast = np.zeros(len(determines.coefficient_estimable))
+    determined = np.empty(len(rows), dtype=bool)
+    for i, row in enumerate(rows):
+        contrast[columns] = row
+        determined[i] = contrast_determined(contrast, *determines)
     return np.where(determined, se, np.nan)
 
 
@@ -326,13 +329,18 @@ def feature_se_from_cov(
     n_points: int = 200,
     center: bool = False,
     flags=None,
+    determines: Determinacy | None = None,
 ) -> NDArray:
     """Compute feature-level SEs from a precomputed covariance matrix.
 
     ``center=True`` returns the errors of the mean-centered report, the
     estimable contrast ``C b`` with ``C = I - 11'/L`` and covariance
     ``C V C'``. An inactive term returns zeros either way.  ``flags`` takes the
-    calling reader's ``separated_levels.separation_flags``.
+    calling reader's ``separated_levels.separation_flags``.  ``determines``
+    leaves NaN each error of a spline's curve and of an ordered term's levels
+    that the covariance does not determine, decided where its map is formed
+    (``_spline_se``, ``_held_level_se``); a curve an ``sz`` term moves and the
+    other term classes are reported as they are.
     """
     from superglm.features.categorical import Categorical
     from superglm.features.numeric import Numeric
@@ -355,13 +363,21 @@ def feature_se_from_cov(
             n_points=n_points,
             center=center,
             flags=flags,
+            determines=determines,
         )
         return np.ldexp(se, Cov_active.exponent // 2)
 
     feature_groups = [g for g in groups if g.feature_name == name]
     spec = specs.get(name) or interaction_specs.get(name)
     held = _held_level_se(
-        spec, name, feature_groups, active_groups, Cov_active, interaction_specs, center=center
+        spec,
+        name,
+        feature_groups,
+        active_groups,
+        Cov_active,
+        interaction_specs,
+        center=center,
+        determines=determines,
     )
     if held is not None:
         return held
@@ -376,6 +392,7 @@ def feature_se_from_cov(
                 x_eval=np.array(spec._ordered_levels, dtype=object),
                 reference_x=np.array([spec._base_level], dtype=object),
                 center=center,
+                determines=determines,
             )
         active_subs = [ag for ag in active_groups if ag.feature_name == name]
         if not active_subs:
@@ -458,6 +475,7 @@ def feature_se_from_cov(
             Cov_active,
             n_points=n_points,
             center=center,
+            determines=determines,
         )
 
     if isinstance(spec, Polynomial):

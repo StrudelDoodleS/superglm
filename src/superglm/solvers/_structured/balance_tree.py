@@ -2411,15 +2411,17 @@ class SumToZeroTreeFactor:
         )
         return SumToZeroTreeFactor(system, data)
 
-    def border_estimability(self):
+    def border_estimability(self, centre: NDArray):
         """``coefficient_estimable``'s rule on contrasts of the border slopes, as
-        ``geometry.BorderNullSpace``: the same verified null space's border rows.
+        ``geometry.BorderNullSpace``: the same verified null space's border rows, with the
+        share of ``centre``, the columns' mean, on the level coordinates (``with_centre``).
         """
         from superglm.solvers._structured.geometry import BorderNullSpace
 
         null, root = self._data_factor()._verified_data_null()
-        border = self.small_indices[1:]
-        return BorderNullSpace(border, root[border], null[border])
+        border, levels = self.small_indices[1:], self.structured_indices.ravel()
+        space = BorderNullSpace(border, root[border], null[border])
+        return space.with_centre(centre, levels, root[levels], null[levels], root[0] ** 2)
 
     def _verified_data_estimable(self) -> NDArray:
         """Data estimability on this (unpenalized) tree (``_verified_data_null``)."""
@@ -3104,9 +3106,10 @@ class ProfiledSumToZeroTreeFactor(_ProfiledLeafFactor):
         return self.augmented_factor.coefficient_estimable()[1:]
 
     def border_estimability(self):
-        """The slopes' ``SumToZeroTreeFactor.border_estimability``."""
-        border = self.augmented_factor.border_estimability()
-        return replace(border, indices=border.indices - 1)
+        """The slopes' ``SumToZeroTreeFactor.border_estimability``, centred on their mean."""
+        centre = self.xtw / self.sum_w
+        border = self.augmented_factor.border_estimability(np.concatenate(([0.0], centre)))
+        return replace(border, indices=border.indices - 1, centre=centre)
 
     def raw_level_inverse_block(self, level: int) -> NDArray:
         return self.augmented_factor.raw_level_inverse_block(level)

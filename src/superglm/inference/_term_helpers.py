@@ -175,18 +175,16 @@ def _spline_se(
     x_eval: NDArray | None = None,
     reference_x: NDArray | None = None,
     center: bool = False,
+    determines=None,
 ) -> NDArray:
-    """Shared public-runtime SE computation for spline-style terms.
+    """Standard errors of a spline-style term's curve, ``sqrt(diag(M V M'))``.
 
-    Parameters
-    ----------
-    x_eval : array, optional
-        Evaluate SEs at these x positions instead of a linspace grid; ``n_points`` is ignored.
-    reference_x : array, optional
-        Propagate uncertainty for ``f(x_eval) - f(reference_x)``.
-    center : bool
-        Propagate uncertainty for ``f(x) - mean_x f(x)`` (``centering="mean"``): subtract the
-        map's own column means, as ``reference_x`` does against one reference row.
+    ``M`` is the basis at ``x_eval``, or on a grid of ``n_points``, less its row at
+    ``reference_x`` (the error of ``f(x) - f(reference_x)``; one row, or one per point)
+    and, with ``center``, less its column means (``f(x) - mean_x f(x)``,
+    ``centering="mean"``).  ``determines`` leaves NaN each point whose row of ``M`` the
+    covariance does not determine (``_term_covariance.withhold_undetermined``); ``None``
+    reports every one.
     """
     n_out = len(x_eval) if x_eval is not None else n_points
     from superglm.inference.covariance import BinaryScaledCovariance
@@ -202,6 +200,7 @@ def _spline_se(
             x_eval=x_eval,
             reference_x=reference_x,
             center=center,
+            determines=determines,
         )
         return np.ldexp(se, Cov_active.exponent // 2)
     active_subs = [ag for ag in active_groups if ag.feature_name == name]
@@ -226,7 +225,12 @@ def _spline_se(
     if center:
         M = M - M.mean(axis=0)
     Q = M @ Cov_g
-    return cast(NDArray, np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0)))
+    se = cast(NDArray, np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0)))
+    if determines is None:
+        return se
+    from superglm.inference._term_covariance import withhold_undetermined
+
+    return withhold_undetermined(se, determines, feature_groups[0].start + active_cols, M)
 
 
 def _build_spline_metadata(spec) -> SplineMetadata:
