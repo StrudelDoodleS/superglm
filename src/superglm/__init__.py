@@ -62,6 +62,14 @@ if _typing.TYPE_CHECKING:
     )
     from superglm.distributional.predictor import Predictor
     from superglm.distributional.splice import SplitSplice
+    from superglm.distributional.thresholds import (
+        MeanExcessResult,
+        ThresholdStabilityResult,
+        mean_excess,
+        plot_mean_excess,
+        plot_threshold_stability,
+        threshold_stability,
+    )
     from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
     from superglm.export import RatingTableBaseNotRepresentableError, export_rating_tables
     from superglm.features._spline_config import SCOPRetiredWarning, SplineOptionWarning
@@ -228,6 +236,14 @@ _LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
     "superglm.distributional.families.two_piece": ("TwoPieceLogNormalLSS", "TwoPieceNormalLSS"),
     "superglm.distributional.predictor": ("Predictor",),
     "superglm.distributional.splice": ("SplitSplice",),
+    "superglm.distributional.thresholds": (
+        "MeanExcessResult",
+        "ThresholdStabilityResult",
+        "mean_excess",
+        "plot_mean_excess",
+        "plot_threshold_stability",
+        "threshold_stability",
+    ),
     "superglm.distributions": (
         "Binomial",
         "Gamma",
@@ -477,6 +493,13 @@ __all__ = [
     "SuperGLM",
     "SuperLSS",
     "SplitSplice",
+    # Choosing a tail threshold (experimental)
+    "mean_excess",
+    "MeanExcessResult",
+    "plot_mean_excess",
+    "threshold_stability",
+    "ThresholdStabilityResult",
+    "plot_threshold_stability",
     "BoundPredictor",
     "bind_predictor",
     "BoundInteraction",

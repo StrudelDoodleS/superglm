@@ -55,3 +55,23 @@ for a fitting and prediction example.
 
    superglm.SplitSplice
 ```
+
+## Choosing a tail threshold
+
+Experimental: the names, the arguments and the layout of what comes back may
+change in a minor release. `mean_excess` and `threshold_stability` read the
+claims before any body-plus-tail fit, and the two `plot_*` functions draw
+their results.
+
+```{eval-rst}
+.. autosummary::
+   :toctree: ../generated
+   :nosignatures:
+
+   superglm.mean_excess
+   superglm.MeanExcessResult
+   superglm.plot_mean_excess
+   superglm.threshold_stability
+   superglm.ThresholdStabilityResult
+   superglm.plot_threshold_stability
+```

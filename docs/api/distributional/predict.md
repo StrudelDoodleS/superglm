@@ -59,6 +59,8 @@ probability or an expected shortfall to give per-row intervals, and
    ~superglm.SuperLSS.predict_parameters
    ~superglm.SuperLSS.predict_link
    ~superglm.SuperLSS.predict_cdf
+   ~superglm.SuperLSS.predict_pdf
+   ~superglm.SuperLSS.predict_mean_excess
    ~superglm.SuperLSS.predict_quantile
    ~superglm.SuperLSS.posterior_predictive
    ~superglm.SuperLSS.posterior_draws

@@ -17,4 +17,6 @@ family is right, the last three where it is wrong.
    ~superglm.SuperLSS.plot
    ~superglm.SuperLSS.plot_data
    ~superglm.SuperLSS.plot_diagnostics
+   ~superglm.SuperLSS.distribution_curve
+   ~superglm.SuperLSS.plot_distribution
 ```
