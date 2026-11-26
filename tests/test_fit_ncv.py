@@ -1540,6 +1540,8 @@ def test_fits_at_the_limit_of_float64_are_used_and_disclosed_in_one_warning(wher
     are library refits without each group.  The model is not converged: the search's verdict
     stands, and the coefficient fits' does not.  A stagnated final fit is one solve after a
     search that stopped aiming, and two after one that did not: no solve from another start.
+    After the unforced search it is one exact step on from the certified fit, and everything
+    read of the model, its standard errors among it, is that fit's.
     """
     b, good = curve_book(), curve_fit()
     forced = {
@@ -1566,6 +1568,7 @@ def test_fits_at_the_limit_of_float64_are_used_and_disclosed_in_one_warning(wher
     assert abs(np.log(report["lambdas"]["t"] / reached["lambdas"]["t"])) <= apart
     if where == "final":
         assert report["lambdas"] == reached["lambdas"]
+        assert_reads_alike(readings(model, b.frame, b), readings(good, b.frame, b), 64 * kappa * U)
     predicted = good.predict(b.frame)
     gap = np.abs(model.predict(b.frame) - predicted)
     assert np.all(gap <= apart * moves + 64 * kappa * U * np.maximum(1.0, np.abs(predicted)))

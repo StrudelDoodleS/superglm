@@ -85,6 +85,15 @@ STOP_WORDS = {
     "failed_search": "the held-out deviance could not be computed at any smoothing it tried",
 }
 STOP_WORDS["compact"] = STOP_WORDS["at_the_limit"] = STOP_WORDS["converged"]
+# Each state's verdicts: the search's, and its coefficient fits'.
+VERDICTS = {
+    "converged": (True, True),
+    "step_limit": (False, True),
+    "line_search": (False, True),
+    "failed_search": (False, False),
+    "compact": (True, True),
+    "at_the_limit": (True, False),
+}
 NCV_CONVERGED = (
     "Converged. fit_ncv chose the smoothing by held-out prediction, and its search met its "
     "stopping test."
@@ -229,6 +238,7 @@ def test_telemetry_files_the_search_as_fit_ncv_s_in_both_forms(state):
     for key in ("method", "termination_reason", "n_iter", "n_evaluations", "converged"):
         assert search[key] == report[key]
     assert search["criterion"] == report["criterion"] and search["lambdas"] == report["lambdas"]
+    assert (search["search_converged"], search["coefficients_converged"]) == VERDICTS[state]
     metrics = metrics_for_logging(model)
     assert not [key for key in metrics if ".reml." in key]
     want = {
@@ -282,6 +292,10 @@ def test_the_fit_record_carries_the_search_as_fit_ncv_s(state, monkeypatch, tmp_
     assert summary["objective"] == report["criterion"]
     assert summary["n_penalties"] == len(report["lambdas"])
     assert summary["work"] == report["work"] and summary["work"]["inner_solves"] > 0
+    at_the_limit = report["n_evaluations"] if state == "at_the_limit" else 0
+    assert summary["work"]["stagnated_fits"] == at_the_limit
+    verdicts = summary["ncv"]["search_converged"], summary["ncv"]["coefficients_converged"]
+    assert verdicts == VERDICTS[state]
     assert summary["ncv"] == {
         "search_converged": report["search_converged"],
         "coefficients_converged": report["coefficients_converged"],
