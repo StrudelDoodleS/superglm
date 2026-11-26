@@ -282,8 +282,14 @@ def stop_report(result: Any, *, smoothing: bool = False, refit_reason: str | Non
     evidence = None
     if smoothing and reason != "coefficients_revised":
         evidence = getattr(result, "stop_evidence", None)
+        if getattr(result, "criterion", "reml") == "ncv":
+            from superglm.model.ncv_ops import CONVERGED_STOPS
+
+            # fit_ncv's search verdict is its stop alone (``ncv_diagnostics()``'s
+            # ``search_converged``); its coefficient fits have their own.
+            converged = reason in CONVERGED_STOPS
         # The final coefficient refit can overturn the overall verdict.
-        if getattr(result, "terminal_refit_termination", None) is not None:
+        elif getattr(result, "terminal_refit_termination", None) is not None:
             converged = reason in _REML_CONVERGED_REASONS
     elif not smoothing and reason == "max_iter":
         evidence = {"test": "iteration_limit", "iteration_limit": iterations}
