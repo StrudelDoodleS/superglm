@@ -704,7 +704,8 @@ def _refresh_fit_statistics(
     from the likelihood where one is held against its outcome, else at the clipped mean.
     """
     from superglm.model.base import (
-        predict_eta_raw_exact,
+        clipped_rows,
+        predict_priced,
         require_priced_rows,
         response_mean,
         unpriced_rows,
@@ -815,20 +816,22 @@ def _refresh_fit_statistics(
         and (X_ref is retained_X_ref or X_ref is None)
     )
     if X_ref is not None and not can_use_fitted_design:
-        # predict's predictor; the check below names any row without a mean
-        eta_raw = predict_eta_raw_exact(model, X_ref, offset_arr)
+        # The check below names any row without a mean, so predict's warning would repeat it.
+        # Past the clip the statistics' sums read the clipped mean, not predict's.
+        mu, eta_raw = clipped_rows(
+            model, X_ref, offset_arr, predict_priced(model, X_ref, offset_arr)
+        )
     elif getattr(model, "_dm", None) is not None and model._dm.n == y_arr.size:
         solver_result = (
             model._solver_pirls_result() if model._solver_result is not None else model.result
         )
         eta_raw = linear_predictor(model._dm, solver_result, offset_arr)
+        mu = response_mean(model, eta_raw)
     else:
         model._fit_stats = None
         return None
 
-    eta_raw = np.asarray(eta_raw, dtype=np.float64)
-    # the mean the solver's rows hold there, which the statistics' sums read
-    mu = np.asarray(response_mean(model, eta_raw), dtype=np.float64).ravel()
+    mu = np.asarray(mu, dtype=np.float64).ravel()
     if mu.size != y_arr.size:
         raise ValueError(f"Predictions have length {mu.size}, expected {y_arr.size}.")
     require_priced_rows(model, mu, weights, "the fit statistics")
@@ -846,7 +849,8 @@ def _refresh_fit_statistics(
     )
     unit_weights = np.ldexp(weights, exponent) if exponent else weights
     held = None
-    if clip_may_hold(model._distribution, model._link, mu):
+    if eta_raw is not None and clip_may_hold(model._distribution, model._link, mu):
+        # A mean at the clip: the test needs the predictor the clip moved.
         held = rescored_held_rows(model._distribution, model._link, y_arr, weights, eta_raw)
     null_mu, null_held = _null_state(
         y_arr,

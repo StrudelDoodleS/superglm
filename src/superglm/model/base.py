@@ -994,6 +994,25 @@ def scored_deviance(model, y, weights: NDArray, eta: NDArray, mu: NDArray) -> fl
     return total if held is None else total + held.deviance_gap(weights)
 
 
+def clipped_rows(
+    model, X: EagerFrame | FrameLike, offset: NDArray | None, mu: NDArray
+) -> tuple[NDArray, NDArray | None]:
+    """``predict``'s means ``mu`` on the rows ``X`` as a score's sums read them, and their raw predictor.
+
+    Past the working clip ``predict`` returns a probability no mean-based sum
+    can hold (``1 - mu`` rounds to 0), so the sums read the clipped mean there
+    (``response_mean``), formed with the predictor that says which rows are
+    held.  With no mean past the clip, as for every model but a logit, probit
+    or cloglog binomial with a row in a tail, ``mu`` itself and ``None``: one
+    comparison, and the predictor is not formed.
+    """
+    link = getattr(model, "_link", None)  # a scorer's stand-in model may have none
+    if link is None or not clip_may_hold(model._distribution, link, mu):
+        return mu, None
+    eta = np.asarray(predict_eta_raw_exact(model, X, offset, warn=False), dtype=np.float64)
+    return response_mean(model, eta), eta
+
+
 def score_rows(
     model,
     X: EagerFrame | FrameLike,
@@ -1002,21 +1021,13 @@ def score_rows(
     weights: NDArray | None,
     mu: NDArray,
 ) -> tuple[NDArray, HeldRows | None]:
-    """``predict``'s means ``mu`` on the rows ``X`` as a score's sums read them, and its ``held_score_rows``.
+    """``clipped_rows`` of ``predict``'s means ``mu``, and the rows a score reads from the likelihood.
 
-    Past the working clip ``predict`` returns a probability no mean-based sum
-    can hold (``1 - mu`` rounds to 0), so the sums read the clipped mean there
-    (``response_mean``) and the held rows the likelihood.  With no mean past
-    the clip, as for every model but a logit, probit or cloglog binomial with
-    a row in a tail, ``mu`` itself and ``None``: one comparison, and the
-    predictor is not formed.
+    The sums' mean and its ``held_score_rows``, whose gaps the caller adds;
+    ``mu`` itself and ``None`` with no mean past the clip.
     """
-    link = getattr(model, "_link", None)  # a scorer's stand-in model may have none
-    if link is None or not clip_may_hold(model._distribution, link, mu):
-        return mu, None
-    eta = predict_eta_raw_exact(model, X, offset, warn=False)
-    clipped = response_mean(model, eta)
-    return clipped, held_score_rows(model, y, weights, eta, clipped)
+    mu, eta = clipped_rows(model, X, offset, mu)
+    return mu, None if eta is None else held_score_rows(model, y, weights, eta, mu)
 
 
 def predict_exact(

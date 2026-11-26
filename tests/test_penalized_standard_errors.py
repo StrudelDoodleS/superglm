@@ -39,6 +39,7 @@ from superglm import (
     Spline,
     SuperGLM,
 )
+from superglm.distributions import clip_mu
 from superglm.features.interaction import TensorInteraction
 from superglm.model.fit_state import fitted_lambda2
 from superglm.reml.penalty_algebra import build_penalty_matrix
@@ -63,8 +64,12 @@ def _design(model) -> np.ndarray:
 
 
 def _working_weights(model, frame) -> np.ndarray:
-    """Fisher weights ``(dmu/deta)^2 / V(mu)`` at the published fit, unit prior weights."""
-    mu = np.asarray(model.predict(frame), dtype=np.float64)
+    """Fisher weights ``(dmu/deta)^2 / V(mu)`` at the published fit, unit prior weights.
+
+    At the mean the solver's rows hold: ``predict`` returns a walked binomial
+    level's own probability, which rounds to 0, where the ratio is ``0 / 0``.
+    """
+    mu = clip_mu(np.asarray(model.predict(frame), dtype=np.float64), model._distribution)
     slope = np.asarray(model._link.deriv_inverse(model._link.link(mu)), dtype=np.float64)
     return slope**2 / np.asarray(model._distribution.variance(mu), dtype=np.float64)
 

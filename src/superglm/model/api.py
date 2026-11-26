@@ -2550,7 +2550,10 @@ class SuperGLM:
         Returns
         -------
         NDArray
-            Predicted mean on the response scale (inverse-link of eta).
+            Predicted mean on the response scale (inverse-link of eta). A
+            binomial model under the logit, probit or cloglog link returns
+            each row's own probability however small: a row priced at 1e-16
+            predicts 1e-16, and one within 1e-16 of certainty predicts 1.0.
 
         Warns
         -----
