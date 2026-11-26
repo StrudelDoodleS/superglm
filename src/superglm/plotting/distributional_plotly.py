@@ -35,7 +35,7 @@ try:  # pragma: no cover - exercised by the absence of the dependency
 except ImportError:  # pragma: no cover
     raise ImportError(
         "plotly is required for superglm.plotting.distributional_plotly; "
-        "install it with: pip install plotly"
+        "install it with: pip install 'superglm[plotting]'"
     ) from None
 
 __all__ = [

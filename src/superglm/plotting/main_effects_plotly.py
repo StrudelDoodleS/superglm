@@ -209,7 +209,8 @@ def plot_main_effects_plotly(
         from plotly.subplots import make_subplots
     except ImportError:
         raise ImportError(
-            "plotly is required for engine='plotly'. Install it with: pip install plotly"
+            "plotly is required for engine='plotly'. "
+            "Install it with: pip install 'superglm[plotting]'"
         ) from None
 
     frame = None if X is None else as_eager_frame(X)

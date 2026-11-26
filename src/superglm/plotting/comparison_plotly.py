@@ -21,7 +21,8 @@ def plot_term_comparison_plotly(
         from plotly.subplots import make_subplots
     except ImportError:
         raise ImportError(
-            "plotly is required for term comparison plots. Install it with: pip install plotly"
+            "plotly is required for term comparison plots. "
+            "Install it with: pip install 'superglm[plotting]'"
         ) from None
 
     terms = payload["terms"]

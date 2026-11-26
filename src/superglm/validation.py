@@ -935,7 +935,8 @@ def lorenz_curve(
                 import plotly.graph_objects as go
             except ImportError:
                 raise ImportError(
-                    "plotly is required for engine='plotly'. Install it with: pip install plotly"
+                    "plotly is required for engine='plotly'. "
+                    "Install it with: pip install 'superglm[plotting]'"
                 ) from None
 
             from superglm.plotting.common import _PLOTLY_TEXT, _apply_plotly_theme
@@ -1024,7 +1025,8 @@ def lorenz_curve(
             import plotly.graph_objects as go
         except ImportError:
             raise ImportError(
-                "plotly is required for engine='plotly'. Install it with: pip install plotly"
+                "plotly is required for engine='plotly'. "
+                "Install it with: pip install 'superglm[plotting]'"
             ) from None
 
         from superglm.plotting.common import (
