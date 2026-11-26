@@ -423,7 +423,7 @@ def test_gaussian_fit_publishing_its_scale_reads_no_weight_logarithms(
     import superglm.reml.scale as scale
     from superglm import Spline, SuperGLM
 
-    real_terms = scale.gaussian_reml_scale_terms
+    real_terms = scale.gaussian_saturated_log_weight
     calls = 0
 
     def counted_terms(*args, **kwargs):
@@ -432,8 +432,8 @@ def test_gaussian_fit_publishing_its_scale_reads_no_weight_logarithms(
         return real_terms(*args, **kwargs)
 
     for module in list(sys.modules.values()):
-        if getattr(module, "gaussian_reml_scale_terms", None) is real_terms:
-            monkeypatch.setattr(module, "gaussian_reml_scale_terms", counted_terms)
+        if getattr(module, "gaussian_saturated_log_weight", None) is real_terms:
+            monkeypatch.setattr(module, "gaussian_saturated_log_weight", counted_terms)
 
     rng = np.random.default_rng(3)
     x = rng.uniform(-2.0, 2.0, 400)
@@ -453,3 +453,62 @@ def test_gaussian_fit_publishing_its_scale_reads_no_weight_logarithms(
     assert np.isfinite(result.phi_likelihood) and result.phi_likelihood > 0.0
     fitted("fit_reml")
     assert calls >= 1
+
+
+@pytest.mark.parametrize("semantics", ["prior", "frequency"])
+def test_gaussian_reml_fit_reduces_the_weights_once_for_its_scale(
+    monkeypatch: pytest.MonkeyPatch, semantics: str
+) -> None:
+    """Over a complete Gaussian ``fit_reml``, the scale profile reduces the weights
+    no more than master did: the likelihood size once per profile, where the
+    family prepares it, and the saturated term's ``sum(log w)`` once more under
+    prior weights. ``reml.scale`` reduces no weight to a size, and under
+    frequency weights, whose saturated term is zero, it reads none."""
+    import os
+    import sys
+
+    import pandas as pd
+
+    from superglm import Spline, SuperGLM
+
+    n = 400
+    rng = np.random.default_rng(3)
+    x = rng.uniform(-2.0, 2.0, n)
+    # Replication counts are integral; precisions need not be.
+    if semantics == "prior":
+        weights = rng.uniform(0.5, 2.0, n)
+    else:
+        weights = rng.integers(1, 4, n).astype(np.float64)
+    y = np.sin(x) + rng.normal(0.0, 1.0, n) / np.sqrt(weights)
+    scale_file = os.path.join("superglm", "reml", "scale.py")
+    reductions: list[str] = []
+
+    def counted(name, real):
+        def reduction(a, *args, **kwargs):
+            caller = sys._getframe(1).f_code.co_filename
+            if caller.endswith(scale_file) and np.shape(a) == (n,):
+                reductions.append(name)
+            return real(a, *args, **kwargs)
+
+        return reduction
+
+    monkeypatch.setattr(np, "sum", counted("sum", np.sum))
+    monkeypatch.setattr(np, "count_nonzero", counted("count_nonzero", np.count_nonzero))
+    real_profile = Gaussian.scale_profile
+    profiles = 0
+
+    def counted_profile(self, *args, **kwargs):
+        nonlocal profiles
+        profiles += 1
+        return real_profile(self, *args, **kwargs)
+
+    monkeypatch.setattr(Gaussian, "scale_profile", counted_profile)
+    model = SuperGLM(
+        family="gaussian", features={"x": Spline(n_knots=6)}, weight_semantics=semantics
+    )
+    model.fit_reml(pd.DataFrame({"x": x}), y, sample_weight=weights)
+    assert profiles >= 1
+    assert np.isfinite(model.result.phi) and model.result.phi > 0.0
+    # Under prior weights every reduction left in ``reml.scale`` is a log-weight sum.
+    expected = ["sum"] * profiles if semantics == "prior" else []
+    assert reductions == expected

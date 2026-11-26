@@ -276,12 +276,8 @@ def prepare_gamma_reml_scale_data(
     )
 
 
-def gaussian_reml_scale_terms(
-    sample_weight: NDArray,
-    *,
-    weight_semantics: str,
-) -> tuple[float, float]:
-    """Return the Gaussian likelihood size and its weight-only saturated term.
+def gaussian_saturated_log_weight(sample_weight: NDArray, *, weight_semantics: str) -> float:
+    """Return the Gaussian saturated term's weight-only part.
 
     Under ``"prior"`` each row's saturated density is ``N(y_i; y_i, phi/w_i)``,
     whose normalizer is ``0.5 log(w_i / (2 pi phi))``.  The ``0.5 log w_i`` part
@@ -289,19 +285,18 @@ def gaussian_reml_scale_terms(
     dispersion or the selected smoothing parameters; it is returned and applied
     anyway so that the published criterion is the restricted log-likelihood
     rather than the restricted log-likelihood plus an unnamed constant, which
-    is what makes a cross-package comparison meaningful.
+    is what makes a cross-package comparison meaningful.  Under ``"frequency"``
+    a weight replicates a unit-weight row, so the term is zero and no weight is
+    read.  The likelihood size is ``dispersion_likelihood_size``'s.
     """
     if weight_semantics not in (PRIOR_WEIGHTS, FREQUENCY_WEIGHTS):
         raise ValueError(
             f"weight_semantics must be 'prior' or 'frequency', got {weight_semantics!r}",
         )
-    weights = np.asarray(sample_weight, dtype=np.float64)
     if weight_semantics == FREQUENCY_WEIGHTS:
-        return float(np.sum(weights, dtype=np.float64)), 0.0
-    carried = weights > 0.0
-    likelihood_size = float(np.count_nonzero(carried))
-    saturated_log_weight = float(0.5 * np.sum(np.log(weights[carried]), dtype=np.float64))
-    return likelihood_size, saturated_log_weight
+        return 0.0
+    weights = np.asarray(sample_weight, dtype=np.float64)
+    return float(0.5 * np.sum(np.log(weights[weights > 0.0]), dtype=np.float64))
 
 
 def _gaussian_reml_log_phi(
@@ -879,10 +874,10 @@ class GaussianScaleProfile:
 
     @functools.cached_property
     def saturated_log_weight(self) -> float:
-        _, saturated_log_weight = gaussian_reml_scale_terms(
+        # The likelihood size is already held; only the saturated term is reduced.
+        return gaussian_saturated_log_weight(
             self.sample_weight, weight_semantics=self.weight_semantics
         )
-        return saturated_log_weight
 
     def profile(self, penalized_deviance: float, penalty_nullity: float) -> ProfiledScaleTerm:
         return profile_gaussian_reml_scale(
@@ -949,7 +944,7 @@ __all__ = [
     "ProfiledScaleTerm",
     "TweedieScaleProfile",
     "gaussian_reml_scale_phi",
-    "gaussian_reml_scale_terms",
+    "gaussian_saturated_log_weight",
     "prepare_gamma_reml_scale_data",
     "prepare_reml_scale_data",
     "prepare_tweedie_reml_scale_data",
