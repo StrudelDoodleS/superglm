@@ -25,8 +25,29 @@ system is the Woodbury identity on the whole neighbourhood (Wood, equation 4): w
 ``H_a^-1 Z_a' r = Y' (r + W^(1/2) (I - W^(1/2) B W^(1/2))^-1 W^(1/2) B r)``.  Form and factor
 accumulates ``Z_a' W_a Z_a`` over the neighbourhood's rows in bounded blocks and factors the
 Jacobi-scaled ``H - Z_a' W_a Z_a``.  Beyond the row product both share, the first costs
-``3 |a|^2 P + |a|^3`` and the second ``P^3`` (``P = p + 1``), which is the dispatch rule.  Single
-rows take the scalar form ``1 - W_i h_i`` in blocks of rows, with no factorisation.
+``3 |a|^2 P + |a|^3`` and the second ``P^3`` (``P = p + 1``), which is the dispatch rule.  A
+neighbourhood of one row takes the scalar form ``1 - W_i h_i``, with no factorisation.
+
+**Stacks.**  Neighbourhoods on the first route are read in blocks of whole neighbourhoods,
+sorted by size, and those of one size are solved together, as ``(members, size, size)``
+arrays of ``B`` and of the systems: the single rows of a block by the scalar form, whether
+they come from the single-row form or from groups or folds of one row, and each larger size
+by one call of LAPACK's ``xGESV`` a right-hand side (``numpy.linalg.solve``).  The cost is
+per row and per distinct size in a block, not per neighbourhood.  The stacked call fails as
+a whole on a singular member and says nothing of which, where the batched LAPACK interface
+returns a status per matrix (Abdelfattah et al., "A set of batched basic linear algebra
+subprograms and LAPACK routines", ACM Trans. Math. Softw. 47(3), 2021), and it has no
+condition estimate.  A stack therefore takes the members it can show sound beforehand:
+those whose Gershgorin discs all lie right of ``sqrt(size)`` times the flag level (below).
+Such a system is symmetric and strictly diagonally dominant, so it is positive definite
+with its smallest eigenvalue above that bound; its margin, the reciprocal of
+``||A^-1||_1 <= sqrt(size) ||A^-1||_2``, is above the flag level; and elimination on it
+meets no zero pivot and grows no entry beyond twice the largest (Wilkinson; Higham 2002,
+Theorem 9.9), so the solve is backward stable.  Every other member is factored and decided
+on its own, in the neighbourhoods' order and before its block's stacks are scored.  The
+route a neighbourhood takes, and whether it is flagged, fitted from its kept rows or
+refused, are what they would be for the neighbourhood alone.  A forced route takes every
+neighbourhood alone.
 
 **Row work.**  Rows enter through four products, ``Z v``, ``Z' v``, ``Z' W Z`` and ``z' M z``,
 and dense blocks of ``rows.chunk_rows(P)`` rows serve all four.  A form-and-factor
@@ -135,10 +156,13 @@ pairs reads the scored rows.
 **Memory.**  No ``rows x P`` array of the whole design is formed.  Rows are read in blocks of
 ``rows.chunk_rows(P)``; a form-and-factor neighbourhood within one block is held from a block
 of whole neighbourhoods while it is solved, a larger one is streamed through such blocks pass
-by pass, and a neighbourhood on the neighbourhood-sized route is held whole (under the cost rule it has fewer
-than ``0.54 P`` weighted rows).  An evaluation holds a block, its two products and two blocks of
-``(u, Delta)`` pairs, a handful of ``P x P`` matrices, and row-length vectors: the mode's rows
-and five entries per scored pair.  A neighbourhood served as a row subset holds that subset's
+by pass, and the neighbourhoods on the neighbourhood-sized route come in blocks of at most
+that many rows and one neighbourhood more (under the cost rule each has fewer than ``0.54 P``
+weighted rows).  An evaluation holds a block and its solved rows, one more array of that
+size at most (a stack's ``(u, Delta)`` pairs, or two blocks of pairs from neighbourhoods
+taken one at a time), ``size x size`` per stacked neighbourhood of the block (at most
+``0.54`` of the block), a handful of ``P x P`` matrices, and row-length vectors: the mode's
+rows and five entries per scored pair.  A neighbourhood served as a row subset holds that subset's
 stored form (an index per lookup term, its dense columns) and the solver's plan for it, one
 neighbourhood at a time; the compact third pass adds row-length vectors and reads the design's
 own lookup plan, which the design holds until the fit is published.  Between evaluations only a
@@ -187,7 +211,10 @@ from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_factor
 from superglm.types import GroupSlice, PenaltyComponent
 
 Route = Literal["woodbury", "factor"]
-"""A leave-out solve route: the neighbourhood-sized system, or form and factor."""
+"""A leave-out solve route: the neighbourhood-sized system, or form and factor.
+
+Forced on an evaluation, a route takes every neighbourhood by it, one at a time.
+"""
 
 InfeasibleReason = Literal[
     "uncertified_mode", "clipped_prediction", "non_finite", "leave_out_rank", "rank_deficient_fit"
@@ -257,6 +284,10 @@ class WorkCounts:
     third-derivative pass.  ``rows_streamed`` are rows a pass took through compact products
     in place of a dense block (``rows.CentredRows``), once per pass, and are in neither of
     the other two.  Divide any of them by the row count for passes over the data.
+    ``small_factorisations`` are neighbourhood-sized systems factored one at a time, and
+    ``solves`` the solves with one factored system, of either size.  ``stacked`` are the
+    neighbourhood-sized systems solved together, in ``stacks`` of one size, each stack by one
+    LAPACK call a right-hand side; a single row's scalar system is in none of these.
     ``kept_fits`` are leave-out systems fitted from their kept rows, each one or two passes of
     the solver's row factor over the design, which neither row count includes.
     ``fallback_solves`` are the inner solves, of ``inner_solves``, made because an earlier one
@@ -271,6 +302,8 @@ class WorkCounts:
     pirls_iterations: int = 0
     factorisations: int = 0
     small_factorisations: int = 0
+    stacks: int = 0
+    stacked: int = 0
     solves: int = 0
     rows_read: int = 0
     rows_multiplied: int = 0
@@ -859,7 +892,7 @@ def _evaluate(
     try:
         trial = _Trial.start(problem, nb, fit, gradient and bool(problem.names), heldout, work)
         if nb.drop_rows is None and route is None:
-            _single_rows(trial, nb)
+            _small_route(trial, nb, np.flatnonzero(problem.active), stacked=True)
         else:
             _neighbourhoods(trial, nb, route)
     except _InfeasibleTrial as stop:
@@ -1352,6 +1385,19 @@ class _Trial:
         if self._held == len(self._left):
             self.flush()
 
+    def pairs(self, left: NDArray[np.float64], right: NDArray[np.float64]) -> None:
+        """Add ``sum_k u_k Delta_k'`` to ``M`` for a block of pairs, and their forms where those are kept.
+
+        Row ``k`` of ``left`` and of ``right`` need only have ``u_k Delta_k'`` as their outer
+        product.
+        """
+        if self.forms is not None:
+            design = self.design
+            for u, delta in zip(left, right, strict=True):
+                self.forms += design.matvec(self.lifted(u)) * design.matvec(self.lifted(delta))
+        self.cross += left.T @ right
+        self.work.rows_multiplied += len(left)
+
     def flush(self) -> None:
         """Add the held pairs' ``sum u Delta'`` to ``M``."""
         held, self._held = self._held, 0
@@ -1428,35 +1474,154 @@ def _leave_out_factor(
     return (factor if margin > questionable else None), margin
 
 
-def _single_rows(trial: _Trial, nb: Neighbourhoods) -> None:
-    """Every weighted row removed and scored on its own, in blocks of rows.
+@dataclass(frozen=True)
+class _Stack:
+    """The neighbourhoods of one size in a block of rows, one neighbourhood a row of each array.
 
-    A row whose ``1 - W h`` is questionable is taken out of its block and fitted from the
-    rows it leaves (:func:`_factor_route`).
+    ``ks`` are the neighbourhoods; ``rows`` their removed rows and ``slots`` each row's scored
+    pair, -1 where it is not scored, both ``(members, size)``.  ``Z`` and ``Y`` are those rows
+    and ``Z H^-1``, ``(members, size, P)`` views of the block.  ``B`` is ``Y Z'`` per member,
+    ``None`` on a forced route, and ``sound`` marks the members the stack solves together.
     """
-    problem = trial.problem
-    for chunk in row_chunks(np.flatnonzero(problem.active), problem.width):
-        block = trial.read(chunk)
-        solved = trial.solved(block)
-        leverage = np.einsum("ij,ij->i", solved, block)
-        curvature = trial.curvature[chunk]
-        denominator = 1.0 - curvature * leverage
-        sound = denominator > trial.questionable
-        if not sound.all():
-            for at in np.flatnonzero(~sound).tolist():
-                _factor_route(trial, nb, int(chunk[at]), flagged=float(denominator[at]))
-            chunk, block, solved = chunk[sound], block[sound], solved[sound]
-            leverage, curvature, denominator = leverage[sound], curvature[sound], denominator[sound]
-        a = trial.score[chunk] / denominator
-        step = a * leverage
-        slope = trial.score_pairs(chunk, chunk, trial.eta[chunk] + step)
-        if not trial.gradient:
-            continue
-        b = slope / denominator
-        xu = b * leverage
-        trial.q += block.T @ (slope + curvature * xu + trial.third[chunk] * xu * step)
-        trial.cross += solved.T @ ((a * b)[:, None] * solved)
-        trial.work.rows_multiplied += len(chunk)
+
+    ks: NDArray[np.intp]
+    rows: NDArray[np.intp]
+    slots: NDArray[np.intp]
+    Z: NDArray[np.float64]
+    Y: NDArray[np.float64]
+    B: NDArray[np.float64] | None
+    sound: NDArray[np.bool_]
+
+    def solved_together(self) -> _Stack:
+        """The members marked sound, as a stack of their own."""
+        if self.sound.all():
+            return self
+        parts = (self.ks, self.rows, self.slots, self.Z, self.Y, self.B, self.sound)
+        return _Stack(*(part[self.sound] for part in parts))
+
+
+def _systems(B: NDArray[np.float64], root: NDArray[np.float64]) -> NDArray[np.float64]:
+    """``I - W^(1/2) B W^(1/2)`` for each member of a stack, ``root`` its ``W^(1/2)``.
+
+    A row of zero weight has the identity's row and column, so it is in no system.
+    """
+    system = -(root[:, :, None] * B * root[:, None, :])
+    np.einsum("nii->ni", system)[...] += 1.0
+    return system
+
+
+def _dominant(system: NDArray[np.float64], level: float) -> NDArray[np.bool_]:
+    """Members of a stack whose smallest eigenvalue Gershgorin's discs put above ``level``.
+
+    Every disc of such a member, its diagonal entry less the absolute sum of the rest of
+    the row, lies right of ``level``.  The member is then strictly diagonally dominant, so
+    Gaussian elimination meets no zero pivot and grows no entry beyond twice the largest
+    (Wilkinson; Higham 2002, Theorem 9.9).  A member that is not finite is not marked.
+    """
+    diagonal = np.einsum("nii->ni", system)
+    reach = np.abs(system).sum(axis=2) - np.abs(diagonal)
+    return np.min(diagonal - reach, axis=1) > level
+
+
+def _stack(
+    trial: _Trial,
+    stacked: bool,
+    ks: NDArray[np.intp],
+    rows: NDArray[np.intp],
+    slots: NDArray[np.intp],
+    Z: NDArray[np.float64],
+    Y: NDArray[np.float64],
+) -> _Stack:
+    """A stack with ``B`` formed and the members it solves together marked; none unless ``stacked``.
+
+    Single rows: every member whose margin ``1 - W h`` is above the flag level.  Larger
+    systems: the members Gershgorin's discs put above ``sqrt(size)`` times that level, whose
+    margin as :func:`_leave_out_factor` estimates it is then above the level (module
+    docstring): taken alone they would be factored and not flagged.
+    """
+    size = rows.shape[1]
+    if not stacked:
+        return _Stack(ks, rows, slots, Z, Y, None, np.zeros(len(ks), dtype=bool))
+    curvature = trial.curvature[rows]
+    if size == 1:
+        B = np.einsum("ij,ij->i", Y[:, 0], Z[:, 0])[:, None, None]
+        sound = 1.0 - curvature[:, 0] * B[:, 0, 0] > trial.questionable
+    else:
+        B = np.matmul(Y, Z.transpose(0, 2, 1))
+        sound = _dominant(_systems(B, np.sqrt(curvature)), np.sqrt(size) * trial.questionable)
+    return _Stack(ks, rows, slots, Z, Y, B, sound)
+
+
+def _alone(trial: _Trial, nb: Neighbourhoods, stack: _Stack, at: int) -> None:
+    """Member ``at`` of ``stack``, which the stack does not solve.
+
+    A single row is flagged by its margin ``1 - W h`` (:func:`_factor_route`); any other
+    member, and every member of a forced route, is decided by its own factorisation
+    (:func:`_woodbury`).
+    """
+    k = int(stack.ks[at])
+    if stack.B is None or stack.rows.shape[1] > 1:
+        _woodbury(trial, nb, k, stack.rows[at], stack.Z[at], stack.Y[at])
+        return
+    margin = 1.0 - trial.curvature[stack.rows[at, 0]] * stack.B[at, 0, 0]
+    _factor_route(trial, nb, k, flagged=float(margin))
+
+
+def _single_rows(trial: _Trial, stack: _Stack) -> None:
+    """A stack of single rows by the scalar form ``1 - W h``, with no factorisation."""
+    rows, block, solved = stack.rows[:, 0], stack.Z[:, 0], stack.Y[:, 0]
+    leverage = stack.B[:, 0, 0]
+    curvature = trial.curvature[rows]
+    denominator = 1.0 - curvature * leverage
+    a = trial.score[rows] / denominator
+    step = a * leverage
+    scored = stack.slots[:, 0] >= 0
+    slope = np.zeros(len(rows))
+    slope[scored] = trial.score_pairs(
+        stack.slots[scored, 0], rows[scored], (trial.eta[rows] + step)[scored]
+    )
+    if not trial.gradient:
+        return
+    b = slope / denominator
+    xu = b * leverage
+    trial.q += block.T @ (slope + curvature * xu + trial.third[rows] * xu * step)
+    trial.pairs(solved, (a * b)[:, None] * solved)
+
+
+def _stacked(trial: _Trial, stack: _Stack) -> None:
+    """A stack of neighbourhood-sized systems, each right-hand side by one ``numpy.linalg.solve``.
+
+    The arithmetic of :func:`_woodbury` with one row of each array a member, all of them
+    shown sound beforehand (:func:`_stack`).  A removed row of zero weight sits in its
+    member's system as a row of the identity with a zero score: its part of every sum is an
+    exact zero, and its prediction is the full fit plus the step.
+    """
+    rows, Z, Y, B = stack.rows, stack.Z, stack.Y, stack.B
+    curvature = trial.curvature[rows]
+    root = np.sqrt(curvature)
+    system = _systems(B, root)
+
+    def lift(residual: NDArray[np.float64]) -> NDArray[np.float64]:
+        """``m`` with ``H_a^-1 Z' residual = Y' m`` per member, for residuals on its removed rows."""
+        inner = root * np.einsum("nij,nj->ni", B, residual)
+        return residual + root * np.linalg.solve(system, inner[..., None])[..., 0]
+
+    m = lift(trial.score[rows])
+    step = np.einsum("nji,nj->ni", B, m)
+    scored = stack.slots >= 0
+    slope = np.zeros(rows.shape)
+    slope[scored] = trial.score_pairs(
+        stack.slots[scored], rows[scored], (trial.eta[rows] + step)[scored]
+    )
+    trial.work.stacks += 1
+    trial.work.stacked += len(rows)
+    if not trial.gradient:
+        return
+    adjoint = lift(slope)
+    xu = np.einsum("nji,nj->ni", B, adjoint)
+    weight = slope + curvature * xu + trial.third[rows] * xu * step
+    trial.q += weight.reshape(-1) @ Z.reshape(rows.size, -1)
+    trial.pairs(np.einsum("ni,nip->np", adjoint, Y), np.einsum("ni,nip->np", m, Y))
 
 
 def _neighbourhoods(trial: _Trial, nb: Neighbourhoods, route: Route | None) -> None:
@@ -1477,10 +1642,11 @@ def _neighbourhoods(trial: _Trial, nb: Neighbourhoods, route: Route | None) -> N
     small = 3 * size * size * width + size**3 < width**3
     if route is not None:
         small = np.full(nb.m, route == "woodbury")
-    trial.reserve(int(np.count_nonzero(weighted)))
+    formed = np.flatnonzero(~small & (weighted > 0))
+    trial.reserve(len(formed) if route is None else int(np.count_nonzero(weighted)))
     trial.keep_forms(int(np.count_nonzero(weighted)))
-    _woodbury_route(trial, nb, np.flatnonzero(small & (weighted > 0)))
-    _factor_routes(trial, nb, np.flatnonzero(~small & (weighted > 0)))
+    _small_route(trial, nb, np.flatnonzero(small & (weighted > 0)), stacked=route is None)
+    _factor_routes(trial, nb, formed)
 
 
 def _batches(sizes: NDArray[np.intp], limit: int) -> Iterator[tuple[int, int]]:
@@ -1534,17 +1700,78 @@ def _factor_routes(trial: _Trial, nb: Neighbourhoods, ks: NDArray[np.intp]) -> N
             trial._block = None
 
 
-def _woodbury_route(trial: _Trial, nb: Neighbourhoods, ks: NDArray[np.intp]) -> None:
-    """Neighbourhoods ``ks`` by the neighbourhood-sized system, their rows read in bounded batches."""
+def _ranges(
+    ptr: NDArray[np.intp], ks: NDArray[np.intp]
+) -> tuple[NDArray[np.intp], NDArray[np.intp], NDArray[np.intp]]:
+    """Every position of the ranges ``ptr[k]:ptr[k + 1]`` of ``ks``, range by range.
+
+    With them, each position's index in ``ks`` and where each range starts among the positions.
+    """
+    sizes = ptr[ks + 1] - ptr[ks]
+    first = np.cumsum(sizes) - sizes
+    owner = np.repeat(np.arange(len(ks), dtype=np.intp), sizes)
+    return ptr[ks][owner] + np.arange(len(owner), dtype=np.intp) - first[owner], owner, first
+
+
+def _removed(
+    nb: Neighbourhoods, ks: NDArray[np.intp]
+) -> tuple[NDArray[np.intp], NDArray[np.intp], NDArray[np.intp]]:
+    """The rows neighbourhoods ``ks`` remove, neighbourhood by neighbourhood.
+
+    Each row, its scored pair (-1 where the neighbourhood does not score it) and its
+    neighbourhood's index in ``ks``.
+    """
+    if nb.drop_ptr is None or nb.drop_rows is None:
+        return ks, ks, np.arange(len(ks), dtype=np.intp)
+    entries, owner, first = _ranges(nb.drop_ptr, ks)
+    if nb.score_ptr is None or nb.score_pos is None:
+        return nb.drop_rows[entries], entries, owner
+    pairs, scorer, _ = _ranges(nb.score_ptr, ks)
+    slots = np.full(len(entries), -1, dtype=np.intp)
+    slots[first[scorer] + nb.score_pos[pairs]] = pairs
+    return nb.drop_rows[entries], slots, owner
+
+
+def _small_route(trial: _Trial, nb: Neighbourhoods, ks: NDArray[np.intp], stacked: bool) -> None:
+    """Neighbourhoods ``ks`` by the neighbourhood-sized system, in bounded blocks of whole neighbourhoods.
+
+    A block's rows are read sorted by the size of their neighbourhood, so the neighbourhoods
+    of one size are a stack (:class:`_Stack`): views of the block and of its solved rows.
+    A stack solves together the members it can show sound (:func:`_stack`).  Every other
+    member is decided one at a time (:func:`_alone`), in the order of ``ks`` and before the
+    block's stacks are solved.  ``stacked`` False is a forced route: every neighbourhood
+    one at a time.
+    """
     sizes = nb.sizes()[ks]
     for first, last in _batches(sizes, chunk_rows(trial.problem.width)):
-        members = ks[first:last].tolist()
-        rows = np.concatenate([nb.drop(k) for k in members])
+        members, size = ks[first:last], sizes[first:last]
+        rows, slots, owner = _removed(nb, members)
+        order = np.argsort(size[owner], kind="stable")
+        rows, slots = rows[order], slots[order]
         block = trial.read(rows)
         solved = trial.solved(block)
-        stops = np.cumsum(sizes[first:last]).tolist()
-        for k, start, stop in zip(members, [0, *stops[:-1]], stops, strict=True):
-            _woodbury(trial, nb, k, rows[start:stop], block[start:stop], solved[start:stop])
+        stacks, stop = [], 0
+        for removed in np.unique(size).tolist():
+            inside = np.flatnonzero(size == removed)
+            start, stop = stop, stop + removed * len(inside)
+            shape = (len(inside), removed)
+            stack = _stack(
+                trial,
+                stacked,
+                members[inside],
+                rows[start:stop].reshape(shape),
+                slots[start:stop].reshape(shape),
+                block[start:stop].reshape(*shape, -1),
+                solved[start:stop].reshape(*shape, -1),
+            )
+            stacks.append(stack)
+        alone = [(stack, at) for stack in stacks for at in np.flatnonzero(~stack.sound).tolist()]
+        for stack, at in sorted(alone, key=lambda member: member[0].ks[member[1]]):
+            _alone(trial, nb, stack, at)
+        for stack in stacks:
+            if stack.sound.any():
+                solve = _single_rows if stack.rows.shape[1] == 1 else _stacked
+                solve(trial, stack.solved_together())
 
 
 def _woodbury(

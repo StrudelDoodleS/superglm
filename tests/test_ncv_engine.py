@@ -1036,7 +1036,11 @@ def test_unidentified_leave_out_system_is_refused_with_its_neighbourhood(route):
 
 
 def test_cost_rule_sends_each_neighbourhood_to_the_cheaper_solve():
-    """Neighbourhood-sized system when ``3 a^2 P + a^3 < P^3`` in weighted rows ``a``, else form and factor."""
+    """Neighbourhood-sized system when ``3 a^2 P + a^3 < P^3`` in weighted rows ``a``, else form and factor.
+
+    A neighbourhood-sized system is solved in a stack or factored alone; ``solves`` counts the
+    solves with one factored system.
+    """
     c = case("gaussian", 300, zero_weights=True)
     p = c.problem
     nb = neighbourhoods("groups", c)
@@ -1045,9 +1049,9 @@ def test_cost_rule_sends_each_neighbourhood_to_the_cheaper_solve():
     small = 3 * weighted**2 * width + weighted**3 < width**3
     assert 0 < small[weighted > 0].sum() < (weighted > 0).sum()
     work = evaluate(p, nb, RHO).work
-    assert work.small_factorisations == int((small & (weighted > 0)).sum())
+    assert work.small_factorisations + work.stacked == int((small & (weighted > 0)).sum())
     assert work.factorisations == int((~small & (weighted > 0)).sum())
-    assert work.solves == 2 * int((weighted > 0).sum())
+    assert work.solves == 2 * (work.factorisations + work.small_factorisations)
     forced = evaluate(p, nb, RHO, route="factor").work
     assert (forced.small_factorisations, forced.factorisations) == (0, int((weighted > 0).sum()))
 
