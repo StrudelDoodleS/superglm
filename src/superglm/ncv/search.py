@@ -182,7 +182,8 @@ class Descent:
 
     ``ends`` holds, for every start with a finite criterion, the point its search ended on and
     why; ``path`` each such start and each accepted step.  ``warm`` is the last certified inner
-    fit, which starts the next one.  ``reasons`` counts the infeasible trials by reason.
+    fit, which starts the next one and carries the bar it runs to (``engine.first_bar``).
+    ``reasons`` counts the infeasible trials by reason.
     """
 
     criterion: Criterion

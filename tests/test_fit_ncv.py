@@ -45,14 +45,18 @@ from superglm.solvers import pirls
 from superglm.solvers.irls_direct import _fit as direct_fit
 from superglm.types import LambdaPolicy
 from tests.test_ncv_engine import (
+    AIM,
     KeptRows,
     U,
     assert_pairs_equal,
+    at_the_aim,
     mean_and_deviance,
     predictor_slack,
     problem_of,
     refit_pairs,
+    solver_short,
 )
+from tests.test_ncv_engine_rank_cache import twin
 from tests.test_ncv_search import Case, NarrowBox, stop_reach
 
 TOL = engine.DEFAULT_NCV_TOL
@@ -373,6 +377,23 @@ def test_published_smoothing_and_counts_are_those_of_the_search(family, form):
     assert got["heldout_available"] and got["heldout_failure"] is None
 
 
+@pytest.mark.parametrize(("exposure", "form"), [("offset", "neighbours"), ("weight", "cv")])
+def test_poisson_search_meets_its_test_where_fits_to_one_bar_stalled_it(exposure, form):
+    """Two searches of the 300-row book, at default settings, stop on their first-order test.
+
+    With every inner fit run only to a hundredth of the tolerance, both ended on the line
+    search after 32 evaluations, their slopes 1.5 and 1.6 times the stopping bar: two fits
+    at one smoothing then differ in the criterion by 1e-9 of it, the size of the last gains.
+    """
+    b = book("poisson", exposure)
+    model, caught = run(model_of("poisson"), b, **held_out(form, b))
+    assert not messages(caught, ConvergenceWarning)
+    report = model.ncv_diagnostics()
+    assert report["termination_reason"] == "gradient"
+    assert report["converged"] and report["search_converged"] and model.result.converged
+    assert report["n_evaluations"] <= 20 and report["infeasible_trials"] == 0
+
+
 # ── row 5: the diagnostics ────────────────────────────────────────────────────
 
 
@@ -604,16 +625,23 @@ def test_search_stopped_at_its_step_limit_is_disclosed_and_its_fit_is_good():
 
 
 def test_final_fit_short_of_its_test_is_disclosed_after_a_search_that_met_its_own(monkeypatch):
-    """The final coefficient fit is made to end at its iteration limit, uncertified."""
+    """Every solve of the final coefficient fit is made to end at its iteration limit, uncertified.
+
+    Three solves: to the aim, from where that stopped to the acceptance bar, and to that bar
+    from the solver's own start.
+    """
     solve = ncv_ops.fit_irls_direct
+    solved = []
 
     def uncertified(**kwargs):
         result, inverse = solve(**kwargs)
+        solved.append((kwargs["_mode_bar"], "beta_init" in kwargs))
         return replace(result, converged=False, termination_reason="max_iter"), inverse
 
-    monkeypatch.setattr(ncv_ops, "fit_irls_direct", uncertified)
     b, good = curve_book(), curve_fit().ncv_diagnostics()
+    monkeypatch.setattr(ncv_ops, "fit_irls_direct", uncertified)
     model, caught = run(curve_model(), b, groups=b.labels)
+    assert solved == [(AIM, True), (BAR, True), (BAR, False)]
     (message,) = messages(caught, ConvergenceWarning)
     steps = good["n_iter"]
     assert steps > 1 and message.startswith(
@@ -633,6 +661,34 @@ def test_final_fit_short_of_its_test_is_disclosed_after_a_search_that_met_its_ow
     with pytest.raises(RuntimeError, match=r"ncv_heldout\(\) has no held-out results to read"):
         model.ncv_heldout()
     np.testing.assert_array_equal(model.predict(b.frame), curve_fit().predict(b.frame))
+
+
+def test_final_fit_accepted_at_the_looser_bar_reads_as_converged(monkeypatch):
+    """The final coefficient fit's solve to the aim is made to end short of it.
+
+    It is continued from where it stopped and certified at the acceptance bar: a converged
+    fit with its held-out results and nothing to disclose, one Newton step from the fit
+    whose solve reached the aim.
+    """
+    b, good = curve_book(), curve_fit()
+    log: list = []
+    monkeypatch.setattr(ncv_ops, "fit_irls_direct", solver_short(at_the_aim, log))
+    model, caught = run(curve_model(), b, groups=b.labels)
+    assert not messages(caught)
+    stopped, continued = log
+    assert (stopped.bar, continued.bar) == (AIM, BAR) and continued.start is stopped.beta
+    assert not stopped.certified and continued.certified
+    report, reached = model.ncv_diagnostics(), good.ncv_diagnostics()
+    assert report["converged"] and report["search_converged"] and report["coefficients_converged"]
+    assert report["coefficient_termination"] is None and model.result.converged
+    assert report["heldout_available"] and report["heldout_failure"] is None
+    assert len(model.ncv_heldout()) == len(b.y)
+    assert report["lambdas"] == reached["lambdas"]
+    kappa = hessian_condition(good, b)
+    assert report["criterion"] == pytest.approx(reached["criterion"], rel=64 * kappa * U)
+    predicted = good.predict(b.frame)
+    gap = np.abs(model.predict(b.frame) - predicted)
+    assert np.all(gap <= 64 * kappa * U * np.maximum(1.0, np.abs(predicted)))
 
 
 @pytest.mark.parametrize("side", ["floor", "ceiling"])
@@ -1298,6 +1354,53 @@ def test_response_units_do_not_move_the_chosen_curve():
     gap = np.abs(small.predict(b.frame) / 1e-4 - predicted)
     assert np.all(gap <= apart * moves + rounding * np.maximum(1.0, np.abs(predicted)))
     assert abs(mine["n_iter"] - theirs["n_iter"]) <= 2 and mine["converged"]
+
+
+@cache
+def moved_book(level=0.0) -> Book:
+    """The rank-cache tests' 240-row Gaussian book in twelve groups, ``level`` of its spread from zero."""
+    design = twin("gaussian", False)
+    n = design.problem.n
+    labels = np.array([f"g{k:02d}" for k in np.arange(n) % 12])
+    y = design.problem.y + level * np.std(design.problem.y)
+    return Book(design.frame[["t", "x"]], y, np.ones(n), np.zeros(n), labels)
+
+
+@cache
+def unmoved_fit():
+    b = moved_book()
+    model, caught = run(curve_model(), b, groups=b.labels)
+    assert not caught
+    return model
+
+
+@pytest.mark.parametrize("level", [1e7, 1e8])
+def test_response_far_from_zero_chooses_the_same_curve_and_pays_for_the_aim_once(solves, level):
+    """A Gaussian response ``level`` times its spread from zero: the curve of the response at zero.
+
+    Counts, for fits certified at the acceptance bar and not at the aim, and fewer where
+    the aim is reached: a Gaussian solve is one iteration, its working response being the
+    same from any start, and the one that ends short of the aim takes a second, which finds
+    its state unchanged.  Only the first fit short of the aim tries for it, so the search's
+    solves are at most its evaluations, the provisional fit and one continuation, and the
+    published fit is one solve more.
+    """
+    b, plain = moved_book(), unmoved_fit()
+    apart, edf, _ = stops_apart(plain, b)
+    rounding = 64 * hessian_condition(plain, b) * U
+    solves.clear()
+    moved, caught = run(curve_model(), moved_book(level), groups=b.labels)
+    assert not messages(caught)
+    mine, theirs = moved.ncv_diagnostics(), plain.ncv_diagnostics()
+    work = mine["work"]
+    assert solves == {"direct": work["inner_solves"] + 1}
+    assert work["inner_solves"] <= mine["n_evaluations"] + 2 and work["fallback_solves"] <= 1
+    assert work["pirls_iterations"] <= work["inner_solves"] + 1
+    assert mine["converged"] and mine["termination_reason"] == "gradient"
+    assert moved.result.converged and mine["infeasible_trials"] == 0
+    assert mine["criterion"] == pytest.approx(theirs["criterion"], rel=10 * TOL)
+    assert abs(np.log(mine["lambdas"]["t"] / theirs["lambdas"]["t"])) <= apart
+    assert abs(moved.result.effective_df - plain.result.effective_df) <= apart * edf + rounding * 9
 
 
 def test_duplicated_column_fits_as_the_model_without_it():

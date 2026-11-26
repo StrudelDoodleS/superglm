@@ -13,8 +13,9 @@ Numerical Algorithms*, 2nd ed., 2002, section 10.1: a Cholesky solve's forward e
 multiple of ``kappa U``).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cache
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -47,6 +48,7 @@ from superglm.solvers.mode_score import centred_warm_start, linear_predictor
 
 U = 2.0**-53
 MODE_BAR = 200.0 * U
+AIM, BAR = engine.ncv_mode_aim(), engine.ncv_mode_bar()
 RHO = np.array([0.7, -1.2])
 FORMS = ("rows", "groups", "cv", "neighbours", "forward", "repeated")
 ROUTES = (None, "woodbury", "factor")
@@ -690,6 +692,121 @@ def test_uncertified_warm_solve_is_retried_from_a_cold_start(monkeypatch):
     monkeypatch.undo()
     _, _, kappa = one_step("poisson", 300, "cv")
     assert_same_criterion(c.problem, got, evaluate(c.problem, nb, RHO, gradient=False), kappa)
+
+
+def solver_short(when, log):
+    """The solver, reporting each solve whose arguments ``when`` accepts as ended short of its bar.
+
+    The solve is the solver's own, so the state it returns is what a solve at its limiting
+    accuracy hands back: the mode, without the certificate.  ``log`` takes every solve's bar,
+    the coefficients it was started from (``None`` for the solver's own start) and returned,
+    its iterations and whether it is reported certified.
+    """
+
+    def solve(**arguments):
+        result, *rest = fit_irls_direct(**arguments)
+        if when(arguments):
+            result = replace(result, converged=False, termination_reason="score_stagnated")
+        log.append(
+            SimpleNamespace(
+                bar=arguments["_mode_bar"],
+                start=arguments.get("beta_init"),
+                beta=result.beta,
+                iterations=int(result.n_iter),
+                certified=bool(result.converged),
+            )
+        )
+        return (result, *rest)
+
+    return solve
+
+
+def at_the_aim(arguments) -> bool:
+    return arguments["_mode_bar"] == AIM
+
+
+def test_both_bars_follow_the_tolerance_and_neither_goes_below_a_hundred_eps():
+    floor = 200.0 * U
+    assert engine.ncv_mode_aim(1e-6) == pytest.approx(1e-9, rel=4 * U) == AIM
+    assert engine.ncv_mode_bar(1e-6) == pytest.approx(1e-8, rel=4 * U) == BAR
+    assert engine.ncv_mode_aim(1e-11) == floor < engine.ncv_mode_bar(1e-11)
+    assert engine.ncv_mode_aim(1e-13) == engine.ncv_mode_bar(1e-13) == floor
+    default = case("poisson", 300).problem
+    assert default.mode_aim == default.mode_bar == MODE_BAR, "an aim above the bar is the bar"
+
+
+def test_solve_short_of_its_aim_is_continued_from_where_it_stopped(monkeypatch):
+    """Every solve to the aim is made to end short of it, as on data that cannot resolve it.
+
+    The fit is the stopped solve continued to the acceptance bar, not a second solve from
+    the solver's own start.  That is one iteration: the stopped state lies within the bar
+    already, and the solver takes a step before it reads its certificate.
+    """
+    problem = replace(case("poisson", 300).problem, mode_aim=AIM, mode_bar=BAR)
+    log: list = []
+    monkeypatch.setattr(engine, "fit_irls_direct", solver_short(at_the_aim, log))
+    work = engine.WorkCounts()
+    fit = solve_mode(problem, RHO, work=work)
+    stopped, continued = log
+    assert (work.inner_solves, work.fallback_solves) == (2, 1)
+    assert continued.iterations == 1 < stopped.iterations
+    assert work.pirls_iterations == stopped.iterations + 1
+    assert (stopped.bar, stopped.start, stopped.certified) == (AIM, None, False)
+    assert continued.bar == BAR and continued.start is stopped.beta
+    assert fit.certified and fit.bar == BAR
+
+
+def test_fit_carries_its_bar_to_the_solve_it_warms(monkeypatch):
+    """A solve warmed by a fit accepted at the acceptance bar runs to that bar and not to the aim.
+
+    One solve, where trying for the aim again would be two.  A fit certified at the aim
+    warms a solve that runs to the aim.
+    """
+    problem = replace(case("poisson", 300).problem, mode_aim=AIM, mode_bar=BAR)
+    reached = solve_mode(problem, RHO)
+    assert reached.certified and reached.bar == AIM
+    log: list = []
+    monkeypatch.setattr(engine, "fit_irls_direct", solver_short(at_the_aim, log))
+    accepted = solve_mode(problem, RHO)
+    assert accepted.certified and accepted.bar == BAR
+    for warm, bar in ((accepted, BAR), (reached, AIM)):
+        del log[:]
+        work = engine.WorkCounts()
+        fit = solve_mode(problem, RHO + 0.5, warm=warm, work=work)
+        assert (log[0].bar, fit.bar) == (bar, BAR) and log[0].start is warm.result.beta
+        assert work.inner_solves == len(log) == (1 if bar == BAR else 2)
+
+
+def test_solve_short_of_both_bars_is_solved_once_from_the_solvers_own_start(monkeypatch):
+    """Every solve given a start is made to end short of its bar: the third is the solver's own.
+
+    From the solver's own start there are two solves and no third, and a mode certified at
+    neither bar gives no criterion.
+    """
+    c = case("poisson", 300)
+    problem = replace(c.problem, mode_aim=AIM, mode_bar=BAR)
+    nb = neighbourhoods("cv", c)
+    warm = evaluate(problem, nb, RHO + 3.0, gradient=False).fit
+    log: list = []
+    started = solver_short(lambda arguments: "beta_init" in arguments, log)
+    monkeypatch.setattr(engine, "fit_irls_direct", started)
+    got = evaluate(problem, nb, RHO, warm=warm, gradient=False)
+    assert [(call.bar, call.start is not None) for call in log] == [
+        (AIM, True),
+        (BAR, True),
+        (BAR, False),
+    ]
+    assert got.feasible and got.fit.bar == BAR
+    assert (got.work.inner_solves, got.work.fallback_solves) == (3, 2)
+    del log[:]
+    monkeypatch.setattr(engine, "fit_irls_direct", solver_short(lambda arguments: True, log))
+    lost = evaluate(problem, nb, RHO, gradient=False)
+    assert [(call.bar, call.start is not None) for call in log] == [(AIM, False), (BAR, True)]
+    assert not lost.feasible and lost.infeasible_reason == "uncertified_mode" and lost.fit is None
+    assert (lost.work.inner_solves, lost.work.fallback_solves) == (2, 1)
+    monkeypatch.undo()
+    _, _, kappa = one_step("poisson", 300, "cv")
+    assert_same_criterion(problem, got, evaluate(problem, nb, RHO, gradient=False), kappa)
 
 
 @pytest.mark.parametrize("form", ["rows", "groups", "cv"])

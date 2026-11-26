@@ -32,6 +32,23 @@ Rows of zero weight are in no system and no sum; a scored one is predicted at th
 the step.  A trial counts only at a certified inner mode, and with every weighted scored row on
 the scale where its mean is the unclipped inverse link.
 
+**The inner fit's two bars.**  The criterion is not stationary in the coefficients, so the
+error an inner fit stops with enters the criterion and its gradient at first order, and a line
+search on values that uncertain finds steps only while the slope exceeds about the square root
+of the uncertainty times the criterion's curvature (Xie, Byrd and Nocedal, "Analysis of the
+BFGS method with errors", arXiv:1901.09063, Theorems 3.4 and 3.16).  A solve therefore runs to
+``ncv_mode_aim``, a thousandth of the search's tolerance.  Newton's method in floating point
+contracts to a limiting accuracy and no further (Tisseur 2001, as
+``solvers.mode_score.stagnation_window`` cites it), and that limit can lie above the aim: a
+Gaussian response 1e7 of its spread from zero is resolved to between 1e-10 and 2e-8 of the
+score's scale, by how its rounding falls.  A solve that ends short of the aim is continued, from
+the state it stopped on, to ``ncv_mode_bar``, a hundredth of the tolerance, and one still
+short is solved to that bar from the solver's own start (:func:`two_level`).  A fit certified
+at either bar is a certified mode, and one certified at neither gives its trial no criterion.
+The limit is taken to be the data's more than the smoothing's, so a fit carries the bar it
+was certified at and a solve it warms runs to that bar at once: a search pays once for an aim
+its data cannot reach.
+
 **A rank-deficient fit.**  When the fit's own slope Hessian has a null space (a duplicated
 column, a column constant on the weighted rows), every weighted row and every penalty with a
 positive smoothing parameter annihilates it, so no held-out prediction on a weighted row
@@ -149,18 +166,23 @@ _POCON = get_lapack_funcs("pocon", dtype=np.float64)
 
 
 def ncv_mode_bar(ncv_tol: float = DEFAULT_NCV_TOL) -> float:
-    """The inner fit's certificate bar for a search stopping at ``ncv_tol``: a hundredth of it.
+    """The certificate bar an inner fit is accepted at, for a search stopping at ``ncv_tol``.
 
-    The criterion is not stationary in the coefficients, so a mode error enters it and its
-    gradient at first order, and a line search on values that uncertain finds steps only
-    while the slope exceeds about the square root of the uncertainty times the criterion's
-    curvature (Xie, Byrd and Nocedal, "Analysis of the BFGS method with errors",
-    arXiv:1901.09063, Theorems 3.4 and 3.16).  The bar is therefore well below the search's
-    own, and no tighter than a fit can meet: a Gaussian fit whose response lies 1e7 of its
-    spread from zero is certified at 1e-8 and not at 1e-9, and a trial without a certified
-    fit has no criterion.  Never below ``100 eps``, the least the certificate expresses.
+    A hundredth of the tolerance: the looser of the inner fit's two bars (module docstring),
+    which a fit short of :func:`ncv_mode_aim` is taken to.  A trial without a fit certified
+    at it has no criterion.  Never below ``100 eps``, the least the certificate expresses.
     """
     return max(0.01 * float(ncv_tol), 100.0 * EPS)
+
+
+def ncv_mode_aim(ncv_tol: float = DEFAULT_NCV_TOL) -> float:
+    """The certificate bar an inner fit first runs to, for a search stopping at ``ncv_tol``.
+
+    A thousandth of the tolerance: at a hundredth, two fits at one smoothing differ in the
+    criterion by about 1e-9 of it at the default tolerance, the size of a search's last
+    gains.  Never below ``100 eps``, so never above :func:`ncv_mode_bar`.
+    """
+    return max(0.001 * float(ncv_tol), 100.0 * EPS)
 
 
 class LeaveOutRankError(ValueError):
@@ -188,9 +210,12 @@ class WorkCounts:
     third-derivative pass.  Divide either by the row count for passes over the data.
     ``kept_fits`` are leave-out systems fitted from their kept rows, each one or two passes of
     the solver's row factor over the design, which neither row count includes.
+    ``fallback_solves`` are the inner solves, of ``inner_solves``, made because an earlier one
+    at the same smoothing ended short of its bar (:func:`two_level`).
     """
 
     inner_solves: int = 0
+    fallback_solves: int = 0
     pirls_iterations: int = 0
     factorisations: int = 0
     small_factorisations: int = 0
@@ -293,8 +318,10 @@ class NCVProblem:
 
     ``names`` are the estimated penalty components, in the order of ``rho``; ``blocks`` holds
     each one's columns and unit penalty matrix on them.  ``fixed_lambdas`` are the components
-    held at a value, which every inner fit keeps.  ``cache`` is this problem's own: no
-    constructor argument sets it, so a problem built or copied anew starts with nothing held.
+    held at a value, which every inner fit keeps.  ``mode_aim`` and ``mode_bar`` are the
+    certificate bars an inner fit runs to and is accepted at (:func:`two_level`).  ``cache``
+    is this problem's own: no constructor argument sets it, so a problem built or copied anew
+    starts with nothing held.
     """
 
     dm: DesignMatrix
@@ -311,6 +338,7 @@ class NCVProblem:
     fixed_lambdas: Mapping[str, float]
     loss: RowLoss
     active: NDArray[np.bool_]
+    mode_aim: float
     mode_bar: float
     pirls_tol: float
     max_pirls_iter: int
@@ -347,6 +375,7 @@ def build_problem(
     weight_semantics: str,
     fixed_lambdas: Mapping[str, float] | None = None,
     mode_bar: float | None = None,
+    mode_aim: float | None = None,
     pirls_tol: float = 1e-8,
     max_pirls_iter: int = 100,
 ) -> NCVProblem:
@@ -354,10 +383,15 @@ def build_problem(
 
     ``penalties`` are the design's components (``penalty_algebra.build_penalty_context``).  A
     component named in ``fixed_lambdas`` is held at that value; every other one is estimated.
+    ``mode_bar`` and ``mode_aim`` default to the bars of the default search tolerance
+    (:func:`ncv_mode_bar`, :func:`ncv_mode_aim`), and an aim above the bar is the bar: a
+    problem given a bar below the default aim solves to that bar alone.
     """
     held = dict(fixed_lambdas or {})
     estimated = [component for component in penalties if component.name not in held]
     weights = np.asarray(weights, dtype=np.float64)
+    bar = ncv_mode_bar() if mode_bar is None else float(mode_bar)
+    aim = ncv_mode_aim() if mode_aim is None else float(mode_aim)
     return NCVProblem(
         dm=dm,
         y=np.asarray(y, dtype=np.float64),
@@ -373,7 +407,8 @@ def build_problem(
         fixed_lambdas=held,
         loss=row_loss(distribution, link),
         active=weights > 0.0,
-        mode_bar=ncv_mode_bar() if mode_bar is None else float(mode_bar),
+        mode_aim=min(aim, bar),
+        mode_bar=bar,
         pirls_tol=float(pirls_tol),
         max_pirls_iter=int(max_pirls_iter),
     )
@@ -412,6 +447,8 @@ class ModeFit:
     formed it; a fit not made by :meth:`from_solve` may carry none.  All three are in the
     design's own columns, the ones ``NCVProblem.blocks`` index, whatever the fit's rank: the
     coordinates a rank-deficient fit identified are read from ``result``, never from a shape.
+    ``bar`` is the certificate bar the solve ran to; a fit made without one carries ``None``,
+    which says nothing of what its data can reach.
     """
 
     lambdas: dict[str, float]
@@ -422,6 +459,7 @@ class ModeFit:
     centre_hi: NDArray[np.float64]
     centre_lo: NDArray[np.float64] | None
     data_gram: NDArray[np.float64] | None = None
+    bar: float | None = None
 
     @classmethod
     def from_solve(
@@ -430,11 +468,13 @@ class ModeFit:
         result: PIRLSResult,
         slope_inverse: NDArray[np.float64],
         cache: Mapping[str, Any],
+        bar: float | None = None,
     ) -> ModeFit:
         """From what ``fit_irls_direct(..., lambda2=lambdas, return_xtwx=True, cache_out=cache)`` hands back.
 
         Solve with ``_retain_reml_decomposition=True``: a rank-deficient fit whose solver kept a
         basis and not representative columns is evaluated in that basis, read from ``result``.
+        ``bar`` is the solve's ``_mode_bar``.
         """
         centre_hi, centre_lo = cache["centre_pair"]
         return cls(
@@ -446,12 +486,54 @@ class ModeFit:
             centre_hi=centre_hi,
             centre_lo=centre_lo,
             data_gram=cache.get("centered_XtWX"),
+            bar=bar,
         )
 
     @property
     def certified(self) -> bool:
         """Whether the solve ended on its mode certificate."""
         return bool(self.result.converged)
+
+
+def warm_start(fit: ModeFit) -> dict[str, Any]:
+    """The solver's start arguments for the state ``fit``'s solve ended on."""
+    return {
+        "beta_init": fit.result.beta,
+        "intercept_init": float(fit.result.intercept),
+        "_centred_init": centred_warm_start(fit.result),
+    }
+
+
+def first_bar(warm: ModeFit | None, aim: float, bar: float) -> float:
+    """The bar a solve warmed by ``warm`` first runs to.
+
+    The bar ``warm`` was certified at, within ``[aim, bar]``: a fit accepted only at ``bar``
+    shows the aim is beyond what its data resolve, and the next solve does not try for it.
+    ``aim`` with no fit, or with one that carries no bar.
+    """
+    if warm is None or warm.bar is None:
+        return aim
+    return max(aim, min(warm.bar, bar))
+
+
+def two_level(
+    solve: Callable[[dict[str, Any], float], ModeFit], start: dict[str, Any], aim: float, bar: float
+) -> ModeFit:
+    """A fit by ``solve(start, bar)`` under the inner fit's two-level rule (module docstring).
+
+    ``start`` holds the solver's start arguments and is empty for its own start.  The solve
+    runs to ``aim`` from ``start``.  One that ends short of it is continued to ``bar`` from
+    the state it stopped on, which is as near the mode as that solve could bring it.  One
+    still short is solved to ``bar`` from the solver's own start, unless it began there.  At
+    most three solves, each within the solver's iteration budget; the last one is returned,
+    certified or not.
+    """
+    fit = solve(start, aim)
+    if not fit.certified and aim < bar:
+        fit = solve(warm_start(fit), bar)
+    if not fit.certified and start:
+        fit = solve({}, bar)
+    return fit
 
 
 def solve_mode(
@@ -461,29 +543,30 @@ def solve_mode(
     warm: ModeFit | None = None,
     work: WorkCounts | None = None,
 ) -> ModeFit:
-    """The penalised fit at ``rho``, started from ``warm``'s coefficients when given.
+    """The penalised fit at ``rho`` by :func:`two_level`, from ``warm``'s coefficients when given.
 
-    A warm-started solve that ends without its certificate is solved once more from the
-    solver's own start, within the same iteration budget.
+    The first solve runs to the bar ``warm`` carries (:func:`first_bar`).
     """
     lambdas = problem.lambdas(np.asarray(rho, dtype=np.float64))
     counts = WorkCounts() if work is None else work
-    fit = _solve(problem, lambdas, warm, counts)
-    if warm is not None and not fit.certified:
-        fit = _solve(problem, lambdas, None, counts)
+    before = counts.inner_solves
+    fit = two_level(
+        lambda start, bar: _solve(problem, lambdas, start, bar, counts),
+        {} if warm is None else warm_start(warm),
+        first_bar(warm, problem.mode_aim, problem.mode_bar),
+        problem.mode_bar,
+    )
+    counts.fallback_solves += counts.inner_solves - before - 1
     return fit
 
 
 def _solve(
-    problem: NCVProblem, lambdas: dict[str, float], warm: ModeFit | None, work: WorkCounts
+    problem: NCVProblem,
+    lambdas: dict[str, float],
+    start: dict[str, Any],
+    bar: float,
+    work: WorkCounts,
 ) -> ModeFit:
-    start: dict[str, Any] = {}
-    if warm is not None:
-        start = {
-            "beta_init": warm.result.beta,
-            "intercept_init": float(warm.result.intercept),
-            "_centred_init": centred_warm_start(warm.result),
-        }
     cache: dict[str, Any] = {}
     solved = fit_irls_direct(
         X=problem.dm,
@@ -498,7 +581,7 @@ def _solve(
         max_iter=problem.max_pirls_iter,
         tol=problem.pirls_tol,
         convergence="mode_score",
-        _mode_bar=problem.mode_bar,
+        _mode_bar=bar,
         return_xtwx=True,
         cache_out=cache,
         compute_rank_info=False,
@@ -510,7 +593,7 @@ def _solve(
     )
     work.inner_solves += 1
     work.pirls_iterations += int(solved[0].n_iter)
-    return ModeFit.from_solve(lambdas, solved[0], solved[1], cache)
+    return ModeFit.from_solve(lambdas, solved[0], solved[1], cache, bar)
 
 
 @dataclass(frozen=True)
@@ -1348,6 +1431,10 @@ __all__ = [
     "build_problem",
     "evaluate",
     "evaluate_fit",
+    "first_bar",
+    "ncv_mode_aim",
     "ncv_mode_bar",
     "solve_mode",
+    "two_level",
+    "warm_start",
 ]

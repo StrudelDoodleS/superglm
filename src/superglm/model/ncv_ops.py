@@ -16,9 +16,10 @@ as it was.  Its steps, in order:
    fits and before any step.
 3. **Publication** (:func:`_publish`).  The design is rebuilt in the basis the chosen
    smoothing gives and fitted once more there, on the solver route the model is configured
-   with; that fit is published by the steps ``fit`` publishes with (fit statistics, both
-   scales, the public coefficients).  What is read of the model afterwards is what ``fit``
-   gives at that smoothing.
+   with and to the two bars of the search's own fits (``engine.two_level``); that fit is
+   published by the steps ``fit`` publishes with (fit statistics, both scales, the public
+   coefficients).  What is read of the model afterwards is what ``fit`` gives at that
+   smoothing.
 4. **The held-out results** (:func:`_evaluate_published`): one evaluation of the criterion on
    the published fit's own geometry, with no further solve, gives the criterion and one
    entry per scored (neighbourhood, row) pair (:class:`HeldOut`).
@@ -87,7 +88,10 @@ from superglm.ncv.engine import (
     ModeFit,
     build_problem,
     evaluate_fit,
+    first_bar,
+    ncv_mode_aim,
     ncv_mode_bar,
+    two_level,
 )
 from superglm.ncv.neighbourhoods import Neighbourhoods, build_neighbourhoods, unidentified_levels
 from superglm.ncv.result import NCVResult
@@ -383,7 +387,7 @@ def _fit_ncv_in_workspace(
     _refuse_removed_levels(model, nb, sample_weight > 0.0, penalties)
     lambdas, estimated = initialize_component_lambdas(penalties, declared)
     fixed = {name: value for name, value in lambdas.items() if name not in estimated}
-    bar = ncv_mode_bar(tol)
+    aim, bar = ncv_mode_aim(tol), ncv_mode_bar(tol)
 
     def problem_of(components):
         """The engine's problem on the model's current design: built anew, it holds no cache."""
@@ -399,6 +403,7 @@ def _fit_ncv_in_workspace(
             weight_semantics=model_weight_semantics(model),
             fixed_lambdas=fixed,
             mode_bar=bar,
+            mode_aim=aim,
             pirls_tol=pirls_tol,
             max_pirls_iter=max_pirls_iter,
         )
@@ -424,6 +429,7 @@ def _fit_ncv_in_workspace(
         y_ref=y_ref,
         sample_weight_ref=sample_weight_ref,
         offset_ref=offset_ref,
+        aim=aim,
         bar=bar,
         pirls_tol=pirls_tol,
         max_pirls_iter=max_pirls_iter,
@@ -476,6 +482,7 @@ def _publish(
     y_ref,
     sample_weight_ref,
     offset_ref,
+    aim: float,
     bar: float,
     pirls_tol: float,
     max_pirls_iter: int,
@@ -485,8 +492,12 @@ def _publish(
 
     The design is rebuilt in the basis the smoothing gives, as a ``fit`` declared with that
     smoothing builds it, and solved on the model's configured route from the search's last
-    certified coefficients.  Returns the solve as the engine reads one, with the geometry it
-    was made in, and the penalty components in the rebuilt basis.
+    certified coefficients.  The solve follows the inner fit's two-level rule
+    (``engine.two_level``): to ``aim``, or at once to the bar the search's fit was certified
+    at; then from where it stopped to ``bar``; then to ``bar`` from the solver's own start.
+    A fit certified at either bar is published as converged.  Returns the solve as the
+    engine reads one, with the geometry it was made in, and the penalty components in the
+    rebuilt basis.
     """
     from superglm.model.base import rebuild_dm_with_lambdas
 
@@ -497,33 +508,39 @@ def _publish(
     penalties, _, _ = build_penalty_context(
         list(design.group_matrices), reml_groups, _reuse_raw_from=penalties
     )
-    cache: dict[str, Any] = {}
-    solved = fit_irls_direct(
-        X=model._dm,
-        y=y,
-        weights=sample_weight,
-        family=model._distribution,
-        link=model._link,
-        groups=model._groups,
-        lambda2=lambdas,
-        offset=offset,
-        max_iter=max_pirls_iter,
-        tol=pirls_tol,
-        convergence="mode_score",
-        _mode_bar=bar,
-        cache_out=cache,
-        direct_solve=model._direct_solve,
-        reml_penalties=penalties,
-        _retain_reml_decomposition=True,
-        _published=True,
-        separation="error" if published and refuses_on_publication(model) else "record",
-        weight_semantics=model_weight_semantics(model),
-        **_terminal_start(outcome.fit, searched, model),
-    )
-    terminal = ModeFit.from_solve(lambdas, solved[0], solved[1], cache)
+    separation = "error" if published and refuses_on_publication(model) else "record"
+
+    def solve(start: dict[str, Any], to: float) -> ModeFit:
+        cache: dict[str, Any] = {}
+        solved = fit_irls_direct(
+            X=model._dm,
+            y=y,
+            weights=sample_weight,
+            family=model._distribution,
+            link=model._link,
+            groups=model._groups,
+            lambda2=lambdas,
+            offset=offset,
+            max_iter=max_pirls_iter,
+            tol=pirls_tol,
+            convergence="mode_score",
+            _mode_bar=to,
+            cache_out=cache,
+            direct_solve=model._direct_solve,
+            reml_penalties=penalties,
+            _retain_reml_decomposition=True,
+            _published=True,
+            separation=separation,
+            weight_semantics=model_weight_semantics(model),
+            **start,
+        )
+        return ModeFit.from_solve(lambdas, solved[0], solved[1], cache, to)
+
+    start = _terminal_start(outcome.fit, searched, model)
+    terminal = two_level(solve, start, first_bar(outcome.fit, aim, bar), bar)
 
     # The decomposition serves the held-out evaluation; a published result carries none.
-    result = replace(solved[0], reml_slope_decomposition=None)
+    result = replace(terminal.result, reml_slope_decomposition=None)
     if getattr(model._distribution, "scale_known", True) and result.phi != 1.0:
         result = replace(result, phi=1.0)
     model._result = result

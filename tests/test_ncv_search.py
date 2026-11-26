@@ -51,11 +51,12 @@ from superglm.reml.penalty_algebra import build_penalty_context, build_penalty_m
 from superglm.reml.result import REMLResult
 from superglm.solvers.mode_score import linear_predictor
 from tests.test_import_compat import _LIBRARIES, _loaded_after, _type_checking_imports
+from tests.test_ncv_engine import AIM, BAR, at_the_aim, solver_short
 from tests.test_ncv_engine_rank_cache import one_row_on_the_right, rebuilt, spectral_basis, twin
 
 U = 2.0**-53
 TOL = DEFAULT_NCV_TOL
-# An inner fit is certified to this share of the search's tolerance (``ncv_mode_bar``).
+# An inner fit is certified within this share of the search's tolerance (``ncv_mode_bar``).
 SHARE = 0.01
 
 
@@ -589,18 +590,43 @@ def test_ceiling_that_stops_a_falling_criterion_is_disclosed_as_holding_the_term
 
 
 def test_inner_fits_are_certified_finely_enough_for_the_last_steps():
-    """A 240-row Poisson search over single rows meets its first-order test at the default bar.
+    """A 240-row Poisson search over single rows meets its first-order test at the default bars.
 
     Two inner fits at one smoothing differ in the criterion by a share of their certificate
     bar.  At a tenth of the search's tolerance that was the size of the last steps' gains:
     this search ended on its line search after 27 evaluations, its slope 1.1 times the
-    stopping bar.  At a hundredth it converges in 8.
+    stopping bar.  At a hundredth, and at the default aim of a thousandth, it converges in 8.
     """
     design = twin("poisson", False)
     problem = rebuilt(design.problem, mode_bar=engine.ncv_mode_bar(TOL))
+    assert (problem.mode_aim, problem.mode_bar) == (AIM, BAR)
     result = search(problem, single_rows(problem.n), configured={"t": 1.0}, tol=TOL).result
     assert result.termination_reason == "gradient" and result.converged
     assert result.n_evaluations <= 12
+
+
+def test_search_pays_for_an_aim_its_data_cannot_reach_at_one_fit(monkeypatch):
+    """Every solve to the aim is made to end short of it, as on data that cannot resolve it.
+
+    The provisional fit pays for the aim: its solve, and the step that takes it on to the
+    acceptance bar.  Each later fit is warmed by one accepted at that bar and runs to it, so
+    the search's solves are its evaluations and those two, and it ends on the curve of the
+    search whose fits reach the aim.
+    """
+    c = counts_curve()
+    assert (c.problem.mode_aim, c.problem.mode_bar) == (AIM, BAR)
+    reached = search(c.problem, c.nb, configured=c.configured).result
+    log: list = []
+    monkeypatch.setattr(engine, "fit_irls_direct", solver_short(at_the_aim, log))
+    outcome = search(c.problem, c.nb, configured=c.configured)
+    result = outcome.result
+    assert [call.bar for call in log] == [AIM] + [BAR] * (result.n_evaluations + 1)
+    assert result.work["inner_solves"] == result.n_evaluations + 2
+    assert result.work["fallback_solves"] == 1 and reached.work["fallback_solves"] == 0
+    assert log[1].iterations == 1 and log[1].start is log[0].beta
+    assert outcome.fit.certified and outcome.fit.bar == BAR
+    assert result.objective == pytest.approx(reached.objective, rel=10 * TOL)
+    assert abs(np.log(result.lambdas["t"] / reached.lambdas["t"])) <= 4 * stop_reach(c, reached)
 
 
 # ── infeasible trials ─────────────────────────────────────────────────────────
