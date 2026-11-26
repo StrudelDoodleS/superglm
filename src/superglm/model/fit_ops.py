@@ -197,7 +197,7 @@ class PathResult:
 
 
 def _reject_lambda_policy_fit(model, method: str = "fit") -> None:
-    """lambda_policy is only supported in fit_reml(); reject fit() and fit_path().
+    """lambda_policy is read by fit_reml() and fit_ncv() only; reject fit() and fit_path().
 
     An ``OrderedCategorical`` carries its policy on its spline basis.
     """
@@ -208,7 +208,8 @@ def _reject_lambda_policy_fit(model, method: str = "fit") -> None:
         if getattr(smooth, "_lambda_policy", None) is not None:
             raise NotImplementedError(
                 f"lambda_policy on feature '{name}' is only supported with "
-                f"fit_reml(), not {method}(). Use fit_reml() or remove lambda_policy."
+                f"fit_reml() and fit_ncv(), not {method}(). Use fit_reml() or fit_ncv(), "
+                f"or remove lambda_policy."
             )
 
 
