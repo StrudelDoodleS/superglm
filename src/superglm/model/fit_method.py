@@ -104,6 +104,27 @@ def traits_of(model) -> FitMethodTraits:
     return FIT_METHODS.get(method_of(model), FIT_METHODS["fit"])
 
 
+def search_criterion(model) -> str | None:
+    """The criterion of the smoothing search the model's fit holds, or None where it holds none.
+
+    A search result is the recorded method's (``FitMethodTraits.criterion``). A model that
+    holds a result and no recorded method was saved before fits recorded theirs, when REML
+    was the only search, and reads as REML's.
+    """
+    if getattr(model, "_reml_result", None) is None:
+        return None
+    return traits_of(model).criterion or "reml"
+
+
+def smoothing_held_from(model) -> FitMethod | None:
+    """The search method whose chosen smoothing this ``fit`` holds, recorded by the editor's refit.
+
+    None for any fit that did not record one: a search method's own fit, and a fit at
+    smoothing the analyst set.
+    """
+    return (getattr(model, "_last_fit_meta", None) or {}).get("smoothing_held_from")
+
+
 def check_search_result(model) -> None:
     """Refuse a recorded method whose smoothing search result has another criterion.
 

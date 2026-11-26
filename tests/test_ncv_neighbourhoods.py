@@ -252,7 +252,7 @@ def test_neighbourhood_removing_every_weighted_row_is_refused(kwargs, where):
 
 
 def test_one_valid_split_builds_and_warns():
-    with pytest.warns(UserWarning, match="fit_ncv has 1 neighbourhoods; with fewer than 10"):
+    with pytest.warns(UserWarning, match="fit_ncv has 1 neighbourhood; with fewer than 10"):
         nb = build_neighbourhoods(N, ACTIVE, frame=FRAME, cv=PredefinedSplit([0, 0, 0, -1, -1, -1]))
     assert enumerated(nb) == [([0, 1, 2], [0, 1, 2])]
 

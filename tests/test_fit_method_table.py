@@ -246,6 +246,69 @@ def test_a_model_saved_without_fit_metadata_is_not_checked_against_its_result(fi
     fit_method.check_search_result(old)
 
 
+# ── readers of a fit or fit_reml model ─────────────────────────
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("method", ("fit", "fit_reml", "fit_reml_stopped"))
+def test_readers_of_a_fit_or_fit_reml_model_carry_no_held_out_search_entry(fitted, method):
+    """Pins the readers of ``fit`` and ``fit_reml`` models, which name no held-out search.
+
+    Their REML diagnostics, both forms of the telemetry, ``diagnostics()``, the summary
+    and the editor's Diagnose trace carry no entry of ``fit_ncv``'s (no ``"ncv"``
+    telemetry or metric, no criterion or note in ``reml_diagnostics()``, no
+    ``smoothing_search`` or bound note, no criterion in the trace, which charts the REML
+    score); a search stopped at its limit is stated in REML's words; and an editor refit
+    by ``fit`` reads as smoothing the analyst set.
+    """
+    from superglm.diagnostics.fit_report import status_sentence
+    from superglm.editor.diagnose import fit_trace
+    from superglm.editor.refit import fit_refit_model
+    from superglm.features.rebuild import clone_with_replaced_features
+    from superglm.model.telemetry_ops import metrics_for_logging
+
+    X, y = _data()
+    stopped = method == "fit_reml_stopped"
+    model = _model() if stopped else fitted[method]
+    if stopped:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit_reml(X, y, max_reml_iter=1)
+    searched = method != "fit"
+    diagnostics = model.reml_diagnostics()
+    assert diagnostics["enabled"] is searched
+    assert "criterion" not in diagnostics and "note" not in diagnostics
+    assert "ncv" not in model.training_telemetry()
+    metrics = metrics_for_logging(model)
+    assert not [key for key in metrics if ".ncv." in key]
+    assert ("train.reml.n_iter" in metrics) is searched
+    entry = model.diagnostics()["_model"]
+    assert "smoothing_search" not in entry and "smoothing_bound_note" not in entry
+    summary = model.summary()
+    assert "smoothing_bound_note" not in summary._info
+    trace = fit_trace(model, fit_id="model", label="All rows")
+    assert "criterion" not in trace and trace["search"] is None
+    if searched:
+        assert trace["path"] == [float(v) for v in model._reml_result.objective_history]
+    if stopped:
+        note = summary._info["convergence_note"]
+        assert note.startswith(
+            "fit_reml did not converge: smoothing-parameter selection stopped after 1 iteration "
+            "because it reached the max_reml_iter limit."
+        )
+        assert trace["explanation"] == note == entry["convergence_note"]
+        assert trace["stop_text"] == (
+            "it reached its limit of 1 smoothing round (max_reml_iter) before settling"
+        )
+    refit = clone_with_replaced_features(model, {})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fit_refit_model(model, refit, method="fit", X=X, y=y)
+    assert fit_trace(refit, fit_id="model", label="All rows")["verdict"] == status_sentence(
+        "fixed_fit"
+    )
+
+
 # ── the owner is the only writer and the only reader of the tag ─
 #
 # Scope: provenance is the method recorded in ``_last_fit_meta``. The scan follows

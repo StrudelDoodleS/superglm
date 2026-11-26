@@ -1384,6 +1384,12 @@ class SuperGLM:
           results exist, and why not.
         - ``"work"``: counts of coefficient fits, factorisations and rows read.
 
+        After the coefficients are edited by hand (the editor, a post-fit shape
+        repair), ``"termination_reason"`` is ``"coefficients_revised"``, every
+        verdict is False, and the criterion, its mean, its slopes, the bound
+        pressure and the held-out results are withdrawn: they described the fitted
+        coefficients. The smoothing and the bounds it sits on are kept.
+
         The dict and everything in it are copies.
         """
         from superglm.model import ncv_ops

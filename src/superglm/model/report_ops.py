@@ -10,7 +10,8 @@ import scipy.linalg
 
 from superglm.diagnostics.convergence import (
     coefficient_nonconvergence_message,
-    reml_nonconvergence_message,
+    ncv_bound_message,
+    search_nonconvergence_message,
 )
 from superglm.distributions import scale_is_known
 from superglm.inference._term_helpers import (
@@ -52,12 +53,14 @@ def _scale_info(res) -> dict:
 
 
 def _terminal_stop(model, res) -> tuple[str | None, str | None]:
-    """The last fitting stage's stop and its non-convergence note: REML's when
-    smoothing was selected, otherwise the coefficient fit's."""
-    reml = getattr(model, "_reml_result", None)
-    if reml is None:
+    """The last fitting stage's stop and its non-convergence note: the smoothing search's,
+    in the words of its own method, when smoothing was searched, otherwise the coefficient
+    fit's."""
+    criterion = fit_method.search_criterion(model)
+    if criterion is None:
         return getattr(res, "termination_reason", None), coefficient_nonconvergence_message(res)
-    return reml.termination_reason, reml_nonconvergence_message(reml)
+    search = model._reml_result
+    return search.termination_reason, search_nonconvergence_message(criterion, search)
 
 
 def diagnostics(model) -> dict[str, Any]:
@@ -118,6 +121,10 @@ def diagnostics(model) -> dict[str, Any]:
             reml_profile.get("reml_laplace_excluded_labels", ()) or ()
         ),
     }
+    if fit_method.search_criterion(model) == "ncv":
+        # A held-out search names its method beside its verdict, and the terms it left on a bound.
+        out["_model"]["smoothing_search"] = fit_method.method_of(model)
+        out["_model"]["smoothing_bound_note"] = ncv_bound_message(model._reml_result)
     statistics_reason = edited_statistics_unavailable(model)
     if statistics_reason is not None:
         out["_model"]["fit_statistics_unavailable"] = statistics_reason
@@ -357,6 +364,8 @@ def summary(
     if convergence_note is not None:
         model_info["termination_reason"] = termination_reason
         model_info["convergence_note"] = convergence_note
+    if fit_method.search_criterion(model) == "ncv":
+        model_info["smoothing_bound_note"] = ncv_bound_message(model._reml_result)
     editor_meta = getattr(model, "_editor_edits", None)
     if getattr(model, "_editor_inference_stale", False):
         model_info["editor_inference_stale"] = True

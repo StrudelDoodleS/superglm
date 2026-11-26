@@ -988,7 +988,7 @@ def test_one_supplied_split_fits_with_the_warning():
     cv = ShuffleSplit(n_splits=1, test_size=0.3, random_state=0)
     model, caught = run(curve_model(), b, cv=cv)
     (message,) = messages(caught)
-    assert message.startswith("fit_ncv has 1 neighbourhoods; with fewer than 10 the held-out")
+    assert message.startswith("fit_ncv has 1 neighbourhood; with fewer than 10 the held-out")
     ((_, test),) = cv.split(b.frame)
     table = model.ncv_heldout()
     assert sorted(table.row) == sorted(test) and len(model.ncv_heldout_groups()) == 1
@@ -1165,6 +1165,30 @@ def test_what_is_not_supported_is_refused_before_any_solve(solves, name):
     assert sum(solves.values()) == 0
     assert fit_method.method_of(model) == method and model._fit_revision == revision
     np.testing.assert_array_equal(model.predict(b.frame, offset=b.offset), before)
+
+
+def test_a_solver_route_fit_refuses_is_refused_before_any_solve_with_fit_s_reason(solves):
+    """``fit`` refuses a forced structured route on a model without a structured term."""
+    b = curve_book()
+    with pytest.raises(ValueError) as refused:
+        curve_model(direct_solve="structured").fit(b.frame, b.y)
+    reason = str(refused.value)
+    assert reason.startswith("direct_solve='structured' is ineligible")
+    model = curve_model(direct_solve="structured")
+    solves.clear()
+    with pytest.raises(ValueError) as caught:
+        run(model, b, groups=b.labels)
+    assert str(caught.value) == (
+        f"{reason.rstrip('.')}. Construct the model with direct_solve='auto', 'gram' or 'qr'."
+    )
+    assert sum(solves.values()) == 0 and fit_method.method_of(model) is None
+
+
+@pytest.mark.parametrize("route", ["gram", "qr"])
+def test_a_solver_route_fit_accepts_is_the_published_fit_s_route(route):
+    b = curve_book()
+    model, _ = run(curve_model(direct_solve=route), b, groups=b.labels)
+    assert model.result.direct_backend == route and model.ncv_diagnostics()["converged"]
 
 
 def test_level_with_one_weighted_row_is_refused_when_single_rows_are_held_out(solves):

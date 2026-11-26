@@ -34,7 +34,8 @@ import { clockText, foldColour } from "./cv_tab.js";
  * @property {string|null} search which smoothing search produced the fit, with its option; null where not recorded
  * @property {boolean} converged
  * @property {number|null} seconds
- * @property {number[]} path
+ * @property {number[]} path the REML score after each round; empty for a held-out search
+ * @property {string} [criterion] "ncv" when held-out prediction (fit_ncv) chose the smoothing, which has no REML score to chart
  * @property {number|null} late_gain
  * @property {number|null} settled_round
  * @property {Record<string, DiagnoseCell>} terms
@@ -296,7 +297,7 @@ function roundGains(path) {
  */
 export function searchPathMarkup(payload, selected, width = CHART.width) {
   const traced = payload.fits.filter((fit) => fit.path.length >= 2);
-  const unrecorded = payload.fits.filter((fit) => fit.rounds > 0 && fit.path.length < 2).map((fit) => fit.label);
+  const unrecorded = payload.fits.filter((fit) => fit.rounds > 0 && fit.path.length < 2 && fit.criterion !== "ncv").map((fit) => fit.label);
   const shown = payload.fits.find((fit) => fit.id === selected);
   const searches = new Set(payload.fits.map((fit) => fit.search ?? ""));
   const notes = [

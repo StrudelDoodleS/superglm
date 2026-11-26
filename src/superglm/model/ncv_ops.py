@@ -6,8 +6,9 @@ as it was.  Its steps, in order:
 1. **Refusals, before any solve.**  The controls, the model's settings and the hold-out
    arguments are checked first (:func:`fit_ncv`, :func:`_refuse_unsupported_model`,
    ``neighbourhoods.build_neighbourhoods``); the terms once they are known, and the
-   neighbourhoods against the factor levels once the design is built
-   (:func:`_refuse_unsupported_terms`, :func:`_refuse_constrained_terms`,
+   neighbourhoods against the factor levels and a forced solver route against the terms
+   once the design is built (:func:`_refuse_unsupported_terms`,
+   :func:`_refuse_constrained_terms`, :func:`_refuse_ineligible_route`,
    :func:`_refuse_removed_levels`).
 2. **The search** over the estimated smoothing parameters, by the criterion of
    :mod:`superglm.ncv.engine` (``search.search_smoothing``).  Rows that stop identifying the
@@ -94,6 +95,7 @@ from superglm.ncv.rows import row_loss
 from superglm.ncv.search import DEFAULT_MAX_NCV_ITER, SearchOutcome, search_smoothing
 from superglm.reml.penalty_algebra import build_penalty_context
 from superglm.reml.result import _map_beta_between_bases, _map_centred_state_between_bases
+from superglm.solvers._structured.selection import resolve_structured_backend
 from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.mode_score import centred_warm_start
@@ -288,6 +290,29 @@ def _refuse_constrained_terms(model) -> None:
         )
 
 
+def _refuse_ineligible_route(model) -> None:
+    """Refuse a ``direct_solve`` route that ``fit`` refuses for this design, with its reason.
+
+    ``fit`` decides a forced structured route from the terms alone, so the decision is made
+    here on the built design, before any solve.  A route ``fit`` accepts is the published
+    fit's route.
+    """
+    if model._direct_solve != "structured":
+        return
+    try:
+        resolve_structured_backend(
+            list(model._dm.group_matrices),
+            model._groups,
+            direct_solve=model._direct_solve,
+            coefficient_width=model._dm.p,
+        )
+    except ValueError as error:
+        raise ValueError(
+            f"{str(error).rstrip('.')}. Construct the model with direct_solve='auto', 'gram' "
+            "or 'qr'."
+        ) from None
+
+
 def _refuse_removed_levels(model, nb: Neighbourhoods, active, penalties) -> None:
     """Refuse neighbourhoods that remove every weighted row of an unpenalised factor level."""
     penalised = {component.group_index for component in penalties}
@@ -349,6 +374,7 @@ def _fit_ncv_in_workspace(
     sample_weight, offset = _store_fit_arrays(model, sample_weight, offset, y)
     _clear_fit_inference_caches(model)
     _refuse_constrained_terms(model)
+    _refuse_ineligible_route(model)
 
     reml_groups: list[tuple[int, Any]] = collect_reml_groups(
         model._groups, model._dm.group_matrices
@@ -668,6 +694,12 @@ def _ncv_result(model, reader: str) -> NCVResult:
 
 def _held(model, reader: str) -> HeldOut:
     result = _ncv_result(model, reader)
+    if result.termination_reason == "coefficients_revised":
+        raise RuntimeError(
+            f"{reader} has no held-out results to read: the coefficients were revised after "
+            "fitting, and the held-out results described the fitted ones; refit with fit_ncv "
+            "to compute them for this model."
+        )
     if result.heldout is None:
         raise RuntimeError(
             f"{reader} has no held-out results to read: the criterion could not be computed "
@@ -747,7 +779,11 @@ def ncv_diagnostics(model) -> dict[str, Any]:
     box = result.lambda_box
     floor, ceiling = (box.floor, box.ceiling) if isinstance(box, LambdaBox) else (None, None)
     search_converged = result.termination_reason in CONVERGED_STOPS
-    coefficients_converged = result.terminal_refit_termination is None
+    # Revised coefficients are not the final fit's, whatever that fit's stop was.
+    coefficients_converged = (
+        result.terminal_refit_termination is None
+        and result.termination_reason != "coefficients_revised"
+    )
     return {
         "method": "fit_ncv",
         "criterion": None if result.objective is None else float(result.objective),

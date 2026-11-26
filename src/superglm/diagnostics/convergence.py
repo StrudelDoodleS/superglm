@@ -577,6 +577,21 @@ def warn_ncv_bounds(result: Any) -> str | None:
     return message
 
 
+def search_nonconvergence_message(criterion: str, result: Any) -> str | None:
+    """The non-convergence statement of a SuperGLM smoothing search by ``criterion``, or None.
+
+    ``criterion`` is the search's (``fit_method.search_criterion``): ``"reml"`` gives
+    ``fit_reml``'s statement, ``"ncv"`` ``fit_ncv``'s.
+    """
+    return _SEARCH_NONCONVERGENCE[criterion](result)
+
+
+_SEARCH_NONCONVERGENCE = {
+    "reml": reml_nonconvergence_message,
+    "ncv": ncv_nonconvergence_message,
+}
+
+
 def lss_nonconvergence_reason(
     fitted_result: Any, smoothing_reason: str | None, coefficient_reason: str | None = None
 ) -> str | None:

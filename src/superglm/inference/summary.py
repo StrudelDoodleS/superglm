@@ -696,7 +696,11 @@ class ModelSummary:
         abbrevs = info.get("penalty_abbrevs", {})
         if abbrevs:
             notes.append(("abbrevs", "; ".join(f"{k}: {v}" for k, v in abbrevs.items())))
-        for note in (info.get("convergence_note"), info.get("standard_error_note")):
+        for note in (
+            info.get("convergence_note"),
+            info.get("smoothing_bound_note"),
+            info.get("standard_error_note"),
+        ):
             if note:
                 notes.append(("warning", note))
         notes.extend(("editor", note) for note in _editor_notes(info))

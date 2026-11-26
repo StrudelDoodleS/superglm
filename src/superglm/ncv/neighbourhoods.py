@@ -315,7 +315,8 @@ def warn_few_neighbourhoods(nb: Neighbourhoods) -> None:
     """Warn when there are fewer than ``FEW_NEIGHBOURHOODS`` neighbourhoods."""
     if nb.m < FEW_NEIGHBOURHOODS:
         warn_caller(
-            f"fit_ncv has {nb.m} neighbourhoods; with fewer than {FEW_NEIGHBOURHOODS} the "
+            f"fit_ncv has {nb.m} neighbourhood{'' if nb.m == 1 else 's'}; with fewer than "
+            f"{FEW_NEIGHBOURHOODS} the "
             "held-out criterion is noisy (a rule of thumb, not a measured threshold), so the "
             "chosen smoothing can move between splits. Use more groups or folds where you can."
         )
