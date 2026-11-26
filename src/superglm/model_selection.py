@@ -135,8 +135,13 @@ class CrossValidationResult:
     refused_scores : tuple of (int, str) or None
         The ``(fold, score)`` cells whose score was refused (``"score
         refused"``), in fold order. A fold's other scores stand.
+    ncv_groups : ndarray or None
+        Under ``fit_mode="fit_ncv"``, the ``groups`` labels the folds' fits
+        held out by, copied, one per row the folds index; ``None`` otherwise.
+        A replay of ``fold_indices`` passes them again, so each fold chooses
+        its smoothing as it did.
 
-    ``n_rows`` through ``refused_scores`` are ``None`` on a result made before
+    ``n_rows`` through ``ncv_groups`` are ``None`` on a result made before
     they were recorded; such a result without ``warm_start`` and
     ``fit_kwargs`` was fitted cold, with no extra fit arguments.
     """
@@ -159,6 +164,7 @@ class CrossValidationResult:
     warm_start: bool | None = None
     fit_kwargs: dict[str, Any] | None = None
     refused_scores: tuple[tuple[int, str], ...] | None = None
+    ncv_groups: NDArray | None = None
 
     def plot_terms_by_fold(
         self,
@@ -1399,4 +1405,5 @@ def cross_validate(
             for key, value in fit_kwargs.items()
         },
         refused_scores=tuple(sorted(refused_cells)),
+        ncv_groups=groups.copy() if fit_mode == "fit_ncv" and groups is not None else None,
     )

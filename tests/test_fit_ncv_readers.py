@@ -25,13 +25,14 @@ from functools import cache
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.model_selection import GroupKFold
 
-from superglm import Categorical, OrderedCategorical, Spline, SuperGLM
+from superglm import Categorical, OrderedCategorical, Spline, SuperGLM, cross_validate
 from superglm.diagnostics.convergence import ncv_bound_message, ncv_nonconvergence_message
 from superglm.diagnostics.fit_report import status_sentence
 from superglm.editor import EditorSession
 from superglm.editor import free_levels as free_levels_module
-from superglm.editor.cv import capture_final_fit, run_final_fit
+from superglm.editor.cv import capture_cv_run, capture_final_fit, run_cv, run_final_fit
 from superglm.editor.diagnose import fit_trace
 from superglm.editor.refit import fit_refit_model
 from superglm.features.rebuild import clone_with_replaced_features
@@ -448,6 +449,30 @@ def test_an_editor_refit_at_the_analysts_smoothing_drops_a_lambda_policy():
     reference.lambda2 = 1.0
     reference.fit(frame, y)
     np.testing.assert_allclose(refit.predict(frame), reference.predict(frame), rtol=1e-10)
+
+
+def test_the_editors_run_cv_replays_a_fit_ncv_result_with_its_groups():
+    """Run CV with no edit gives back a fit_ncv result's fold scores: each fold holds out its groups.
+
+    The groups share a level, so holding out single rows instead chooses other smoothing.
+    """
+    rng = np.random.default_rng(17)
+    groups = np.repeat(np.arange(30), 3)
+    frame = pd.DataFrame({"x": rng.uniform(size=90)})
+    y = np.sin(6 * frame.x.to_numpy()) + rng.normal(0, 0.6, 30)[groups] + rng.normal(0, 0.3, 90)
+    model = SuperGLM(family="gaussian", features={"x": Spline(kind="ps", n_knots=10)})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        supplied = cross_validate(
+            model, frame, y, cv=GroupKFold(3), groups=groups, fit_mode="fit_ncv"
+        )
+        model.fit_ncv(frame, y, groups=groups)
+        session = EditorSession.from_model(model, train_data=(frame, y), cv=supplied)
+        run = run_cv(capture_cv_run(session), _Context())
+    np.testing.assert_array_equal(supplied.ncv_groups, groups)
+    np.testing.assert_allclose(
+        run.result.fold_scores["deviance"], supplied.fold_scores["deviance"], rtol=1e-12
+    )
 
 
 def test_the_editors_final_fit_of_a_fit_ncv_model_holds_the_chosen_smoothing():

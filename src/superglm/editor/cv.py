@@ -1208,6 +1208,8 @@ class CVRunPlan(_Plan):
     scoring: tuple[str, ...]
     splitter: str | None
     n_points: int
+    # The supplied result's fit_ncv group labels, passed again so each fold holds out as it did.
+    groups: NDArray | None = None
 
 
 def capture_cv_run(session) -> CVRunPlan:
@@ -1241,6 +1243,7 @@ def capture_cv_run(session) -> CVRunPlan:
         scoring=supplied or tuple(name for name, *_ in _metrics_of(session.model)),
         splitter=cv.splitter,
         n_points=session.n_points,
+        groups=getattr(cv, "ncv_groups", None),
     )
 
 
@@ -1456,6 +1459,7 @@ def run_cv(plan: CVRunPlan, context) -> CVRun:
             scoring=recorder.score,
             error_score="raise",
             fit_kwargs=plan.fit_kwargs,
+            groups=plan.groups,
             warm_start=plan.warm_start,
         )
     except JobCancelledError:
