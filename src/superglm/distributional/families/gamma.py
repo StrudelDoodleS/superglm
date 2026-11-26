@@ -8,9 +8,7 @@ from dataclasses import dataclass
 from typing import Any, ClassVar, Literal
 
 import numpy as np
-import scipy.linalg
 from numpy.typing import NDArray
-from scipy import special
 
 from superglm.distributional.families._base import (
     array_digest,
@@ -52,7 +50,11 @@ from superglm.distributional.family import (
     _validated_derivative_order,
     _validated_parameter_matrix,
 )
-from superglm.distributional.kernels._declared_bounds import gamma_window_jets
+from superglm.distributional.kernels._declared_bounds import (
+    gamma_cdf,
+    gamma_quantile,
+    gamma_window_jets,
+)
 from superglm.distributional.kernels.gamma import (
     GammaInitializationError as GammaInitializationError,
 )
@@ -620,10 +622,8 @@ class GammaLS(MeanPredictor, ScalePredictor):
         interior = response > 0.0
         if np.any(interior):
             inside_values = values[interior]
-            cv2 = inside_values[:, 1] * inside_values[:, 1]
-            out[interior] = special.gammainc(
-                1.0 / cv2,
-                response[interior] / (inside_values[:, 0] * cv2),
+            out[interior] = gamma_cdf(
+                response[interior], inside_values, np.ones(len(inside_values))
             )
         return readonly(out)
 
@@ -639,8 +639,7 @@ class GammaLS(MeanPredictor, ScalePredictor):
             or np.any(probabilities >= 1.0)
         ):
             raise ValueError("quantile probabilities must lie strictly inside (0, 1)")
-        cv2 = values[:, 1] * values[:, 1]
-        return readonly(values[:, 0] * cv2 * special.gammaincinv(1.0 / cv2, probabilities))
+        return readonly(gamma_quantile(probabilities, values, np.ones(len(values))))
 
     def expected_shortfall(self, p: NDArray, theta: NDArray) -> NDArray[np.float64]:
         """``E[Y | Y > q_p]`` for shape ``1 / cv^2`` at unit prior weight."""
@@ -691,13 +690,7 @@ class GammaLS(MeanPredictor, ScalePredictor):
         out = np.zeros_like(response)
         interior = response > 0.0
         if np.any(interior):
-            inside_values = values[interior]
-            inside_prior = prior[interior]
-            cv2 = inside_values[:, 1] * inside_values[:, 1]
-            out[interior] = special.gammainc(
-                inside_prior / cv2,
-                inside_prior * response[interior] / (inside_values[:, 0] * cv2),
-            )
+            out[interior] = gamma_cdf(response[interior], values[interior], prior[interior])
         return readonly(out)
 
     def quantile_prior_weighted(
@@ -715,10 +708,7 @@ class GammaLS(MeanPredictor, ScalePredictor):
             or np.any(probabilities >= 1.0)
         ):
             raise ValueError("quantile probabilities must lie strictly inside (0, 1)")
-        cv2 = values[:, 1] * values[:, 1]
-        return readonly(
-            values[:, 0] * cv2 / prior * special.gammaincinv(prior / cv2, probabilities)
-        )
+        return readonly(gamma_quantile(probabilities, values, prior))
 
     def expected_shortfall_prior_weighted(
         self, p: NDArray, theta: NDArray, weights: NDArray

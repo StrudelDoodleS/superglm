@@ -16,6 +16,9 @@ higher derivatives ``-a r``, ``r = y/m``. Tail points with shape above
 :data:`UNIFORM_SHAPE` (``1e4``, the incomplete-gamma engine's tested
 envelope) inside Temme's uniform domain use the ``*_uniform`` laws, whose cost
 does not grow with shape (``kernels/_gg_uniform_tail.py``).
+
+:func:`gamma_cdf` and :func:`gamma_quantile` are ``GammaLS``'s distribution
+function and its inverse, read from the same expansion at large shape.
 """
 
 from __future__ import annotations
@@ -26,8 +29,10 @@ from types import ModuleType
 
 import numpy as np
 import numpy.random
+import scipy.linalg
 from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
+from scipy import special
 
 from superglm.distributional.kernels._curvature_direction import compose_derivatives
 from superglm.distributional.kernels._declared import (
@@ -48,8 +53,11 @@ from superglm.distributional.kernels._response_tails import (
     quadrature_window_jets,
 )
 from superglm.distributional.kernels.generalized_gamma import (
+    LARGE_GAMMA_SHAPE,
     location_rows,
     location_third_fourth,
+    log_tail_cdf,
+    log_tail_quantile,
     mean_exists,
     mean_location_map,
     series_e1,
@@ -393,6 +401,42 @@ def _gamma_window_jets(
         rate=rate,
         uniform=uniform,
     )
+
+
+def gamma_cdf(y: NDArray, parameters: NDArray, weight: NDArray) -> NDArray[np.float64]:
+    """``GammaLS``'s ``P(Y <= y)`` at ``y > 0``: shape ``weight/cv^2``, mean ``mean``.
+
+    Above :data:`LARGE_GAMMA_SHAPE` the law is read as the generalised gamma it
+    is, ``log(Y/mean) = Q W`` with ``sigma = Q = cv/sqrt(weight)``, from that
+    law's log tail.
+    """
+    mean, cv = parameters[:, 0], parameters[:, 1]
+    cv2 = cv * cv
+    with np.errstate(divide="ignore", over="ignore"):
+        shape = weight / cv2
+    large = shape > LARGE_GAMMA_SHAPE
+    rest = ~large
+    out = np.empty_like(shape)
+    out[rest] = special.gammainc(shape[rest], weight[rest] * y[rest] / (mean[rest] * cv2[rest]))
+    q = cv[large] / np.sqrt(weight[large])
+    with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+        out[large] = log_tail_cdf(np.log1p((y[large] - mean[large]) / mean[large]) / q, q)
+    return out
+
+
+def gamma_quantile(p: NDArray, parameters: NDArray, weight: NDArray) -> NDArray[np.float64]:
+    """``GammaLS``'s ``p``-quantile, by the same two routes as :func:`gamma_cdf`."""
+    mean, cv = parameters[:, 0], parameters[:, 1]
+    cv2 = cv * cv
+    with np.errstate(divide="ignore", over="ignore"):
+        shape = weight / cv2
+    large = shape > LARGE_GAMMA_SHAPE
+    rest = ~large
+    out = np.empty_like(shape)
+    out[rest] = mean[rest] * cv2[rest] / weight[rest] * special.gammaincinv(shape[rest], p[rest])
+    q = cv[large] / np.sqrt(weight[large])
+    out[large] = mean[large] * np.exp(q * log_tail_quantile(p[large], q))
+    return out
 
 
 def normal_window_jets(
@@ -759,6 +803,8 @@ def _warmup_declared_bounds(*parts: str) -> None:
 
 __all__ = [
     "declared_window_jets",
+    "gamma_cdf",
+    "gamma_quantile",
     "gamma_window_jets",
     "gg_window_jets",
     "gpd_window_jets",
