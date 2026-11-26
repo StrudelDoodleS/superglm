@@ -299,6 +299,21 @@ class DistributionalEFSResult:
 
     @property
     def matched_certified(self) -> bool:
+        return self.terminal_fit.coefficient_face is None and self._certified_beside_face()
+
+    @property
+    def certified_on_exact_face(self) -> bool:
+        """Whether the fit ended on an exact face and passed every other check of certification.
+
+        The face must name a penalty component: a shape-only face is not one. Such a fit is
+        converged at a boundary optimum. It is never ``matched_certified``, which requires that
+        no term ended on an exact face (a term resting at its floor bound may still certify).
+        """
+        face = self.terminal_fit.coefficient_face
+        return face is not None and bool(face.component_names) and self._certified_beside_face()
+
+    def _certified_beside_face(self) -> bool:
+        """Every check of ``matched_certified`` except that no term ended on an exact face."""
         face = self.terminal_fit.coefficient_face
         face_names = () if face is None else face.component_names
         direction_evidence = tuple(
@@ -325,7 +340,6 @@ class DistributionalEFSResult:
             self.converged
             and self.convergence_reason != "practical_plateau"
             and self.coefficient_converged
-            and face is None
             and self.terminal_evidence_fresh
             and not self.unresolved_upper_bound
             and not any(
@@ -350,7 +364,8 @@ class DistributionalEFSResult:
             and indexed_assessments_valid
             and dict(self.terminal_endpoint_directions) == final_revalidations
             and all(
-                evidence._derived_authority_matches()
+                evidence.decision == "endpoint"
+                and evidence._derived_authority_matches()
                 and evidence.authority_identifier == "analytic-observed-curvature-direction/v1"
                 for evidence in self.terminal_endpoint_directions.values()
             )

@@ -13,6 +13,7 @@ from sklearn.model_selection import KFold
 
 from superglm import GammaLS, SuperGLM, SuperLSS, cat, cross_validate, re, s
 from superglm._lambda_box import fitted_lambda_box
+from superglm.diagnostics.fit_report import status_sentence
 from superglm.editor import diagnose as editor_diagnose
 from superglm.editor import edit
 from superglm.editor.cv import capture_cv_run, run_cv
@@ -666,6 +667,20 @@ def test_the_default_search_is_named_as_the_family_runs_it():
     assert search == _SEARCH_SENTENCES_BY_OUTER[ran]
     # The sentence is words for a reader: no option name, no code, no solver acronym.
     assert "outer" not in search and "=" not in search and "EFS" not in search
+
+
+def test_a_superlss_fit_converged_on_an_exact_face_is_a_converged_fit():
+    from tests._lss_editor_fixtures import lognormal_case
+
+    model = lognormal_case().model
+    assert model.exact_face_components_ == ("mean:power#wiggle",)
+    trace = fit_trace(model, fit_id="model", label="All rows")
+    assert trace["status"] == "converged"
+    assert trace["verdict"] == status_sentence("converged_exact_face")
+    assert trace["explanation"] is None
+    # The face is the smoothing findings' to report; no check is said to have failed.
+    assert all("extra check" not in item["headline"] for item in trace["findings"])
+    assert not [item for item in trace["findings"] if item["affects_numbers"]]
 
 
 def test_a_superlss_fit_stopped_at_its_round_limit_says_it_did_not_converge():
