@@ -14,6 +14,7 @@ from typing import Any, Literal, NamedTuple
 
 import numpy as np
 import scipy.linalg
+import scipy.sparse as sp
 from numpy.typing import NDArray
 
 from superglm._roundoff import EPS as _EPS
@@ -858,6 +859,58 @@ def null_directions_keep_to(inside: NDArray, outside: NDArray | None = None) -> 
     return bool(np.all((cosines <= rcond) | (1.0 - cosines**2 <= rcond)))
 
 
+type SharedDirections = NDArray | sp.csr_matrix
+
+
+def shared_function_estimable(
+    null: NDArray, marked: NDArray, shared: SharedDirections, scale: NDArray
+) -> bool:
+    """Can every data null split into an internal direction and a transfer on the shared span?"""
+    inside = null[marked]
+    if sp.issparse(shared):
+        # Each level (and each free main axis) has disjoint support. Normalize its
+        # equilibrated direction to project onto the shared span in linear storage.
+        basis = shared[marked].multiply(scale[marked, None]).tocsc()
+        basis.eliminate_zeros()
+        basis = basis[:, np.diff(basis.indptr) > 0]
+        if basis.nnz:
+            norms = np.hypot.reduceat(basis.data, basis.indptr[:-1])
+            basis.data /= np.repeat(norms, np.diff(basis.indptr))
+            inside = inside - basis @ (basis.T @ inside)
+        return _null_directions_decompose(inside, null[~marked])
+    directions = np.asarray(shared)[marked] * scale[marked, None]
+    if directions.size:
+        left, singular, _ = np.linalg.svd(directions, full_matrices=False)
+        cutoff = singular[0] * np.finfo(float).eps * max(directions.shape)
+        basis = left[:, singular > cutoff]
+        inside = inside - basis @ (basis.T @ inside)
+    return _null_directions_decompose(inside, null[~marked])
+
+
+def _null_directions_decompose(shape: NDArray, outside: NDArray) -> bool:
+    """Whether each null direction splits into one on ``~outside`` and one on ``~shape``."""
+    rcond = SHARED_RANK_POLICY.factor_rcond
+    nullity = shape.shape[1]
+    if nullity == 0:
+        return True
+    _, sv_shape, vt_shape = (
+        np.linalg.svd(shape, full_matrices=shape.shape[0] < nullity)
+        if shape.shape[0]
+        else (None, np.zeros(0), np.eye(nullity))
+    )
+    _, sv_out, vt_out = (
+        np.linalg.svd(outside, full_matrices=outside.shape[0] < nullity)
+        if outside.shape[0]
+        else (None, np.zeros(0), np.eye(nullity))
+    )
+    ker_shape = vt_shape[int(np.count_nonzero(sv_shape > rcond)) :].T
+    ker_out = vt_out[int(np.count_nonzero(sv_out > rcond)) :].T
+    if ker_shape.shape[1] + ker_out.shape[1] < nullity:
+        return False
+    singular = np.linalg.svd(np.hstack((ker_shape, ker_out)), compute_uv=False)
+    return bool(singular[nullity - 1] > rcond)
+
+
 @dataclass(frozen=True)
 class RankDecomposition:
     """The rank-revealing decomposition chosen for one design matrix."""
@@ -1098,17 +1151,13 @@ class RankDecomposition:
         )
         return bool(np.linalg.norm(projection) <= tolerance)
 
-    def function_estimable(self, columns: NDArray) -> bool:
+    def function_estimable(self, columns: NDArray, shared: SharedDirections | None = None) -> bool:
         """Whether each design row's part on the coefficients ``columns`` marks is estimable.
 
-        Those parts, zero on the other coefficients, are the fitted function of a term
-        whose coefficients are the marked ones.  A term's function is estimable when its
-        columns share no direction with the others' (Rao, *Linear Statistical Inference
-        and Its Applications*, 2nd ed., 1973, p. 282; Seely & Birkes, "Estimability in
-        partitioned linear models", Ann. Statist. 8(2), 1980): every null direction is
-        then one of the term's columns alone or of the others alone
-        (``null_directions_keep_to``).  This reads the null space the coefficient mask
-        reads, and no row of a design factor.
+        A term's function is estimable when every null direction keeps to its columns or
+        to the rest (Rao 1973, p. 282; Seely & Birkes 1980).  With ``shared``, each
+        null direction touching ``columns`` must split into one on those shared directions
+        plus the remaining columns and one inside the remaining ``columns`` alone.
         """
         scaled = self.column_scale > 0.0
         if self.equilibrated_null_basis is not None:
@@ -1119,7 +1168,9 @@ class RankDecomposition:
             retained = norms > np.finfo(float).eps
             null = null[:, retained] / norms[retained]
         marked = np.asarray(columns, dtype=bool)[scaled]
-        return null_directions_keep_to(null[marked], null[~marked])
+        if shared is None:
+            return null_directions_keep_to(null[marked], null[~marked])
+        return shared_function_estimable(null, marked, shared[scaled], self.column_scale[scaled])
 
     def estimability_only(self) -> RankDecomposition:
         """This decomposition without its factor and solution bases.
@@ -1291,7 +1342,12 @@ class RankInfo:
         return face_pseudo_inverse(self.face_coefficient, self.face)
 
     def is_estimable(
-        self, contrast: NDArray, intercept: float = 0.0, design_rows: bool = False
+        self,
+        contrast: NDArray,
+        intercept: float = 0.0,
+        design_rows: bool = False,
+        shared: SharedDirections | None = None,
+        group_columns: NDArray | None = None,
     ) -> bool:
         """Whether the data determine ``intercept * a + contrast @ beta``.
 
@@ -1304,7 +1360,8 @@ class RankInfo:
         """
         if design_rows:
             return self.data.function_estimable(
-                np.asarray(contrast, dtype=bool)[self.selected_columns]
+                np.asarray(contrast, dtype=bool)[self.selected_columns],
+                shared=None if shared is None else shared[self.selected_columns],
             )
         contrast = np.asarray(contrast, dtype=float)
         if contrast.shape != self.mean_x.shape:

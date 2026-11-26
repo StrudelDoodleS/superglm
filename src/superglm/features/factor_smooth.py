@@ -1437,6 +1437,29 @@ def population_curve_terms(name: Any, interaction_specs: Any) -> list[tuple[Any,
     ]
 
 
+def population_curve_level_constants(
+    terms: list[tuple[Any, FactorSmooth]], groups: Any, width: int
+) -> sp.csr_matrix:
+    """Disjoint level-constant directions in the free sz blocks, in fitted coordinates."""
+    rows, columns, values = [], [], []
+    count = 0
+    for key, spec in terms:
+        term_groups = [group for group in groups if group.feature_name == key]
+        if not term_groups:
+            continue
+        term_cols = np.concatenate([np.arange(group.start, group.end) for group in term_groups])
+        if len(term_cols) != (len(spec._levels) - 1) * spec.k:
+            continue
+        unit = spec._lowest_order_null_space(1)[:, 0]
+        unit = unit / np.linalg.norm(unit)
+        free = len(spec._levels) - 1
+        rows.extend(term_cols)
+        columns.extend(np.repeat(np.arange(count, count + free), spec.k))
+        values.extend(np.tile(unit, free))
+        count += free
+    return sp.csr_matrix((values, (rows, columns)), shape=(width, count))
+
+
 def share_group_levels(specs: Any) -> None:
     """Decide once, for the ``sz`` terms on each group, which levels they treat alike, and who folds.
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 import warnings
-from functools import partial
 
 import numpy as np
 
@@ -93,24 +92,26 @@ def _aliased_features(model, covariance) -> set[str]:
     }
 
 
-def _default_determines(model, name):
-    """``contrast_determined`` on the default covariance for ordered term ``name``, or ``None``.
+def _default_determinacy(model, names):
+    """The default covariance's ``Determinacy``, the summary's mask and decomposition, for
+    the main terms ``names``; ``None`` where none of them reads it (``reads_determinacy``).
 
-    The summary's rule, on the mask and decomposition it reads (``fit_contrast_estimable``):
-    an ordered term's levels and curve are contrasts of several coefficients.
+    The mask is read without the rest of the fit's inference record
+    (``fit_coefficient_mask``); the decider forms that record on the first contrast the
+    mask leaves open (``fit_contrast_estimable``).
     """
-    from superglm.features.ordered_categorical import OrderedCategorical
-    from superglm.inference._term_covariance import contrast_determined
-    from superglm.model.state_ops import fit_contrast_estimable
+    from superglm.inference._term_covariance import Determinacy, reads_determinacy
+    from superglm.model.state_ops import fit_coefficient_mask, fit_contrast_estimable
 
-    if not isinstance(model._specs.get(name), OrderedCategorical):
+    specs, interactions = model._specs, model._interaction_specs
+    if not any(reads_determinacy(specs.get(name), name, interactions) for name in names):
         return None
-    inference = model._fit_inference_info
-    return partial(
-        contrast_determined,
-        coefficient_estimable=inference["coefficient_estimable"],
-        contrast_estimable=fit_contrast_estimable(model, inference),
-    )
+
+    def decide(*args, **kwargs) -> bool:
+        decider = fit_contrast_estimable(model, model._fit_inference_info)
+        return decider is not None and bool(decider(*args, **kwargs))
+
+    return Determinacy(fit_coefficient_mask(model), decide)
 
 
 _ALIASED_INFERENCE_MESSAGE = (
@@ -238,7 +239,9 @@ def relativities(model, with_se=False, centering="native", *, covariance=None):
         covariance_fn=cov_fn,
         centering=centering,
         determines=(
-            partial(_default_determines, model) if with_se and robust_cov is None else None
+            _default_determinacy(model, model._feature_order)
+            if with_se and robust_cov is None
+            else None
         ),
     )
     # Per FEATURE, not for the whole call: this returns every term at once, and
@@ -301,6 +304,7 @@ def simultaneous_bands(
         )
     if robust_cov is not None and str(feature) in _aliased_features(model, covariance):
         raise RuntimeError(_ALIASED_INFERENCE_MESSAGE.format(terms=repr(feature)))
+    from superglm.features.factor_smooth import population_curve_terms
     from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
 
     _ensure_factor_smooth_levels_recorded(model)
@@ -317,6 +321,9 @@ def simultaneous_bands(
         n_sim=n_sim,
         n_points=n_points,
         seed=seed,
+        determines=_default_determinacy(model, [feature])
+        if robust_cov is None and population_curve_terms(feature, model._interaction_specs)
+        else None,
     )
     return bands
 
@@ -377,7 +384,9 @@ def term_inference(
         n_sim=n_sim,
         seed=seed,
         centering=centering,
-        determines=(_default_determines(model, name) if robust_cov is None and with_se else None),
+        determines=(
+            _default_determinacy(model, [name]) if robust_cov is None and with_se else None
+        ),
     )
     if covariance is not None and hasattr(inference, "covariance_method"):
         inference = dataclasses.replace(

@@ -15,10 +15,10 @@ from superglm._weight_units import coefficient_covariance, standard_errors
 from superglm.features.constraint import rules_of
 from superglm.inference._metrics_design import MetricsDesign, factor_from_gram, weighted_moments
 from superglm.inference._term_covariance import (
+    Determinacy,
     contrast_determined,
     feature_se_from_cov,
     function_determined,
-    ordered_level_contrasts,
 )
 from superglm.inference._term_helpers import (
     _resolve_group_lambda,
@@ -416,7 +416,6 @@ class _CoefTable:
         )
         self._group_edf = self.group_edf_map
         self._ordered_done: set[Hashable] = set()
-        self._ordered_levels: dict[Hashable, NDArray[np.bool_]] = {}
 
     def rows(self) -> list[_CoefRow]:
         """The intercept row, then each group's rows from its feature class's producer."""
@@ -497,38 +496,39 @@ class _CoefTable:
             columns[group.sl] = True
         return function_determined(columns, self.estimable, self.contrast_estimable)
 
-    def block_test_withheld(self, g_slice: slice) -> bool:
-        """Whether the default path withholds a chi-square of ``beta = 0`` on the block at ``g_slice``.
+    def block_determines(self, g: GroupSlice) -> Callable[[NDArray], NDArray[np.bool_]]:
+        """Which contrasts of active group ``g``'s coefficients the covariance in hand determines.
 
-        Each coefficient is a tested contrast, and every one must be ``determined``.
+        The default covariance decides by its mask's rule (``mask_determines``).  A robust
+        one has the same first clause, a contrast of coefficients its mask all shows, and
+        decides the rest by its bread (``SandwichCovariance.determines``): a truncated
+        structured bread keeps the mask and no null direction to decide by.
         """
-        return not self.is_sandwich and not np.all(
-            self.mask_determines(g_slice)(np.eye(g_slice.stop - g_slice.start))
-        )
-
-    def block_determines(self, start: int) -> Callable[[NDArray], NDArray[np.bool_]] | None:
-        """``determines`` of a robust covariance for contrasts of the block at ``start``, or none."""
         covariance = self.sandwich_covariance
         if covariance is None:
-            return None
+            return self.mask_determines(g.sl)
+        start = 1 + self.active_by_name[g.name].start
+        hidden = ~self.estimable[g.sl]
 
         def determines(contrasts: NDArray) -> NDArray[np.bool_]:
             rows = np.zeros((len(contrasts), covariance.n_params))
             rows[:, start : start + contrasts.shape[1]] = contrasts
-            return covariance.determines(rows)
+            shown = ~np.any(contrasts[:, hidden] != 0.0, axis=1)
+            return shown | covariance.determines(rows)
 
         return determines
 
     def feature_se(self, feature_name: Hashable) -> NDArray:
         """A term's level or curve errors from the slope covariance (``feature_se_from_cov``).
 
-        A robust covariance blanks each one whose contrast the fit does not determine:
-        the term's own map, read with the covariance replaced by each metric of
-        ``UndeterminedDirections``, gives every row's share along the undetermined
-        directions.
+        Each one whose contrast the fit does not determine is blank.  The default
+        covariance decides where the map is formed, by its mask's rule
+        (``feature_se_from_cov``'s ``determines``); a robust one reads the term's own map
+        with the covariance replaced by each metric of ``UndeterminedDirections``, which
+        gives every row's share along the undetermined directions.
         """
 
-        def read(covariance: Any) -> NDArray:
+        def read(covariance: Any, determines: Determinacy | None = None) -> NDArray:
             return np.asarray(
                 feature_se_from_cov(
                     feature_name,
@@ -538,35 +538,19 @@ class _CoefTable:
                     self.groups,
                     self.specs,
                     self.interaction_specs,
+                    determines=determines,
                 ),
                 dtype=np.float64,
             )
 
-        from superglm.features.ordered_categorical import OrderedCategorical
-
-        se = read(self.cov_from_aug(covariance_slope_view(self.XtWX_inv_aug)))
-        if not self.is_sandwich and isinstance(self.specs.get(feature_name), OrderedCategorical):
-            return np.where(self.ordered_levels_determined(feature_name), se, np.nan)
+        determines = (
+            None if self.is_sandwich else Determinacy(self.estimable, self.contrast_estimable)
+        )
+        se = read(self.cov_from_aug(covariance_slope_view(self.XtWX_inv_aug)), determines)
         if self.undetermined is None or self.undetermined_metrics is None:
             return se
         norms = [read(metric) for metric in self.undetermined_metrics]
         return np.where(self.undetermined.determined(*norms), se, np.nan)
-
-    def ordered_levels_determined(self, feature_name: Hashable) -> NDArray[np.bool_]:
-        """Which levels of an ordered term the default covariance determines (``determined``)."""
-        if feature_name not in self._ordered_levels:
-            contrasts = ordered_level_contrasts(
-                self.specs[feature_name],
-                feature_name,
-                [g for g in self.groups if g.feature_name == feature_name],
-                self.interaction_specs,
-                len(self.beta),
-                self.selected,
-            )
-            self._ordered_levels[feature_name] = np.array(
-                [self.determined(c) for c in contrasts], dtype=bool
-            )
-        return self._ordered_levels[feature_name]
 
     def curve_se_range(self, feature_name: Hashable) -> tuple[float, float]:
         """The smallest and largest error on a spline term's curve.
@@ -589,15 +573,19 @@ class _CoefTable:
             return _GroupTest(None, None, None)
         return _GroupTest(float("nan"), float("nan"), float(size))
 
-    def block_wald(
-        self, b_block: NDArray, V_block: NDArray, g_slice: slice, group_name: str
-    ) -> _GroupTest:
-        """The chi-square of ``beta = 0`` on one unpenalised block."""
+    def block_wald(self, g: GroupSlice, V_block: NDArray) -> _GroupTest:
+        """The chi-square of ``beta = 0`` on active group ``g``'s unpenalised block.
+
+        Each coefficient is a tested contrast: the test is withheld unless the covariance
+        in hand determines every one (``block_determines``).
+        """
         from scipy.stats import chi2 as chi2_dist
 
-        ref_df = float(len(b_block))
+        b_block, ref_df = self.beta[g.sl], float(g.size)
+        if not np.all(self.block_determines(g)(np.eye(g.size))):
+            return _WITHHELD
         if self.is_sandwich:
-            return self._robust_block_wald(b_block, V_block, g_slice, group_name, ref_df)
+            return self._robust_block_wald(b_block, V_block, g.sl, g.name, ref_df)
         try:
             stat = covariance_wald_statistic(b_block, V_block)
             return _GroupTest(stat, 1.0 - chi2_dist.cdf(stat, ref_df), ref_df)
@@ -617,12 +605,9 @@ class _CoefTable:
         stat, p = wald_block_statistic(b_block, V_block, df_limit=self.wald_df_limit)
         return _GroupTest(None, None, None) if stat is None else _GroupTest(stat, p, ref_df)
 
-    def group_wald_test(self, g: GroupSlice, *, undetermined: bool) -> _GroupTest:
-        """The chi-square on an active group's whole block, unless ``undetermined``."""
-        if undetermined:
-            return _WITHHELD
-        V_block = self.group_block(self.active_by_name[g.name])
-        return self.block_wald(self.beta[g.sl], V_block, g.sl, g.name)
+    def group_wald_test(self, g: GroupSlice) -> _GroupTest:
+        """The chi-square on an active group's whole block (``block_wald``)."""
+        return self.block_wald(g, self.group_block(self.active_by_name[g.name]))
 
     def wood_test(
         self,
@@ -632,21 +617,20 @@ class _CoefTable:
         covariance: NDArray,
         size: int,
         *,
-        withhold_undetermined: bool,
         catch: type[Exception],
     ) -> _GroupTest:
         """Wood's (2013) test of ``term_groups``' fitted function, at ``columns`` of the active design.
 
-        ``withhold_undetermined`` withholds it where the fit does not determine that
-        function; ``catch`` is the failure that leaves the row untested.
+        Withheld where the default covariance does not determine that function
+        (``function_determined``); ``catch`` is the failure that leaves the row untested.
         """
+        if not self.function_determined(term_groups):
+            return _WITHHELD
         R_a = self.R_factor()
         edf, edf1 = self.influence_edf()
         rank = float(np.sum(edf1[columns]))
         design = R_a[:, columns]
         residual_df = self.wood_residual_df(edf)
-        if withhold_undetermined and not self.function_determined(term_groups):
-            return _WITHHELD
         try:
             return _GroupTest(
                 *self.wood_statistic(term_groups, coef, design, covariance, rank, residual_df)
@@ -654,9 +638,7 @@ class _CoefTable:
         except catch:
             return self.untested(size)
 
-    def group_wood_test(
-        self, g: GroupSlice, *, withhold_undetermined: bool, catch: type[Exception]
-    ) -> _GroupTest:
+    def group_wood_test(self, g: GroupSlice) -> _GroupTest:
         """Wood's test of one active group's function; a robust covariance reports none."""
         if self.is_sandwich:
             return self.untested(g.size)
@@ -667,8 +649,7 @@ class _CoefTable:
             active_group.sl,
             self.group_block(active_group),
             g.size,
-            withhold_undetermined=withhold_undetermined,
-            catch=catch,
+            catch=Exception,
         )
 
     def wood_statistic(self, term_groups, coef, design, covariance, rank, residual_df):
@@ -986,7 +967,6 @@ class _CoefTable:
                     columns,
                     covariance,
                     size,
-                    withhold_undetermined=True,
                     catch=np.linalg.LinAlgError,
                 )
             curve_se = self.curve_se_range(g.feature_name)
@@ -1031,17 +1011,8 @@ class _CoefTable:
         active_group = self.active_by_name.get(main_group.name) if smooth_active else None
         if active_group is not None:
             V_b_main = self.group_block(active_group)
-            determines = (
-                self.block_determines(1 + active_group.start)
-                if self.is_sandwich
-                else self.mask_determines(main_group.sl)
-            )
-            # The chi-square tests beta_main = 0: each coefficient is a contrast.
-            test = (
-                self.block_wald(b_main, V_b_main, main_group.sl, main_group.name)
-                if np.all(determines(np.eye(main_group.size)))
-                else _WITHHELD
-            )
+            determines = self.block_determines(main_group)
+            test = self.block_wald(main_group, V_b_main)
         rows = [
             _CoefRow(
                 name=label,
@@ -1137,9 +1108,9 @@ class _CoefTable:
         if g.name not in self.selected:
             return [self.group_row(g, None, **{**fields, "edf": 0.0})]
         if g.subgroup_type == "linear":
-            test = self.group_wald_test(g, undetermined=self.block_test_withheld(g.sl))
+            test = self.group_wald_test(g)
         else:
-            test = self.group_wood_test(g, withhold_undetermined=True, catch=Exception)
+            test = self.group_wood_test(g)
         curve_min, curve_max = self.curve_se_range(g.feature_name)
         return [self.group_row(g, test, curve_se_min=curve_min, curve_se_max=curve_max, **fields)]
 
@@ -1174,10 +1145,10 @@ class _CoefTable:
         return rows
 
     def spline_by_level_rows(self, g: GroupSlice, spec: Any) -> list[_CoefRow]:
-        """A by-level curve's Wood test row, which is not withheld on an undetermined function."""
+        """A by-level curve's Wood test row."""
         if g.name not in self.selected:
             return [self.group_row(g, None)]
-        test = self.group_wood_test(g, withhold_undetermined=False, catch=Exception)
+        test = self.group_wood_test(g)
         return [
             self.group_row(
                 g,
@@ -1197,10 +1168,10 @@ class _CoefTable:
         return [self.coefficient_row(g, i, f"{g.name}[P{powers[i]}]", group) for i in range(g.size)]
 
     def polynomial_by_level_rows(self, g: GroupSlice, spec: Any) -> list[_CoefRow]:
-        """A by-level polynomial's Wald test row, which is not withheld on an undetermined block."""
+        """A by-level polynomial's Wald test row."""
         if g.name not in self.selected:
             return [self.group_row(g, None)]
-        return [self.group_row(g, self.group_wald_test(g, undetermined=False))]
+        return [self.group_row(g, self.group_wald_test(g))]
 
     def crossed_level_rows(self, g: GroupSlice, spec: Any) -> list[_CoefRow]:
         """One row per crossed cell, a separated cell blank."""
@@ -1219,7 +1190,7 @@ class _CoefTable:
         ]
 
     def numeric_interaction_rows(self, g: GroupSlice, spec: Any) -> list[_CoefRow]:
-        """Up to four coefficient rows, else one Wald test row (not withheld on an undetermined block)."""
+        """Up to four coefficient rows, else one Wald test row."""
         if g.name not in self.selected:
             return [self.group_row(g, None)]
         if g.size <= 4:
@@ -1227,7 +1198,7 @@ class _CoefTable:
                 self.coefficient_row(g, i, f"{g.name}[{i}]" if g.size > 1 else g.name, g.name)
                 for i in range(g.size)
             ]
-        test = self.group_wald_test(g, undetermined=False)
+        test = self.group_wald_test(g)
         return [
             self.group_row(
                 g,
@@ -1238,11 +1209,11 @@ class _CoefTable:
         ]
 
     def tensor_rows(self, g: GroupSlice, spec: Any) -> list[_CoefRow]:
-        """A tensor's Wood test row, which is not withheld on an undetermined function."""
+        """A tensor's Wood test row."""
         lam = _resolve_group_lambda(g.name, self.reml_lambdas, self.lambda2)
         if g.name not in self.selected:
             return [self.group_row(g, None, edf=0.0, smoothing_lambda=lam)]
-        test = self.group_wood_test(g, withhold_undetermined=False, catch=Exception)
+        test = self.group_wood_test(g)
         return [self.group_row(g, test, edf=self.mapped_edf(g.name), smoothing_lambda=lam)]
 
     def numeric_rows(self, g: GroupSlice, spec: Any) -> list[_CoefRow]:
@@ -1277,11 +1248,7 @@ class _CoefTable:
         ]
         test = None
         if active:
-            test = (
-                _GroupTest(None, None, None)
-                if shrunk
-                else self.group_wald_test(g, undetermined=self.block_test_withheld(g.sl))
-            )
+            test = _GroupTest(None, None, None) if shrunk else self.group_wald_test(g)
         # ``subgroup_type`` names the row for what it is in both renderers, which
         # otherwise label every group-test row "spline".
         rows.append(self.group_row(g, test, subgroup_type="piecewise", edf=edf))

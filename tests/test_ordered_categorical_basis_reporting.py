@@ -22,6 +22,7 @@ import pandas as pd
 import pytest
 
 from superglm import (
+    Categorical,
     FactorSmooth,
     GroupLasso,
     Numeric,
@@ -32,6 +33,8 @@ from superglm import (
     Spline,
     SuperGLM,
 )
+from superglm.solvers.rank import SHARED_RANK_POLICY
+from superglm.types import LambdaPolicy
 
 LEVELS = [f"Mi{i:03d}" for i in range(10)]
 
@@ -216,11 +219,14 @@ def _design(model):
     return np.column_stack([np.ones(model._dm.n), *[g.toarray() for g in model._dm.group_matrices]])
 
 
-def _rank_gain(model, contrasts):
-    """How much the slope contrasts raise the rank of ``[1, X]`` when appended."""
+def _rank_gain(model, contrasts, rtol=None):
+    """How much the slope contrasts raise the rank of ``[1, X]`` when appended.
+
+    ``rtol`` is the singular-value cut relative to the largest, numpy's default when omitted.
+    """
     design = _design(model)
     stacked = np.vstack([design, np.column_stack([np.zeros(len(contrasts)), contrasts])])
-    return int(np.linalg.matrix_rank(stacked) - np.linalg.matrix_rank(design))
+    return int(np.linalg.matrix_rank(stacked, rtol=rtol) - np.linalg.matrix_rank(design, rtol=rtol))
 
 
 @pytest.mark.parametrize("degrees", [None, [2, 2], [3, 2]])
@@ -1075,6 +1081,1055 @@ def test_an_intercept_is_decided_with_its_own_weight_not_by_what_a_zero_mean_rou
     assert np.linalg.matrix_rank(design) == np.linalg.matrix_rank(design[:, 1:])
     for row in _intercept_rows(model, shifted, y):
         assert row.se is None and row.ci_low is None and row.estimable is False
+
+
+def _curve_contrasts(model, name, x):
+    """Spline term ``name``'s curve at ``x`` as rows over the fitted slopes."""
+    group = next(g for g in model._groups if g.name == name)
+    rows = np.zeros((len(x), len(model.result.beta)))
+    rows[:, group.sl] = np.asarray(model._specs[name].transform(np.asarray(x)), dtype=float)
+    return rows
+
+
+def test_curves_of_twin_splines_carry_no_error_on_any_reader() -> None:
+    """Twin splines on one column: no point of either curve is determined (issue #752).
+
+    Moving the effect between the twins leaves the fit, so each curve point raises the
+    design's rank when appended.  ``term_inference`` and ``relativities(with_se=True)``,
+    native and centred, give NaN errors and intervals around a finite curve, no
+    simultaneous band is drawn, and the summaries print no curve-error range.  At
+    09fe0c01d the readers gave errors from 0.60 to 2.84, as the ordered twins did
+    before #740.
+    """
+    model, X, y = _numeric_twin_fit(["u", "v"], "spline")
+    for name in ("u", "v"):
+        assert _rank_gain(model, _curve_contrasts(model, name, [0.25, 0.75])) > 0
+        for centering in ("native", "mean"):
+            inference = model.term_inference(name, centering=centering)
+            assert np.all(np.isnan(inference.se_log_relativity)), (name, centering)
+            assert np.all(np.isnan(inference.ci_lower)) and np.all(np.isnan(inference.ci_upper))
+            assert np.isfinite(inference.log_relativity).all()
+            frame = model.relativities(with_se=True, centering=centering)[name]
+            assert frame["se_log_relativity"].isna().all(), (name, centering)
+        banded = model.term_inference(name, simultaneous=True, n_sim=200)
+        assert banded.ci_lower_simultaneous is None and banded.ci_upper_simultaneous is None
+    other = X.iloc[:120].reset_index(drop=True), y[:120] + 0.5
+    for summary in (
+        model.summary(),
+        model.metrics(X, y).summary(),
+        model.metrics(*other).summary(),
+    ):
+        for row in _numeric_test_rows(summary, ("u", "v")).values():
+            assert np.isnan(row.curve_se_min) and np.isnan(row.curve_se_max), row.name
+        assert "curve SE" not in str(summary)
+
+
+def test_a_self_aliased_spline_keeps_the_curve_errors_its_data_determine() -> None:
+    """Three support points determine a spline's curve at those points and nowhere else (#752).
+
+    Each curve point is decided on its own: at a support point it is a design row's
+    part, which leaves the design's rank when appended, and keeps its error; between
+    them the unpenalized fit has no information, the point raises the rank, and its
+    error is NaN.  The centred curve subtracts the grid's mean, which the fit does not
+    determine, so every centred error is NaN.  At 09fe0c01d every error was a figure.
+
+    The rank is cut at ``1e-10`` of the largest singular value: the basis is formed to
+    about ``1e-13`` of it, where numpy's default cut also sits, and a point between the
+    support points adds a singular value of the design's own size.
+    """
+    model, X, _ = _three_point_spline()
+    inference = model.term_inference("x", n_points=11)
+    support = np.isin(inference.x, [0.0, 0.4, 1.0])
+    assert support.sum() == 3
+    gains = [_rank_gain(model, _curve_contrasts(model, "x", [x]), 1e-10) for x in inference.x]
+    np.testing.assert_array_equal(np.asarray(gains) == 0, support)
+    errors = np.asarray(inference.se_log_relativity)
+    np.testing.assert_array_equal(np.isfinite(errors), support)
+    assert np.all(errors[support] > 0.0)
+    centred = model.term_inference("x", n_points=11, centering="mean").se_log_relativity
+    assert np.all(np.isnan(centred))
+
+
+@pytest.mark.pins_behaviour
+def test_a_single_spline_keeps_its_curve_errors() -> None:
+    """Control (pins): one unaliased spline keeps every curve error.
+
+    ``term_inference`` and ``relativities`` give ``sqrt(diag(M V M'))`` with ``M`` the
+    basis on the grid (less its column means when centred) and ``V`` the term's
+    covariance block, to the rounding of that product; the summary prints their range,
+    the one 09fe0c01d gave, and the simultaneous band is drawn.
+    """
+    model, X, y = _numeric_twin_fit(["u"], "spline")
+    covariance, active = model._coef_covariance
+    block = covariance[np.ix_(*[np.arange(active[0].start, active[0].end)] * 2)]
+    inference = model.term_inference("u")
+    M = np.asarray(model._specs["u"].transform(inference.x), dtype=float)
+    for centering, basis in (("native", M), ("mean", M - M.mean(axis=0))):
+        expected = np.sqrt(np.maximum(np.sum((basis @ block) * basis, axis=1), 0.0))
+        got = model.term_inference("u", centering=centering).se_log_relativity
+        np.testing.assert_allclose(got, expected, rtol=1e-12)
+        frame = model.relativities(with_se=True, centering=centering)["u"]
+        np.testing.assert_array_equal(frame["se_log_relativity"].to_numpy(), got)
+    native = np.asarray(inference.se_log_relativity)
+    np.testing.assert_allclose(
+        [native.min(), native.max()], [0.12079868655384633, 0.2486961468140573], rtol=1e-6
+    )
+    banded = model.term_inference("u", simultaneous=True, n_sim=200)
+    assert np.all(banded.ci_upper_simultaneous >= banded.ci_upper)
+    for summary in (model.summary(), model.metrics(X, y).summary()):
+        row = _numeric_test_rows(summary, ("u",))["u"]
+        np.testing.assert_allclose(
+            [row.curve_se_min, row.curve_se_max], [native.min(), native.max()], rtol=1e-9
+        )
+
+
+def test_a_centred_curve_the_fit_determines_keeps_its_simultaneous_band() -> None:
+    """Centring can determine every point of a curve whose own points are open (issue #752).
+
+    ``z = (x - 0.5)**2`` beside an unpenalized spline on ``x`` lies in the spline's span,
+    so the curve is open by a multiple of it.  On the two endpoints that multiple is one
+    constant, which the grid's mean removes: each native point raises the design's rank
+    and has no error, each centred point leaves it and has ``sqrt(diag(M V M'))`` on the
+    centred map.  The band is of the reported curve, so ``centering="mean"`` draws it.
+    At 07ceaec50 the band was decided on the native errors, and the centred report,
+    0.2477 at both ends, had none.
+    """
+    x = np.tile(np.linspace(0.0, 1.0, 33), 4)
+    X = pd.DataFrame({"x": x, "z": (x - 0.5) ** 2})
+    y = np.sin(3.0 * x) + np.cos(np.arange(float(len(x))))
+    features = {"x": Spline(kind="ps", n_knots=6), "z": Numeric()}
+    model = SuperGLM(family="gaussian", features=features, spline_penalty=0).fit(X, y)
+    ends = _curve_contrasts(model, "x", [0.0, 1.0])
+    assert [_rank_gain(model, row[None], 1e-10) for row in ends] == [1, 1]
+    assert _rank_gain(model, ends - ends.mean(axis=0), 1e-10) == 0
+
+    native = model.term_inference("x", n_points=2, simultaneous=True, n_sim=200)
+    assert np.all(np.isnan(native.se_log_relativity))
+    assert native.ci_lower_simultaneous is None and native.critical_value_simultaneous is None
+
+    centred = model.term_inference("x", n_points=2, simultaneous=True, n_sim=200, centering="mean")
+    covariance, active = model._coef_covariance
+    block = covariance[np.ix_(*[np.arange(active[0].start, active[0].end)] * 2)]
+    M = np.asarray(model._specs["x"].transform(centred.x), dtype=float)
+    M = M - M.mean(axis=0)
+    expected = np.sqrt(np.sum((M @ block) * M, axis=1))
+    np.testing.assert_allclose(centred.se_log_relativity, expected, rtol=1e-12)
+    np.testing.assert_allclose(expected, [0.2477361, 0.2477361], rtol=1e-6)
+    assert np.isfinite(centred.critical_value_simultaneous)
+    half = centred.critical_value_simultaneous * expected
+    upper, lower = np.exp(centred.log_relativity + half), np.exp(centred.log_relativity - half)
+    np.testing.assert_allclose(centred.ci_upper_simultaneous, upper, rtol=1e-12)
+    np.testing.assert_allclose(centred.ci_lower_simultaneous, lower, rtol=1e-12)
+
+
+def _population_fit(names, direct_solve, bound=None):
+    """Splines ``names`` on one column beside an ``sz`` smooth of ``x`` by four levels, every
+    lambda fixed.  The last level has one row: it is thin and left out of the population,
+    so the reported curve of ``x`` is the population curve ``main(x) + b(x)' c``.  ``bound``
+    adds a term the smooth shares its levels with: an ordered ``"group term"`` on ``g``, or a
+    ``"second smooth"`` of another column by ``g``."""
+    x = np.r_[np.tile(np.linspace(0.0, 1.0, 30), 3), 0.4]
+    g = np.array([*np.repeat(["a", "b", "c"], 30), "d"])
+    row = np.arange(float(len(x)))
+    y = np.sin(3.0 * x) + 0.3 * (g == "b") * x + 0.2 * np.cos(row)
+    X = pd.DataFrame({name: x for name in names}).assign(g=g, w=np.cos(1.7 * row))
+    features = {name: Spline(n_knots=5, lambda_policy=LambdaPolicy.fixed(1.2)) for name in names}
+    smooths = ["x"]
+    if bound == "group term":
+        features["g"] = OrderedCategorical(order=list("abcd"), basis=Polynomial(degree=2))
+    if bound == "second smooth":
+        features["w"] = Spline(n_knots=5, lambda_policy=LambdaPolicy.fixed(1.2))
+        smooths.append("w")
+    wiggle = {"wiggle": LambdaPolicy.fixed(1.0)}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the thin level, and the group term it repeats
+        model = SuperGLM(
+            family="gaussian",
+            features=features,
+            interactions=[
+                FactorSmooth(name, group="g", basis="sz", k=5, lambda_policy=wiggle)
+                for name in smooths
+            ],
+            selection_penalty=0,
+            direct_solve=direct_solve,
+        ).fit_reml(X, y)
+    assert bool(model._fit_inference_info.get("structured_covariance")) == (
+        direct_solve == "structured"
+    )
+    assert model._interaction_specs["x:g:sz"]._has_population_offset
+    return model
+
+
+def _assert_population_errors_are_the_contrasts(model) -> np.ndarray:
+    """``x``'s reported errors are ``sqrt(diag(G V G'))`` on its population contrast ``G``,
+    less its column means when centred, to the rounding of that sum of products
+    (``gamma_(2 p)`` of ``|G| |V| |G|'``, Higham 2002, section 3.5); returns the native ones."""
+    covariance = model._coef_covariance[0]
+    width = covariance.shape[0]
+    solve = getattr(covariance, "solve", None)
+    V = np.asarray(covariance if solve is None else solve(np.eye(width)), dtype=float)
+    inference = model.term_inference("x")
+    G = _population_contrasts(model, inference.x, active=True)
+    for centering, contrast in (("native", G), ("mean", G - G.mean(axis=0))):
+        variance = np.einsum("ij,jk,ik->i", contrast, V, contrast)
+        reach = np.einsum("ij,jk,ik->i", np.abs(contrast), np.abs(V), np.abs(contrast))
+        got = np.asarray(model.term_inference("x", centering=centering).se_log_relativity)
+        assert np.all(np.abs(got * got - variance) <= 8 * width * np.finfo(float).eps * reach)
+        frame = model.relativities(with_se=True, centering=centering)["x"]
+        np.testing.assert_array_equal(frame["se_log_relativity"].to_numpy(), got)
+    native = np.asarray(inference.se_log_relativity)
+    assert np.all(native > 0.0)
+    return native
+
+
+def _population_contrasts(model, grid, active=False):
+    """The population curve of ``x`` on ``grid`` as rows over the fitted slopes (the active
+    covariance's with ``active``): its basis, and the smooth's times its population contrast."""
+    term = model._interaction_specs["x:g:sz"]
+    groups = model._coef_covariance[1] if active else model._groups
+    rows = np.zeros((len(grid), max(group.end for group in groups)))
+    for group in groups:
+        if group.feature_name == "x":
+            rows[:, group.start : group.end] = model._specs["x"].transform(np.asarray(grid))
+        if group.feature_name == "x:g:sz":
+            rows[:, group.start : group.end] = term.marginal_basis(np.asarray(grid)) @ (
+                term._population_contrast()
+            )
+    return rows
+
+
+@pytest.mark.parametrize("direct_solve", ["structured", "gram"])
+def test_a_population_curve_traded_against_a_twin_carries_no_error(direct_solve) -> None:
+    """A curve an ``sz`` term moves onto its population curve is decided too (issue #752).
+
+    ``x`` beside its copy ``z``: the reported curve of ``x`` is a contrast of its main
+    term and the smooth together.  Moving the effect between ``x`` and ``z`` leaves the
+    fit and moves that curve, so each of its points raises the design's rank, as each
+    point of ``z`` does.  Both terms give NaN errors on every reader, native and centred,
+    no simultaneous band and no curve-error range.  At 07ceaec50 ``x`` returned its
+    errors before the rule was read: 200 figures, a band and a range.
+    """
+    model = _population_fit(["x", "z"], direct_solve)
+    grid = np.linspace(0.0, 1.0, 5)
+    for rows in (_population_contrasts(model, grid), _curve_contrasts(model, "z", grid)):
+        assert [_rank_gain(model, row[None], 1e-10) for row in rows] == [1] * len(grid)
+    for name in ("x", "z"):
+        for centering in ("native", "mean"):
+            inference = model.term_inference(name, centering=centering)
+            assert np.all(np.isnan(inference.se_log_relativity)), (name, centering)
+            assert np.all(np.isnan(inference.ci_lower)) and np.all(np.isnan(inference.ci_upper))
+            assert np.isfinite(inference.log_relativity).all()
+            frame = model.relativities(with_se=True, centering=centering)[name]
+            assert frame["se_log_relativity"].isna().all(), (name, centering)
+        banded = model.term_inference(name, simultaneous=True, n_sim=200)
+        assert banded.ci_lower_simultaneous is None and banded.critical_value_simultaneous is None
+    summary = model.summary()
+    for row in _numeric_test_rows(summary, ("x", "z")).values():
+        assert np.isnan(row.curve_se_min) and np.isnan(row.curve_se_max), row.name
+    assert "curve SE" not in str(summary)
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("direct_solve", ["structured", "gram"])
+def test_a_population_curve_keeps_the_errors_of_its_contrast(direct_solve) -> None:
+    """Control (pins): a population curve no other term is traded against keeps every error.
+
+    The thin level leaves two directions open, both inside ``x`` and its smooth, and the
+    mask shows none of ``x``'s coefficients: the curve is decided as the fitted function
+    of the terms its smooth binds, which no other term shares.  Its errors are those of
+    the population contrast (``_assert_population_errors_are_the_contrasts``), the band is
+    drawn and the summary prints the range, as at 07ceaec50.
+    """
+    model = _population_fit(["x"], direct_solve)
+    group = next(g for g in model._groups if g.name == "x")
+    assert not np.any(model._fit_inference_info["coefficient_estimable"][group.sl])
+    native = _assert_population_errors_are_the_contrasts(model)
+    banded = model.term_inference("x", simultaneous=True, n_sim=200)
+    assert np.all(banded.ci_upper_simultaneous >= banded.ci_upper)
+    row = _numeric_test_rows(model.summary(), ("x",))["x"]
+    np.testing.assert_allclose(
+        [row.curve_se_min, row.curve_se_max], [native.min(), native.max()], rtol=1e-9
+    )
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize(
+    ("bound", "direct_solve"),
+    [("group term", "structured"), ("group term", "gram"), ("second smooth", "gram")],
+)
+def test_a_population_curve_keeps_its_errors_beside_the_terms_its_smooth_shares(
+    bound, direct_solve
+) -> None:
+    """Control (pins): the terms an ``sz`` smooth shares its levels with do not blank its curve.
+
+    An ordered term on the group repeats each level's constant, and a second ``sz`` smooth
+    on the group shares them (``share_group_levels``): null directions of the data then
+    run between ``x``'s smooth and those terms, so the smooth and its main term alone are
+    not a function the data determine.  The curve is decided on the whole family
+    (``population_curve_family``), which no other term is traded against, and keeps the
+    errors of its contrast, as at 07ceaec50.
+    """
+    model = _population_fit(["x"], direct_solve, bound)
+    marked = np.zeros(len(model.result.beta), dtype=bool)
+    for group in model._groups:
+        marked[group.sl] = group.feature_name in ("x", "x:g:sz")
+    decide = model._solver_pirls_result().rank_info
+    if decide is not None:
+        assert not decide.is_estimable(marked, design_rows=True)
+    _assert_population_errors_are_the_contrasts(model)
+
+
+@pytest.mark.pins_behaviour
+def test_a_population_curve_closes_its_family_across_connected_sz_groups() -> None:
+    """Control (pins): connected ``sz`` groups keep an unaliased curve's errors (#752).
+
+    ``sz(x, g)``, ``sz(w, g)``, and ``sz(w, h)`` with thin levels in both ``g`` and ``h``
+    couple ``sz(x, g)``'s level constants to ``sz(w, g)`` and ``sz(w, h)``.  Because all
+    null directions split cleanly into those level constants plus the other terms' blocks,
+    ``x``'s curve stays determined and keeps its SEs, band, and summary range.
+    """
+    x = np.r_[np.tile(np.linspace(0.0, 1.0, 30), 3), 0.4]
+    g = np.array([*np.repeat(["a", "b", "c"], 30), "d"])
+    row = np.arange(float(len(x)))
+    h = np.where(row == 17, "r", np.where(row % 2 == 0, "p", "q"))
+    w = np.cos(1.7 * row)
+    y = np.sin(3.0 * x) + 0.3 * (g == "b") * x + 0.2 * np.sin(2.5 * w) + 0.1 * np.cos(row)
+    X = pd.DataFrame({"x": x, "w": w, "g": g, "h": h})
+    wiggle = {"wiggle": LambdaPolicy.fixed(1.0)}
+    fixed = LambdaPolicy.fixed(1.2)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = SuperGLM(
+            family="gaussian",
+            features={
+                "x": Spline(n_knots=5, lambda_policy=fixed),
+                "w": Spline(n_knots=5, lambda_policy=fixed),
+            },
+            interactions=[
+                FactorSmooth("x", group="g", basis="sz", k=5, lambda_policy=wiggle),
+                FactorSmooth("w", group="g", basis="sz", k=5, lambda_policy=wiggle),
+                FactorSmooth("w", group="h", basis="sz", k=5, lambda_policy=wiggle),
+            ],
+            selection_penalty=0,
+            direct_solve="gram",
+        ).fit_reml(X, y)
+    assert model._interaction_specs["w:h:sz"]._has_population_offset
+    native = _assert_population_errors_are_the_contrasts(model)
+    banded = model.term_inference("x", simultaneous=True, n_sim=200)
+    assert np.all(banded.ci_upper_simultaneous >= banded.ci_upper)
+    row_x = _numeric_test_rows(model.summary(), ("x",))["x"]
+    np.testing.assert_allclose(
+        [row_x.curve_se_min, row_x.curve_se_max], [native.min(), native.max()], rtol=1e-9
+    )
+
+
+@pytest.mark.parametrize("chained", [False, True], ids=["two-smooth", "three-smooth-chain"])
+def test_a_population_curve_keeps_its_errors_when_only_a_sibling_sz_term_is_aliased(
+    chained: bool,
+) -> None:
+    """An alias confined to sibling term ``w`` leaves ``x``'s population curve determined (#752).
+
+    ``x`` and ``w`` each carry a thin-level ``sz`` smooth on group ``g`` (and ``sz(w, h)`` when
+    ``chained``), while ``z = w`` aliases only ``w``'s linear component.  Previously, closing
+    over ``population_curve_family`` pulled ``w`` into ``x``'s test and blanked ``x``; now
+    ``x`` keeps all 200 errors, band, and summary range while ``w`` is blanked.
+    """
+    x = np.r_[np.tile(np.linspace(0.0, 1.0, 30), 3), 0.4]
+    g = np.array([*np.repeat(["a", "b", "c"], 30), "d"])
+    row = np.arange(float(len(x)))
+    h = np.where(row == 17, "r", np.where(row % 2 == 0, "p", "q"))
+    w = np.cos(1.7 * row)
+    y = np.sin(3.0 * x) + 0.3 * (g == "b") * x + 0.2 * np.sin(2.5 * w) + 0.1 * np.cos(row)
+    wiggle = {"wiggle": LambdaPolicy.fixed(1.0)}
+    fixed = LambdaPolicy.fixed(1.2)
+    interactions = [
+        FactorSmooth("x", group="g", basis="sz", k=5, lambda_policy=wiggle),
+        FactorSmooth("w", group="g", basis="sz", k=5, lambda_policy=wiggle),
+    ]
+    base_data = {"x": x, "w": w, "g": g}
+    if chained:
+        interactions.append(FactorSmooth("w", group="h", basis="sz", k=5, lambda_policy=wiggle))
+        base_data["h"] = h
+    base_features = {
+        "x": Spline(n_knots=5, lambda_policy=fixed),
+        "w": Spline(n_knots=5, lambda_policy=fixed),
+    }
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ref = SuperGLM(
+            family="gaussian",
+            features=base_features,
+            interactions=interactions,
+            selection_penalty=0,
+            direct_solve="gram",
+        ).fit_reml(pd.DataFrame(base_data), y)
+        model = SuperGLM(
+            family="gaussian",
+            features={**base_features, "z": Numeric()},
+            interactions=interactions,
+            selection_penalty=0,
+            direct_solve="gram",
+        ).fit_reml(pd.DataFrame({**base_data, "z": w}), y)
+
+    native = _assert_population_errors_are_the_contrasts(model)
+    ref_ti = ref.term_inference("x", centering="mean")
+    mod_ti = model.term_inference("x", centering="mean")
+    np.testing.assert_allclose(mod_ti.log_relativity, ref_ti.log_relativity, rtol=1e-10, atol=1e-12)
+    np.testing.assert_allclose(
+        mod_ti.se_log_relativity, ref_ti.se_log_relativity, rtol=1e-10, atol=1e-12
+    )
+    banded_x = model.term_inference("x", simultaneous=True, n_sim=200)
+    assert np.all(banded_x.ci_upper_simultaneous >= banded_x.ci_upper)
+    row_x = _numeric_test_rows(model.summary(), ("x",))["x"]
+    np.testing.assert_allclose(
+        [row_x.curve_se_min, row_x.curve_se_max], [native.min(), native.max()], rtol=1e-9
+    )
+
+    for centering in ("native", "mean"):
+        inf_w = model.term_inference("w", centering=centering)
+        assert np.all(np.isnan(inf_w.se_log_relativity))
+        frame_w = model.relativities(with_se=True, centering=centering)["w"]
+        assert frame_w["se_log_relativity"].isna().all()
+    banded_w = model.term_inference("w", simultaneous=True, n_sim=200)
+    assert banded_w.ci_lower_simultaneous is None and banded_w.critical_value_simultaneous is None
+    row_w = _numeric_test_rows(model.summary(), ("w",))["w"]
+    assert np.isnan(row_w.curve_se_min) and np.isnan(row_w.curve_se_max)
+
+
+def test_a_population_curve_blanks_twin_variables_sharing_an_sz_group() -> None:
+    """Mixed/twin external aliases blank population curves while pure group constants do not (#752).
+
+    - Twin variables ``w = x`` with ``sz(x, g)`` + ``sz(w, g)`` leave both curves open -> both blank.
+    - Mixed alias ``z = x + 1_{g=='a'}`` beside ``x + sz(x, g)`` couples ``x`` to ``z`` -> blank.
+    - Pure group constant ``z = 1_{g=='a'}`` couples only to level constants -> keeps ``x``'s errors.
+    """
+    x = np.r_[np.tile(np.linspace(0.0, 1.0, 30), 3), 0.4]
+    g = np.array([*np.repeat(["a", "b", "c"], 30), "d"])
+    row = np.arange(float(len(x)))
+    y = np.sin(3.0 * x) + 0.3 * (g == "b") * x + 0.1 * np.cos(row)
+    wiggle = {"wiggle": LambdaPolicy.fixed(1.0)}
+    fixed = LambdaPolicy.fixed(1.2)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        twin = SuperGLM(
+            family="gaussian",
+            features={
+                "x": Spline(n_knots=5, lambda_policy=fixed),
+                "w": Spline(n_knots=5, lambda_policy=fixed),
+            },
+            interactions=[
+                FactorSmooth("x", group="g", basis="sz", k=5, lambda_policy=wiggle),
+                FactorSmooth("w", group="g", basis="sz", k=5, lambda_policy=wiggle),
+            ],
+            selection_penalty=0,
+            direct_solve="gram",
+        ).fit_reml(pd.DataFrame({"x": x, "w": x, "g": g}), y)
+        mixed = SuperGLM(
+            family="gaussian",
+            features={"x": Spline(n_knots=5, lambda_policy=fixed), "z": Numeric()},
+            interactions=[FactorSmooth("x", group="g", basis="sz", k=5, lambda_policy=wiggle)],
+            selection_penalty=0,
+            direct_solve="gram",
+        ).fit_reml(pd.DataFrame({"x": x, "z": x + (g == "a").astype(float), "g": g}), y)
+        base = SuperGLM(
+            family="gaussian",
+            features={"x": Spline(n_knots=5, lambda_policy=fixed)},
+            interactions=[FactorSmooth("x", group="g", basis="sz", k=5, lambda_policy=wiggle)],
+            selection_penalty=0,
+            direct_solve="gram",
+        ).fit_reml(pd.DataFrame({"x": x, "g": g}), y)
+        pure_g = SuperGLM(
+            family="gaussian",
+            features={"x": Spline(n_knots=5, lambda_policy=fixed), "z": Numeric()},
+            interactions=[FactorSmooth("x", group="g", basis="sz", k=5, lambda_policy=wiggle)],
+            selection_penalty=0,
+            direct_solve="gram",
+        ).fit_reml(pd.DataFrame({"x": x, "z": (g == "a").astype(float), "g": g}), y)
+
+    for model, names in ((twin, ("x", "w")), (mixed, ("x",))):
+        rows = _numeric_test_rows(model.summary(), names)
+        for name in names:
+            for centering in ("native", "mean"):
+                assert np.all(
+                    np.isnan(model.term_inference(name, centering=centering).se_log_relativity)
+                )
+                assert (
+                    model.relativities(with_se=True, centering=centering)[name]["se_log_relativity"]
+                    .isna()
+                    .all()
+                )
+            assert np.isnan(rows[name].curve_se_min) and np.isnan(rows[name].curve_se_max)
+
+    native = _assert_population_errors_are_the_contrasts(pure_g)
+    ref_ti = base.term_inference("x", centering="mean")
+    got_ti = pure_g.term_inference("x", centering="mean")
+    np.testing.assert_allclose(got_ti.log_relativity, ref_ti.log_relativity, rtol=1e-10, atol=1e-12)
+    row_g = _numeric_test_rows(pure_g.summary(), ("x",))["x"]
+    np.testing.assert_allclose(
+        [row_g.curve_se_min, row_g.curve_se_max], [native.min(), native.max()], rtol=1e-9
+    )
+
+
+def _thin_population_with_numeric(alias, solve, *, degree=3, thin=0.4):
+    x = np.r_[np.tile(np.linspace(0.0, 1.0, 30), 3), thin]
+    g = np.array([*np.repeat(["a", "b", "c"], 30), "d"])
+    X = pd.DataFrame({"x": x, "g": g})
+    y = np.sin(3 * x) + 0.3 * (g == "b") * x + 0.1 * np.cos(np.arange(len(x)))
+    main = (
+        Spline(n_knots=5, lambda_policy=LambdaPolicy.fixed(1.2))
+        if alias == "indicator"
+        else Spline(kind="ps", degree=degree, n_knots=5, lambda_policy=LambdaPolicy.fixed(0.0))
+    )
+    features = {"x": main}
+    if alias is not None:
+        X["z"] = (g == "a").astype(float) if alias == "indicator" else (x - 0.5) ** 2
+        features["z"] = Numeric()
+    smooth = FactorSmooth(
+        "x", group="g", basis="sz", k=5, lambda_policy={"wiggle": LambdaPolicy.fixed(1)}
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = SuperGLM(
+            family="gaussian",
+            features=features,
+            interactions=[smooth],
+            selection_penalty=0,
+            direct_solve=solve,
+        ).fit_reml(X, y)
+    assert model._reml_profile["direct_backend"] == solve
+    assert model._interaction_specs["x:g:sz"]._has_population_offset
+    return model, X, y
+
+
+def test_population_level_indicator_preserves_centered_errors_on_both_solvers() -> None:
+    """A transfer between a group indicator and sz level constants leaves every centered row fixed."""
+    centered = []
+    for solve in ("structured", "gram"):
+        model, X, y = _thin_population_with_numeric("indicator", solve)
+        native = _assert_population_errors_are_the_contrasts(model)
+        inf = model.term_inference("x", centering="mean", simultaneous=True, n_sim=200)
+        assert np.isfinite(inf.ci_lower_simultaneous).all()
+        np.testing.assert_allclose(model.simultaneous_bands("x", n_sim=200)["se"], native)
+        np.testing.assert_allclose(model.metrics(X, y).feature_se("x")["se_log_relativity"], native)
+        row = _numeric_test_rows(model.summary(), ("x",))["x"]
+        np.testing.assert_allclose(
+            [row.curve_se_min, row.curve_se_max], [native.min(), native.max()]
+        )
+        centered.append(inf.se_log_relativity)
+    np.testing.assert_allclose(*centered, rtol=1e-9)
+
+
+@pytest.mark.parametrize("solve", ["gram", "structured"])
+@pytest.mark.parametrize(("degree", "thin"), [(2, 0.5), (3, 0.4)])
+def test_population_quadratic_alias_is_decided_on_each_reported_grid_row(
+    solve, degree, thin
+) -> None:
+    """The two endpoints have equal quadratic exposure. On seven points only 1/6 and 5/6
+    equal the grid mean quadratic exposure, so they alone retain pointwise intervals."""
+    model, X, y = _thin_population_with_numeric("quadratic", solve, degree=degree, thin=thin)
+    reference, _, _ = _thin_population_with_numeric(None, solve, degree=degree, thin=thin)
+    # Move z's complete linear predictor to the main P-spline. This data null
+    # leaves the thin-level convention untouched because it moves no sz coefficient.
+    design = _design(model)
+    main = next(g for g in model._groups if g.name == "x")
+    z = next(g for g in model._groups if g.name == "z")
+    columns = np.r_[0, 1 + np.arange(main.start, main.end)]
+    move = np.zeros(design.shape[1])
+    move[columns] = np.linalg.lstsq(design[:, columns], design[:, 1 + z.start], rcond=None)[0]
+    move[1 + z.start] = -1
+    tol = max(design.shape) * np.finfo(float).eps * np.linalg.norm(move) * np.linalg.norm(design)
+    assert np.linalg.norm(design @ move) <= tol
+    for count, determined in (
+        (2, [True, True]),
+        (7, [False, True, False, False, False, True, False]),
+    ):
+        args = dict(n_points=count, centering="mean", simultaneous=True, n_sim=256)
+        inf = model.term_inference("x", **args)
+        ref = reference.term_inference("x", **args)
+        grid = np.linspace(0, 1, count)
+        np.testing.assert_array_equal(inf.x, grid)
+        rows = _population_contrasts(model, grid)
+        rows -= rows.mean(axis=0)
+        np.testing.assert_array_equal(np.abs(rows @ move[1:]) <= tol, determined)
+        if count == 2 and degree == 2:
+            # Here both actual centered rows belong to the raw data row space as well.
+            assert _rank_gain(model, rows) == 0
+        np.testing.assert_allclose(inf.log_relativity, rows @ model.result.beta, atol=1e-12)
+        np.testing.assert_array_equal(np.isfinite(inf.se_log_relativity), determined)
+        np.testing.assert_array_equal(np.isfinite(inf.ci_lower), determined)
+        np.testing.assert_allclose(
+            inf.se_log_relativity[determined], ref.se_log_relativity[determined], rtol=1e-9
+        )
+        np.testing.assert_allclose(
+            inf.log_relativity[determined], ref.log_relativity[determined], atol=1e-11
+        )
+        if count == 2:
+            assert inf.critical_value_simultaneous > 0
+            np.testing.assert_allclose(
+                inf.ci_upper_simultaneous, ref.ci_upper_simultaneous, rtol=1e-9
+            )
+        else:
+            assert inf.ci_upper_simultaneous is None and inf.critical_value_simultaneous is None
+    native = model.term_inference("x", n_points=2, simultaneous=True, n_sim=256)
+    assert np.isnan(native.se_log_relativity).all() and native.ci_upper_simultaneous is None
+    single = model.term_inference("x", centering="mean", n_points=1, simultaneous=True, n_sim=256)
+    assert np.isnan(single.se_log_relativity).all() and single.ci_upper_simultaneous is None
+    bands = model.simultaneous_bands("x", n_points=2, n_sim=256)
+    assert bands[["se", "ci_upper_pointwise", "ci_upper_simultaneous"]].isna().all().all()
+    assert np.isnan(model.metrics(X, y).feature_se("x", n_points=2)["se_log_relativity"]).all()
+
+
+_INTERACTION_KINDS = {
+    "spline by level": (lambda: Spline(n_knots=5), "c", "wood"),
+    "tensor": (lambda: Spline(n_knots=4), "w", "wood"),
+    "polynomial by level": (lambda: Polynomial(degree=2), "c", "chi2"),
+    "polynomial by polynomial": (lambda: Polynomial(degree=3), "w", "chi2"),
+}
+
+
+def _interaction_fit(kind, twin):
+    """``x`` crossed with a second term, as each kind of interaction with a whole-term
+    test; with ``twin``, a second copy ``x2`` of ``x`` crossed with it too."""
+    main, other, _ = _INTERACTION_KINDS[kind]
+    rng = np.random.default_rng(0)
+    x = np.tile(np.linspace(0.0, 1.0, 40), 12)
+    c = np.tile(np.repeat(["p", "q", "r"], 40), 4)
+    w = rng.uniform(0.0, 1.0, len(x))
+    y = np.sin(3.0 * x) * (1.0 + (c == "q")) + 0.5 * w + np.cos(np.arange(float(len(x))))
+    names = ["x", "x2"] if twin else ["x"]
+    X = pd.DataFrame({name: x for name in names})
+    features = {name: main() for name in names}
+    if other == "c":
+        X["c"], features["c"] = c, Categorical()
+    else:
+        X["w"] = w
+        features["w"] = Spline(n_knots=4) if kind == "tensor" else Polynomial(degree=2)
+    model = SuperGLM(
+        family="gaussian", features=features, interactions=[(name, other) for name in names]
+    )
+    return model.fit(X, y), X, y
+
+
+def _interaction_rows(model, summary):
+    names = {g.name for g in model._groups if g.feature_name in model._interaction_specs}
+    return {r.name: r for r in summary._coef_rows if r.coef is None and r.name in names}
+
+
+@pytest.mark.parametrize("kind", list(_INTERACTION_KINDS))
+def test_twin_interactions_carry_no_whole_term_test(kind) -> None:
+    """Twin interactions: no whole-term test is formed on any default summary (issue #752).
+
+    ``x:c`` beside ``x2:c`` on a copy of ``x`` (and likewise against ``w``): moving the
+    effect between the twins leaves the fit.  Wood's test of a by-level spline or a
+    tensor is of the block's fitted function, and the chi-square of a by-level
+    polynomial or a large polynomial product is of ``beta_block = 0``; both raise the
+    design's rank when appended.  The rule is the one inside the two test helpers, which
+    these four producers reach without stating it.  At 09fe0c01d the default summary
+    showed Wood p 0.999 on ``x:c[q]`` and 1.0 on ``x:w``, chi2 20.65 (p = 3e-5) on the
+    polynomial ``x:c[q]`` and 0.657 on the polynomial ``x:w``, with NaN on their twins;
+    the robust summary left the two chi-squares blank but flagged them estimable.
+    """
+    model, X, y = _interaction_fit(kind, twin=True)
+    design = _design(model)
+    width = len(model.result.beta)
+    for group in model._groups:
+        if group.feature_name not in model._interaction_specs:
+            continue
+        function = np.zeros((len(design), width))
+        function[:, group.sl] = design[:, 1 + group.start : 1 + group.end]
+        tested = function if _INTERACTION_KINDS[kind][2] == "wood" else np.eye(width)[group.sl]
+        assert _rank_gain(model, tested) > 0, group.name
+    other = X.iloc[:360].reset_index(drop=True), y[:360] + 0.5
+    summaries = [model.summary(), model.metrics(X, y).summary(), model.metrics(*other).summary()]
+    if _INTERACTION_KINDS[kind][2] == "chi2":
+        summaries.append(model.summary(covariance=model.sandwich_covariance()))
+    for summary in summaries:
+        rows = _interaction_rows(model, summary)
+        assert len(rows) == (4 if _INTERACTION_KINDS[kind][1] == "c" else 2)
+        for row in rows.values():
+            assert row.wald_chi2 is None and row.wald_p is None and row.ref_df is None, row.name
+            assert row.estimable is False, row.name
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("kind", list(_INTERACTION_KINDS))
+def test_a_single_interaction_keeps_its_whole_term_test(kind) -> None:
+    """Control (pins): one unaliased interaction keeps its whole-term test on both summaries.
+
+    The polynomial rows are the Wald chi-square ``b' V^-1 b`` of their unpenalized block,
+    ``V`` the Gaussian ``phi (X'X)^-1`` block; the spline rows are Wood's test, at the
+    figures 09fe0c01d gave.
+    """
+    model, X, y = _interaction_fit(kind, twin=False)
+    wood = {
+        "spline by level": {
+            "x:c[q]": (21.01900558308689, 5.834075571440447),
+            "x:c[r]": (3.2500155228990493, 5.834075571440447),
+        },
+        "tensor": {"x:w": (11.219280813499378, 24.983943859133674)},
+    }
+    design = _design(model)
+    coef, *_ = np.linalg.lstsq(design, y, rcond=None)
+    residual = y - design @ coef
+    V = float(residual @ residual) / (len(y) - design.shape[1]) * np.linalg.inv(design.T @ design)
+    for summary in (model.summary(), model.metrics(X, y).summary()):
+        rows = _interaction_rows(model, summary)
+        for group in model._groups:
+            if group.feature_name not in model._interaction_specs:
+                continue
+            row = rows[group.name]
+            assert row.estimable is True
+            if kind in wood:
+                np.testing.assert_allclose(
+                    [row.wald_chi2, row.ref_df], wood[kind][group.name], rtol=1e-6
+                )
+                continue
+            block = slice(1 + group.start, 1 + group.end)
+            expected = float(coef[block] @ np.linalg.solve(V[block, block], coef[block]))
+            np.testing.assert_allclose([row.wald_chi2, row.ref_df], [expected, group.size], 1e-8)
+
+
+_INTERCEPT_COLUMNS = {
+    # x and 3 - x span the constant
+    "spanning": lambda x, a: {"x": x, "z": 3.0 - x},
+    # a and 3 a, symmetric about zero, are collinear and do not span it
+    "collinear": lambda x, a: {"x": a, "z": 3.0 * a},
+    "alone": lambda x, a: {"x": x},
+}
+
+
+def _intercept_fit(term, columns, direct_solve="auto"):
+    """Numeric terms on ``columns`` beside a structured ``term`` on 40 levels (``_structured_fit``'s)."""
+    rng = np.random.default_rng(0)
+    n = 720
+    level = np.tile(np.repeat(np.arange(40), 2), 9)
+    half = rng.integers(-(2**50), 2**50, n // 2) / 2**50
+    x = rng.uniform(0.0, 3.0, n)
+    z = 0.5 + 0.5 * np.sin(0.7 * np.arange(float(n)))
+    X = pd.DataFrame({"g": level.astype(str), "s": z})
+    numeric = _INTERCEPT_COLUMNS[columns](x, np.r_[half, -half])
+    X = X.assign(**numeric)
+    y = 1.0 + 0.5 * x + 2.0 * np.cos(level) + z + rng.normal(size=n)
+    features: dict = {"g": RandomEffect()} if term == "random effect" else {}
+    features.update({name: Numeric() for name in numeric})
+    interactions = []
+    if term != "random effect":
+        features["s"] = Spline(n_knots=5)
+        interactions.append(FactorSmooth("s", group="g", basis=term, k=5))
+    model = SuperGLM(
+        family="gaussian", features=features, interactions=interactions, direct_solve=direct_solve
+    )
+    return model.fit_reml(X, y), X, y
+
+
+def _intercept_share_of_the_null_space(model):
+    """The largest weight a null direction of ``[1, X]`` puts on the intercept."""
+    _, s, vt = np.linalg.svd(_design(model))
+    null = vt[int(np.sum(s > s[0] * 1e-10)) :]
+    return float(np.max(np.abs(null[:, 0]), initial=0.0))
+
+
+@pytest.mark.parametrize(
+    ("term", "columns"),
+    [
+        ("random effect", "spanning"),
+        ("fs", "spanning"),
+        ("sz", "spanning"),
+        ("random effect", "collinear"),
+        ("fs", "collinear"),
+    ],
+)
+def test_structured_fits_show_no_error_on_an_intercept_their_data_leave_open(term, columns) -> None:
+    """A structured fit decides its reported intercept on its own data, as a dense fit does (#752).
+
+    The reported intercept weighs every column's mean, the structured ones included, which
+    the compact geometry read as outside its border and left undecided: only the ordered
+    terms' base-level part was.  Beside ``x`` and ``3 - x`` the columns span the constant;
+    beside any aliased pair, a random effect's or an ``fs`` smooth's levels, which only
+    their penalty holds, alias it too.  A null direction of ``[1, X]`` then moves the
+    intercept, and the default and metrics summaries keep its estimate with no error,
+    flagged ``estimable=False``, the dense fit's answer.  At 09fe0c01d the random effect
+    beside ``x`` and ``3 - x`` showed SE 0.233.
+    """
+    model, X, y = _intercept_fit(term, columns)
+    assert model._fit_inference_info.get("structured_covariance")
+    assert _intercept_share_of_the_null_space(model) > 0.01
+    dense, _, _ = _intercept_fit(term, columns, direct_solve="gram")
+    assert not dense._fit_inference_info.get("structured_covariance")
+    assert dense.summary()._coef_rows[0].se is None
+    for summary in (model.summary(), model.metrics(X, y).summary()):
+        row = summary._coef_rows[0]
+        assert row.name == "Intercept" and np.isfinite(row.coef)
+        assert row.se is None and row.z is None and row.p is None and row.ci_low is None
+        assert row.estimable is False
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize(
+    ("term", "columns"),
+    [("sz", "collinear"), ("random effect", "alone"), ("fs", "alone"), ("sz", "alone")],
+)
+def test_structured_fits_keep_an_intercept_they_determine(term, columns) -> None:
+    """Control (pins): a structured fit keeps the dense fit's intercept error where it is determined.
+
+    Beside one numeric term the penalized fit is certified and every error is shown.  An
+    ``sz`` smooth's levels sum to zero, so beside a collinear pair that does not span the
+    constant no null direction of ``[1, X]`` moves the intercept: the geometry decides
+    the columns' mean on its level coordinates and keeps the error.
+    """
+    model, X, y = _intercept_fit(term, columns)
+    assert model._fit_inference_info.get("structured_covariance")
+    if columns == "collinear":
+        assert not np.all(model._fit_inference_info["coefficient_estimable"])
+        assert _intercept_share_of_the_null_space(model) < 1e-8
+    dense, _, _ = _intercept_fit(term, columns, direct_solve="gram")
+    expected = dense.summary()._coef_rows[0]
+    assert expected.estimable is True
+    for summary in (model.summary(), model.metrics(X, y).summary()):
+        row = summary._coef_rows[0]
+        assert row.estimable is True
+        np.testing.assert_allclose(row.se, expected.se, rtol=1e-9)
+
+
+@pytest.mark.parametrize("multiple", [30, 35])
+def test_an_sz_fit_sizes_its_intercept_in_the_centred_columns(multiple) -> None:
+    """An ``sz`` fit decides its reported intercept as a dense fit does (issue #752).
+
+    ``x`` near 16 and ``z = shift - x``: ``x + z`` is the constant ``shift``, so one null
+    direction of ``[1, X]`` moves the intercept by ``shift``.  In the centred columns'
+    equilibrated coordinates that is a share ``shift / (sqrt(2) s)`` of the estimate's
+    size ``hypot(sqrt(2) m / s, 1 / sqrt(n))``, with ``m`` the columns' mean and ``s``
+    their centred norm; the rule's cut is ``factor_rcond``.  The share is 0.94 of the cut
+    at ``30 * 2**-26`` and 1.09 at ``35 * 2**-26``: shown at the first, withheld at the
+    second, on both backends.  At 07ceaec50 the tree sized the contrast in the uncentred
+    columns, where the intercept's own weight is a third of the size, and showed both.
+    """
+    shift, n = multiple * 2.0**-26, 160
+    row = np.arange(float(n))
+    x = 16.0 + np.tile(np.arange(-4, 4) + 0.5, 20) / 4.0
+    s = np.tile(np.linspace(0.0, 1.0, 20), 8)
+    X = pd.DataFrame({"x": x, "z": shift - x, "g": np.repeat(np.arange(8), 20).astype(str), "s": s})
+    y = 1.0 + 0.3 * x + np.sin(3.0 * s) + np.cos(row)
+    spread = float(np.linalg.norm(x - x.mean()))
+    size = np.hypot(np.sqrt(2.0) * x.mean() / spread, 1.0 / np.sqrt(n))
+    share = shift / (np.sqrt(2.0) * spread) / size / SHARED_RANK_POLICY.factor_rcond
+    assert abs(share - 1.0) > 0.05
+    rows = {}
+    for solve in ("structured", "gram"):
+        wiggle = {"wiggle": LambdaPolicy.fixed(1.0)}
+        features = {"x": Numeric(), "z": Numeric()}
+        features["s"] = Spline(n_knots=5, lambda_policy=LambdaPolicy.fixed(1.0))
+        model = SuperGLM(
+            family="gaussian",
+            features=features,
+            interactions=[FactorSmooth("s", group="g", basis="sz", k=5, lambda_policy=wiggle)],
+            selection_penalty=0,
+            direct_solve=solve,
+        ).fit_reml(X, y)
+        structured = bool(model._fit_inference_info.get("structured_covariance"))
+        assert structured == (solve == "structured")
+        rows[solve] = model.summary()._coef_rows[0]
+        assert rows[solve].estimable is bool(share < 1.0), solve
+    if share < 1.0:
+        np.testing.assert_allclose(rows["structured"].se, rows["gram"].se, rtol=1e-6)
+
+
+def test_the_low_level_readers_still_take_a_bare_decider(polynomial_model) -> None:
+    """``determines`` as a callable, the form before #752, still decides each contrast.
+
+    The low-level ``term_inference`` took one decider of a contrast and ``relativities``
+    one per term, ``determines(name)``; both still resolve from ``superglm.inference``.
+    A decider that determines nothing leaves the base level, whose contrast is zero, at
+    error 0 and every other level NaN; one that determines everything changes nothing.
+    At 07ceaec50 both raised ``AttributeError`` on the ordered term.
+    """
+    from superglm.inference._term_model_ops import relativities
+    from superglm.inference._term_ops import term_inference
+
+    model = polynomial_model
+    shared = (model._specs, model._interaction_specs, model._groups, model.result)
+    covariance_fn = lambda: model._coef_covariance  # noqa: E731
+    width = len(model.result.beta)
+
+    def read(decide):
+        asked = []
+
+        def decider(contrast):
+            asked.append(np.asarray(contrast).shape)
+            return decide
+
+        inference = term_inference(
+            "band",
+            result=model.result,
+            groups=model._groups,
+            specs=model._specs,
+            interaction_specs=model._interaction_specs,
+            covariance_fn=covariance_fn,
+            reml_lambdas=None,
+            lambda2=0.0,
+            determines=None if decide is None else decider,
+        )
+        frame = relativities(
+            ["band"],
+            [],
+            *shared,
+            with_se=True,
+            covariance_fn=covariance_fn,
+            determines=None if decide is None else (lambda name: decider),
+        )["band"]
+        assert set(asked) <= {(width,)}
+        return np.asarray(inference.se_log_relativity), frame["se_log_relativity"].to_numpy()
+
+    plain = read(None)
+    base = np.asarray(LEVELS) == model._specs["band"]._base_level
+    assert np.all(plain[0][~base] > 0.0) and plain[0][base] == 0.0
+    for errors, reference in zip(read(True), plain, strict=True):
+        np.testing.assert_array_equal(errors, reference)
+    for errors in read(False):
+        np.testing.assert_array_equal(np.isnan(errors), ~base)
+        assert errors[base] == 0.0
+
+
+def test_readers_form_the_rule_only_for_a_term_that_reads_it(monkeypatch) -> None:
+    """Work counts: no mask or centre is formed where no reader would use it (issue #752).
+
+    ``relativities(with_se=True)`` and ``term_inference`` put a spline's curve and an
+    ordered term's levels to the covariance's rule, and no other class, so a numeric
+    term forms no coefficient mask.  A structured summary reads its columns' mean only
+    to decide the intercept beside a coefficient the mask leaves open.  At 07ceaec50 the
+    numeric-only readers formed the mask once each and the certified summary the mean.
+    """
+    from superglm.model import state_ops
+
+    calls = {"mask": 0, "centre": 0}
+    mask, centre = state_ops.fit_coefficient_mask, state_ops.fit_intercept_centre
+
+    def counted(name, function):
+        def wrapper(*args, **kwargs):
+            calls[name] += 1
+            return function(*args, **kwargs)
+
+        return wrapper
+
+    monkeypatch.setattr(state_ops, "fit_coefficient_mask", counted("mask", mask))
+    monkeypatch.setattr(state_ops, "fit_intercept_centre", counted("centre", centre))
+
+    x = np.tile(np.linspace(0.0, 1.0, 40), 4)
+    X = pd.DataFrame({"u": x, "v": np.cos(7.0 * x)})
+    y = np.sin(3.0 * x) + np.cos(np.arange(160.0))
+    numeric = SuperGLM(family="gaussian", features={"u": Numeric(), "v": Numeric()}).fit(X, y)
+    numeric.relativities(with_se=True)
+    numeric.term_inference("u")
+    assert calls["mask"] == 0
+    mixed = SuperGLM(family="gaussian", features={"u": Spline(n_knots=5), "v": Numeric()})
+    mixed.fit(X, y).term_inference("v")
+    assert calls["mask"] == 0
+    mixed.term_inference("u")
+    mixed.relativities(with_se=True)
+    assert calls["mask"] == 2
+
+    certified, _, _ = _intercept_fit("random effect", "alone")
+    assert np.all(certified._fit_inference_info["coefficient_estimable"])
+    assert certified.summary()._coef_rows[0].estimable is True and calls["centre"] == 0
+    aliased, _, _ = _intercept_fit("random effect", "collinear")
+    assert aliased.summary()._coef_rows[0].estimable is False and calls["centre"] == 1
+
+
+def _robust_block_fit(direct_solve):
+    """A random effect on 40 levels beside the collinear pair ``x``, ``2 x``, the twin
+    piecewise terms ``u`` and ``v`` on one column, and a piecewise term ``k`` on its own."""
+    n = 720
+    row = np.arange(float(n))
+    level = np.tile(np.repeat(np.arange(40), 2), 9)
+    x = np.tile(np.linspace(-1.0, 1.0, 45), 16)
+    k, u = np.cos(1.3 * row), np.sin(2.1 * row)
+    X = pd.DataFrame({"g": level.astype(str), "x": x, "z": 2.0 * x, "k": k, "u": u, "v": u})
+    y = 1.0 + 0.5 * x + 2.0 * np.cos(level) + 0.4 * np.maximum(k, 0.0) + 0.2 * u + np.sin(row)
+    features = {"g": RandomEffect(), "x": Numeric(), "z": Numeric()}
+    features.update({name: Piecewise(breaks=[0.0]) for name in ("k", "u", "v")})
+    model = SuperGLM(family="gaussian", features=features, direct_solve=direct_solve)
+    return model.fit_reml(X, y)
+
+
+@pytest.mark.parametrize("clustered", [False, True])
+def test_a_truncated_structured_bread_keeps_the_test_of_a_block_its_mask_shows(clustered) -> None:
+    """A robust summary tests a block whose every coefficient its mask shows (issue #752).
+
+    A structured fit's truncated bread keeps the fit's coefficient mask and no null
+    direction, so it decides no contrast by itself.  ``k`` is aliased with nothing and
+    its two coefficients are shown: its chi-square is ``b' V^-1 b`` on its robust block,
+    the dense fit's figure, under HC0 and CR0.  The twins ``u`` and ``v`` are not shown
+    and stay withheld, flagged ``estimable=False``, on both fits.  At 07ceaec50 the
+    structured summary withheld ``k`` too.
+    """
+    summaries = {}
+    for solve in ("structured", "gram"):
+        model = _robust_block_fit(solve)
+        cluster = np.arange(720) % 15 if clustered else None
+        covariance = model.sandwich_covariance(cluster)
+        truncated = covariance.undetermined is not None and covariance.undetermined.basis is None
+        assert truncated == (solve == "structured")
+        group = next(g for g in model._groups if g.name == "k")
+        assert np.all(covariance.coefficient_estimable[group.sl])
+        rows = _numeric_test_rows(model.summary(covariance=covariance), ("k", "u", "v"))
+        for name in ("u", "v"):
+            twin = next(g for g in model._groups if g.name == name)
+            assert not np.any(covariance.coefficient_estimable[twin.sl])
+            assert rows[name].wald_chi2 is None and rows[name].wald_p is None
+            assert rows[name].estimable is False
+        active = next(a for a in covariance.active_groups if a.name == "k")
+        block = covariance.covariance[1 + active.start : 1 + active.end][:, 1 + active.start :]
+        b = model.result.beta[group.sl]
+        expected = float(b @ np.linalg.solve(block[:, : group.size], b))
+        assert rows["k"].estimable is True and rows["k"].ref_df == group.size
+        np.testing.assert_allclose(rows["k"].wald_chi2, expected, rtol=1e-9)
+        summaries[solve] = rows["k"]
+    np.testing.assert_allclose(
+        summaries["structured"].wald_chi2, summaries["gram"].wald_chi2, rtol=1e-8
+    )
+
+
+def test_a_geometry_saved_before_it_kept_the_mean_is_formed_again() -> None:
+    """A saved fit's old contrast geometry does not blank an intercept its data determine (#752).
+
+    A structured fit's inference record keeps the geometry its contrasts were decided on.
+    One pickled before that geometry kept the columns' mean decides no intercept, so the
+    reader forms it again from the retained factor, with no rows and no refit, and the
+    loaded summary shows the fresh fit's error bit for bit.  The fit is compact, with
+    varying and zero weights and an offset, beside the collinear pair ``a``, ``2 a``.
+    At 07ceaec50 the loaded summary showed the intercept with no error.
+    """
+    n = 720
+    row = np.arange(float(n))
+    level = np.tile(np.repeat(np.arange(40), 2), 9)
+    a = np.tile([-0.5, 0.5], n // 2)
+    s = 0.5 + 0.5 * np.sin(0.7 * row)
+    X = pd.DataFrame({"g": level.astype(str), "s": s, "a": a, "b": 2.0 * a})
+    y = 1.0 + 0.5 * a + 2.0 * np.cos(level) + s + np.cos(row)
+    weights = np.linspace(0.5, 1.5, n)
+    weights[::9] = 0.0
+    model = SuperGLM(
+        family="gaussian",
+        features={"a": Numeric(), "b": Numeric(), "s": Spline(n_knots=5)},
+        interactions=[FactorSmooth("s", group="g", basis="sz", k=5)],
+        retain_fit_state=False,
+    ).fit_reml(X, y, sample_weight=weights, offset=0.3 * np.cos(0.11 * row))
+    inference = model._fit_inference_info
+    assert inference.get("structured_covariance") and model._dm is None
+    assert not np.all(inference["coefficient_estimable"])
+    fresh = model.summary()._coef_rows[0]
+    assert fresh.estimable is True and fresh.se > 0.0
+
+    saved = vars(inference["contrast_estimability"])
+    for name in ("centre", "centre_along", "centre_size"):
+        del saved[name]
+    loaded = pickle.loads(pickle.dumps(model))
+    assert loaded._fit_inference_info["contrast_estimability"].centre is None
+    intercept = loaded.summary()._coef_rows[0]
+    assert intercept.estimable is True
+    assert (intercept.se, intercept.z, intercept.ci_low) == (fresh.se, fresh.z, fresh.ci_low)
+    assert loaded._fit_inference_info["contrast_estimability"].centre is not None
 
 
 def test_editor_stale_summary_keeps_the_basis_vocabulary(segmented_model) -> None:

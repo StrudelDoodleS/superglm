@@ -10,11 +10,7 @@ from numpy.typing import NDArray
 
 from superglm._frame import FrameLike
 from superglm.distributions import prior_weights_in_normalizer, scale_is_known
-from superglm.inference._term_covariance import (
-    feature_se_from_cov,
-    ordered_level_contrasts,
-    withhold_undetermined,
-)
+from superglm.inference._term_covariance import as_determinacy, feature_se_from_cov
 from superglm.inference._term_helpers import _VALID_CENTERING
 from superglm.inference._term_types import _safe_exp
 
@@ -38,14 +34,19 @@ def relativities(
 ) -> dict[str, pd.DataFrame]:
     """Extract plot-ready relativity DataFrames for all features.
 
-    ``determines(name)`` gives ``term_inference``'s decider of a contrast over the fitted
-    coefficients for term ``name``, or ``None``; an ordered term's level errors it does not
-    determine are NaN.  ``None`` reports every one.
+    ``determines`` is ``term_inference``'s: the errors of a spline's curve and of an
+    ordered term's levels that the covariance does not determine are NaN.  A callable is
+    the earlier form: ``determines(name)`` gives term ``name``'s decider of a contrast,
+    or ``None``.  ``None`` reports every one.
     """
     if centering not in _VALID_CENTERING:
         raise ValueError(f"centering must be one of {_VALID_CENTERING}, got {centering!r}")
     if with_se:
         Cov_active, active_groups = covariance_fn()
+
+    def _determinacy(name: str):
+        rule = determines(name) if callable(determines) else determines
+        return as_determinacy(rule, len(result.beta))
 
     def _feature_groups(name: str) -> list[GroupSlice]:
         return [g for g in groups if g.feature_name == name]
@@ -85,26 +86,6 @@ def relativities(
         df["relativity"] = _safe_exp(df["log_relativity"].values)
         return df
 
-    def _ordered_level_se(name: str, spec, se: NDArray) -> NDArray:
-        """``se`` of ordered term ``name``'s levels, NaN where ``determines`` leaves one open."""
-        from superglm.solvers.rank import selected_group_name_set
-
-        def contrasts() -> NDArray:
-            rows = ordered_level_contrasts(
-                spec,
-                name,
-                _feature_groups(name),
-                interaction_specs,
-                len(result.beta),
-                selected_group_name_set(result, groups),
-            )
-            # a centred frame reports each level less the levels' mean (``C b``)
-            return rows - rows.mean(axis=0) if center_se else rows
-
-        return withhold_undetermined(
-            se, None if determines is None else determines(name), contrasts
-        )
-
     out: dict[str, pd.DataFrame] = {}
     for name in feature_order:
         raw = _reconstruct(name)
@@ -120,19 +101,16 @@ def relativities(
                 }
             )
             if with_se:
-                df["se_log_relativity"] = _ordered_level_se(
+                df["se_log_relativity"] = feature_se_from_cov(
                     name,
-                    spec_cur,
-                    feature_se_from_cov(
-                        name,
-                        Cov_active,
-                        active_groups,
-                        result,
-                        groups,
-                        specs,
-                        interaction_specs,
-                        center=center_se,
-                    ),
+                    Cov_active,
+                    active_groups,
+                    result,
+                    groups,
+                    specs,
+                    interaction_specs,
+                    center=center_se,
+                    determines=_determinacy(name),
                 )
             out[name] = _center_df(df)
             continue
@@ -156,6 +134,7 @@ def relativities(
                     interaction_specs,
                     n_points=len(raw["x"]),
                     center=center_se,
+                    determines=_determinacy(name),
                 )
             out[name] = _center_df(df)
         elif "levels" in raw:

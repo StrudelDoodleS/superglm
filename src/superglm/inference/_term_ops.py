@@ -11,12 +11,10 @@ from numpy.typing import NDArray
 
 from superglm.features.constraint import rules_of
 from superglm.inference._term_covariance import (
+    as_determinacy,
     feature_se_from_cov,
-    ordered_level_contrasts,
     piecewise_knot_covariance,
     simultaneous_band_and_critical_value,
-    term_contrasts,
-    withhold_undetermined,
 )
 from superglm.inference._term_helpers import (
     _VALID_CENTERING,
@@ -61,6 +59,7 @@ def _centered_se(
     *,
     n_points: int = 200,
     flags=None,
+    determines=None,
 ) -> NDArray | None:
     """The errors of the mean-centered report, or ``None`` when not centering.
 
@@ -82,6 +81,7 @@ def _centered_se(
         n_points=n_points,
         center=True,
         flags=flags,
+        determines=determines,
     )
 
 
@@ -165,7 +165,10 @@ class _TermReport:
     # ── Errors ────────────────────────────────────────────────────
 
     def feature_errors(self, **options: Any) -> NDArray | None:
-        """The term's standard errors (``feature_se_from_cov``), or ``None`` without them."""
+        """The term's standard errors (``feature_se_from_cov``), or ``None`` without them.
+
+        NaN where ``determines`` leaves a reported value open.
+        """
         if not (self.with_se and self.active and self.Cov_active is not None):
             return None
         assert self.active_groups_cov is not None
@@ -177,6 +180,7 @@ class _TermReport:
             self.groups,
             self.specs,
             self.interaction_specs,
+            determines=self.determines,
             **options,
         )
 
@@ -200,6 +204,7 @@ class _TermReport:
             self.groups,
             self.specs,
             self.interaction_specs,
+            determines=self.determines,
             **options,
         )
 
@@ -259,19 +264,6 @@ class _TermReport:
         level_log_rels = np.array([raw["level_log_relativities"][lv] for lv in levels])
         special_labels = set(raw.get("special_levels") or ())
         se = self.feature_errors()
-        if se is not None:
-            se = withhold_undetermined(
-                se,
-                self.determines,
-                lambda: ordered_level_contrasts(
-                    spec,
-                    name,
-                    self.feature_groups,
-                    self.interaction_specs,
-                    len(self.beta),
-                    self.selected_names,
-                ),
-            )
         ci_lo, ci_hi = self.interval(level_log_rels, se)
         curve = (
             self.ordered_curve(raw, [lv for lv in levels if lv not in special_labels])
@@ -340,17 +332,7 @@ class _TermReport:
             self.Cov_active,
             x_eval=raw["x"],
             reference_x=reference_x,
-        )
-        curve_se = withhold_undetermined(
-            curve_se,
-            self.determines,
-            lambda: term_contrasts(
-                np.asarray(inner.transform(raw["x"]), dtype=np.float64)
-                - np.asarray(inner.transform(reference_x), dtype=np.float64),
-                smooth_groups,
-                len(self.beta),
-                self.selected_names,
-            ),
+            determines=self.determines,
         )
         ci_lo, ci_hi = self.interval(raw["log_relativity"], curve_se)
         return SmoothCurve(
@@ -372,9 +354,14 @@ class _TermReport:
         raw = with_population_curve(raw, name, self.interaction_specs, self.groups, self.beta, spec)
         log_rel = raw["log_relativity"]
         se = self.feature_errors(n_points=self.n_points)
+        # _recenter_term leaves a one-point report at its native value.
+        se_centered = self.centred_errors(n_points=self.n_points) if len(log_rel) > 1 else None
         ci_lo, ci_hi = self.interval(log_rel, se)
         ci_lo_sim = ci_hi_sim = c_sim = None
-        if se is not None and self.simultaneous:
+        # A simultaneous band is one statement about the whole curve, the centred one
+        # under ``centering="mean"``: none where the covariance leaves a point of it open.
+        banded = se if se_centered is None else se_centered
+        if banded is not None and self.simultaneous and not np.isnan(banded).any():
             bands, c_sim = simultaneous_band_and_critical_value(
                 name,
                 result=self.result,
@@ -386,7 +373,7 @@ class _TermReport:
                 n_sim=self.n_sim,
                 n_points=self.n_points,
                 seed=self.seed,
-                center=self.centering == "mean",
+                center=se_centered is not None,
             )
             ci_lo_sim = bands["ci_lower_simultaneous"].values
             ci_hi_sim = bands["ci_upper_simultaneous"].values
@@ -413,7 +400,7 @@ class _TermReport:
                 alpha=self.alpha,
             ),
             self.centering,
-            se_centered=self.centred_errors(n_points=self.n_points),
+            se_centered=se_centered,
         )
 
     def categorical(self) -> TermInference:
@@ -661,10 +648,11 @@ def term_inference(
         same fitted coefficients, so the errors and intervals are propagated
         through the centering contrast rather than translated with the
         values -- see ``_recenter_term``.
-    determines : callable or None
-        Whether the covariance determines a contrast over the fitted coefficients
-        (``contrast_determined``); an ordered term's level and curve errors it does not
-        determine are NaN.  ``None`` reports every one.
+    determines : Determinacy, callable or None
+        The covariance's rule for a contrast over the fitted coefficients
+        (``contrast_determined``); the errors of a spline's curve and of an ordered term's
+        levels and curve that it does not determine are NaN.  A callable, the earlier
+        form, decides each contrast itself.  ``None`` reports every one.
 
     Returns
     -------
@@ -707,7 +695,7 @@ def term_inference(
         n_sim=n_sim,
         seed=seed,
         centering=centering,
-        determines=determines,
+        determines=as_determinacy(determines, len(result.beta)),
     ).inference()
 
 

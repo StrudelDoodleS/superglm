@@ -90,6 +90,7 @@ from superglm.solvers.dispersion import likelihood_scale_method, scale_method
 from superglm.solvers.mode_score import corrected_two_pass_pair
 from superglm.solvers.rank import (
     RankDecomposition,
+    SharedDirections,
     decide_data_rank,
     decompose_factor,
     decompose_gram,
@@ -415,6 +416,8 @@ def _active_contrast_estimable(
     intercept: float = 0.0,
     design_rows: bool = False,
     sum_w=None,
+    shared: SharedDirections | None = None,
+    group_columns: NDArray | None = None,
 ) -> bool:
     """Whether ``data_rank`` determines ``contrast``, whose active coordinates sit at ``columns``.
 
@@ -422,7 +425,12 @@ def _active_contrast_estimable(
     without ``sum_w`` decides the contrast alone.
     """
     if design_rows:
-        return bool(data_rank.function_estimable(np.asarray(contrast, dtype=bool)[columns]))
+        return bool(
+            data_rank.function_estimable(
+                np.asarray(contrast, dtype=bool)[columns],
+                shared=None if shared is None else shared[columns],
+            )
+        )
     outside = np.ones(len(contrast), dtype=bool)
     outside[columns] = False
     if np.any(contrast[outside] != 0.0):
@@ -1895,12 +1903,13 @@ class ModelMetrics:
                 key: np.ldexp(value, exponent // 2) if key.startswith("se") else value
                 for key, value in values.items()
             }
+        from superglm.features.factor_smooth import population_curve_terms
         from superglm.features.numeric import Numeric
         from superglm.features.ordered_categorical import OrderedCategorical
         from superglm.features.piecewise import Piecewise
         from superglm.features.random_effect import RandomEffect
         from superglm.features.spline import _SplineBase
-        from superglm.inference._term_covariance import feature_se_from_cov
+        from superglm.inference._term_covariance import Determinacy, feature_se_from_cov
 
         # Inactive feature: return zeros (all subgroups zeroed)
         selected_names = selected_group_name_set(
@@ -1971,6 +1980,23 @@ class ModelMetrics:
             # (every nested chain level counts against its cap, §6).
             variance = phi * covariance_selected_diagonal(XtWX_inv_aug, aug_indices)
             return {"se": np.sqrt(np.maximum(variance, 0.0))}
+        if isinstance(spec, _SplineBase) and population_curve_terms(
+            name, self._model._interaction_specs
+        ):
+            se = feature_se_from_cov(
+                name,
+                covariance_slope_view(XtWX_inv_aug, scale=phi),
+                active_groups,
+                self._result,
+                self._groups,
+                self._model._specs,
+                self._model._interaction_specs,
+                n_points=n_points,
+                determines=Determinacy(
+                    self._current_coefficient_estimable, self._current_contrast_estimable
+                ),
+            )
+            return {"x": np.linspace(spec._lo, spec._hi, n_points), "se_log_relativity": se}
         Cov_g = phi * covariance_selected_block(XtWX_inv_aug, aug_indices)
 
         if isinstance(spec, _SplineBase):
@@ -2018,6 +2044,9 @@ class ModelMetrics:
                 "constrained coefficients -- the quantity summary() withholds for this term. "
                 "Fit the constraint (Constraint.fit.*) if you need a band."
             )
+        from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
+
+        _ensure_factor_smooth_levels_recorded(self._model)
         return self._feature_se_impl(name, n_points=n_points, phi_scale=True)
 
     # ── Summary ───────────────────────────────────────────────────

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Hashable, Mapping
-from typing import TYPE_CHECKING, Any, cast
+from functools import partial
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
+import scipy.sparse as sp
 from numpy.typing import NDArray
 
 from superglm._roundoff import EPS, SQRT_EPS, TINY
@@ -15,6 +17,7 @@ from superglm.inference._term_types import _safe_exp
 
 if TYPE_CHECKING:
     from superglm.solvers.pirls import PIRLSResult
+    from superglm.solvers.rank import SharedDirections
     from superglm.types import GroupSlice
 
 
@@ -89,8 +92,10 @@ def _population_curve_map(
     x_grid: NDArray,
     *,
     center: bool,
+    groups: list[GroupSlice],
+    determines: Determinacy | None = None,
 ) -> tuple[NDArray, NDArray] | None:
-    """``(M, V_f)``: a main-effect curve's map and covariance on its ``sz`` population curve.
+    """The covariance and estimability mask of the reported ``sz`` population grid.
 
     The reported curve is ``f(x) = M(x) gamma + sum_terms b(x)' C theta``
     (``factor_smooth.with_population_curve``; ``C`` each term's
@@ -132,7 +137,78 @@ def _population_curve_map(
     Cov_g = np.asarray(Cov_active[np.ix_(indices, indices)], dtype=np.float64)
     cross = M @ product[indices] @ B.T
     V_f = M @ Cov_g @ M.T + cross + cross.T + B @ (lifted.T @ product) @ B.T
-    return M, 0.5 * (V_f + V_f.T)
+    shown = np.ones(len(x_grid), dtype=bool)
+    if determines is not None:
+        shown = _population_grid_determined(
+            name, terms, groups, active_groups, indices, M, B, lifted, determines, center
+        )
+    return 0.5 * (V_f + V_f.T), shown
+
+
+def _population_grid_determined(
+    name, terms, groups, active_groups, indices, M, B, lifted, determines, center
+) -> NDArray:
+    """Which population rows are invariant to aliases with other terms?
+
+    Internal thin-level wiggles use the fitted smooth's convention. If an external
+    transfer can keep the sz blocks level-constant, its centered effect also equals
+    that on the average identified level curve. A data-estimable row of that average
+    then certifies the reported row. Otherwise only the reported row itself can certify it.
+    """
+    from superglm.features.factor_smooth import population_curve_level_constants
+
+    width = len(determines.coefficient_estimable)
+    own_names = {name, *(key for key, _ in terms)}
+    own = np.zeros(width, dtype=bool)
+    for group in groups:
+        own[group.sl] = group.feature_name in own_names
+    if np.all(determines.coefficient_estimable[own]):
+        return np.ones(len(M), dtype=bool)
+    shared = population_curve_level_constants(terms, groups, width)
+    if function_determined(own, *determines, shared=shared):
+        return np.ones(len(M), dtype=bool)
+    actual = B @ lifted.T
+    actual[:, indices] = M
+    original = {group.name: group for group in groups}
+    active = np.concatenate(
+        [np.arange(original[g.name].start, original[g.name].end) for g in active_groups]
+    )
+    # The sz reader needs the tree's level rows of the null space as well as its border.
+    decide = determines.contrast_estimable
+    point_rule = Determinacy(
+        determines.coefficient_estimable, None if decide is None else partial(decide, shared=shared)
+    )
+    determined = _determined_rows(point_rule, active, actual)
+    if not center or decide is None or np.all(determined):
+        return determined
+
+    # Can all external transfers be made in the main effect and shared constants,
+    # up to a null direction confined to the curve's own terms?
+    main_axes = sp.csr_matrix(
+        (np.ones(len(indices)), (active[indices], np.arange(len(indices)))),
+        shape=(width, len(indices)),
+    )
+    if not function_determined(
+        own, *determines, shared=sp.hstack((shared, main_axes), format="csr")
+    ):
+        return determined
+    average = actual[~determined]
+    column = 0
+    by_feature = {g.feature_name: g for g in active_groups}
+    for key, term in terms:
+        excluded = term._left_out
+        weights = np.array([i not in excluded for i in range(len(term._levels))], dtype=float)
+        if not np.any(weights):
+            return determined
+        weights /= weights.sum()
+        # Free blocks store every level but the last, which is minus their sum.
+        basis = B[~determined, column : column + term.k]
+        average[:, by_feature[key].sl] = (
+            basis[:, None, :] * (weights[:-1] - weights[-1])[None, :, None]
+        ).reshape(len(average), -1)
+        column += term.k
+    determined[~determined] = _determined_rows(point_rule, active, average)
+    return determined
 
 
 def _population_curve_se(
@@ -145,8 +221,14 @@ def _population_curve_se(
     *,
     n_points: int,
     center: bool,
+    groups: list[GroupSlice],
+    determines: Determinacy | None = None,
 ) -> NDArray | None:
-    """The errors of a main-effect curve on its ``sz`` population curve (``_population_curve_map``)."""
+    """The errors of a main-effect curve on its ``sz`` population curve (``_population_curve_map``).
+
+    The grid and covariance have the same centering. Each row receives the decision
+    of ``_population_grid_determined``.
+    """
     x_grid = np.linspace(spline_spec._lo, spline_spec._hi, n_points)
     mapped = _population_curve_map(
         spline_spec,
@@ -157,10 +239,13 @@ def _population_curve_se(
         interaction_specs,
         x_grid,
         center=center,
+        groups=groups,
+        determines=determines,
     )
     if mapped is None:
         return None
-    return cast(NDArray, np.sqrt(np.maximum(np.diag(mapped[1]), 0.0)))
+    covariance, shown = mapped
+    return np.where(shown, np.sqrt(np.maximum(np.diag(covariance), 0.0)), np.nan)
 
 
 def _held_levels(spec, name, interaction_specs):
@@ -213,7 +298,15 @@ def _level_rows(spec, levels, held, columns) -> NDArray:
 
 
 def _held_level_se(
-    spec, name, feature_groups, active_groups, Cov_active, interaction_specs, *, center: bool
+    spec,
+    name,
+    feature_groups,
+    active_groups,
+    Cov_active,
+    interaction_specs,
+    *,
+    center: bool,
+    determines: Determinacy | None = None,
 ) -> NDArray | None:
     """The level errors of a main term an ``sz`` term folds, or ``None``.
 
@@ -221,7 +314,8 @@ def _held_level_se(
     (``factor_smooth.with_held_group_levels``), so each reported level is
     ``(L_l - L_base) gamma`` with ``L`` the term's rows at its levels and a
     held level's row the identified rows' mean: the errors are those of that
-    map, and centring maps it through ``I - 11'/n``.
+    map, and centring maps it through ``I - 11'/n``.  ``determines`` leaves NaN
+    each one it does not determine (``withhold_undetermined``).
     """
     active_subs = [ag for ag in active_groups if ag.feature_name == name]
     record = _held_levels(spec, name, interaction_specs) if active_subs else None
@@ -235,36 +329,53 @@ def _held_level_se(
     if center:
         L = L - L.mean(axis=0)
     variance = np.einsum("ij,jk,ik->i", L, Cov_g, L, optimize=True)
-    return cast(NDArray, np.sqrt(np.maximum(variance, 0.0)))
+    se = cast(NDArray, np.sqrt(np.maximum(variance, 0.0)))
+    return withhold_undetermined(se, determines, feature_groups[0].start + columns, L)
 
 
-def ordered_level_contrasts(
-    spec, name, feature_groups, interaction_specs, width: int, selected
-) -> NDArray:
-    """Each level ``feature_se_from_cov`` reports for ordered ``spec``, over ``width`` coefficients.
-
-    Row ``l`` is ``L_l - L_base`` (``_level_rows``, a held level's the identified levels'
-    mean) on the term's groups ``selected`` names, and zero on the others, whose
-    coefficients the selected model holds at zero.
+class Determinacy(NamedTuple):
+    """What ``contrast_determined`` reads of a covariance: its coefficient mask over the
+    fitted coefficients, and the decider of the decomposition the mask came from
+    (``RankDecomposition.is_estimable``), or ``None``.
     """
-    levels = list(spec._ordered_levels)
-    record = _held_levels(spec, name, interaction_specs)
-    L = _level_rows(spec, levels, None if record is None else record[1:], slice(None))
-    return term_contrasts(L, feature_groups, width, selected)
+
+    coefficient_estimable: NDArray
+    contrast_estimable: Callable[..., bool] | None
 
 
-def term_contrasts(rows: NDArray, feature_groups, width: int, selected) -> NDArray:
-    """``rows`` over a term's ``feature_groups`` (columns in their order) as contrasts over
-    ``width`` coefficients, zero on the groups ``selected`` does not name: the selected
-    model holds those at zero.
+def reads_determinacy(spec: Any, name: Hashable, interaction_specs: Mapping[Any, Any]) -> bool:
+    """Whether ``feature_se_from_cov`` puts main term ``name``'s errors to ``determines``.
+
+    It does for a spline's curve, an ordered term's levels and the levels an ``sz`` term
+    folds (``_held_levels``); the other term classes are reported as they are.
     """
-    contrasts = np.zeros((len(rows), width))
-    start = 0
-    for group in feature_groups:
-        if group.name in selected:
-            contrasts[:, group.sl] = rows[:, start : start + group.size]
-        start += group.size
-    return contrasts
+    from superglm.features.ordered_categorical import OrderedCategorical
+    from superglm.features.spline import _SplineBase
+
+    if isinstance(spec, _SplineBase | OrderedCategorical):
+        return True
+    return _held_levels(spec, name, interaction_specs) is not None
+
+
+def as_determinacy(determines: Any, width: int) -> Determinacy | None:
+    """``determines`` as a ``Determinacy`` over ``width`` fitted coefficients.
+
+    A bare decider of one contrast, the form the readers took before the mask came with
+    it, shows no coefficient: every contrast with a nonzero weight is put to it.  It was
+    never asked about a term's fitted function, which stays reported.
+    """
+    if determines is None or isinstance(determines, Determinacy):
+        return determines
+
+    def decide(
+        contrast: NDArray,
+        design_rows: bool = False,
+        shared: SharedDirections | None = None,
+        group_columns: NDArray | None = None,
+    ) -> bool:
+        return design_rows or bool(determines(contrast))
+
+    return Determinacy(np.zeros(width, dtype=bool), decide)
 
 
 def contrast_determined(
@@ -294,6 +405,9 @@ def function_determined(
     columns: NDArray,
     coefficient_estimable: NDArray,
     contrast_estimable: Callable[..., bool] | None,
+    *,
+    shared: SharedDirections | None = None,
+    group_columns: NDArray | None = None,
 ) -> bool:
     """Whether a covariance determines each design row's part on the coefficients ``columns`` marks.
 
@@ -304,15 +418,38 @@ def function_determined(
     """
     if np.all(coefficient_estimable[columns]):
         return True
-    return contrast_estimable is not None and bool(contrast_estimable(columns, design_rows=True))
+    if contrast_estimable is None:
+        return False
+    if shared is None and group_columns is None:
+        return bool(contrast_estimable(columns, design_rows=True))
+    return bool(
+        contrast_estimable(columns, design_rows=True, shared=shared, group_columns=group_columns)
+    )
 
 
-def withhold_undetermined(se: NDArray, determines, contrasts) -> NDArray:
-    """``se`` with NaN at each row of ``contrasts()`` that ``determines`` does not determine."""
-    if determines is None:
+def withhold_undetermined(
+    se: NDArray, determines: Determinacy | None, columns: NDArray, rows: NDArray
+) -> NDArray:
+    """``se`` with NaN where ``determines`` leaves its row of ``rows`` open (``contrast_determined``).
+
+    ``rows`` is the map the errors were formed with, over the fitted coefficients
+    ``columns``, which are a term's active ones: the selected model holds its others at
+    zero.  A mask that shows all of ``columns`` determines every row, and none is decided
+    apart; ``None`` reports every one.
+    """
+    if determines is None or np.all(determines.coefficient_estimable[columns]):
         return se
-    determined = np.array([determines(contrast) for contrast in contrasts()], dtype=bool)
-    return np.where(determined, se, np.nan)
+    return np.where(_determined_rows(determines, columns, rows), se, np.nan)
+
+
+def _determined_rows(determines: Determinacy, columns: NDArray, rows: NDArray) -> NDArray:
+    """Apply the coefficient mask's contrast rule to report rows on selected columns."""
+    contrast = np.zeros(len(determines.coefficient_estimable))
+    determined = np.empty(len(rows), dtype=bool)
+    for i, row in enumerate(rows):
+        contrast[columns] = row
+        determined[i] = contrast_determined(contrast, *determines)
+    return determined
 
 
 def feature_se_from_cov(
@@ -326,13 +463,18 @@ def feature_se_from_cov(
     n_points: int = 200,
     center: bool = False,
     flags=None,
+    determines: Determinacy | None = None,
 ) -> NDArray:
     """Compute feature-level SEs from a precomputed covariance matrix.
 
     ``center=True`` returns the errors of the mean-centered report, the
     estimable contrast ``C b`` with ``C = I - 11'/L`` and covariance
     ``C V C'``. An inactive term returns zeros either way.  ``flags`` takes the
-    calling reader's ``separated_levels.separation_flags``.
+    calling reader's ``separated_levels.separation_flags``.  ``determines``
+    leaves NaN each error of a spline's curve and of an ordered term's levels
+    that the covariance does not determine, decided where its map is formed
+    (``_spline_se``, ``_held_level_se``, ``_population_curve_se``); the other
+    term classes are reported as they are.
     """
     from superglm.features.categorical import Categorical
     from superglm.features.numeric import Numeric
@@ -355,13 +497,21 @@ def feature_se_from_cov(
             n_points=n_points,
             center=center,
             flags=flags,
+            determines=determines,
         )
         return np.ldexp(se, Cov_active.exponent // 2)
 
     feature_groups = [g for g in groups if g.feature_name == name]
     spec = specs.get(name) or interaction_specs.get(name)
     held = _held_level_se(
-        spec, name, feature_groups, active_groups, Cov_active, interaction_specs, center=center
+        spec,
+        name,
+        feature_groups,
+        active_groups,
+        Cov_active,
+        interaction_specs,
+        center=center,
+        determines=determines,
     )
     if held is not None:
         return held
@@ -376,6 +526,7 @@ def feature_se_from_cov(
                 x_eval=np.array(spec._ordered_levels, dtype=object),
                 reference_x=np.array([spec._base_level], dtype=object),
                 center=center,
+                determines=determines,
             )
         active_subs = [ag for ag in active_groups if ag.feature_name == name]
         if not active_subs:
@@ -447,6 +598,8 @@ def feature_se_from_cov(
             interaction_specs,
             n_points=n_points,
             center=center,
+            groups=groups,
+            determines=determines,
         )
         if shifted is not None:
             return shifted
@@ -458,6 +611,7 @@ def feature_se_from_cov(
             Cov_active,
             n_points=n_points,
             center=center,
+            determines=determines,
         )
 
     if isinstance(spec, Polynomial):
@@ -600,6 +754,7 @@ def simultaneous_band_and_critical_value(
     seed: int = 42,
     center: bool = False,
     interaction_specs: Mapping[Any, Any] | None = None,
+    determines: Determinacy | None = None,
 ) -> tuple[pd.DataFrame, float]:
     """Simultaneous confidence bands for a spline feature, and their critical value.
 
@@ -668,6 +823,8 @@ def simultaneous_band_and_critical_value(
         interaction_specs,
         x_grid,
         center=center,
+        groups=groups,
+        determines=determines,
     )
     if mapped is not None:
         from superglm.features.factor_smooth import population_curve_shift
@@ -675,17 +832,24 @@ def simultaneous_band_and_critical_value(
         shift = population_curve_shift(feature, x_grid, interaction_specs, groups, beta)
         assert shift is not None
         log_rel = log_rel + (shift - shift.mean() if center else shift)
-        se = np.sqrt(np.maximum(np.diag(mapped[1]), 0.0))
-        f_sim = rng.standard_normal((n_sim, se.size)) @ _principal_root(mapped[1])
+        covariance, shown = mapped
+        se = np.where(shown, np.sqrt(np.maximum(np.diag(covariance), 0.0)), np.nan)
+        f_sim = (
+            rng.standard_normal((n_sim, se.size)) @ _principal_root(covariance)
+            if shown.all()
+            else None
+        )
     else:
         beta_sim = rng.standard_normal((n_sim, Cov_g.shape[0])) @ _principal_root(Cov_g)
         f_sim = beta_sim @ M.T
 
     # A standard error below the rounding of the largest one carries no
     # information; the floor is relative, so rescaling the response moves it too.
-    se_safe = np.maximum(se, max(SQRT_EPS * float(np.max(se)), TINY))
-    T_sim = np.max(np.abs(f_sim) / se_safe[np.newaxis, :], axis=1)
-    c_sim = float(np.quantile(T_sim, 1.0 - alpha))
+    c_sim = np.nan
+    if f_sim is not None:
+        se_safe = np.maximum(se, max(SQRT_EPS * float(np.max(se)), TINY))
+        T_sim = np.max(np.abs(f_sim) / se_safe[np.newaxis, :], axis=1)
+        c_sim = float(np.quantile(T_sim, 1.0 - alpha))
 
     z = norm.ppf(1.0 - alpha / 2.0)
 

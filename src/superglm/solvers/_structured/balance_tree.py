@@ -70,7 +70,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from functools import cached_property, lru_cache
 from typing import TYPE_CHECKING
 
@@ -2411,16 +2411,6 @@ class SumToZeroTreeFactor:
         )
         return SumToZeroTreeFactor(system, data)
 
-    def border_estimability(self):
-        """``coefficient_estimable``'s rule on contrasts of the border slopes, as
-        ``geometry.BorderNullSpace``: the same verified null space's border rows.
-        """
-        from superglm.solvers._structured.geometry import BorderNullSpace
-
-        null, root = self._data_factor()._verified_data_null()
-        border = self.small_indices[1:]
-        return BorderNullSpace(border, root[border], null[border])
-
     def _verified_data_estimable(self) -> NDArray:
         """Data estimability on this (unpenalized) tree (``_verified_data_null``)."""
         null, _ = self._verified_data_null()
@@ -3103,10 +3093,23 @@ class ProfiledSumToZeroTreeFactor(_ProfiledLeafFactor):
         """The slopes' estimability (``SumToZeroTreeFactor.coefficient_estimable``)."""
         return self.augmented_factor.coefficient_estimable()[1:]
 
-    def border_estimability(self):
-        """The slopes' ``SumToZeroTreeFactor.border_estimability``."""
-        border = self.augmented_factor.border_estimability()
-        return replace(border, indices=border.indices - 1)
+    def border_estimability(self, operator: CenteredBlockOperator, *, all_slopes: bool = False):
+        """The data null space on the border and intercept, or on every slope for a population curve.
+
+        The tree certifies it in the uncentred columns; the contrast rule reads it in the
+        centred scales of ``operator``, the fit's centred data operator
+        (``geometry.augmented_null_border_space``).  Signed weights certify it on the
+        ``|w|`` rows, whose own centred operator then gives the scales.
+        """
+        from superglm.solvers._structured.geometry import augmented_null_border_space
+
+        data = self.augmented_factor._data_factor()
+        if data.system is not self.augmented_factor.system:
+            operator = data.system.centred_data_operator
+        null, root = data._verified_data_null()
+        return augmented_null_border_space(
+            operator, null, root, self.xtw / self.sum_w, all_slopes=all_slopes
+        )
 
     def raw_level_inverse_block(self, level: int) -> NDArray:
         return self.augmented_factor.raw_level_inverse_block(level)
