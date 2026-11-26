@@ -65,6 +65,11 @@ def _population(monkeypatch, splice, body, tail, q):
         lambda X, **kw: pd.DataFrame(np.broadcast_to(tail, (len(X), 2))),
     )
     monkeypatch.setattr(splice.exceedance, "predict", lambda X, **kw: np.broadcast_to(q, (len(X),)))
+    monkeypatch.setattr(
+        splice.exceedance,
+        "_predict_with_complement",
+        lambda X, **kw: (np.broadcast_to(q, (len(X),)), np.broadcast_to(1 - q, (len(X),))),
+    )
 
 
 def test_exact_splice_and_boundary(monkeypatch, fitted):
@@ -295,6 +300,21 @@ def test_extreme_exceedance_probabilities(monkeypatch, fitted):
     y = fitted.predict_quantile(X, p)
     assert np.all(y[:3] < u) and y[3] > u
     np.testing.assert_allclose(fitted.predict_cdf(X, y), p, rtol=2e-12, atol=0)
+
+
+def test_the_body_keeps_its_mass_where_the_exceedance_probability_rounds_to_one(fitted):
+    """An exceedance logit of +100 leaves the body a mass of ``e^-100``.
+
+    The exceedance probability rounds to 1 there, and the body's mass was its
+    difference from 1: the CDF at the threshold read 0, and the ``1e-45``
+    quantile, which lies below the threshold, was placed in the tail.
+    """
+    X, u = _frame(2), fitted.threshold
+    offset = 100.0 - fitted.exceedance._predict_eta_raw_exact(X)
+    assert np.all(fitted.exceedance.predict(X, offset=offset) == 1.0)  # the control
+    cdf = fitted.predict_cdf(X, u, exceedance_offset=offset)
+    np.testing.assert_allclose(cdf, np.exp(-100.0), rtol=1e-12)
+    assert np.all(fitted.predict_quantile(X, 1e-45, exceedance_offset=offset) < u)
 
 
 def test_prediction_rejects_unknown_offset_keywords():

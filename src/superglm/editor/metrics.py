@@ -6,13 +6,14 @@ from typing import Any
 
 import numpy as np
 
-from superglm._utils import _explained_deviance, weighted_row_sum
+from superglm._utils import _explained_deviance
 from superglm._weight_units import unit_log_likelihood
 from superglm.editor.apply import model_for_split_scoring
 from superglm.editor.errors import no_quote_message
 from superglm.editor.evaluation import (
     EvaluationDataset,
     _validate_evaluation_weights,
+    edited_statistics_dataset,
     named_metrics_dataset,
 )
 from superglm.editor.lss.availability import unavailable_evidence
@@ -137,7 +138,9 @@ def metrics_payload(
     selected_model = (
         reference_model
         if source == "original"
-        else model_for_split_scoring(session.model, session.terms)
+        else model_for_split_scoring(
+            session.model, session.terms, edited_statistics_dataset(session)
+        )
     )
     original_metrics = compute_dataset_metrics(reference_model, eval_dataset)
     edited_metrics = compute_dataset_metrics(selected_model, eval_dataset)
@@ -227,6 +230,7 @@ def _compute_metrics(
     model, X, y, weights, offset, *, contract_checked: bool = False
 ) -> dict[str, float]:
     from superglm.model import base
+    from superglm.solvers.clip_rows import unheld_weights, weighted_deviance_sum
 
     y_arr = np.asarray(y, dtype=np.float64).ravel()
     w = np.asarray(weights, dtype=np.float64).ravel()
@@ -252,7 +256,7 @@ def _compute_metrics(
         weight_semantics=model_weight_semantics(model),
     )
     # A zero-weight row adds an exact 0, even where it has no quote (NaN).
-    deviance = weighted_row_sum(w, family.deviance_unit, y_arr, mu)
+    deviance = weighted_deviance_sum(family, y_arr, w, mu, held)
     # `compute_dataset_metrics` bypasses `ModelMetrics` entirely, so the
     # evaluation-boundary check is repeated here for editor validation and
     # test splits.  The fit's own objects were checked by the fit.
@@ -265,16 +269,14 @@ def _compute_metrics(
             family,
             y_arr,
             mu,
-            w,
+            unheld_weights(held, w),
             model.result,
             weight_semantics=model_weight_semantics(model),
             report_contract=not contract_checked,
         )
     )
     if held is not None:
-        gap = held.deviance_gap(w)
-        deviance += gap
-        log_likelihood -= 0.5 * gap
+        log_likelihood -= 0.5 * held.deviance_sum(w)
     aic = float(-2.0 * log_likelihood + 2.0 * edf)
     bic = float(-2.0 * log_likelihood + np.log(likelihood_size) * edf)
     denom = likelihood_size - edf - 1.0
@@ -284,10 +286,16 @@ def _compute_metrics(
     )
     explained = _explained_deviance(deviance, null_deviance, y_arr, null_mu, w)
     pearson = float(
-        pearson_chi2(distribution=family, y=y_arr, mu=mu, sample_weight=w, variance_floor=0.0)
+        pearson_chi2(
+            distribution=family,
+            y=y_arr,
+            mu=mu,
+            sample_weight=unheld_weights(held, w),
+            variance_floor=0.0,
+        )
     )
     if held is not None:
-        pearson += held.pearson_gap(w)
+        pearson += held.pearson_sum(w)
     return {
         "deviance": deviance,
         "aic": aic,
@@ -314,7 +322,7 @@ def _null_deviance_and_mu(
     likelihood; a fit that ended on the likelihood's rows always does.
     """
     from superglm.model.fit_ops import _null_state
-    from superglm.solvers.clip_rows import on_likelihood_rows
+    from superglm.solvers.clip_rows import on_likelihood_rows, weighted_deviance_sum
 
     mu, held = _null_state(
         y,
@@ -325,5 +333,4 @@ def _null_deviance_and_mu(
         weight_semantics=model_weight_semantics(model),
         likelihood_rows=likelihood_rows or on_likelihood_rows(model.result),
     )
-    deviance = float(np.sum(weights * model._distribution.deviance_unit(y, mu)))
-    return (deviance if held is None else deviance + held.deviance_gap(weights)), mu
+    return weighted_deviance_sum(model._distribution, y, weights, mu, held), mu

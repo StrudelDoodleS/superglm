@@ -19,7 +19,6 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import FrameLike, as_eager_frame
-from superglm._utils import weighted_row_sum
 from superglm._weight_units import unit_log_likelihood
 from superglm.distributional.api import SuperLSS
 from superglm.distributional.cross_validation import LSSFolds, parts_ratio
@@ -31,6 +30,7 @@ from superglm.model.base import NoPredictedMeanError, unpriced_rows
 from superglm.model.binding_ops import resolve_level_bindings as _resolve_level_bindings
 from superglm.model.fit_method import FIT_METHODS, FitMethod
 from superglm.model.reml_setup import live_reml_lambdas
+from superglm.solvers.clip_rows import unheld_weights, weighted_deviance_sum
 from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
 from superglm.validation import _normalized_gini
 
@@ -577,8 +577,7 @@ def _pooled_deviance_parts(model, X_val, y_val, *, sample_weight=None, offset=No
     """Return numerator and denominator for pooled deviance aggregation."""
     mu, held = _scored_rows(model, X_val, y_val, sample_weight, offset, "the deviance")
     weights, denominator = _scoring_weights(model, sample_weight, len(y_val))
-    total = weighted_row_sum(weights, model._distribution.deviance_unit, y_val, mu)
-    return total if held is None else total + held.deviance_gap(weights), denominator
+    return weighted_deviance_sum(model._distribution, y_val, weights, mu, held), denominator
 
 
 def _pooled_nll_parts(model, X_val, y_val, *, sample_weight=None, offset=None):
@@ -602,12 +601,12 @@ def _pooled_nll_parts(model, X_val, y_val, *, sample_weight=None, offset=None):
         model._distribution,
         y_val,
         mu,
-        weights,
+        unheld_weights(held, weights),
         model.result,
         weight_semantics=model_weight_semantics(model),
     )
     if held is not None:
-        ll -= 0.5 * held.deviance_gap(weights)
+        ll -= 0.5 * held.deviance_sum(weights)
     return float(-ll), denominator
 
 
@@ -767,9 +766,11 @@ class _GLMFolds:
 
         mu, held = score_rows(est, X, offset, y, sample_weight, predict_priced(est, X, offset))
         unit = est._distribution.deviance_unit(np.asarray(y, dtype=np.float64), mu)
-        if held is not None:
-            unit = held.patched(unit, held.deviance)
-        return unit if sample_weight is None else np.asarray(sample_weight) * unit
+        costs = unit if sample_weight is None else np.asarray(sample_weight) * unit
+        if held is None:
+            return costs
+        weights = np.ones(unit.shape) if sample_weight is None else sample_weight
+        return held.patched(costs, held.weighted_deviance(weights))
 
     def predict(self, est, X, offset) -> NDArray[np.float64]:
         """``est.predict``, without its warning for rows with no mean: ``cross_validate`` names

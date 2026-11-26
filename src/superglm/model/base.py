@@ -59,6 +59,8 @@ from superglm.solvers.clip_rows import (
     HeldRows,
     clip_may_hold,
     scored_held_rows,
+    tail_complement,
+    weighted_deviance_sum,
 )
 from superglm.solvers.dispersion import model_weight_semantics, validate_weight_semantics
 from superglm.solvers.pirls import PIRLSResult
@@ -972,8 +974,8 @@ def held_score_rows(
 ) -> HeldRows | None:
     """The rows of a score at the raw predictor ``eta`` that are read from the likelihood, or ``None``.
 
-    ``mu`` is ``response_mean`` of ``eta``, which the score's sums read; the
-    caller adds the held rows' gaps to them (``HeldRows.deviance_gap``).  The
+    ``mu`` is ``response_mean`` of ``eta``, which the score's sums read on every
+    other row; the caller adds the held rows' own (``HeldRows.deviance_sum``).  The
     rule is the fit's own (``clip_rows.scored_held_rows``): a binomial row the
     working clip holds is read at its own predictor, as ``predict`` returns
     it.  A mean clear of the clip costs one comparison.
@@ -987,11 +989,8 @@ def held_score_rows(
 
 def scored_deviance(model, y, weights: NDArray, eta: NDArray, mu: NDArray) -> float:
     """``sum w d(y, mu)`` on rows scored at the raw predictor ``eta``, with its ``held_score_rows``."""
-    from superglm._utils import weighted_row_sum
-
-    total = weighted_row_sum(weights, model._distribution.deviance_unit, y, mu)
     held = held_score_rows(model, y, weights, eta, mu)
-    return total if held is None else total + held.deviance_gap(weights)
+    return weighted_deviance_sum(model._distribution, y, weights, mu, held)
 
 
 def clipped_rows(
@@ -1023,7 +1022,7 @@ def score_rows(
 ) -> tuple[NDArray, HeldRows | None]:
     """``clipped_rows`` of ``predict``'s means ``mu``, and the rows a score reads from the likelihood.
 
-    The sums' mean and its ``held_score_rows``, whose gaps the caller adds;
+    The sums' mean and its ``held_score_rows``, whose own sums the caller adds;
     ``mu`` itself and ``None`` with no mean past the clip.
     """
     mu, eta = clipped_rows(model, X, offset, mu)
@@ -1055,6 +1054,23 @@ def predict_exact(
     if warn and np.any(missing) and not _NO_MEAN_WARNING_QUIET.get():
         warn_caller(_no_mean_warning(model, eta, missing))
     return mu
+
+
+def predict_with_complement(
+    model, X: EagerFrame | FrameLike, offset: NDArray | None = None
+) -> tuple[NDArray, NDArray]:
+    """``predict_exact``'s means and their complements ``1 - mean``.
+
+    A binomial under the logit, probit or cloglog link forms the complement at
+    the row's own predictor, as it forms the mean (``clip_rows.tail_complement``):
+    a mean that rounds to 1 keeps the complement float64 holds.  Any other
+    model's is the difference.
+    """
+    if not pair_of(model._distribution, model._link).tail_rows:
+        mu = predict_exact(model, X, offset)
+        return mu, 1.0 - mu
+    eta = predict_eta_raw_exact(model, X, offset)
+    return model._link.inverse(eta), tail_complement(model._link, eta)
 
 
 def resolve_penalty(

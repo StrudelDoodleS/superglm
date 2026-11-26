@@ -36,6 +36,7 @@ import scipy.linalg
 from numpy.typing import NDArray
 
 from superglm._family_link import pair_of
+from superglm._utils import weighted_row_sum
 from superglm.distributions import Binomial, Distribution, clip_mu
 from superglm.links import (
     CloglogLink,
@@ -304,6 +305,26 @@ def tail_rows(link: object, y: NDArray, eta: NDArray) -> tuple[NDArray, NDArray,
             )
             score = np.where(event, y * ratio, 0.0) - np.where(non_event, (1.0 - y) * t, 0.0)
             return log_likelihood, score, information, observed
+    raise TypeError(f"no tail rows are declared for {type(link).__name__}")
+
+
+def tail_complement(link: object, eta: NDArray) -> NDArray:
+    """``1 - p`` at the unclipped ``eta``, formed in the predictor as ``p`` itself is.
+
+    ``expit(-eta)``, ``Phi(-eta)`` and ``exp(-e^eta)``.  The difference ``1 - p``
+    is 0 once ``p`` rounds to 1, from a logit predictor of 36.8, while the
+    complement is a float64 value to 709.
+    """
+    from scipy.special import expit, ndtr
+
+    eta = np.asarray(eta, dtype=np.float64)
+    if type(link) is LogitLink:
+        return expit(-eta)
+    if type(link) is ProbitLink:
+        return ndtr(-eta)
+    if type(link) is CloglogLink:
+        with np.errstate(over="ignore"):
+            return np.exp(-np.exp(eta))
     raise TypeError(f"no tail rows are declared for {type(link).__name__}")
 
 
@@ -754,6 +775,12 @@ class HeldRows:
     the row's float64 value wherever it has one: where a score or the scores'
     ratio leaves the normal range the Pearson residual is ``exp(+-(log(1 - p)
     - log p) / 2)``.  A figure float64 cannot hold is infinite.
+
+    A weighted figure is the row's float64 value wherever the product has one
+    (``weighted_deviance``, ``pearson``): a unit figure that overflows is
+    weighted inside its exponential.  A sum reads the held rows beside the
+    others (``weighted_deviance_sum``, ``unheld_weights``), never as a
+    correction to the clipped sum, which rounds a row of small weight away.
     """
 
     __slots__ = (
@@ -764,6 +791,7 @@ class HeldRows:
         "log_q",
         "event_score",
         "non_event_score",
+        "_cloglog",
         "_clipped",
     )
 
@@ -783,11 +811,9 @@ class HeldRows:
         self.log_q, non_event = tail_rows(link, np.zeros_like(eta), eta)[:2]
         # a magnitude: one that underflows is +0, whose reciprocal is +inf
         self.non_event_score = np.abs(non_event)
-        # the clipped mean's unit deviance and squared Pearson residual, which the sums trade away
-        self._clipped = (
-            np.asarray(family.deviance_unit(y, mu), dtype=np.float64),
-            (y - mu) ** 2 / family.variance(mu),
-        )
+        self._cloglog = type(link) is CloglogLink
+        # the clipped mean's unit deviance, which ``deviance_gap`` trades away
+        self._clipped = np.asarray(family.deviance_unit(y, mu), dtype=np.float64)
 
     @property
     def deviance(self) -> NDArray:
@@ -801,6 +827,11 @@ class HeldRows:
     @property
     def residual(self) -> NDArray:
         return _by_outcome(self.y, self.complement, -np.exp(self.log_p))
+
+    @property
+    def score(self) -> NDArray:
+        """The likelihood's score ``dl/deta``."""
+        return _by_outcome(self.y, self.event_score, -self.non_event_score)
 
     @property
     def pearson_residual(self) -> NDArray:
@@ -823,11 +854,42 @@ class HeldRows:
             event = np.where(np.isinf(self.non_event_score), np.exp(-self.eta), event)
             return _by_outcome(self.y, event, -1.0 / self.event_score)
 
-    def pearson(self, weights: NDArray) -> NDArray:
-        """``sqrt(w)`` times the Pearson residual, an exact 0 on a row of weight 0."""
+    def weighted_deviance(self, weights: NDArray) -> NDArray:
+        """``w`` times the unit deviance, an exact 0 on a row of weight 0.
+
+        ``-2 [y (w log p) + (1 - y) (w log(1 - p))]``.  The one term an
+        ordinary predictor overflows is the cloglog non-event's ``log(1 - p) =
+        -e^eta``, from ``eta = 709.8``: there ``w log(1 - p)`` is ``-e^(eta +
+        log w)``, the row's float64 value wherever it has one.
+        """
         weight = np.asarray(weights, dtype=np.float64)[self.index]
-        with np.errstate(invalid="ignore"):
-            return np.where(weight > 0.0, np.sqrt(weight) * self.pearson_residual, 0.0)
+        with np.errstate(invalid="ignore", over="ignore", divide="ignore"):
+            non_event = weight * self.log_q
+            if self._cloglog:
+                combined = -np.exp(self.eta + np.log(weight))
+                non_event = np.where(np.isinf(self.log_q), combined, non_event)
+            rows = -2.0 * _by_outcome(self.y, weight * self.log_p, non_event)
+        return np.where(weight > 0.0, rows, 0.0)
+
+    def pearson(self, weights: NDArray) -> NDArray:
+        """``sqrt(w)`` times the Pearson residual, an exact 0 on a row of weight 0.
+
+        A residual that alone overflows or rounds to 0 is ``exp`` of half the
+        log odds: the row is then one exponential of that plus ``log(w) / 2``.
+        """
+        weight = np.asarray(weights, dtype=np.float64)[self.index]
+        with np.errstate(invalid="ignore", over="ignore", divide="ignore", under="ignore"):
+            residual = self.pearson_residual
+            rows = np.sqrt(weight) * residual
+            far = ~np.isfinite(residual) | (residual == 0.0)
+            if np.any(far):
+                half_weight = 0.5 * np.log(weight)
+                half_odds = 0.5 * (self.log_q - self.log_p)
+                combined = _by_outcome(
+                    self.y, np.exp(half_weight + half_odds), -np.exp(half_weight - half_odds)
+                )
+                rows = np.where(far, combined, rows)
+        return np.where(weight > 0.0, rows, 0.0)
 
     def patched(self, rows: NDArray, held: NDArray) -> NDArray:
         """A copy of the per-row figure ``rows`` with the held rows' entries ``held``."""
@@ -835,26 +897,53 @@ class HeldRows:
         result[self.index] = held
         return result
 
-    def _gap(self, weights: NDArray, exact: NDArray, clipped: NDArray) -> float:
+    def deviance_sum(self, weights: NDArray) -> float:
+        """``sum w d`` over the held rows.
+
+        A log-likelihood's share is ``-1/2`` of it: the binomial unit deviance
+        is ``-2 l`` under either weight contract.
+        """
+        return float(np.sum(self.weighted_deviance(weights)))
+
+    def pearson_sum(self, weights: NDArray) -> float:
+        """Pearson's ``sum w (y - p)^2 / (p (1 - p))`` over the held rows."""
+        with np.errstate(over="ignore"):
+            return float(np.sum(self.pearson(weights) ** 2))
+
+    def deviance_gap(self, weights: NDArray) -> float:
+        """``deviance_sum`` less the clipped mean's sum on the held rows.
+
+        For a shape repair's merit, which holds the clipped sum and compares
+        candidates; a published score sums the rows (``weighted_deviance_sum``).
+        """
         weight = np.asarray(weights, dtype=np.float64)[self.index]
         carried = weight > 0.0
         with np.errstate(invalid="ignore", over="ignore"):
-            return float(
-                np.sum(weight[carried] * exact[carried] - weight[carried] * clipped[carried])
-            )
+            exact = self.weighted_deviance(weights)[carried]
+            return float(np.sum(exact - weight[carried] * self._clipped[carried]))
 
-    def deviance_gap(self, weights: NDArray) -> float:
-        """``sum w d`` on the likelihood's rows less the clipped mean's, over the held rows.
 
-        A log-likelihood changes by ``-1/2`` of it: the binomial unit deviance
-        is ``-2 l`` under either weight contract.
-        """
-        return self._gap(weights, self.deviance, self._clipped[0])
+def unheld_weights(held: HeldRows | None, weights: NDArray) -> NDArray:
+    """``weights`` with a 0 on every row of ``held``; ``weights`` itself where it is ``None``.
 
-    def pearson_gap(self, weights: NDArray) -> float:
-        """Pearson's ``sum w (y - p)^2 / (p (1 - p))`` less the clipped mean's, over the held rows."""
-        with np.errstate(over="ignore"):
-            return self._gap(weights, self.pearson_residual**2, self._clipped[1])
+    A sum over the clipped means reads these and adds the held rows' own sum
+    (``HeldRows.deviance_sum``, ``pearson_sum``).  Trading their clipped terms
+    out of a finished sum instead loses a held row whose weighted term is
+    below that sum's last place.
+    """
+    if held is None:
+        return weights
+    rest = np.array(weights, dtype=np.float64, copy=True)
+    rest[held.index] = 0.0
+    return rest
+
+
+def weighted_deviance_sum(
+    family: Distribution, y: NDArray, weights: NDArray, mu: NDArray, held: HeldRows | None
+) -> float:
+    """``sum w d(y, mu)`` at the clipped mean ``mu``, the rows of ``held`` read from the likelihood."""
+    total = weighted_row_sum(unheld_weights(held, weights), family.deviance_unit, y, mu)
+    return total if held is None else total + held.deviance_sum(weights)
 
 
 def held_likelihood_rows(
@@ -910,17 +999,15 @@ def rescored_held_rows(
 ) -> HeldRows | None:
     """The held rows a model re-scored at ``eta_unclipped`` reads from the likelihood, or ``None``.
 
-    A fit's own test (``_IRLSDirectClipOverlay.moves_to_likelihood``) at the
-    coefficients a shape repair or an editor edit scores: with a
-    positive-weight row held against its outcome, tail rows for the pair and a
-    likelihood float64 can hold there, every held row is read from the
+    The coefficients are the ones a shape repair or an editor edit scores, or
+    a fitted model's on other rows.  With a positive-weight row held against
+    its outcome and tail rows for the pair, every held row is read from the
     likelihood, as a fit ending on that state reads it.  ``None`` otherwise:
-    the re-scored model keeps the clipped rows.
+    the re-scored model keeps the clipped rows.  A held row whose loss float64
+    cannot hold is read from the likelihood too, and scores infinity: the
+    clipped mean would price it at ``-2 log 1e-7``, below an ordinary bad row.
     """
-    held = held_likelihood_rows(family, link, y, eta_unclipped, against=weights)
-    if held is None or not np.isfinite(held.deviance_gap(weights)):
-        return None
-    return held
+    return held_likelihood_rows(family, link, y, eta_unclipped, against=weights)
 
 
 def scored_held_rows(

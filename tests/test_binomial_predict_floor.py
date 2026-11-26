@@ -17,20 +17,27 @@ factor of two.
 
 from __future__ import annotations
 
+import functools
 import math
 import warnings
 
 import numpy as np
 import pandas as pd
 import pytest
-from scipy.special import log_ndtr
+from scipy.optimize import brentq
+from scipy.special import expit, log_ndtr
 
 from superglm import Numeric, SuperGLM
 from superglm.distributions import Binomial, clip_mu
 from superglm.editor.evaluation import EvaluationDataset
 from superglm.editor.metrics import compute_dataset_metrics
 from superglm.links import stabilize_eta
-from superglm.model_selection import cross_validate, fold_adapter
+from superglm.model_selection import (
+    _pooled_deviance_parts,
+    _pooled_nll_parts,
+    cross_validate,
+    fold_adapter,
+)
 from superglm.stats.model_tests import _per_obs_log_likelihood
 
 _RTOL = 1e-10
@@ -83,11 +90,11 @@ def _predictor(model, x, offset):
 class _Rows:
     """A fit on ordinary rows, and eight other rows whose first four sit in the two tails."""
 
-    def __init__(self, link: str):
+    def __init__(self, link: str, tail: tuple[float, float] | None = None):
         self.link = link
         self.model = _model(link)
         self.model.fit(pd.DataFrame({"x": _TRAIN_X}), _TRAIN_Y)
-        low, high = _TAIL_ETA[link]
+        low, high = _TAIL_ETA[link] if tail is None else tail
         target = np.r_[low, low, high, high, np.zeros(4)]
         self.offset = np.r_[(target - _predictor(self.model, _X, 0.0))[_TAIL], np.zeros(4)]
         self.frame = pd.DataFrame({"x": _X})
@@ -234,6 +241,7 @@ def test_cross_validation_scores_read_the_likelihood(rows):
     np.testing.assert_allclose(scores["deviance"], mean_deviance, rtol=_RTOL)
     np.testing.assert_allclose(scores["nll"], 0.5 * mean_deviance, rtol=_RTOL)
     np.testing.assert_allclose(result.pooled_scores["deviance"], mean_deviance, rtol=_RTOL)
+    np.testing.assert_allclose(result.pooled_scores["nll"], 0.5 * mean_deviance, rtol=_RTOL)
 
 
 def test_row_costs_read_the_likelihood(rows):
@@ -325,3 +333,236 @@ def test_a_fit_that_never_moved_keeps_its_own_figures_on_its_own_rows():
             deviance = model.metrics(rows_, y, offset=offset).deviance
             np.testing.assert_allclose(deviance, model.result.deviance, rtol=1e-12)
     np.testing.assert_allclose(model.result.deviance, 40 * 2e-7, rtol=1e-6)
+
+
+# ── rows whose loss, or whose weight, leaves the ordinary range ─────
+
+
+@functools.cache
+def _fit(link: str) -> SuperGLM:
+    model = _model(link)
+    model.fit(pd.DataFrame({"x": _TRAIN_X}), _TRAIN_Y)
+    return model
+
+
+def _rows_at(link: str, eta):
+    """The fit under ``link``, rows at ``x = 0`` and the offsets that put them at ``eta``."""
+    model = _fit(link)
+    eta = np.asarray(eta, dtype=np.float64)
+    return model, pd.DataFrame({"x": np.zeros(eta.size)}), eta - _predictor(model, 0.0, 0.0)
+
+
+def _dataset(frame, y, weights, offset) -> EvaluationDataset:
+    return EvaluationDataset(
+        name="v", label="V", X=frame, y=y, sample_weight=weights, offset=offset
+    )
+
+
+#: cloglog predictors of an event priced at 2e-9, a non-event whose ``e^eta`` overflows, an ordinary row
+_OVERFLOW_ETA = [-20.0, 800.0, 0.0]
+_OVERFLOW_Y = np.array([1.0, 0.0, 0.0])
+
+
+@pytest.mark.filterwarnings("ignore:.*non-integral sample_weight")
+@pytest.mark.parametrize(
+    ("weight", "loss"),
+    [(math.exp(-200.0), 2.0 * math.exp(600.0)), (1.0, math.inf)],
+    ids=["float64-holds-the-weighted-loss", "past-float64"],
+)
+def test_a_non_event_past_the_overflow_of_exp_keeps_its_weighted_loss(weight, loss):
+    """A cloglog non-event at 800 costs ``2 w e^800``: ``7.5e260`` at ``w = e^-200``, else infinity.
+
+    ``e^800`` overflows.  The unfixed scores then dropped the likelihood for
+    every row past the clip, so that row cost the clip's ``-2 log 2e-7 = 30.8``
+    a unit of weight and ranked below the event at -20 beside it, which cost
+    32.2 where the likelihood gives 40.
+    """
+    model, frame, offset = _rows_at("cloglog", _OVERFLOW_ETA)
+    weights = np.array([1.0, weight, 1.0])
+    event = float(_log_p_log_q("cloglog", np.array([-20.0]))[0][0])
+    expected = np.array([-2.0 * event, loss, 2.0])
+    costs = fold_adapter(model).row_costs(model, frame, _OVERFLOW_Y, weights, offset)
+    np.testing.assert_allclose(costs, expected, rtol=_RTOL)
+    assert np.argmax(costs) == 1
+    metrics = model.metrics(frame, _OVERFLOW_Y, sample_weight=weights, offset=offset)
+    np.testing.assert_allclose(metrics.deviance, expected.sum(), rtol=_RTOL)
+    np.testing.assert_allclose(metrics.log_likelihood, -0.5 * expected.sum(), rtol=_RTOL)
+    scores = compute_dataset_metrics(model, _dataset(frame, _OVERFLOW_Y, weights, offset))
+    np.testing.assert_allclose(scores["deviance"], expected.sum(), rtol=_RTOL)
+    density = _per_obs_log_likelihood(model, frame, _OVERFLOW_Y, offset, sample_weight=weights)
+    np.testing.assert_allclose(density, -0.5 * expected, rtol=_RTOL)
+
+
+def test_an_edit_scored_on_a_loss_past_float64_has_no_statistics_and_says_why():
+    """An editor's model re-scored on a cloglog non-event at 800 withholds its statistics.
+
+    Its deviance on those rows is infinite, which no summary can print.  The
+    unfixed re-scoring returned to the clipped rows there and printed 65.1.
+    """
+    from superglm.editor import edit
+
+    model = _model("cloglog")
+    model.fit(pd.DataFrame({"x": _TRAIN_X}), _TRAIN_Y)
+    frame = pd.DataFrame({"x": np.zeros(3)})
+    offset = np.array(_OVERFLOW_ETA) - _predictor(model, 0.0, 0.0)
+    session = edit(model, train_data=(pd.DataFrame({"x": _TRAIN_X}), _TRAIN_Y, None, None))
+    scored = session.to_model(X=frame, y=_OVERFLOW_Y, offset=offset)
+    assert np.isnan(scored.result.deviance)
+    with pytest.raises(RuntimeError, match="probability too small for float64"):
+        scored.summary()
+
+
+@pytest.mark.pins_behaviour
+def test_a_zero_weight_row_past_the_overflow_of_exp_adds_an_exact_zero():
+    """Pins: a cloglog non-event at 800 with weight 0 has a cost and a residual of 0.
+
+    At the clipped mean it always had.  Read from the likelihood its unit
+    deviance is infinite, and multiplying that by the weight gives NaN under
+    a RuntimeWarning: the product is the row's own, an exact 0.
+    """
+    model, frame, offset = _rows_at("cloglog", _OVERFLOW_ETA)
+    weights = np.array([1.0, 0.0, 1.0])
+    metrics = model.metrics(frame, _OVERFLOW_Y, sample_weight=weights, offset=offset)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        costs = fold_adapter(model).row_costs(model, frame, _OVERFLOW_Y, weights, offset)
+        residuals = metrics.residuals("deviance")
+        standardized = metrics.std_deviance_residuals
+    assert costs[1] == 0.0 and residuals[1] == 0.0 and standardized[1] == 0.0
+    np.testing.assert_allclose(residuals**2, costs, rtol=_RTOL)
+    assert np.all(np.isfinite(standardized))
+
+
+@pytest.mark.filterwarnings("ignore:.*non-integral sample_weight")
+def test_a_row_of_small_weight_is_not_rounded_out_of_the_sums():
+    """An event at a logit of -100 with weight 1e-26, beside two agreeing rows: 2e-24 of deviance.
+
+    The agreeing rows' clipped terms are 2e-7 each.  The unfixed sums added
+    the likelihood's terms less the clipped ones to the clipped total, which
+    rounds 2e-24 away: deviance, log-likelihood and null deviance all read 0.
+    """
+    eta = np.array([-100.0, 100.0, -100.0])
+    model, frame, offset = _rows_at("logit", eta)
+    y, weights = np.array([1.0, 1.0, 0.0]), np.array([1e-26, 1.0, 1.0])
+
+    def deviance(shift: float) -> float:
+        log_p, log_q = _log_p_log_q("logit", eta + shift)
+        return -2.0 * float(np.sum(weights * np.where(y > 0.0, log_p, log_q)))
+
+    metrics = model.metrics(frame, y, sample_weight=weights, offset=offset)
+    scores = compute_dataset_metrics(model, _dataset(frame, y, weights, offset))
+    assert 1.9e-24 < deviance(0.0) < 2.1e-24
+    for value in (metrics.deviance, -2.0 * metrics.log_likelihood, scores["deviance"]):
+        np.testing.assert_allclose(value, deviance(0.0), rtol=_RTOL)
+    np.testing.assert_allclose(-2.0 * scores["log_likelihood"], deviance(0.0), rtol=_RTOL)
+    for parts, share in ((_pooled_deviance_parts, 1.0), (_pooled_nll_parts, 0.5)):
+        total, _ = parts(model, frame, y, sample_weight=weights, offset=offset)
+        np.testing.assert_allclose(total, share * deviance(0.0), rtol=_RTOL)
+    # the null model moves every predictor by the one shift at which its score is 0
+    shift = brentq(
+        lambda b: float(np.sum(weights * (y * expit(-eta - b) - (1.0 - y) * expit(eta + b)))),
+        -150.0,
+        150.0,
+        xtol=1e-12,
+    )
+    np.testing.assert_allclose(metrics.null_deviance, deviance(shift), rtol=1e-8)
+
+
+def test_the_fits_own_statistics_keep_a_row_of_small_weight():
+    """The statistics ``summary()`` prints, which an editor edit re-forms, sum the same way.
+
+    The three rows above as a fit on the likelihood's rows holds them, the
+    event at weight 1e-60: the unfixed log-likelihood was 0 where the
+    likelihood gives -7.4e-44, and its Pearson sum held 6 digits of 2.7e-17.
+    """
+    from superglm.links import LogitLink
+    from superglm.model.fit_ops import _compute_fit_stats
+
+    eta = np.array([-100.0, 100.0, -100.0])
+    y, weights = np.array([1.0, 1.0, 0.0]), np.array([1e-60, 1.0, 1.0])
+    family, link = Binomial(), LogitLink()
+    mu = clip_mu(link.inverse(stabilize_eta(eta, link)), family)
+    stats = _compute_fit_stats(
+        y, mu, weights, None, family, link, 1.0, weight_semantics="frequency", likelihood_eta=eta
+    )
+    log_p, log_q = _log_p_log_q("logit", eta)
+    log_likelihood = float(np.sum(weights * np.where(y > 0.0, log_p, log_q)))
+    np.testing.assert_allclose(stats.log_likelihood, log_likelihood, rtol=_RTOL)
+    odds_against = np.exp(np.where(y > 0.0, log_q - log_p, log_p - log_q))
+    np.testing.assert_allclose(stats.pearson_chi2, np.sum(weights * odds_against), rtol=_RTOL)
+
+
+@pytest.mark.filterwarnings("ignore:.*non-integral sample_weight")
+def test_pearson_weights_a_row_before_it_squares_it():
+    """An event at a logit of -800 with weight 1e-100 adds ``1e-100 e^800 = 2.7e247`` to Pearson's sum.
+
+    The unfixed sum squared the residual ``e^400`` first, which overflows, and
+    read infinity.  At -1500 the residual ``e^750`` overflows alone, and with
+    weight 1e-200 the weighted one is ``e^(750 - 230.3)``: it read infinity too.
+    """
+    model, frame, offset = _rows_at("logit", [-800.0, 0.0, 0.0])
+    y, weights = np.array([1.0, 0.0, 1.0]), np.array([1e-100, 1.0, 1.0])
+    expected = math.exp(800.0 + math.log(1e-100)) + 2.0
+    metrics = model.metrics(frame, y, sample_weight=weights, offset=offset)
+    np.testing.assert_allclose(metrics.pearson_chi2, expected, rtol=_RTOL)
+    scores = compute_dataset_metrics(model, _dataset(frame, y, weights, offset))
+    np.testing.assert_allclose(scores["pearson_chi2"], expected, rtol=_RTOL)
+    model, frame, offset = _rows_at("logit", [-1500.0, 0.0, 0.0])
+    weights = np.array([1e-200, 1.0, 1.0])
+    residual = model.metrics(frame, y, sample_weight=weights, offset=offset).residuals("pearson")
+    np.testing.assert_allclose(residual[0], math.exp(750.0 + 0.5 * math.log(1e-200)), rtol=_RTOL)
+
+
+@pytest.mark.parametrize("link", ["logit", "probit"])
+def test_cooks_distance_past_float64_is_formed_from_the_score(link):
+    """Cook's distance where the Pearson residual overflows and the leverage underflows.
+
+    ``w r^2 h`` is ``(w s)^2 g`` with ``s`` the likelihood's score and ``g = x'
+    (X' W X)^-1 x``: an event at a probit predictor of -800 has the inverse
+    Mills ratio for its score, about 800.  The unfixed distance multiplied an
+    infinite ``r^2`` by a leverage of 0 and read NaN.
+    """
+    far = _Rows(link, (-800.0, 800.0))
+    eta = far.eta()
+    log_p, log_q = _log_p_log_q(link, eta)
+    log_information = _log_information(link, eta)
+    information = _WEIGHTS * np.exp(log_information)
+    design = np.column_stack([np.ones(len(_X)), _X])
+    covariance = np.linalg.inv(design.T @ (design * information[:, None]))
+    form = np.einsum("ij,jk,ik->i", design, covariance, design)
+    # s^2 is the odds against the outcome that occurred times the information, in logs
+    square_score = np.exp(np.where(_Y > 0.0, log_q - log_p, log_p - log_q) + log_information)
+    metrics = far.model.metrics(far.frame, _Y, sample_weight=_WEIGHTS, offset=far.offset)
+    spread = (1.0 - information * form) ** 2 * metrics.effective_df
+    expected = _WEIGHTS**2 * square_score * form / spread
+    assert (
+        np.all(np.isfinite(expected)) and expected[0] > 1.0
+    )  # the control: the row is influential
+    np.testing.assert_allclose(metrics.cooks_distance, expected, rtol=1e-8)
+
+
+@pytest.mark.pins_behaviour
+def test_drop1_of_a_fit_that_kept_no_state_reads_the_fits_own_deviance():
+    """Pins: ``drop1`` under weights of ``2^-600`` re-forms the fit's deviance without its state.
+
+    The rows past the clip all agree with their outcomes, so the fit reads
+    them at the clip (#734).  A fit that kept no fitted mean has its deviance
+    re-formed from a prediction, and ``predict`` now returns those rows' own
+    probabilities, 2e-7 of deviance a row below the fit's: the re-formed
+    deviance reads them as the fit does, and equals the one from its state.
+    """
+    n = 30
+    offset = np.where(np.arange(n) % 2 == 0, -30.0, 30.0)
+    y = (offset > 0.0).astype(float)
+    y[:6], offset[:6] = [0.0, 1.0, 0.0, 1.0, 1.0, 0.0], 0.0
+    weights, frame = np.full(n, 2.0**-600), pd.DataFrame({"x": np.linspace(-1.0, 1.0, n)})
+    tables = []
+    for retain in (True, False):
+        model = SuperGLM(family="binomial", features={"x": Numeric()}, retain_fit_state=retain)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # rows in the tails
+            model.fit(frame, y, sample_weight=weights, offset=offset)
+            table = model.drop1(frame, y, sample_weight=weights, offset=offset)
+        assert model.result.weight_exponent  # the control: drop1 re-forms the deviance
+        tables.append(table[["deviance_full", "deviance_reduced"]].to_numpy())
+    np.testing.assert_allclose(tables[1], tables[0], rtol=1e-12)

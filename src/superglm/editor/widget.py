@@ -517,7 +517,7 @@ class EditorWidget:
             model = (
                 self.session._materialize_current_statistics(request)
                 if statistics
-                else model_for_split_scoring(request.base_model, request.terms)
+                else model_for_split_scoring(request.base_model, request.terms, request.dataset)
             )
             return {"model": model}
 

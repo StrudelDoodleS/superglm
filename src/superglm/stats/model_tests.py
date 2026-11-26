@@ -216,9 +216,9 @@ def _per_obs_log_likelihood(
         return density
     # such a row's log density is -1/2 of its unit deviance, times its prior weight
     mass = np.ones(y.shape) if sample_weight is None else np.asarray(sample_weight, dtype=float)
-    kept = slice(None) if carried is None else carried[held.index]
-    exact = np.zeros(held.index.shape)
-    exact[kept] = -0.5 * mass[held.index][kept] * held.deviance[kept]
+    exact = -0.5 * held.weighted_deviance(mass)
+    if carried is not None:
+        exact = np.where(carried[held.index], exact, 0.0)
     return held.patched(density, exact)
 
 
