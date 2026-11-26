@@ -88,6 +88,14 @@ def test_diagnostics_and_summary_report_the_only_coefficient_fit_stop(method):
     assert diagnostic["termination_reason"] == "max_iter"
     assert "did not converge" in diagnostic["convergence_note"]
     assert "larger max_iter" in diagnostic["convergence_note"]
+    stop = diagnostic["convergence"]
+    assert stop["smoothing"] is None
+    assert stop["coefficients"] == {
+        "reason": "max_iter",
+        "converged": False,
+        "iterations": 1,
+        "evidence": {"test": "iteration_limit", "iteration_limit": 1},
+    }
     assert "did not converge" in model.summary()._info["convergence_note"]
 
 

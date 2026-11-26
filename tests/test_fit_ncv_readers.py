@@ -274,6 +274,12 @@ def test_diagnostics_label_the_search_by_its_method(state):
     )
     assert entry["convergence_note"] == expected_statement(state, model)
     assert entry["smoothing_bound_note"] is None
+    # The stop report's smoothing verdict is the search's own, as fit_ncv defines it.
+    smoothing = entry["convergence"]["smoothing"]
+    assert (smoothing["reason"], smoothing["converged"]) == (
+        report["termination_reason"],
+        report["search_converged"],
+    )
 
 
 # ── the fit recorder ──────────────────────────────────────────────────────────

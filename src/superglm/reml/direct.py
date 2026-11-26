@@ -40,7 +40,7 @@ from superglm.reml.convergence import (
     classify_dead_feasible_exit,
     coefficient_walk_guard_stopped,
     concave_live_directions,
-    dead_search_score_bar,
+    dead_search_evidence,
     direction_penalty_ranks,
     evaluate_reml_candidate,
     fixed_freeze_record,
@@ -50,11 +50,13 @@ from superglm.reml.convergence import (
     freeze_record,
     mask_frozen_stop_gradient,
     newton_predicted_decrease,
+    newton_step_evidence,
     newton_step_left,
     newton_step_resolved,
     newton_step_same_terms,
     newton_step_settled,
     newton_step_stop_bar,
+    objective_change_evidence,
     project_reml_gradient,
     revalidate_stop,
     trial_counts_as_precision_evidence,
@@ -227,34 +229,6 @@ def _backtracked_rate_cannot_finish(
     if gradient_norm <= score_bar or not 0.0 < step < 1.0:
         return False
     return math.log(score_bar / gradient_norm) / math.log(1.0 - step) > iterations_left
-
-
-def _mean_space_boundary_message(rows: int, *, estimated: bool, unresolved: bool = False) -> str:
-    """Why a fit whose maximum stays at the mean-space boundary has no REML criterion.
-
-    ``unresolved``: the rows rise towards the boundary along a direction the
-    factorization truncates (``TruncatedDirection.boundary``) rather than
-    being fitted at it.
-    """
-    where = (
-        "even with every estimated smoothing parameter at its upper bound"
-        if estimated
-        else "at the fixed smoothing parameters"
-    )
-    fitted = (
-        "rise towards probability 1 along a direction float64 cannot resolve"
-        if unresolved
-        else "are fitted at probability 1"
-    )
-    return (
-        f"The binomial/log model has no interior maximum: {rows} row(s) {fitted}, the "
-        f"boundary of its parameter space, {where}. The maximum "
-        "is constrained there rather than stationary, so the Laplace-approximate REML "
-        "criterion is not defined at it. The unpenalized part of the model fits these "
-        "rows at probability one (for example a categorical level or parametric term "
-        "whose rows all have y = 1); a logit link, merging that level, or a Poisson/log "
-        "risk-ratio fit with robust standard errors (Zou 2004) avoids the boundary."
-    )
 
 
 def optimize_direct_reml(
@@ -822,6 +796,8 @@ def optimize_direct_reml(
 
     n_mean_space_restorations = 0
     prev_obj = np.inf
+    current_roundoff = None
+    stop_evidence = None
     # The stop judges the active set only: a flat frozen direction keeps a
     # tiny gradient forever, and counting it would spin to max_reml_iter.
     stop_criterion_frozen = None
@@ -883,16 +859,8 @@ def optimize_direct_reml(
             and pair.mean_space_violation is not None
         ):
             if not bool(np.any(estimated_mask & (rho_clipped < log_hi))):
-                raise ObservedModeNotConvergedError(
-                    _mean_space_boundary_message(
-                        int(pirls_result.mean_space_boundary_rows),
-                        estimated=bool(np.any(estimated_mask)),
-                        unresolved=bool(pirls_result.mean_space_boundary_unresolved),
-                    ),
-                    infeasible_detail=(
-                        "the penalized maximum lies on the boundary of the binomial mean space"
-                    ),
-                )
+                termination_reason = "mean_space_boundary"
+                break
             rho_clipped = np.where(
                 estimated_mask,
                 np.clip(rho_at_boundary + restoration_step, log_lo, log_hi),
@@ -911,6 +879,20 @@ def optimize_direct_reml(
             pirls_result, XtWX_S_inv, XtWX, S_cand, cand_dense = fit_candidate(
                 cand_lambdas, None, None, n_iter
             )
+        if termination_reason == "mean_space_boundary":
+            # No penalty can move the rows: the unpenalized part holds them at
+            # the boundary, where the criterion is undefined. Published, disclosed.
+            best_pirls, best_obj, best_lambdas = pirls_result, None, cand_lambdas.copy()
+            if lambda_history[-1] != cand_lambdas:
+                lambda_history.append(cand_lambdas.copy())
+            stop_evidence = {
+                "test": "mean_space_boundary",
+                "iter": n_iter,
+                "boundary_row_count": int(pirls_result.mean_space_boundary_rows),
+                "unresolved_direction": bool(pirls_result.mean_space_boundary_unresolved),
+                "estimated_at_upper_bound": bool(np.any(estimated_mask)),
+            }
+            break
         warm_beta = pirls_result.beta.copy()
         warm_intercept = float(pirls_result.intercept)
         warm_centred = centred_warm_start(pirls_result)
@@ -1041,9 +1023,11 @@ def optimize_direct_reml(
         inverse_phi_derivative = None
         penalty_nullity: float | None = None
         obj_roundoff = 0.0
+        previous_roundoff = current_roundoff
+        current_roundoff = None
         if isinstance(objective_evaluation, REMLObjectiveEvaluation):
             obj = objective_evaluation.value
-            obj_roundoff = objective_evaluation.roundoff
+            obj_roundoff = current_roundoff = objective_evaluation.roundoff
             penalty_nullity = objective_evaluation.penalty_nullity
             profiled_scale = objective_evaluation.profiled_scale
         else:
@@ -1330,17 +1314,13 @@ def optimize_direct_reml(
                 hessian = hessian + held_cross[np.ix_(index, index)]
             return newton_step_left(hessian, grad[index])
 
-        def record_step_stop(step_left: float, *, taken_step: float | None) -> None:
-            """``taken_step`` is the Newton step proposed and then taken, None where none was."""
+        def record_step_stop(step_left: float, previous_step: float, *, step_taken: bool) -> dict:
+            record = newton_step_evidence(
+                n_iter, step_left, previous_step, step_bar, step_taken=step_taken
+            )
             if profile is not None:
-                profile["reml_newton_step_stop"] = {
-                    "iter": int(n_iter),
-                    "step_left": step_left,
-                    "taken_step": taken_step,
-                    "previous_step": last_accepted_step if taken_step is None else taken_step,
-                    "bar": step_bar,
-                    "step_taken": taken_step is not None,
-                }
+                profile["reml_newton_step_stop"] = record
+            return record
 
         revalidated_hess = None
         # An uncertified candidate's objective and gradient prove nothing, so
@@ -1423,7 +1403,7 @@ def optimize_direct_reml(
                         estimated_mask=estimated_mask,
                     )
             if same_terms:
-                record_step_stop(step_left, taken_step=held_newton_model[2])
+                stop_evidence = record_step_stop(step_left, held_newton_model[2], step_taken=True)
                 converged = True
                 termination_reason = "newton_step_tolerance"
                 break
@@ -1521,7 +1501,11 @@ def optimize_direct_reml(
                 # warm-started settle at the same lambdas.
                 continue
             # All components frozen: converged (a genuinely all-flat model; the
-            # compound criterion usually fires first).
+            # compound criterion usually fires first). The evidence reads the
+            # gradient under this iteration's hold set, the one the stop used.
+            candidate_convergence = candidate_convergence.under_holds(
+                mask_frozen_stop_gradient(proj_grad, frozen, objective=obj, tolerance=_tol)
+            )
             converged = True
             termination_reason = "active_set_stationary"
             break
@@ -1630,6 +1614,7 @@ def optimize_direct_reml(
         # and that rounding
         unresolved_decrease: float | None = None
         stall_roundoff: float | None = None
+        comparison_roundoff: float | None = None
         # whether a stationary full-step trial was rejected, and an accepted
         # shorter step's decrease that no quadratic criterion rejecting it
         # allows
@@ -1975,6 +1960,10 @@ def optimize_direct_reml(
                 # and the search ends as a dead one (Shi, Xie, Byrd & Nocedal
                 # 2022, SIAM J. Optim. 32(1), sec. 4.1).
                 inconsistent_decrease = float(obj - trial_obj)
+                if current_roundoff is not None and isinstance(
+                    trial_evaluation, REMLObjectiveEvaluation
+                ):
+                    comparison_roundoff = float(obj_roundoff + trial_roundoff)
                 if trace_run is not None and trace_run.enabled:
                     # The trial's evaluation event above reads accepted; this
                     # records that the stop discarded it.
@@ -2014,6 +2003,10 @@ def optimize_direct_reml(
                 # certificate judges the candidate, else the step is taken.
                 unresolved_decrease = float(obj - trial_obj)
                 stall_roundoff = float(obj_roundoff + trial_roundoff)
+                if current_roundoff is not None and isinstance(
+                    trial_evaluation, REMLObjectiveEvaluation
+                ):
+                    comparison_roundoff = stall_roundoff
                 if trace_run is not None and trace_run.enabled:
                     # The trial's evaluation event above reads accepted; this
                     # records that the stop discarded it.
@@ -2131,21 +2124,24 @@ def optimize_direct_reml(
                 # or rejected, add none either way, so the point stands.
                 step_left = held_step_left()
                 if newton_step_settled(step_left, last_accepted_step, bar=step_bar):
-                    record_step_stop(step_left, taken_step=None)
+                    stop_evidence = record_step_stop(
+                        step_left, last_accepted_step, step_taken=False
+                    )
                     termination_reason = "newton_step_tolerance"
+            dead = dead_search_evidence(
+                n_iter,
+                termination_reason,
+                objective=obj,
+                tolerance=_tol,
+                gradient=active_grad_norm,
+                predicted_decrease=dead_predicted_decrease,
+                evaluated_trial=dead_evidence,
+                mode_stationary=candidate_mode_stationary,
+            )
             if profile is not None:
-                # The dead-search exit's evidence, as the discrete engine
-                # records it.
                 profile["reml_dead_line_search"] = {
-                    "iter": int(n_iter),
-                    "active_gradient_norm": active_grad_norm,
-                    "bar": dead_search_score_bar(obj, _tol),
-                    "predicted_decrease": dead_predicted_decrease,
-                    "decrease_bar": float(_tol * score_scale),
+                    **dead,
                     "trial_correction_with_roundoff": correction_size,
-                    "evaluated_trial": bool(dead_evidence),
-                    "candidate_mode_stationary": bool(candidate_mode_stationary),
-                    "termination_reason": termination_reason,
                     # an accepted trial's decrease, within the two evaluations'
                     # rounding; without one, the candidate's own rounding
                     "unresolved_decrease": unresolved_decrease,
@@ -2156,6 +2152,17 @@ def optimize_direct_reml(
                     # full step leaves a quadratic criterion and within the
                     # stop resolution
                     "inconsistent_decrease": inconsistent_decrease,
+                }
+            if stop_evidence is None:
+                change = (
+                    unresolved_decrease
+                    if unresolved_decrease is not None
+                    else inconsistent_decrease
+                )
+                stop_evidence = {
+                    **dead,
+                    **objective_change_evidence(change, comparison_roundoff),
+                    "candidate_objective_roundoff": current_roundoff,
                 }
             # The second-order check (``concave_live_directions``) gates the
             # score-test exit only: a shoulder here has its gradient under the
@@ -2173,6 +2180,19 @@ def optimize_direct_reml(
         best_bound_pressure = candidate_bound_pressure()
     if best_pirls is None:
         raise RuntimeError("Direct REML Newton did not evaluate any candidates")
+
+    if stop_evidence is None and not all_lambdas_fixed:
+        stop_evidence = candidate_convergence.stop_evidence(
+            termination_reason,
+            objective=obj,
+            tolerance=_tol,
+            iteration_limit=max_reml_iter,
+            roundoff=(
+                current_roundoff + previous_roundoff
+                if current_roundoff is not None and previous_roundoff is not None
+                else None
+            ),
+        )
 
     if profile is not None:
         profile["reml_optimizer_s"] = _time.perf_counter() - _t_reml_start
@@ -2207,7 +2227,7 @@ def optimize_direct_reml(
         n_reml_iter=n_iter,
         converged=converged,
         lambda_history=lambda_history,
-        objective=float(best_obj),
+        objective=None if best_obj is None else float(best_obj),
         objective_history=objective_history,
         curvature_source="observed" if use_observed_geometry else "fisher",
         termination_reason=termination_reason,
@@ -2215,4 +2235,5 @@ def optimize_direct_reml(
         mean_space_restorations=n_mean_space_restorations,
         lambda_box=box,
         bound_pressure=best_bound_pressure,
+        stop_evidence=stop_evidence,
     )

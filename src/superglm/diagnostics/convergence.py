@@ -248,6 +248,11 @@ _REML_REASON_TEXT = {
     "max_reml_iter": "it reached the max_reml_iter limit",
     "line_search_failed": "no smoothing step improved the REML score",
     "line_search_stalled": "no smoothing step improved the REML score",
+    "mean_space_boundary": (
+        "the penalized maximum held fitted means on the boundary of the family's mean "
+        "space at the smoothing parameters the search tried (up to the upper bound), and "
+        "the REML score is not defined there"
+    ),
 }
 
 # Termination reasons of a smoothing search that met its convergence test. A
@@ -265,6 +270,41 @@ _REML_CONVERGED_REASONS = frozenset(
         "fixed_lambdas",
     }
 )
+
+
+def stop_report(result: Any, *, smoothing: bool = False, refit_reason: str | None = None) -> dict:
+    """The result's own verdict with any measurements its stopping test recorded."""
+    reason = (
+        refit_reason if refit_reason is not None else getattr(result, "termination_reason", None)
+    )
+    converged = refit_reason is None and bool(result.converged)
+    iterations = getattr(result, "n_reml_iter" if smoothing else "n_iter", None)
+    evidence = None
+    if smoothing and reason != "coefficients_revised":
+        evidence = getattr(result, "stop_evidence", None)
+        if getattr(result, "criterion", "reml") == "ncv":
+            from superglm.model.ncv_ops import CONVERGED_STOPS
+
+            # fit_ncv's search verdict is its stop alone (``ncv_diagnostics()``'s
+            # ``search_converged``); its coefficient fits have their own.
+            converged = reason in CONVERGED_STOPS
+        # The final coefficient refit can overturn the overall verdict.
+        elif getattr(result, "terminal_refit_termination", None) is not None:
+            converged = reason in _REML_CONVERGED_REASONS
+    elif not smoothing and reason == "max_iter":
+        evidence = {"test": "iteration_limit", "iteration_limit": iterations}
+    elif not smoothing and reason == "mean_space_boundary":
+        evidence = {
+            "test": "mean_space_boundary",
+            "boundary_row_count": int(getattr(result, "mean_space_boundary_rows", 0)),
+            "unresolved_direction": bool(getattr(result, "mean_space_boundary_unresolved", False)),
+        }
+    return {
+        "reason": reason,
+        "converged": converged,
+        "iterations": iterations,
+        "evidence": None if evidence is None else dict(evidence),
+    }
 
 
 def _iterations(count: int) -> str:
@@ -378,8 +418,12 @@ def reml_nonconvergence_message(reml_result: Any) -> str | None:
     elif refit_reason == "max_iter":
         message += " Refit with a larger max_pirls_iter to let the final fit finish."
     else:
+        if reason in ("line_search_failed", "line_search_stalled"):
+            message += (
+                " Check the weights and offsets for extreme values and simplify dependent terms."
+            )
         message += " model.reml_diagnostics() holds the iteration history."
-    return message
+    return message + " See model.diagnostics()['_model'] for the stopping evidence."
 
 
 def _bootstrap_retried(reml_result: Any) -> bool:
@@ -890,7 +934,7 @@ def coefficient_nonconvergence_message(fit_result: Any) -> str | None:
             "lies on that boundary rather than inside it, so the fit is reported as not "
             "converged and its standard errors there are not reliable. A logit link keeps "
             "every probability inside (0, 1); a categorical level whose responses are all 0 "
-            "or all 1 can also be merged."
+            "or all 1 can also be merged. See model.diagnostics()['_model'] for affected rows."
         )
     if reason == "clip_held":
         return _clip_held_message(fit_result)
@@ -907,6 +951,7 @@ def coefficient_nonconvergence_message(fit_result: Any) -> str | None:
             else "The stop is not an iteration cap, so more iterations will not help: check "
             "the responses, weights and offsets for extreme values, or simplify the terms."
         )
+        + " See model.diagnostics()['_model'] for the stopping evidence."
     )
 
 

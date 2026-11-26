@@ -64,6 +64,17 @@ N = 240
 LEVELS = ["a", "b", "c"]
 _VOLATILE = re.compile(r"hash|time|second|revision|epoch|fingerprint|(^|_)id$|^fit_share$")
 _ROWS_PASSED = {"n_obs", "n_observations", "storage_rows"}  # the rows handed in, by definition
+# A stopping test's measurement is a residual at the stop, which two fits to one optimum round
+# differently; it is read on the scale of what the test compares it with, beside it in the evidence.
+_STOP_MEASUREMENTS = {
+    "gradient_norm": "gradient_bar",
+    "active_gradient_norm": "bar",
+    "step_left": "bar",
+    "remaining_distance": "bar",
+    "predicted_decrease": "decrease_bar",
+    "objective_change": "objective_change_bar",
+    "objective_roundoff": "objective",
+}
 
 _CONVENTION = (
     "the printed intercept and term curve are centred on the unweighted mean of the basis over "
@@ -174,6 +185,10 @@ def _differences(got, want, rtol):
         gap = np.where(same_nan, 0.0, np.abs(a - b))
         gap = np.where(np.isnan(gap), np.inf, gap)  # a NaN against a number
         scale = max(float(np.max(np.abs(b[~np.isnan(b)]), initial=0.0)), 1e-300)
+        parent, _, leaf = key.rpartition(".")
+        against = want.get(f"{parent}.{_STOP_MEASUREMENTS.get(leaf)}")
+        if isinstance(against, np.ndarray) and np.isfinite(against).all():
+            scale = max(scale, float(np.max(np.abs(against), initial=0.0)))
         if float(np.max(gap, initial=0.0)) > rtol * scale:
             problems.append(f"{key}: largest gap {np.max(gap):.3g} on a scale of {scale:.3g}")
     return problems

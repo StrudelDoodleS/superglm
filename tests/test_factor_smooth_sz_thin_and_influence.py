@@ -1374,6 +1374,8 @@ def test_an_sz_line_that_separates_is_named_and_left_out_of_the_population() -> 
         model = _separated_model().fit_reml(frame, y)
     spec = model._interaction_specs["x:g:sz"]
     assert [spec._levels[code] for code in spec._separated_levels] == ["g000", "g001"]
+    separation = model.diagnostics()["_model"]["convergence"]["separation"]
+    assert separation["levels"]["x:g:sz"] == ["g000", "g001"]
     named = [w for w in caught if "unpenalized line" in str(w.message)]
     assert len(named) == 1
     assert issubclass(named[0].category, SeparationWarning)

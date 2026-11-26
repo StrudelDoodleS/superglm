@@ -82,6 +82,9 @@ class REMLResult:
     # The smoothing criterion the search minimised (``fit_method.FitMethodTraits.criterion``);
     # a result saved before the field reads the class default.
     criterion: str = "reml"
+    # Scalar comparisons at the smoothing search's stop. The final coefficient
+    # refit can publish a different candidate and has its own stop.
+    stop_evidence: dict | None = None
 
 
 def _map_beta_between_bases(
