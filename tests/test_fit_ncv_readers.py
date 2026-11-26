@@ -23,8 +23,10 @@ from dataclasses import replace
 from functools import cache
 
 import numpy as np
+import pandas as pd
 import pytest
 
+from superglm import Spline, SuperGLM
 from superglm.diagnostics.convergence import ncv_bound_message, ncv_nonconvergence_message
 from superglm.diagnostics.fit_report import status_sentence
 from superglm.editor import EditorSession
@@ -36,6 +38,7 @@ from superglm.model.fit_state import fitted_lambda2
 from superglm.model.telemetry_ops import metrics_for_logging
 from superglm.ncv import engine
 from superglm.ncv import search as search_module
+from superglm.types import LambdaPolicy
 from tests.test_fit_ncv import curve_book, curve_fit, curve_model, run
 from tests.test_ncv_engine import always, solver_short
 from tests.test_ncv_search import NarrowBox
@@ -367,6 +370,52 @@ def test_an_auto_refit_from_the_editor_holds_the_chosen_smoothing_with_fit_and_s
     assert fit_trace(elsewhere, fit_id="model", label="All rows")["verdict"] == status_sentence(
         "fixed_fit"
     )
+
+
+def test_an_editor_refit_of_drafts_holds_a_fixed_lambda_policy_at_the_chosen_smoothing():
+    """fit_ncv's drafts refit is a fit at the source's smoothing, a fixed policy's value included.
+
+    The reference is a ``fit`` of the same drafted terms without the policy at those values.  A
+    fit_reml source's refit replays fit_reml, keeping the policy and searching the other term.
+    """
+    rng = np.random.default_rng(41)
+    frame = pd.DataFrame({"x": rng.uniform(size=400), "z": rng.uniform(size=400)})
+    y = np.sin(6 * frame.x.to_numpy()) + np.cos(4 * frame.z.to_numpy()) + rng.normal(0, 0.3, 400)
+    refits = {}
+    for method in ("fit_ncv", "fit_reml"):
+        features = {
+            "x": Spline(kind="ps", n_knots=8, lambda_policy=LambdaPolicy.fixed(3.0)),
+            "z": Spline(kind="ps", n_knots=6),
+        }
+        model = SuperGLM(family="gaussian", features=features)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            getattr(model, method)(frame, y)
+            session = EditorSession.from_model(model, terms=["x", "z"], train_data=(frame, y))
+            session.stage_structural("knots", "x", {"count": 6, "strategy": "quantile_rows"})
+            session.stage_structural("knots", "z", {"count": 5, "strategy": "quantile_rows"})
+            drafts = {term: copy.deepcopy(session.draft_spec(term)) for term in ("x", "z")}
+            session.refit_pending()
+        refits[method] = (model, session.model, drafts)
+
+    source, refit, drafts = refits["fit_ncv"]
+    chosen = source.ncv_diagnostics()["lambdas"]
+    assert chosen["x:wiggle"] == 3.0
+    assert refit._editor_step["method"] == "fit" and refit._reml_result is None
+    assert fitted_lambda2(refit) == {"x": 3.0, "z": chosen["z"]}
+    drafts["x"]._lambda_policy = None
+    reference = SuperGLM(family="gaussian", features=drafts)
+    reference.lambda2 = {"x": 3.0, "z": chosen["z"]}
+    reference.fit(frame, y)
+    np.testing.assert_allclose(refit.predict(frame), reference.predict(frame), rtol=1e-10)
+    assert fit_trace(refit, fit_id="model", label="All rows")["verdict"] == (
+        "No smoothing search. The smoothing is held where fit_ncv chose it."
+    )
+
+    source, refit, _ = refits["fit_reml"]
+    assert refit._editor_step["method"] == "fit_reml" and refit._reml_result is not None
+    assert fitted_lambda2(refit)["x:wiggle"] == 3.0
+    assert refit._specs["x"]._lambda_policy == LambdaPolicy.fixed(3.0)
 
 
 # ── after a coefficient edit ──────────────────────────────────────────────────

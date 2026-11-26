@@ -72,16 +72,28 @@ class RangePlacementError(ValueError):
 # -- The model -------------------------------------------------------------------
 
 
-def clone_with_replaced_features(model, replacements: dict[str, Any], *, lambda1=..., lambda2=...):
+def clone_with_replaced_features(
+    model, replacements: dict[str, Any], *, lambda1=..., lambda2=..., smoothing_resolved=False
+):
     """Clone a model and replace feature specs before fitting.
 
     Each replacement is deep-copied in, so fitting the clone never touches the
     caller's spec: a waiting step's draft stays unfitted, and a refit that is
     undone and run again fits a fresh copy of the same draft.
+    ``smoothing_resolved`` marks a refit at the source's fitted smoothing: the
+    clone and its replacements carry no lambda policy, whose values ``lambda2``
+    already holds (``clone_without_features``).
     """
-    new_model = model._clone_without_features(set(), lambda1=lambda1, lambda2=lambda2)
-    for term, replacement in replacements.items():
-        new_model._specs[term] = copy.deepcopy(replacement)
+    from superglm.model.base import _drop_resolved_policies, _unname_single_penalties
+
+    new_model = model._clone_without_features(
+        set(), lambda1=lambda1, lambda2=lambda2, smoothing_resolved=smoothing_resolved
+    )
+    copies = {term: copy.deepcopy(replacement) for term, replacement in replacements.items()}
+    unnamed = _drop_resolved_policies(copies) if smoothing_resolved else set()
+    if unnamed and isinstance(new_model.lambda2, dict):
+        new_model.lambda2 = _unname_single_penalties(new_model.lambda2, unnamed)
+    new_model._specs.update(copies)
     # A bind_levels base names a level of the old grouping, so a replaced
     # term's base resolves again where it is fitted. The universe carries over
     # only to a replacement that declares none.

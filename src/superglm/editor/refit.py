@@ -67,7 +67,8 @@ def _record_held_smoothing(source_model, refit_model, resolved_method: str) -> N
     ``fit``), or a refit that already held one, hands its smoothing to a ``fit``. When that
     refit declares the source's smoothing unchanged, its record names the search that chose it.
     A refit by another method than the source's own, or at smoothing the analyst gave, records
-    nothing.
+    nothing. A term whose lambda policy the refit dropped declares its one penalty under its own
+    name, which the source keyed ``"<name>:wiggle"``.
     """
     if resolved_method != fit_method.traits_of(source_model).refit_as:
         return
@@ -81,5 +82,7 @@ def _record_held_smoothing(source_model, refit_model, resolved_method: str) -> N
     held, declared = fitted_lambda2(source_model), configured_lambda2(refit_model)
     if chosen_by is None or not isinstance(held, Mapping) or not isinstance(declared, Mapping):
         return
-    if declared and all(held.get(name) == value for name, value in declared.items()):
+    if declared and all(
+        held.get(name, held.get(f"{name}:wiggle")) == value for name, value in declared.items()
+    ):
         fit_method.annotate(refit_model, smoothing_held_from=chosen_by)
