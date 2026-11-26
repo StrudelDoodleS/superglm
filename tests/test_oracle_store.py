@@ -435,9 +435,14 @@ def test_a_constant_imported_under_a_guard_is_followed_to_its_module(fingerprint
     assert fingerprint_of(source, helper="SCALE = 2.0\n") != before
 
 
+@pytest.mark.pins_behaviour
 def test_numpys_ndarray_alias_enters_alike_in_either_form(fingerprint_of, monkeypatch):
     """numpy's ``NDArray`` is a subscripted generic before numpy 2.5 and a type
-    alias from 2.5; an oracle annotated with it fingerprints the same under either."""
+    alias from 2.5; an oracle annotated with it fingerprints the same under either.
+
+    Pins the oracle store's own fingerprint, a test helper in ``tests/``: the
+    fix it guards is not in ``src/``, so the code before the change passes it.
+    """
     library = types.ModuleType("_oracle_store_library")
     monkeypatch.setitem(sys.modules, "_oracle_store_library", library)
     source = (
