@@ -26,14 +26,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Spline, SuperGLM
+from superglm import Categorical, OrderedCategorical, Spline, SuperGLM
 from superglm.diagnostics.convergence import ncv_bound_message, ncv_nonconvergence_message
 from superglm.diagnostics.fit_report import status_sentence
 from superglm.editor import EditorSession
+from superglm.editor import free_levels as free_levels_module
 from superglm.editor.diagnose import fit_trace
 from superglm.editor.refit import fit_refit_model
 from superglm.features.rebuild import clone_with_replaced_features
-from superglm.model import ncv_ops
+from superglm.model import fit_method, ncv_ops
 from superglm.model.fit_state import fitted_lambda2
 from superglm.model.telemetry_ops import metrics_for_logging
 from superglm.ncv import engine
@@ -416,6 +417,61 @@ def test_an_editor_refit_of_drafts_holds_a_fixed_lambda_policy_at_the_chosen_smo
     assert refit._editor_step["method"] == "fit_reml" and refit._reml_result is not None
     assert fitted_lambda2(refit)["x:wiggle"] == 3.0
     assert refit._specs["x"]._lambda_policy == LambdaPolicy.fixed(3.0)
+
+
+def test_compare_with_free_levels_holds_a_fixed_lambda_policy_at_the_chosen_smoothing(monkeypatch):
+    """fit_ncv's free-levels fit is a fit at the source's smoothing, another term's policy included.
+
+    The reference is a ``fit`` of the spline, without its policy at its value, and the levels as a
+    plain categorical; a Gaussian identity fit is one weighted least-squares solve, so both agree to
+    its rounding.  A fit_reml source's free fit replays fit_reml and keeps the policy.
+    """
+    bands = [f"b{i:02d}" for i in range(8)]
+    rng = np.random.default_rng(43)
+    frame = pd.DataFrame({"x": rng.uniform(size=600), "band": rng.choice(bands, 600)})
+    step = np.array([bands.index(band) for band in frame.band])
+    y = np.sin(6 * frame.x.to_numpy()) + 0.1 * step + rng.normal(0, 0.3, 600)
+    fitted = []
+    real = free_levels_module.fit_refit_model
+    monkeypatch.setattr(
+        free_levels_module,
+        "fit_refit_model",
+        lambda source, refit, **kwargs: fitted.append(refit) or real(source, refit, **kwargs),
+    )
+    free = {}
+    for method in ("fit_ncv", "fit_reml"):
+        features = {
+            "x": Spline(kind="ps", n_knots=8, lambda_policy=LambdaPolicy.fixed(3.0)),
+            "band": OrderedCategorical(order=bands, basis=Spline(kind="ps", n_knots=4)),
+        }
+        model = SuperGLM(family="gaussian", features=features)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            getattr(model, method)(frame, y)
+            session = EditorSession.from_model(model, train_data=(frame, y))
+            free[method] = free_levels_module.free_level_comparison(session, "band")
+    ncv_fit, reml_fit = fitted
+
+    reference = SuperGLM(
+        family="gaussian",
+        features={
+            "x": Spline(kind="ps", n_knots=8),
+            "band": Categorical(base=ncv_fit._specs["band"]._base_level),
+        },
+    )
+    reference.lambda2 = {"x": 3.0}
+    reference.fit(frame, y)
+    inference = reference.term_inference("band")
+    expected = dict(zip(inference.levels, inference.log_relativity, strict=True))
+    scale = 1.0 + max(abs(value) for value in expected.values())
+    assert fit_method.method_of(ncv_fit) == "fit" and fitted_lambda2(ncv_fit)["x"] == 3.0
+    np.testing.assert_allclose(
+        free["fit_ncv"]["y"], [expected[band] for band in bands], rtol=0, atol=1e-6 * scale
+    )
+
+    assert fit_method.method_of(reml_fit) == "fit_reml"
+    assert fitted_lambda2(reml_fit)["x:wiggle"] == 3.0
+    assert reml_fit._specs["x"]._lambda_policy == LambdaPolicy.fixed(3.0)
 
 
 # ── after a coefficient edit ──────────────────────────────────────────────────
