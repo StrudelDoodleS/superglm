@@ -43,7 +43,7 @@ from superglm.distributional.predictor import (
 )
 from superglm.distributional.response import ResponseSpec, response_spec
 from superglm.distributional.results.endpoint_evidence import ConvergenceReason
-from superglm.distributional.results.fit import DistributionalFitResult
+from superglm.distributional.results.fit import DistributionalFitResult, WallDecision
 from superglm.distributional.results.shape import ShapeFit, shape_disclosures
 from superglm.distributional.results.smoothing import DistributionalEFSResult
 from superglm.distributional.results.solver import DenseSolverConfig, DenseSolverResult
@@ -592,6 +592,33 @@ def _wall_disclosure(
     whether the shape's curvature is lost there, along a dropped direction or
     under a step that still presses the row. An unfinished fit's pressed rows are unsettled.
     """
+    decision = _wall_decision(family, solver_result, layout)
+    return None if decision is None else _wall_message(family, decision)
+
+
+def _wall_message(family: WallDisclosingFamily, decision: WallDecision) -> str | None:
+    """The family's text for a wall decision; ``settled`` goes only to a hook that takes it."""
+    settled = {}
+    if not decision.settled and "settled" in signature(family.wall_disclosure).parameters:
+        settled["settled"] = False
+    return family.wall_disclosure(
+        decision.pressed,
+        decision.clipped,
+        decision.n_rows,
+        unresolved=decision.unresolved,
+        **settled,
+    )
+
+
+def _wall_decision(
+    family: WallDisclosingFamily,
+    solver_result: DenseSolverResult,
+    layout: StackedLayout,
+) -> WallDecision | None:
+    """Count the pressed and clipped rows at each wall, by the tests ``_wall_disclosure`` states.
+
+    ``None`` when no row lies within the link's tail of a wall.
+    """
     rows = wall_rows(family, layout, solver_result.coefficients, solver_result.theta)
     if rows is None:
         return None
@@ -640,21 +667,18 @@ def _wall_disclosure(
     # held by rounding, so the shape's standard errors are not reliable there either
     unresolved |= pressed & clipped
     pressed &= rows.near & ~clipped
-    settled = {}
-    if not solver_result.converged and "settled" in signature(family.wall_disclosure).parameters:
-        settled["settled"] = False
-    return family.wall_disclosure(
-        (
+    return WallDecision(
+        pressed=(
             int(np.count_nonzero(pressed & ~rows.upper_side)),
             int(np.count_nonzero(pressed & rows.upper_side)),
         ),
-        (
+        clipped=(
             int(np.count_nonzero(clipped & ~rows.upper_side)),
             int(np.count_nonzero(clipped & rows.upper_side)),
         ),
-        rows.state.design.n,
+        n_rows=rows.state.design.n,
         unresolved=bool(np.any(unresolved)),
-        **settled,
+        settled=bool(solver_result.converged),
     )
 
 
@@ -675,8 +699,20 @@ def _curvature_disclosures(
     and bounded-link wall disclosures for :class:`WallDisclosingFamily` (see
     ``_wall_disclosure``). A failed disclosure never fails the finished fit.
     """
+    return _disclosures(family, solver_result, response, likelihood_plan, layout)[0]
+
+
+def _disclosures(
+    family: DistributionalFamily,
+    solver_result: DenseSolverResult,
+    response: NDArray,
+    likelihood_plan: FamilyLikelihoodPlan,
+    layout: StackedLayout | None = None,
+) -> tuple[tuple[str, ...], WallDecision | None]:
+    """The messages of ``_curvature_disclosures``, and the wall decision behind the last."""
     telemetry = solver_result.terminal_curvature
     messages: list[str] = []
+    wall: WallDecision | None = None
     projected = telemetry.actual_source == "nearest_semidefinite"
     used_to_refuse = telemetry.fallback_count > 0 and getattr(
         family, "diagnoses_any_curvature_fallback", False
@@ -722,12 +758,13 @@ def _curvature_disclosures(
         and layout is not None
     ):
         try:
-            message = _wall_disclosure(family, solver_result, layout)
+            wall = _wall_decision(family, solver_result, layout)
+            message = None if wall is None else _wall_message(family, wall)
         except Exception:  # noqa: BLE001 - a failed disclosure must not fail the fit
             message = None
         if message:
             messages.append(message)
-    return tuple(messages)
+    return tuple(messages), wall
 
 
 def prepare_distributional_fit_state(
@@ -800,6 +837,7 @@ def prepare_distributional_fit_state(
     )
     face = solver_result.coefficient_face
     exact_face_components = () if face is None else face.component_names
+    disclosures, wall = _disclosures(family, solver_result, response, likelihood_plan, layout)
     result = DistributionalFitResult(
         coefficients=solver_result.coefficients,
         coefficient_names=layout.coefficient_names,
@@ -837,7 +875,7 @@ def prepare_distributional_fit_state(
                 else ()
             ),
             *shape_disclosures(shape_fit),
-            *_curvature_disclosures(family, solver_result, response, likelihood_plan, layout),
+            *disclosures,
             *(
                 ()
                 if compact_null.converged
@@ -848,6 +886,7 @@ def prepare_distributional_fit_state(
                 )
             ),
         ),
+        wall=wall,
     )
     rows = None
     if retain_rows:

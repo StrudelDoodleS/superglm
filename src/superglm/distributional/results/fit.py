@@ -34,6 +34,31 @@ def _frozen_array_mapping(
 
 
 @dataclass(frozen=True)
+class WallDecision:
+    """The rows a fit left at a wall of its bounded parameter, counted as (lower, upper).
+
+    ``pressed`` rows are pushed against the wall by the data and ``clipped`` rows sit at the
+    last float inside it. ``unresolved`` says the fit lost the parameter's curvature at clipped
+    rows. A decision that is not ``settled`` comes from a fit that stopped before converging.
+    """
+
+    pressed: tuple[int, int]
+    clipped: tuple[int, int]
+    n_rows: int
+    unresolved: bool = False
+    settled: bool = True
+
+    @property
+    def side(self) -> str | None:
+        """``"lower"``, ``"upper"`` or ``"both"``; ``None`` when no row is at a wall."""
+        lower = self.pressed[0] + self.clipped[0] > 0
+        upper = self.pressed[1] + self.clipped[1] > 0
+        if lower and upper:
+            return "both"
+        return "lower" if lower else "upper" if upper else None
+
+
+@dataclass(frozen=True)
 class DistributionalFitResult:
     """Compact immutable public-scale state for one complete fitted revision."""
 
@@ -60,6 +85,10 @@ class DistributionalFitResult:
     exact_face_components: tuple[str, ...] = ()
     # Disclosures a fit makes instead of refusing, each also warned at fit time.
     warnings: tuple[str, ...] = ()
+    # The fit's own wall decision for a bounded parameter, behind the wall text in ``warnings``:
+    # ``None`` when no row lies near a wall or the fit made no wall decision.
+    # The class default reads older pickles.
+    wall: WallDecision | None = None
     fit_id: str = field(default_factory=lambda: str(uuid4()), repr=False, compare=False)
 
     def __post_init__(self) -> None:
