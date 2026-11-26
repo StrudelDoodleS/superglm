@@ -2304,14 +2304,17 @@ class TestREMLWarmStart:
             <= bar / curvature + steps
         )
 
-    def test_a_tensor_shoulder_move_counts_as_the_step_before_a_stop(self, monkeypatch):
+    @pytest.mark.parametrize("move", ["shoulder", "bound", "bound-before"])
+    def test_a_tensor_shoulder_move_counts_as_the_step_before_a_stop(self, monkeypatch, move):
         """A cached-weight stop needs two small steps running, and a shoulder's move is a step.
 
         The tensor path's undamped Newton step leaves the shoulder out, so the
         guard must read the step actually taken. The shoulder is forced on the
         iteration before the stop an unforced search reaches, so the search
         must go on past it (mutation check: reading the undamped step alone
-        stops there).
+        stops there). A bound-held term's move onto its bound is a step too:
+        forced on the stop's own iteration it is taken before any stop, and
+        forced on the one before it is no Newton step for the stop to follow.
         """
         from dataclasses import replace
 
@@ -2326,7 +2329,8 @@ class TestREMLWarmStart:
         )
         # The contraction check also tends to refuse here, so isolate this guard.
         monkeypatch.setattr(discrete_module, "newton_step_settled", lambda *_, **__: True)
-        monkeypatch.setattr(discrete_module, "newton_step_same_terms", lambda *_, **__: True)
+        if move != "bound-before":
+            monkeypatch.setattr(discrete_module, "newton_step_same_terms", lambda *_, **__: True)
         rng = np.random.default_rng(3)
         n = 4000
         x1 = rng.uniform(0, 1, n)
@@ -2352,7 +2356,20 @@ class TestREMLWarmStart:
             mask[-1] = True
             return replace(decision, frozen=decision.frozen & ~mask, shoulder=mask)
 
-        monkeypatch.setattr(discrete_module, "freeze_flat_directions", shoulder_before_the_stop)
+        real_bound_step = discrete_module.bound_held_step
+        bound_steps = []
+
+        def forced_bound_move(*args, **kwargs):
+            step = real_bound_step(*args, **kwargs)
+            bound_steps.append(None)
+            if len(bound_steps) == plain - (move == "bound-before"):
+                step[-1] = 1e-4
+            return step
+
+        if move == "shoulder":
+            monkeypatch.setattr(discrete_module, "freeze_flat_directions", shoulder_before_the_stop)
+        else:
+            monkeypatch.setattr(discrete_module, "bound_held_step", forced_bound_move)
 
         assert stop_iteration() > plain
 
@@ -2394,6 +2411,76 @@ class TestREMLWarmStart:
         assert all(row["max_delta_used"] <= row["base_cap"] for row in steps)
         assert any(row["base_cap"] == 1.0 for row in steps)
         assert warm_info["converged"]
+
+    @pytest.mark.parametrize("move", ["newton", "shoulder"])
+    def test_a_tensor_margin_on_its_ceiling_leaves_its_partner_the_coordinate_box(
+        self, monkeypatch, move
+    ):
+        """A margin its bound holds does not cap its partner's step at 2 cap_v (#735).
+
+        The shared-tensor search bounds a pair's half-difference by cap_v while
+        both margins move.  Here the x2 margin sits on a ceiling of 6 with its
+        score pointing out, and the x1 margin starts nearly nine log units
+        below its stop.  Counted as moving, the held margin capped the free
+        one at 2 cap_v (0.5, then 2.0) where the coordinate box allows 1.0,
+        then 2.5, and eight iterations ran out one short of the stop.  A
+        shoulder's step beside a held margin was halved the same way.
+        """
+        from dataclasses import replace
+
+        import superglm._lambda_box as lambda_box
+        import superglm.reml.discrete as discrete_module
+
+        monkeypatch.setattr(lambda_box, "LAMBDA_CEILING", 3.0)
+        rng = np.random.default_rng(3)
+        n = 4000
+        x1 = rng.uniform(0, 1, n)
+        x2 = rng.uniform(0, 1, n)
+        eta = (
+            0.3
+            + 0.8 * np.sin(2 * np.pi * x1)
+            + 0.3 * np.cos(3 * x2)
+            + 0.4 * np.sin(3 * x1) * np.cos(4 * x2)
+        )
+        y = rng.poisson(np.exp(eta)).astype(float)
+        X = pd.DataFrame({"x1": x1, "x2": x2})
+        free, held = "x1:x2:margin_x1", "x1:x2:margin_x2"
+        start = {"x1": 3.0, "x2": 6.0, free: 1e-3, held: 12.0}
+        real = discrete_module.freeze_flat_directions
+        calls = []
+
+        def shoulder_on_the_first_step(*args, **kwargs):
+            decision = real(*args, **kwargs)
+            calls.append(None)
+            if len(calls) != 1:
+                return decision
+            mask = np.arange(decision.frozen.size) == list(start).index(free)
+            return replace(decision, frozen=decision.frozen & ~mask, shoulder=mask)
+
+        if move == "shoulder":
+            monkeypatch.setattr(
+                discrete_module, "freeze_flat_directions", shoulder_on_the_first_step
+            )
+        model = _two_smooth_model(True, interaction=True)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit_reml(X, y, lambda2_init=start, max_reml_iter=8)
+        info = model.reml_diagnostics()
+
+        box = model._reml_result.lambda_box
+        rows = info["profile"]["reml_outer_step_stats"][:3]
+        assert all(box.side(row["tensor_lambdas"][held]) == "ceiling" for row in rows)
+        moved = [
+            np.log(after["tensor_lambdas"][free] / before["tensor_lambdas"][free])
+            for before, after in zip(rows, rows[1:], strict=False)
+        ]
+        assert [row["base_cap"] for row in rows[:2]] == [1.0, 2.5]
+        assert moved[0] == pytest.approx(1.0, rel=1e-9)
+        if move == "newton":
+            assert moved[1] == pytest.approx(2.5, rel=1e-9)
+            # No pair has two margins in the Newton step, so none is recorded as capped.
+            assert [row["tensor_uv"] for row in rows] == [None, None, None]
+            assert info["converged"]
 
     @pytest.mark.parametrize("discrete", [False, True])
     def test_a_stop_refused_by_a_live_shoulder_is_recorded(self, discrete, monkeypatch):

@@ -9,6 +9,7 @@ import pytest
 import scipy.linalg
 import scipy.optimize
 
+import superglm._lambda_box as lambda_box
 from superglm import Categorical, LambdaPolicy, Numeric, Spline, SuperGLM, SuperLSS, s
 from superglm._group_matrix import _group_matrix_range as group_ranges
 from superglm.distributional import GaussianLS
@@ -20,6 +21,7 @@ from superglm.group_matrix import (
     SupportCompressedSplineCategoricalGroupMatrix,
 )
 from superglm.model.reml_setup import collect_reml_groups
+from superglm.reml.convergence import newton_step_stop_bar
 from superglm.reml.penalty_algebra import build_penalty_components
 
 
@@ -758,6 +760,164 @@ def test_by_level_binding_penalty_matches_dense_root_reml_reference(discrete):
     assert lam_b == pytest.approx(lam_b_ref, rel=1e-5)
     assert result.objective == pytest.approx(V_ref, abs=1e-8)
     np.testing.assert_allclose(pred_fit[200:], pred_ref[200:], atol=1e-6, rtol=0.0)
+
+
+def _by_level_dense_reml(model, y):
+    """Wood's (2011) Gaussian REML in the two log lambdas of a fitted main-plus-level model.
+
+    Independent of the fit's own REML: one QR of the design over Green and
+    Silverman's rectangular penalty roots, in the fitted design's coordinates.
+    """
+    root = _green_silverman_cardinal_root(model._specs["x"]._cr_knots)
+    main, factor, level = model._dm.group_matrices
+    design = np.column_stack([np.ones(len(y)), main.toarray(), factor.toarray(), level.toarray()])
+    width = design.shape[1]
+    roots = [(1, root @ main.R_inv), (width - level.shape[1], root @ level.R_inv)]
+    spectra = [scipy.linalg.svdvals(block) for _, block in roots]
+    dof = len(y) - width + sum(map(len, spectra))
+    rhs = np.r_[y, np.zeros(sum(len(block) for _, block in roots))]
+
+    def criterion(*rho):
+        rows = [np.zeros((len(block), width)) for _, block in roots]
+        for row, (start, block), log_lambda in zip(rows, roots, rho, strict=True):
+            row[:, start : start + block.shape[1]] = np.exp(0.5 * log_lambda) * block
+        q, r = np.linalg.qr(np.vstack([design, *rows]))
+        residual = rhs - q @ (q.T @ rhs)
+        log_det = 2.0 * np.sum(np.log(np.abs(np.diag(r)))) - sum(
+            len(values) * log_lambda + 2.0 * np.sum(np.log(values))
+            for values, log_lambda in zip(spectra, rho, strict=True)
+        )
+        return 0.5 * (dof * (np.log(2.0 * np.pi * (residual @ residual) / dof) + 1.0) + log_det)
+
+    return criterion
+
+
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "binned"])
+@pytest.mark.parametrize("side", ["floor", "ceiling"])
+def test_reml_finds_a_levels_optimum_beside_a_main_effect_its_bound_holds(
+    side, discrete, monkeypatch
+):
+    """A smoothing parameter held at a bound leaves the other's Newton step alone (#735).
+
+    The main effect sits on a bound of the box with its REML score pointing out
+    of it, and its Hessian coupling to the level's term is negative; an
+    independent dense criterion confirms both. A Newton step solved with the
+    held term and clipped to the box afterwards moved the level's term uphill,
+    and the search ended unconverged, short of the optimum that criterion places.
+    """
+    x = np.tile(np.geomspace(1.0, 1e5, 200), 2)
+    level_b = np.repeat([False, True], 200)
+    if side == "floor":
+        t = np.log(x) / np.log(x.max())
+        mean = 1.0 + t + np.sin(4.0 * t) + level_b * (1.0 + 2.0 * t + 0.5 * np.cos(3.0 * t))
+        y = mean + 0.1 * np.random.default_rng(5).normal(size=400)
+    else:
+        # The main effect is a line, whose optimum lies beyond a ceiling of 3.
+        monkeypatch.setattr(lambda_box, "LAMBDA_CEILING", 3.0)
+        t = x / x.max()
+        mean = 1.0 + 0.8 * t + level_b * (0.5 + 0.6 * t + 0.6 * np.cos(2.0 * np.pi * t))
+        y = mean + 0.15 * np.random.default_rng(19).normal(size=400)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0,
+        discrete=discrete,
+        features={
+            "x": Spline(kind="cr_cardinal", n_knots=20, knot_strategy="quantile_rows"),
+            "g": Categorical(),
+        },
+        interactions=[("x", "g")],
+    )
+    tolerance = 1e-10
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model.fit_reml(
+            pd.DataFrame({"x": x, "g": np.where(level_b, "B", "A")}),
+            y,
+            reml_tol=tolerance,
+            pirls_tol=tolerance,
+        )
+
+    result = model._reml_result
+    assert result.converged
+    assert result.bound_pressure == (("x", side),)
+    box = result.lambda_box
+    assert box.side(result.lambdas["x"]) == side
+    held, free = np.log(result.lambdas["x"]), np.log(result.lambdas["x:g[B]"])
+
+    criterion = _by_level_dense_reml(model, y)
+    h = 1e-2
+    assert criterion(held + (h if side == "floor" else -h), free) > criterion(held, free)
+    coupling = (
+        criterion(held + h, free + h)
+        - criterion(held + h, free - h)
+        - criterion(held - h, free + h)
+        + criterion(held - h, free - h)
+    )
+    assert coupling < 0.0
+    reference = scipy.optimize.minimize_scalar(
+        lambda rho: criterion(held, rho),
+        bounds=(box.log_floor, box.log_ceiling),
+        method="bounded",
+        options={"xatol": 1e-10},
+    )
+    assert free == pytest.approx(reference.x, abs=newton_step_stop_bar(tolerance))
+    assert result.objective == pytest.approx(
+        reference.fun, abs=tolerance * (1 + abs(reference.fun))
+    )
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact", "binned"])
+def test_reml_started_beside_the_floor_steps_onto_it(discrete):
+    """Pin a start inside the stop's window of the floor ending on the floor (#735).
+
+    The stop reads an outward score within 0.01 log units of a bound as zero.
+    A search that takes no step there either certifies its own start: held out
+    of the Newton system with no step of its own, a term started 0.009 log
+    units above the floor was returned there, 0.22 nats above the criterion a
+    start on the floor and one 0.011 above it both reach. The clipped Newton
+    step this replaces already moved it onto the floor.
+    """
+    x = np.tile(np.geomspace(1.0, 1e5, 200), 2)
+    level_b = np.repeat([False, True], 200)
+    t = np.log(x) / np.log(x.max())
+    mean = 1.0 + t + np.sin(4.0 * t) + level_b * (1.0 + 2.0 * t + 0.5 * np.cos(3.0 * t))
+    y = mean + 0.1 * np.random.default_rng(5).normal(size=400)
+    frame = pd.DataFrame({"x": x, "g": np.where(level_b, "B", "A")})
+    tolerance = 1e-10
+
+    def stop(start):
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0,
+            discrete=discrete,
+            features={
+                "x": Spline(kind="cr_cardinal", n_knots=20, knot_strategy="quantile_rows"),
+                "g": Categorical(),
+            },
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit_reml(
+                frame,
+                y,
+                lambda2_init={"x": start},
+                reml_tol=tolerance,
+                pirls_tol=tolerance,
+            )
+        return model._reml_result
+
+    on_floor = stop(lambda_box.LAMBDA_FLOOR)
+    box = on_floor.lambda_box
+    assert on_floor.converged
+    assert on_floor.bound_pressure == (("x", "floor"),)
+    for offset in (0.009, 0.011):
+        result = stop(box.floor * np.exp(offset))
+        assert result.converged
+        assert box.side(result.lambdas["x"]) == "floor"
+        assert result.objective == pytest.approx(
+            on_floor.objective, abs=tolerance * (1 + abs(on_floor.objective))
+        )
 
 
 @pytest.mark.parametrize(
