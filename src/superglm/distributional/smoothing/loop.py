@@ -294,7 +294,7 @@ class _SmoothingSearch:
     def fit_start(self, lambdas: Mapping[str, float] | None, initial: NDArray | None) -> None:
         """Fit the start: its smoothing parameters, coefficients, objective and evidence."""
         with measure_phase(self.phase_recorder, "layout_penalty_assembly"):
-            self.current_lambdas, initial, lambda_units = prepare_distributional_initialization(
+            current_lambdas, initial, lambda_units = prepare_distributional_initialization(
                 self.family,
                 self.layout,
                 self.y,
@@ -309,8 +309,8 @@ class _SmoothingSearch:
             )
             if lambda_units:
                 self.outer_config = replace(self.outer_config, lambda_units=lambda_units)
-            initial_penalty = self.layout.penalty_matrix(self.current_lambdas)
-        self.initial_lambdas = dict(self.current_lambdas)
+            initial_penalty = self.layout.penalty_matrix(current_lambdas)
+        self.initial_lambdas = dict(current_lambdas)
         initial_fit = fit_dense_fixed_lambda(
             self.family,
             self.layout,
@@ -325,28 +325,36 @@ class _SmoothingSearch:
         )
         self.coefficient_fits = [initial_fit]
         self.history: list[DistributionalEFSIteration] = []
-        self.terminal_fit_index = 0
-        self.current_fit = initial_fit
-        self.current_face: PenaltyFace | None = None
+        terminal_fit_index = 0
+        current_fit = initial_fit
+        current_face: PenaltyFace | None = None
         with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-            self.current_objective = _laplace_objective(
+            current_objective = _laplace_objective(
                 initial_fit,
                 layout=self.layout,
-                lambdas=self.current_lambdas,
-                face=self.current_face,
+                lambdas=current_lambdas,
+                face=current_face,
                 objective_tolerance=self.outer_config.objective_tolerance,
             )
-        self.initial_objective = self.current_objective
+        self.initial_objective = current_objective
         del initial_fit  # current_fit and history own it until their live window ends.
         with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-            self.terminal_evidence = _fresh_raw_evidence(
+            terminal_evidence = _fresh_raw_evidence(
                 self.layout,
-                self.current_lambdas,
-                self.current_fit,
+                current_lambdas,
+                current_fit,
                 self.outer_config,
-                face=self.current_face,
+                face=current_face,
             )
-        self.estimated_names = self.terminal_evidence.estimated_names
+        self.state = EndgameState(
+            lambdas=current_lambdas,
+            fit=current_fit,
+            objective=current_objective,
+            face=current_face,
+            evidence=terminal_evidence,
+            terminal_fit_index=terminal_fit_index,
+        )
+        self.estimated_names = terminal_evidence.estimated_names
 
     def run(self) -> DistributionalEFSResult:
         """Search from the start fit until a phase returns the result."""
@@ -355,30 +363,30 @@ class _SmoothingSearch:
                 layout=self.layout,
                 config=self.outer_config,
                 initial_lambdas=self.initial_lambdas,
-                lambdas=self.current_lambdas,
+                lambdas=self.state.lambdas,
                 initial_objective=self.initial_objective,
-                objective=self.current_objective,
-                converged=self.current_fit.converged,
-                reason="fixed_only" if self.current_fit.converged else "coefficient_not_converged",
-                terminal_evidence=self.terminal_evidence,
+                objective=self.state.objective,
+                converged=self.state.fit.converged,
+                reason="fixed_only" if self.state.fit.converged else "coefficient_not_converged",
+                terminal_evidence=self.state.evidence,
                 history=self.history,
                 coefficient_fits=self.coefficient_fits,
-                terminal_fit_index=self.terminal_fit_index,
+                terminal_fit_index=self.state.terminal_fit_index,
             )
-        if not self.current_fit.converged:
+        if not self.state.fit.converged:
             return _efs_result(
                 layout=self.layout,
                 config=self.outer_config,
                 initial_lambdas=self.initial_lambdas,
-                lambdas=self.current_lambdas,
+                lambdas=self.state.lambdas,
                 initial_objective=self.initial_objective,
-                objective=self.current_objective,
+                objective=self.state.objective,
                 converged=False,
                 reason="coefficient_not_converged",
-                terminal_evidence=self.terminal_evidence,
+                terminal_evidence=self.state.evidence,
                 history=self.history,
                 coefficient_fits=self.coefficient_fits,
-                terminal_fit_index=self.terminal_fit_index,
+                terminal_fit_index=self.state.terminal_fit_index,
             )
         # The Newton endgame's bookkeeping.  ``endgame_outcome`` is the last run's
         # outcome (its derivatives are the result's terminal gradient and Hessian);
@@ -466,14 +474,14 @@ class _SmoothingSearch:
             compact_coefficient_history(
                 self.coefficient_fits,
                 self.history,
-                terminal_fit_index=self.terminal_fit_index,
+                terminal_fit_index=self.state.terminal_fit_index,
                 config=self.outer_config,
             )
-            if self.terminal_evidence.unresolved_upper_bound:
+            if self.state.evidence.unresolved_upper_bound:
                 if (
                     len(self.history) >= self.outer_config.max_iterations
                     and not self.plateau_earned
-                ) or (self.caps_final and self.current_fit is self.refused_fit):
+                ) or (self.caps_final and self.state.fit is self.refused_fit):
                     # No round is left, or these caps were refused at this very fit. Held caps
                     # no assessment has refused were never judged: the search ran out of rounds.
                     # Judging the caps of a plateau already earned is its terminal check, not a
@@ -488,11 +496,11 @@ class _SmoothingSearch:
                     self.layout,
                     self.y,
                     self.likelihood_plan,
-                    lambdas=self.current_lambdas,
-                    current_face=self.current_face,
-                    current_fit=self.current_fit,
-                    current_objective=self.current_objective,
-                    terminal_evidence=self.terminal_evidence,
+                    lambdas=self.state.lambdas,
+                    current_face=self.state.face,
+                    current_fit=self.state.fit,
+                    current_objective=self.state.objective,
+                    terminal_evidence=self.state.evidence,
                     solver_config=self.inner_config,
                     efs_config=self.outer_config,
                     chunk_size=self.chunk_size,
@@ -506,11 +514,11 @@ class _SmoothingSearch:
                         self.layout,
                         self.y,
                         self.likelihood_plan,
-                        lambdas=self.current_lambdas,
-                        current_face=self.current_face,
-                        current_fit=self.current_fit,
-                        current_objective=self.current_objective,
-                        terminal_evidence=self.terminal_evidence,
+                        lambdas=self.state.lambdas,
+                        current_face=self.state.face,
+                        current_fit=self.state.fit,
+                        current_objective=self.state.objective,
+                        terminal_evidence=self.state.evidence,
                         solver_config=self.inner_config,
                         efs_config=self.outer_config,
                         chunk_size=self.chunk_size,
@@ -561,7 +569,7 @@ class _SmoothingSearch:
                                 )
                             )
                         else:
-                            component_names = (self.terminal_evidence.unresolved_upper_bound[0],)
+                            component_names = (self.state.evidence.unresolved_upper_bound[0],)
                             refusal_direction = (
                                 None
                                 if assessment_attempt.check is None
@@ -574,40 +582,41 @@ class _SmoothingSearch:
                         self.history.append(
                             _face_assessment_refusal_iteration(
                                 iteration=len(self.history) + 1,
-                                source_fit_index=self.terminal_fit_index,
+                                source_fit_index=self.state.terminal_fit_index,
                                 coefficient_fit_indices=assessment_indices,
                                 coefficient_tolerance=assessment_attempt.coefficient_tolerance,
                                 component_names=component_names,
                                 direction=refusal_direction,
                                 failure_reason=assessment_attempt.failure_reason,
-                                lambdas=self.current_lambdas,
-                                objective=self.current_objective,
-                                evidence=self.terminal_evidence,
-                                source_fit=self.current_fit,
+                                lambdas=self.state.lambdas,
+                                objective=self.state.objective,
+                                evidence=self.state.evidence,
+                                source_fit=self.state.fit,
                             )
                         )
                     if self.handed_over:
                         self.endpoint_caps.difference_update(
-                            self.terminal_evidence.unresolved_upper_bound
+                            self.state.evidence.unresolved_upper_bound
                         )
                         self.endgame_due = self.handed_over = False
-                        self.terminal_evidence = replace(
-                            self.terminal_evidence, unresolved_upper_bound=()
+                        self.state = replace(
+                            self.state,
+                            evidence=replace(self.state.evidence, unresolved_upper_bound=()),
                         )
                         continue
                     if self.outer_config.outer == "efs" and not self.caps_final:
-                        self.refused_fit = self.current_fit
-                        self.cap_held |= frozenset(self.terminal_evidence.unresolved_upper_bound)
-                        self.terminal_evidence = self._evidence()
+                        self.refused_fit = self.state.fit
+                        self.cap_held |= frozenset(self.state.evidence.unresolved_upper_bound)
+                        self.state = replace(self.state, evidence=self._evidence())
                         continue
                     return self._result(converged=False, reason="lambda_cap_unresolved")
-                source_fit_index = self.terminal_fit_index
+                source_fit_index = self.state.terminal_fit_index
                 first_assessment_index = len(self.coefficient_fits)
                 self.coefficient_fits.extend(promotion.assessment_fits)
                 assessment_indices = tuple(
                     range(first_assessment_index, len(self.coefficient_fits))
                 )
-                self.terminal_fit_index = assessment_indices[-1]
+                self.state = replace(self.state, terminal_fit_index=assessment_indices[-1])
                 if assessment_attempt is None:
                     raise RuntimeError("an accepted exact face requires an authority assessment")
                 coefficient_tolerance = assessment_attempt.coefficient_tolerance
@@ -632,19 +641,22 @@ class _SmoothingSearch:
                     _face_transition_iteration(
                         iteration=len(self.history) + 1,
                         source_fit_index=source_fit_index,
-                        accepted_fit_index=self.terminal_fit_index,
+                        accepted_fit_index=self.state.terminal_fit_index,
                         coefficient_fit_indices=assessment_indices,
-                        lambdas=self.current_lambdas,
-                        objective_before=self.current_objective,
+                        lambdas=self.state.lambdas,
+                        objective_before=self.state.objective,
                         promotion=promotion,
-                        evidence=self.terminal_evidence,
+                        evidence=self.state.evidence,
                         coefficient_tolerance=coefficient_tolerance,
-                        source_fit=self.current_fit,
+                        source_fit=self.state.fit,
                     )
                 )
-                self.current_face = promotion.face
-                self.current_fit = promotion.fit
-                self.current_objective = promotion.objective
+                self.state = replace(
+                    self.state,
+                    face=promotion.face,
+                    fit=promotion.fit,
+                    objective=promotion.objective,
+                )
                 self._active_set_changed(held_promoted=True)
                 resume = self.endgame_due and bool(self.estimated_names)
                 # A stationary verdict whose handed caps were all that was left to estimate
@@ -658,8 +670,8 @@ class _SmoothingSearch:
                 continue
             stopped = self.endgame_stationary or self.plateau_earned
             if stopped or (
-                not self.terminal_evidence.working_infinity
-                and self.terminal_evidence.maximum <= self.outer_config.tolerance
+                not self.state.evidence.working_infinity
+                and self.state.evidence.maximum <= self.outer_config.tolerance
             ):
                 if self.cap_held:
                     # The free terms have stopped: judge the stop again with the caps in it.
@@ -681,11 +693,10 @@ class _SmoothingSearch:
                         return endgame_result
                     continue
                 terminal_endpoint_directions: Mapping[str, EndpointDirectionEvidence] = {}
-                if self.current_face is not None:
+                face = self.state.face
+                if face is not None:
                     revalidation_events = (
-                        1
-                        if len(self.current_face.component_names) > 1
-                        else len(self.current_face.component_names)
+                        1 if len(face.component_names) > 1 else len(face.component_names)
                     )
                     # Revalidating the face of a stationary endgame or an earned plateau is
                     # its terminal check, not a search step, so the iteration budget does not
@@ -696,7 +707,7 @@ class _SmoothingSearch:
                         > self.outer_config.max_iterations
                     ):
                         return self._result(converged=False, reason="max_iterations")
-                    if len(self.current_face.component_names) > 1:
+                    if len(face.component_names) > 1:
                         authority_config = _face_authority_config(self.inner_config)
                         try:
                             finite_faces = tuple(
@@ -705,17 +716,15 @@ class _SmoothingSearch:
                                     _optional_penalty_face(
                                         self.layout,
                                         tuple(
-                                            item
-                                            for item in self.current_face.component_names
-                                            if item != name
+                                            item for item in face.component_names if item != name
                                         ),
                                     ),
                                 )
-                                for name in self.current_face.component_names
+                                for name in face.component_names
                             )
                         except PenaltyFaceError:
                             joint_attempt = _JointFaceDirectionAttempt(
-                                component_names=self.current_face.component_names,
+                                component_names=face.component_names,
                                 direction=None,
                                 assessment_fits=(),
                                 coefficient_tolerance=authority_config.tolerance,
@@ -727,13 +736,13 @@ class _SmoothingSearch:
                                 self.layout,
                                 self.y,
                                 self.likelihood_plan,
-                                lambdas=self.current_lambdas,
-                                component_names=self.current_face.component_names,
-                                joint_face=self.current_face,
+                                lambdas=self.state.lambdas,
+                                component_names=face.component_names,
+                                joint_face=face,
                                 finite_faces=finite_faces,
-                                source_fit=self.current_fit,
-                                source_objective=self.current_objective,
-                                endpoint_fit=self.current_fit,
+                                source_fit=self.state.fit,
+                                source_objective=self.state.objective,
+                                endpoint_fit=self.state.fit,
                                 solver_config=self.inner_config,
                                 efs_config=self.outer_config,
                                 chunk_size=self.chunk_size,
@@ -742,15 +751,17 @@ class _SmoothingSearch:
                                 derivatives=self.endpoint_derivatives,
                             )
                         if _joint_direction_is_endpoint(joint_attempt):
-                            source_fit_index = self.terminal_fit_index
-                            source_fit = self.current_fit
-                            objective_before = self.current_objective
+                            source_fit_index = self.state.terminal_fit_index
+                            source_fit = self.state.fit
+                            objective_before = self.state.objective
                             first_assessment_index = len(self.coefficient_fits)
                             self.coefficient_fits.extend(joint_attempt.assessment_fits)
                             assessment_indices = tuple(
                                 range(first_assessment_index, len(self.coefficient_fits))
                             )
-                            self.terminal_fit_index = assessment_indices[0]
+                            self.state = replace(
+                                self.state, terminal_fit_index=assessment_indices[0]
+                            )
                             endpoint_fit = joint_attempt.assessment_fits[0]
                             direction = joint_attempt.direction
                             assert direction is not None
@@ -763,34 +774,40 @@ class _SmoothingSearch:
                                 _joint_face_revalidation_iteration(
                                     iteration=len(self.history) + 1,
                                     source_fit_index=source_fit_index,
-                                    accepted_fit_index=self.terminal_fit_index,
+                                    accepted_fit_index=self.state.terminal_fit_index,
                                     coefficient_fit_indices=assessment_indices,
-                                    component_names=self.current_face.component_names,
-                                    lambdas=self.current_lambdas,
+                                    component_names=face.component_names,
+                                    lambdas=self.state.lambdas,
                                     objective_before=objective_before,
                                     endpoint_fit=endpoint_fit,
                                     direction=indexed_direction,
                                     coefficient_tolerance=joint_attempt.coefficient_tolerance,
-                                    evidence=self.terminal_evidence,
+                                    evidence=self.state.evidence,
                                     source_fit=source_fit,
                                 )
                             )
-                            self.current_fit = endpoint_fit
-                            self.current_objective = indexed_direction.endpoint_objective
+                            self.state = replace(
+                                self.state,
+                                fit=endpoint_fit,
+                                objective=indexed_direction.endpoint_objective,
+                            )
                             terminal_endpoint_directions = dict(
                                 indexed_direction.component_directions
                             )
                             with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-                                self.terminal_evidence = _fresh_raw_evidence(
-                                    self.layout,
-                                    self.current_lambdas,
-                                    self.current_fit,
-                                    self.outer_config,
-                                    face=self.current_face,
+                                self.state = replace(
+                                    self.state,
+                                    evidence=_fresh_raw_evidence(
+                                        self.layout,
+                                        self.state.lambdas,
+                                        self.state.fit,
+                                        self.outer_config,
+                                        face=self.state.face,
+                                    ),
                                 )
                             if not stopped and (
-                                self.terminal_evidence.working_infinity
-                                or self.terminal_evidence.maximum > self.outer_config.tolerance
+                                self.state.evidence.working_infinity
+                                or self.state.evidence.maximum > self.outer_config.tolerance
                             ):
                                 continue
                             return self._result(
@@ -800,7 +817,7 @@ class _SmoothingSearch:
                             )
                         else:
                             rollback_initial = (
-                                self.current_fit.coefficients
+                                self.state.fit.coefficients
                                 if not joint_attempt.assessment_fits
                                 else joint_attempt.assessment_fits[-1].coefficients
                             )
@@ -809,7 +826,7 @@ class _SmoothingSearch:
                                 self.layout,
                                 self.y,
                                 self.likelihood_plan,
-                                lambdas=self.current_lambdas,
+                                lambdas=self.state.lambdas,
                                 face=None,
                                 initial=rollback_initial,
                                 config=authority_config,
@@ -820,20 +837,22 @@ class _SmoothingSearch:
                             rollback_objective = _laplace_objective(
                                 rollback_fit,
                                 layout=self.layout,
-                                lambdas=self.current_lambdas,
+                                lambdas=self.state.lambdas,
                                 face=None,
                                 objective_tolerance=self.outer_config.objective_tolerance,
                             )
-                            source_fit_index = self.terminal_fit_index
-                            source_fit = self.current_fit
-                            objective_before = self.current_objective
+                            source_fit_index = self.state.terminal_fit_index
+                            source_fit = self.state.fit
+                            objective_before = self.state.objective
                             first_assessment_index = len(self.coefficient_fits)
                             rollback_fits = (*joint_attempt.assessment_fits, rollback_fit)
                             self.coefficient_fits.extend(rollback_fits)
                             assessment_indices = tuple(
                                 range(first_assessment_index, len(self.coefficient_fits))
                             )
-                            self.terminal_fit_index = assessment_indices[-1]
+                            self.state = replace(
+                                self.state, terminal_fit_index=assessment_indices[-1]
+                            )
                             retraction_direction = joint_attempt.direction
                             if retraction_direction is not None:
                                 retraction_direction = _indexed_joint_direction(
@@ -842,7 +861,7 @@ class _SmoothingSearch:
                                     joint_attempt.coefficient_tolerance,
                                 )
                             retraction = _FaceRetraction(
-                                component_names=self.current_face.component_names,
+                                component_names=face.component_names,
                                 fit=rollback_fit,
                                 objective=rollback_objective,
                                 direction=retraction_direction,
@@ -858,28 +877,34 @@ class _SmoothingSearch:
                                 _face_retraction_iteration(
                                     iteration=len(self.history) + 1,
                                     source_fit_index=source_fit_index,
-                                    accepted_fit_index=self.terminal_fit_index,
+                                    accepted_fit_index=self.state.terminal_fit_index,
                                     coefficient_fit_indices=assessment_indices,
-                                    lambdas=self.current_lambdas,
+                                    lambdas=self.state.lambdas,
                                     objective_before=objective_before,
                                     retraction=retraction,
-                                    evidence=self.terminal_evidence,
+                                    evidence=self.state.evidence,
                                     source_fit=source_fit,
                                 )
                             )
-                            self.current_face = None
-                            self.current_fit = rollback_fit
-                            self.current_objective = rollback_objective
+                            self.state = replace(
+                                self.state,
+                                face=None,
+                                fit=rollback_fit,
+                                objective=rollback_objective,
+                            )
                             if _direction_leaves_face(retraction.direction):
                                 self._active_set_changed()
                                 continue
                             with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-                                self.terminal_evidence = _fresh_raw_evidence(
-                                    self.layout,
-                                    self.current_lambdas,
-                                    self.current_fit,
-                                    self.outer_config,
-                                    face=self.current_face,
+                                self.state = replace(
+                                    self.state,
+                                    evidence=_fresh_raw_evidence(
+                                        self.layout,
+                                        self.state.lambdas,
+                                        self.state.fit,
+                                        self.outer_config,
+                                        face=self.state.face,
+                                    ),
                                 )
                             return self._result(
                                 converged=False, reason="endpoint_revalidation_failed"
@@ -889,10 +914,10 @@ class _SmoothingSearch:
                         self.layout,
                         self.y,
                         self.likelihood_plan,
-                        lambdas=self.current_lambdas,
-                        face=self.current_face,
-                        current_fit=self.current_fit,
-                        current_objective=self.current_objective,
+                        lambdas=self.state.lambdas,
+                        face=face,
+                        current_fit=self.state.fit,
+                        current_objective=self.state.objective,
                         solver_config=self.inner_config,
                         efs_config=self.outer_config,
                         chunk_size=self.chunk_size,
@@ -903,15 +928,15 @@ class _SmoothingSearch:
                     )
                     resolved_directions: dict[str, EndpointDirectionEvidence] = {}
                     for component_name, check in recheck.checks:
-                        source_fit_index = self.terminal_fit_index
-                        source_fit = self.current_fit
-                        objective_before = self.current_objective
+                        source_fit_index = self.state.terminal_fit_index
+                        source_fit = self.state.fit
+                        objective_before = self.state.objective
                         first_assessment_index = len(self.coefficient_fits)
                         self.coefficient_fits.extend(check.assessment_fits)
                         assessment_indices = tuple(
                             range(first_assessment_index, len(self.coefficient_fits))
                         )
-                        self.terminal_fit_index = assessment_indices[-1]
+                        self.state = replace(self.state, terminal_fit_index=assessment_indices[-1])
                         direction = _indexed_direction(
                             check.direction,
                             assessment_indices,
@@ -921,39 +946,43 @@ class _SmoothingSearch:
                             _face_revalidation_iteration(
                                 iteration=len(self.history) + 1,
                                 source_fit_index=source_fit_index,
-                                accepted_fit_index=self.terminal_fit_index,
+                                accepted_fit_index=self.state.terminal_fit_index,
                                 coefficient_fit_indices=assessment_indices,
                                 component_name=component_name,
-                                lambdas=self.current_lambdas,
+                                lambdas=self.state.lambdas,
                                 objective_before=objective_before,
                                 check=check,
                                 direction=direction,
-                                evidence=self.terminal_evidence,
+                                evidence=self.state.evidence,
                                 source_fit=source_fit,
                             )
                         )
-                        self.current_fit = check.endpoint_fit
-                        self.current_objective = check.endpoint_objective
+                        self.state = replace(
+                            self.state, fit=check.endpoint_fit, objective=check.endpoint_objective
+                        )
                         resolved_directions[component_name] = direction
                         with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-                            self.terminal_evidence = _fresh_raw_evidence(
-                                self.layout,
-                                self.current_lambdas,
-                                self.current_fit,
-                                self.outer_config,
-                                face=self.current_face,
+                            self.state = replace(
+                                self.state,
+                                evidence=_fresh_raw_evidence(
+                                    self.layout,
+                                    self.state.lambdas,
+                                    self.state.fit,
+                                    self.outer_config,
+                                    face=self.state.face,
+                                ),
                             )
                     if recheck.retraction is not None:
                         retraction = recheck.retraction
-                        source_fit_index = self.terminal_fit_index
-                        source_fit = self.current_fit
-                        objective_before = self.current_objective
+                        source_fit_index = self.state.terminal_fit_index
+                        source_fit = self.state.fit
+                        objective_before = self.state.objective
                         first_assessment_index = len(self.coefficient_fits)
                         self.coefficient_fits.extend(retraction.assessment_fits)
                         assessment_indices = tuple(
                             range(first_assessment_index, len(self.coefficient_fits))
                         )
-                        self.terminal_fit_index = assessment_indices[-1]
+                        self.state = replace(self.state, terminal_fit_index=assessment_indices[-1])
                         if retraction.direction is not None:
                             if not isinstance(retraction.direction, EndpointDirectionEvidence):
                                 raise RuntimeError("scalar revalidation produced joint evidence")
@@ -969,34 +998,40 @@ class _SmoothingSearch:
                             _face_retraction_iteration(
                                 iteration=len(self.history) + 1,
                                 source_fit_index=source_fit_index,
-                                accepted_fit_index=self.terminal_fit_index,
+                                accepted_fit_index=self.state.terminal_fit_index,
                                 coefficient_fit_indices=assessment_indices,
-                                lambdas=self.current_lambdas,
+                                lambdas=self.state.lambdas,
                                 objective_before=objective_before,
                                 retraction=retraction,
-                                evidence=self.terminal_evidence,
+                                evidence=self.state.evidence,
                                 source_fit=source_fit,
                             )
                         )
-                        self.current_face = None
-                        self.current_fit = retraction.fit
-                        self.current_objective = retraction.objective
+                        self.state = replace(
+                            self.state,
+                            face=None,
+                            fit=retraction.fit,
+                            objective=retraction.objective,
+                        )
                         if _direction_leaves_face(retraction.direction):
                             self._active_set_changed()
                             continue
                         with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-                            self.terminal_evidence = _fresh_raw_evidence(
-                                self.layout,
-                                self.current_lambdas,
-                                self.current_fit,
-                                self.outer_config,
-                                face=self.current_face,
+                            self.state = replace(
+                                self.state,
+                                evidence=_fresh_raw_evidence(
+                                    self.layout,
+                                    self.state.lambdas,
+                                    self.state.fit,
+                                    self.outer_config,
+                                    face=self.state.face,
+                                ),
                             )
                         return self._result(converged=False, reason="endpoint_revalidation_failed")
                     terminal_endpoint_directions = resolved_directions
                     if not stopped and (
-                        self.terminal_evidence.working_infinity
-                        or self.terminal_evidence.maximum > self.outer_config.tolerance
+                        self.state.evidence.working_infinity
+                        or self.state.evidence.maximum > self.outer_config.tolerance
                     ):
                         continue
                 return self._result(
@@ -1005,7 +1040,7 @@ class _SmoothingSearch:
                     terminal_endpoint_directions=terminal_endpoint_directions,
                 )
             if len(self.history) >= self.outer_config.max_iterations:
-                if self._release_held_caps() and self.current_fit is self.refused_fit:
+                if self._release_held_caps() and self.state.fit is self.refused_fit:
                     continue
                 # The other components ran out of rounds; the result names the held caps.
                 return self._result(converged=False, reason="max_iterations")
@@ -1017,9 +1052,9 @@ class _SmoothingSearch:
                 continue
 
             iteration_number = len(self.history) + 1
-            source_fit_index = self.terminal_fit_index
+            source_fit_index = self.state.terminal_fit_index
             with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-                plain_update = self.terminal_evidence.update
+                plain_update = self.state.evidence.update
                 if plain_update is None:
                     raise RuntimeError("estimated smoothing components require a raw EFS update")
                 max_proposed_step = _maximum_step(plain_update, self.estimated_names)
@@ -1035,12 +1070,10 @@ class _SmoothingSearch:
                     acceleration_refusal_reason = "non_gfs_proposal"
                 else:
                     with measure_phase(self.phase_recorder, "efs_update_backtracking"):
-                        provenance = _acceleration_provenance(
-                            self.estimated_names, self.current_fit
-                        )
+                        provenance = _acceleration_provenance(self.estimated_names, self.state.fit)
                         self.accelerator.record_accepted(
                             log_lambdas=_ordered_log_lambdas(
-                                self.current_lambdas, self.estimated_names
+                                self.state.lambdas, self.estimated_names
                             ),
                             raw_residual=_ordered_steps(
                                 plain_update.raw_log_steps,
@@ -1085,34 +1118,34 @@ class _SmoothingSearch:
             accelerated_fit_index: int | None = None
             raw_backtracks = 0
             proposed_lambdas: Mapping[str, float] = _complete_mapping(
-                self.current_lambdas,
+                self.state.lambdas,
                 plain_update.lambdas,
-                missing=self.current_lambdas,
+                missing=self.state.lambdas,
             )
             proposed_log_steps: Mapping[str, float] = _complete_mapping(
-                self.current_lambdas,
+                self.state.lambdas,
                 plain_update.log_steps,
                 missing=0.0,
             )
             quadratic_forms = _complete_mapping(
-                self.current_lambdas,
+                self.state.lambdas,
                 plain_update.quadratic_forms,
                 missing=0.0,
             )
             trace_terms = _complete_mapping(
-                self.current_lambdas,
+                self.state.lambdas,
                 plain_update.trace_terms,
                 missing=0.0,
             )
 
             endpoint_names = self._endpoint_names(
-                self._endgame_state(), plain_update.log_steps, self.estimated_names
+                self.state, plain_update.log_steps, self.estimated_names
             )
             accepted_evidence: _FreshRawEvidence | None = None
             if endpoint_names:
                 with measure_phase(self.phase_recorder, "efs_update_backtracking"):
                     trial_lambdas, trial_log_steps = _endpoint_proposal(
-                        self.current_lambdas,
+                        self.state.lambdas,
                         plain_update.log_steps,
                         self.estimated_names,
                         endpoint_names,
@@ -1120,8 +1153,8 @@ class _SmoothingSearch:
                     )
                 trial_fit, fit_index, trial_objective = self._trial(trial_lambdas)
                 if trial_objective is not None and _within_ceiling(
-                    self.current_fit,
-                    self.current_objective,
+                    self.state.fit,
+                    self.state.objective,
                     trial_fit,
                     trial_objective,
                     self.outer_config,
@@ -1152,7 +1185,7 @@ class _SmoothingSearch:
             if accelerated_proposal is not None:
                 with measure_phase(self.phase_recorder, "efs_update_backtracking"):
                     accelerated_values = _accelerated_proposal(
-                        self.current_lambdas,
+                        self.state.lambdas,
                         self.estimated_names,
                         accelerated_proposal.log_lambdas,
                         accelerated_proposal.log_step,
@@ -1173,8 +1206,8 @@ class _SmoothingSearch:
                 ):
                     plateau_eligible = False
                 elif _within_ceiling(
-                    self.current_fit,
-                    self.current_objective,
+                    self.state.fit,
+                    self.state.objective,
                     trial_fit,
                     trial_objective,
                     self.outer_config,
@@ -1200,7 +1233,7 @@ class _SmoothingSearch:
                     step_scale = self.outer_config.backtrack_factor**raw_backtrack
                     with measure_phase(self.phase_recorder, "efs_update_backtracking"):
                         trial_lambdas, trial_log_steps = _scaled_proposal(
-                            self.current_lambdas,
+                            self.state.lambdas,
                             plain_update.log_steps,
                             self.estimated_names,
                             step_scale,
@@ -1212,8 +1245,8 @@ class _SmoothingSearch:
                         plateau_eligible = False
                         continue
                     if _within_ceiling(
-                        self.current_fit,
-                        self.current_objective,
+                        self.state.fit,
+                        self.state.objective,
                         trial_fit,
                         trial_objective,
                         self.outer_config,
@@ -1226,20 +1259,20 @@ class _SmoothingSearch:
                         break
 
             if accepted_fit is None:
-                zero_steps = {name: 0.0 for name in self.current_lambdas}
+                zero_steps = {name: 0.0 for name in self.state.lambdas}
                 self.history.append(
                     DistributionalEFSIteration(
                         iteration=iteration_number,
                         source_fit_index=source_fit_index,
-                        lambdas_before=self.current_lambdas,
+                        lambdas_before=self.state.lambdas,
                         proposed_lambdas=proposed_lambdas,
-                        lambdas_after=self.current_lambdas,
+                        lambdas_after=self.state.lambdas,
                         proposed_log_steps=proposed_log_steps,
                         accepted_log_steps=zero_steps,
                         quadratic_forms=quadratic_forms,
                         trace_terms=trace_terms,
-                        objective_before=self.current_objective,
-                        objective_after=self.current_objective,
+                        objective_before=self.state.objective,
+                        objective_after=self.state.objective,
                         objective_relative_change=0.0,
                         max_proposed_log_step=max_proposed_step,
                         max_accepted_log_step=0.0,
@@ -1252,7 +1285,7 @@ class _SmoothingSearch:
                         coefficient_fit_indices=tuple(self.attempted_fit_indices),
                         accepted_fit_index=None,
                         coefficient_tolerances=tuple(self.attempted_tolerances),
-                        update_curvature=self.current_fit.terminal_curvature,
+                        update_curvature=self.state.fit.terminal_curvature,
                         accepted_curvature=None,
                         endpoint_components=endpoint_names,
                     )
@@ -1290,8 +1323,8 @@ class _SmoothingSearch:
             assert accepted_lambdas is not None
             assert accepted_log_steps is not None
             assert accepted_objective is not None
-            objective_change = abs(accepted_objective - self.current_objective) / (
-                1.0 + abs(self.current_objective)
+            objective_change = abs(accepted_objective - self.state.objective) / (
+                1.0 + abs(self.state.objective)
             )
             max_accepted_step = max(
                 (abs(accepted_log_steps[name]) for name in self.estimated_names),
@@ -1313,7 +1346,7 @@ class _SmoothingSearch:
             )
             practical_parameter_change = (
                 _maximum_relative_natural_parameter_change(
-                    self.current_fit.theta,
+                    self.state.fit.theta,
                     accepted_fit.theta,
                 )
                 if self.outer_config.practical_convergence
@@ -1323,14 +1356,14 @@ class _SmoothingSearch:
                 DistributionalEFSIteration(
                     iteration=iteration_number,
                     source_fit_index=source_fit_index,
-                    lambdas_before=self.current_lambdas,
+                    lambdas_before=self.state.lambdas,
                     proposed_lambdas=proposed_lambdas,
                     lambdas_after=accepted_lambdas,
                     proposed_log_steps=proposed_log_steps,
                     accepted_log_steps=accepted_log_steps,
                     quadratic_forms=quadratic_forms,
                     trace_terms=trace_terms,
-                    objective_before=self.current_objective,
+                    objective_before=self.state.objective,
                     objective_after=accepted_objective,
                     objective_relative_change=objective_change,
                     max_proposed_log_step=max_proposed_step,
@@ -1344,23 +1377,27 @@ class _SmoothingSearch:
                     coefficient_fit_indices=tuple(self.attempted_fit_indices),
                     accepted_fit_index=accepted_fit_index,
                     coefficient_tolerances=tuple(self.attempted_tolerances),
-                    update_curvature=self.current_fit.terminal_curvature,
+                    update_curvature=self.state.fit.terminal_curvature,
                     accepted_curvature=accepted_fit.terminal_curvature,
                     step_source="efs" if accepted_evidence is None else "endpoint",
                     endpoint_components=endpoint_names,
                 )
             )
-            self.previous_fall, self.fall = self.fall, self.current_objective - accepted_objective
-            self.current_lambdas = accepted_lambdas
-            self.current_fit = accepted_fit
-            self.current_objective = accepted_objective
-            self.terminal_fit_index = accepted_fit_index
-            self.terminal_evidence = (
-                self._evidence(self.penalty_memo)
-                if accepted_evidence is None
-                else self._adopt(accepted_evidence)
+            self.previous_fall, self.fall = self.fall, self.state.objective - accepted_objective
+            self.state = replace(
+                self.state,
+                lambdas=accepted_lambdas,
+                fit=accepted_fit,
+                objective=accepted_objective,
+                terminal_fit_index=accepted_fit_index,
             )
-            if self.terminal_evidence.estimated_names != self.estimated_names:
+            self.state = replace(
+                self.state,
+                evidence=self._evidence(self.penalty_memo)
+                if accepted_evidence is None
+                else self._adopt(accepted_evidence),
+            )
+            if self.state.evidence.estimated_names != self.estimated_names:
                 raise RuntimeError("estimated smoothing names changed inside one EFS fit")
             # The step test alone is first-order on a harmonic tail, so require both
             # a flat objective and a contracting step before nominating a plateau.
@@ -1377,11 +1414,11 @@ class _SmoothingSearch:
                 and max_accepted_step <= self.previous_accepted_step
             )
             if self.outer_config.practical_convergence:
-                assert self.terminal_evidence.update is not None
+                assert self.state.evidence.update is not None
                 lower_pressure = _lower_bound_pressure(
-                    self.terminal_evidence,
-                    self.current_lambdas,
-                    self.terminal_evidence.update.raw_log_steps,
+                    self.state.evidence,
+                    self.state.lambdas,
+                    self.state.evidence.update.raw_log_steps,
                     self.outer_config,
                 )
                 self.practical_run = (
@@ -1401,19 +1438,19 @@ class _SmoothingSearch:
             outward_plateau = (
                 self.outer_config.practical_convergence
                 and self.plateau_run >= self.outer_config.plateau_iterations
-                and self.current_face is None
-                and self.terminal_evidence.maximum > self.outer_config.tolerance
-                and self.terminal_evidence.update is not None
+                and self.state.face is None
+                and self.state.evidence.maximum > self.outer_config.tolerance
+                and self.state.evidence.update is not None
                 and _practical_outward_window(
                     history=self.history,
                     coefficient_fits=self.coefficient_fits,
                     terminal_raw_log_steps={
                         name: (
-                            self.terminal_evidence.update.raw_log_steps[name]
-                            if name in self.terminal_evidence.estimated_names
+                            self.state.evidence.update.raw_log_steps[name]
+                            if name in self.state.evidence.estimated_names
                             else 0.0
                         )
-                        for name in self.current_lambdas
+                        for name in self.state.lambdas
                     },
                     config=self.outer_config,
                 )
@@ -1426,8 +1463,8 @@ class _SmoothingSearch:
             # where one is available, so which of the two a fit meets first does not
             # decide its outcome.
             interior = (
-                not self.terminal_evidence.unresolved_upper_bound
-                and not self.terminal_evidence.working_infinity
+                not self.state.evidence.unresolved_upper_bound
+                and not self.state.evidence.working_infinity
             )
             finishes = self._plateau_finishes() and self._endgame_budget() > 0
             if self.stationary_search and (
@@ -1446,9 +1483,9 @@ class _SmoothingSearch:
                 self.outer_config.practical_convergence
                 # Plain Fellner--Schall has no other exit from a face. A spent finish leaves
                 # a face to the strict stop, and a Newton endgame takes it at its hand-off.
-                and (self.current_face is None or finishes or self.outer_config.outer == "efs")
+                and (self.state.face is None or finishes or self.outer_config.outer == "efs")
                 and (outward_plateau or self.practical_run >= self.outer_config.plateau_iterations)
-                and self.terminal_evidence.maximum > self.outer_config.tolerance
+                and self.state.evidence.maximum > self.outer_config.tolerance
                 and interior
             ):
                 if self._endgame_budget() > 0 and (
@@ -1492,7 +1529,7 @@ class _SmoothingSearch:
                 lambdas,
                 fit,
                 self.outer_config,
-                face=self.current_face,
+                face=self.state.face,
                 penalty_memo=memo,
                 held=self.cap_held if held is None else held,
             )
@@ -1503,7 +1540,7 @@ class _SmoothingSearch:
         return evidence
 
     def _evidence(self, memo: _PenaltyEvaluationMemo | None = None) -> _FreshRawEvidence:
-        return self._adopt(self._evidence_at(self.current_lambdas, self.current_fit, memo))
+        return self._adopt(self._evidence_at(self.state.lambdas, self.state.fit, memo))
 
     def _trial(
         self,
@@ -1514,7 +1551,7 @@ class _SmoothingSearch:
         The objective is ``None`` when the fit is not stationary or its objective
         cannot be certified.
         """
-        if self.current_face is None:
+        if self.state.face is None:
             tolerance = self.inner_config.tolerance
             trial_fit = _fit_fixed_state(
                 self.family,
@@ -1523,12 +1560,12 @@ class _SmoothingSearch:
                 self.likelihood_plan,
                 lambdas=trial_lambdas,
                 face=None,
-                initial=self.current_fit.coefficients,
+                initial=self.state.fit.coefficients,
                 config=self.inner_config,
                 chunk_size=self.chunk_size,
                 phase_recorder=self.phase_recorder,
                 _reuse_session=self.reuse_session,
-                _reuse_source=self.current_fit,
+                _reuse_source=self.state.fit,
             )
             stationary = trial_fit.converged
         else:
@@ -1540,8 +1577,8 @@ class _SmoothingSearch:
                 self.y,
                 self.likelihood_plan,
                 lambdas=trial_lambdas,
-                face=self.current_face,
-                initial=self.current_fit.coefficients,
+                face=self.state.face,
+                initial=self.state.fit.coefficients,
                 config=authority_config,
                 chunk_size=self.chunk_size,
                 phase_recorder=self.phase_recorder,
@@ -1562,7 +1599,7 @@ class _SmoothingSearch:
                 trial_fit,
                 layout=self.layout,
                 lambdas=trial_lambdas,
-                face=self.current_face,
+                face=self.state.face,
                 objective_tolerance=self.outer_config.objective_tolerance,
                 penalty_memo=self.penalty_memo,
             )
@@ -1573,8 +1610,8 @@ class _SmoothingSearch:
         if not self.cap_held:
             return False
         self.cap_held = frozenset()
-        self.terminal_evidence = self._evidence()
-        self.caps_final = bool(self.terminal_evidence.unresolved_upper_bound)
+        self.state = replace(self.state, evidence=self._evidence())
+        self.caps_final = bool(self.state.evidence.unresolved_upper_bound)
         return self.caps_final
 
     def _foreign_cap(self) -> bool:
@@ -1584,7 +1621,7 @@ class _SmoothingSearch:
         ones cannot be.
         """
         return any(
-            self.current_lambdas[name] == self.outer_config.upper(name)
+            self.state.lambdas[name] == self.outer_config.upper(name)
             for name in self.estimated_names
             if name not in self.cap_held
         )
@@ -1629,11 +1666,11 @@ class _SmoothingSearch:
         to promote them in and to take the gradient on their face, and no other
         component stands at its cap, beside which none could be promoted.
         """
-        pressed = self.terminal_evidence.unresolved_upper_bound
+        pressed = self.state.evidence.unresolved_upper_bound
         capped = [
             name
             for name in self.estimated_names
-            if self.current_lambdas[name] == self.outer_config.upper(name)
+            if self.state.lambdas[name] == self.outer_config.upper(name)
         ]
         if (
             not pressed
@@ -1657,15 +1694,15 @@ class _SmoothingSearch:
         names those. A face is revalidated by the strict stop the earned plateau
         goes to.
         """
-        ceiling = self.outer_config.plateau_tolerance * (1.0 + abs(self.current_objective))
-        resolution = self.outer_config.objective_tolerance * (1.0 + abs(self.current_objective))
-        bound = self.current_face is not None or not self.endpoint_caps.isdisjoint(self.cap_held)
+        ceiling = self.outer_config.plateau_tolerance * (1.0 + abs(self.state.objective))
+        resolution = self.outer_config.objective_tolerance * (1.0 + abs(self.state.objective))
+        bound = self.state.face is not None or not self.endpoint_caps.isdisjoint(self.cap_held)
         if bound and remaining_fall(self.fall, self.previous_fall, resolution) > ceiling:
             return None
         if (self.refused_fit is not None or not self._foreign_cap()) and self._release_held_caps():
             self.plateau_earned = True
             return None
-        if self.current_face is None:
+        if self.state.face is None:
             return self._result(converged=True, reason="practical_plateau")
         self.plateau_earned = not self.cap_held
         return None
@@ -1681,8 +1718,8 @@ class _SmoothingSearch:
         self.pending_cap = None
         self.endgame_outcome = None  # its derivatives named the old set's components
         self.endgame_stationary = False
-        self.terminal_evidence = self._evidence()
-        self.estimated_names = self.terminal_evidence.estimated_names
+        self.state = replace(self.state, evidence=self._evidence())
+        self.estimated_names = self.state.evidence.estimated_names
         self.plateau_run = 0
         self.practical_run = 0
         self.plateau_qualified = False
@@ -1732,7 +1769,7 @@ class _SmoothingSearch:
         terminal_endpoint_directions: Mapping[str, EndpointDirectionEvidence] | None = None,
     ) -> DistributionalEFSResult:
         self._release_held_caps()  # a result names every cap still pressed
-        evidence = self.terminal_evidence
+        evidence = self.state.evidence
         endgame = self.endgame_outcome
         if converged and self.endgame_stationary:
             # The exact gradient voids a Fellner--Schall cap nomination, including
@@ -1744,19 +1781,19 @@ class _SmoothingSearch:
             layout=self.layout,
             config=self.outer_config,
             initial_lambdas=self.initial_lambdas,
-            lambdas=self.current_lambdas,
+            lambdas=self.state.lambdas,
             initial_objective=self.initial_objective,
-            objective=self.current_objective,
+            objective=self.state.objective,
             converged=converged,
             reason=reason,
             terminal_evidence=evidence,
             history=self.history,
             coefficient_fits=self.coefficient_fits,
-            terminal_fit_index=self.terminal_fit_index,
+            terminal_fit_index=self.state.terminal_fit_index,
             terminal_endpoint_directions=terminal_endpoint_directions,
             endgame=endgame,
             beyond_cap_components=tuple(
-                name for name in self.current_lambdas if name in self.beyond_cap
+                name for name in self.state.lambdas if name in self.beyond_cap
             ),
         )
 
@@ -1764,20 +1801,10 @@ class _SmoothingSearch:
         if self.plateau_earned:
             return "practical_plateau"
         if self.endgame_stationary or (
-            self.stationary_search and not self.terminal_evidence.estimated_names
+            self.stationary_search and not self.state.evidence.estimated_names
         ):
             return "stationary"
         return "objective_plateau" if self.plateau_qualified else "lambda_change"
-
-    def _endgame_state(self) -> EndgameState:
-        return EndgameState(
-            lambdas=self.current_lambdas,
-            fit=self.current_fit,
-            objective=self.current_objective,
-            face=self.current_face,
-            evidence=self.terminal_evidence,
-            terminal_fit_index=self.terminal_fit_index,
-        )
 
     def _resume_fellner_schall(self) -> None:
         """Keep the accepted fit; drop what cannot describe the next EFS step.
@@ -1813,7 +1840,7 @@ class _SmoothingSearch:
         self.endgame_due = self._release_held_caps() and pause
         if self.endgame_due:
             return None
-        entry = self._endgame_state()
+        entry = self.state
         entry_fits = list(self.coefficient_fits) if self._plateau_finishes() else []
         entry_iterations = len(self.history)
         outcome = self._endgame_at(entry, budget)
@@ -1828,16 +1855,19 @@ class _SmoothingSearch:
         self.endpoint_caps.update(outcome.endpoint_components)
         self.endgame_outcome = outcome
         state = outcome.state
-        self.current_lambdas = dict(state.lambdas)
-        self.current_fit = state.fit
-        self.current_objective = state.objective
-        self.terminal_fit_index = state.terminal_fit_index
-        self.terminal_evidence = state.evidence
+        self.state = replace(
+            self.state,
+            lambdas=dict(state.lambdas),
+            fit=state.fit,
+            objective=state.objective,
+            terminal_fit_index=state.terminal_fit_index,
+            evidence=state.evidence,
+        )
         if stalled:
             self.endgame_outcome = None
             if self.unearned:
                 return self._result(converged=False, reason="objective_rejected")
-            if self.current_face is None and not self.terminal_evidence.unresolved_upper_bound:
+            if self.state.face is None and not self.state.evidence.unresolved_upper_bound:
                 return self._result(converged=True, reason="practical_plateau")
             # Only the strict stop revalidates a face, and a stall decides nothing about
             # a nominated cap, so both carry on with the finish spent.
@@ -1859,18 +1889,21 @@ class _SmoothingSearch:
             self.pending_cap = None
             handed = self._handed_caps()
             self.endgame_due = self.handed_over = bool(handed)
-            self.terminal_evidence = replace(self.terminal_evidence, unresolved_upper_bound=handed)
+            self.state = replace(
+                self.state, evidence=replace(self.state.evidence, unresolved_upper_bound=handed)
+            )
             return None
         if outcome.kind == "cap_pressure":
             self.pending_cap = outcome
             self.endgame_due = True  # the endgame goes on from a face promoted for this pressure
-            nominated = set(self.terminal_evidence.unresolved_upper_bound) | set(
-                outcome.cap_pressure
-            )
-            self.terminal_evidence = replace(
-                self.terminal_evidence,
-                unresolved_upper_bound=tuple(
-                    name for name in self.current_lambdas if name in nominated
+            nominated = set(self.state.evidence.unresolved_upper_bound) | set(outcome.cap_pressure)
+            self.state = replace(
+                self.state,
+                evidence=replace(
+                    self.state.evidence,
+                    unresolved_upper_bound=tuple(
+                        name for name in self.state.lambdas if name in nominated
+                    ),
                 ),
             )
             return None
@@ -1888,7 +1921,7 @@ class _SmoothingSearch:
             if attempt.direction is not None:
                 directions = dict(attempt.direction.component_directions)
         elif attempt.check is not None:
-            directions = {self.terminal_evidence.unresolved_upper_bound[0]: attempt.check.direction}
+            directions = {self.state.evidence.unresolved_upper_bound[0]: attempt.check.direction}
         for name, direction in directions.items():
             if direction.decision != "finite":
                 continue
@@ -1900,7 +1933,7 @@ class _SmoothingSearch:
                 name=name,
                 endpoint_derivative=float(direction.analytic_derivative),
                 pending=self.pending_cap,
-                state=self._endgame_state(),
+                state=self.state,
                 solver_config=self.inner_config,
                 efs_config=self.outer_config,
                 chunk_size=self.chunk_size,
@@ -1918,7 +1951,6 @@ class _SmoothingSearch:
     ) -> None:
         """Record the released component as one accepted bracket iteration."""
         assert self.pending_cap is not None and self.pending_cap.derivatives is not None
-        state = self._endgame_state()
         assessment_fits = () if attempt is None else tuple(attempt.assessment_fits)
         first = len(self.coefficient_fits)
         self.coefficient_fits.extend(assessment_fits)
@@ -1929,12 +1961,12 @@ class _SmoothingSearch:
             *((release.tolerance,) * len(release.fits)),
         )
         evidence = _fresh_raw_evidence(
-            self.layout, release.lambdas, release.fit, self.outer_config, face=self.current_face
+            self.layout, release.lambdas, release.fit, self.outer_config, face=self.state.face
         )
         self.history.append(
             newton_iteration_record(
                 iteration=len(self.history) + 1,
-                state=state,
+                state=self.state,
                 proposed_lambdas=release.lambdas,
                 lambdas_after=release.lambdas,
                 objective_after=release.objective,
@@ -1950,11 +1982,14 @@ class _SmoothingSearch:
                 estimated_names=self.estimated_names,
             )
         )
-        self.current_lambdas = dict(release.lambdas)
-        self.current_fit = release.fit
-        self.current_objective = release.objective
-        self.terminal_fit_index = indices[-1]
-        self.terminal_evidence = evidence
+        self.state = replace(
+            self.state,
+            lambdas=dict(release.lambdas),
+            fit=release.fit,
+            objective=release.objective,
+            terminal_fit_index=indices[-1],
+            evidence=evidence,
+        )
         self.beyond_cap[release.name] = self.outer_config.conditioning_limit(release.name)
 
     def _record_bracket_attempt(self, attempt: BracketAttempt) -> None:
@@ -1966,11 +2001,11 @@ class _SmoothingSearch:
         self.history.append(
             newton_iteration_record(
                 iteration=len(self.history) + 1,
-                state=self._endgame_state(),
-                proposed_lambdas=self.current_lambdas,
-                lambdas_after=self.current_lambdas,
-                objective_after=self.current_objective,
-                evidence=self.terminal_evidence,
+                state=self.state,
+                proposed_lambdas=self.state.lambdas,
+                lambdas_after=self.state.lambdas,
+                objective_after=self.state.objective,
+                evidence=self.state.evidence,
                 fit_indices=indices,
                 tolerances=(attempt.tolerance,) * len(indices),
                 accepted_fit=None,
