@@ -43,11 +43,26 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
+      # Licence policy: a dependency a pull request adds or moves must carry a
+      # permissive or weak-copyleft licence. GPL and AGPL are refused by being
+      # absent; LGPL and MPL-2.0 bind only changes to their own files, not a
+      # library that imports them. The list holds every licence the dependency
+      # graph reports for uv.lock today, so an unlisted permissive one is added
+      # here by hand. docutils, from the docs group, is exempt: its one GPL file
+      # is an Emacs mode its wheel does not ship.
       - name: Review dependency changes
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294
         with:
           fail-on-severity: moderate
           comment-summary-in-pr: true
+          allow-licenses: >-
+            0BSD, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause,
+            BSD-2-Clause-Views, BSD-3-Clause, BSL-1.0, CC-BY-4.0, CC0-1.0,
+            HPND-Markus-Kuhn, ISC, LGPL-2.1-only, LGPL-2.1-or-later, LGPL-3.0-only,
+            LGPL-3.0-or-later, LicenseRef-scancode-matplotlib-1.3.0,
+            LicenseRef-scancode-public-domain-disclaimer, MIT, MIT-0, MIT-CMU,
+            MPL-2.0, OFL-1.1, PSF-2.0, Python-2.0, Python-2.0.1, Zlib
+          allow-dependencies-licenses: pkg:pypi/docutils
 
   pip-audit:
     name: pip-audit

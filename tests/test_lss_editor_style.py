@@ -130,6 +130,25 @@ def test_colormaps_run_between_the_token_endpoints():
     assert min(diverging(0.5)[:3]) > 0.99
 
 
+def test_plotly_helpers_without_plotly_name_the_plotting_extra():
+    """The template helpers and the LSS plotly module say how to install plotly."""
+    import importlib
+    import sys
+    from unittest.mock import patch
+
+    blocked = {"plotly": None, "plotly.graph_objects": None, "plotly.io": None}
+    blocked["plotly.subplots"] = None
+    hint = r"plotly is required.*pip install 'superglm\[plotting\]'"
+    with patch.dict("sys.modules", blocked):
+        with pytest.raises(ImportError, match=hint):
+            plotly_template()
+        with pytest.raises(ImportError, match=hint):
+            register_plotly_template("superglm_editor_unregistered")
+        sys.modules.pop("superglm.plotting.distributional_plotly", None)
+        with pytest.raises(ImportError, match=hint):
+            importlib.import_module("superglm.plotting.distributional_plotly")
+
+
 @pytest.mark.skipif(not PLOTLY_AVAILABLE, reason="plotly is not installed")
 def test_plotly_template_carries_the_editor_look():
     import plotly.io as pio

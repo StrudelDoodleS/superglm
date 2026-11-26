@@ -259,6 +259,20 @@ def test_plot_term_comparison_builds_dropdown_and_scale_toggle(fitted_comparison
     assert fig.layout.updatemenus[1].type == "dropdown"
 
 
+def test_plot_term_comparison_without_plotly_names_the_plotting_extra(fitted_comparison_models):
+    from unittest.mock import patch
+
+    from superglm import plot_term_comparison
+
+    X, sample_weight, models = fitted_comparison_models
+    blocked = {"plotly": None, "plotly.graph_objects": None, "plotly.subplots": None}
+    with patch.dict("sys.modules", blocked):
+        with pytest.raises(
+            ImportError, match=r"plotly is required.*pip install 'superglm\[plotting\]'"
+        ):
+            plot_term_comparison(models=models, X=X, sample_weight=sample_weight, engine="plotly")
+
+
 def test_plot_term_comparison_uses_one_trace_per_label(fitted_comparison_models):
     pytest.importorskip("plotly")
     from superglm import plot_term_comparison

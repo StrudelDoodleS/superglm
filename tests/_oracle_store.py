@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import numpy.typing
 
 STORE_DIRECTORY = Path(__file__).resolve().parent / "fixtures" / "oracle_store"
 REFRESH = os.environ.get("SUPERGLM_REFRESH_ORACLES", "") not in ("", "0")
@@ -245,9 +246,15 @@ def _library_version(name: str) -> str:
 _ORACLE_LIBRARIES = tuple((name, _library_version(name)) for name in ("mpmath", "sympy"))
 
 
+# numpy's ``NDArray`` is a type alias from numpy 2.5 and a subscripted generic,
+# which is callable, before it. It enters every fingerprint as the type alias,
+# so a store's answers stand on every numpy the project supports.
+_NDARRAY = numpy.typing.NDArray
+
+
 def _is_data(value: Any) -> bool:
     """A value, not code: neither callable nor a module."""
-    return not (callable(value) or inspect.ismodule(value))
+    return value is _NDARRAY or not (callable(value) or inspect.ismodule(value))
 
 
 def _node_names(node: ast.AST) -> set[str]:
@@ -433,6 +440,10 @@ class _Fingerprint:
     def _named(self, item: Any) -> None:
         # Only the name: a library's module layout moves between versions, and
         # its code is not the oracle's.
+        if getattr(item, "__origin__", None) in (np.ndarray, _NDARRAY):
+            # ``NDArray[...]``, whose origin is ``ndarray`` before numpy 2.5 and the alias from it
+            self._put("external", "NDArray")
+            return
         name = getattr(item, "__qualname__", None) or getattr(item, "__name__", None)
         self._put("external", name or type(item).__qualname__)
 
@@ -647,6 +658,8 @@ class _Fingerprint:
             import sympy
 
             self._put("sympy", sympy.srepr(item))
+        elif item is _NDARRAY:
+            self._put("opaque", "typing.TypeAliasType")
         elif callable(item) and hasattr(item, "__name__"):  # ``np.log``, ``math.exp``
             self._named(item)
         elif type(item).__module__ == "builtins":

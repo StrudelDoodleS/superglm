@@ -255,10 +255,19 @@ def diverging_cmap() -> LinearSegmentedColormap:
     return LinearSegmentedColormap.from_list("superglm_editor_diverging", DIVERGING)
 
 
-# ── plotly (imported lazily: it is a development dependency only) ──
+# ── plotly (imported lazily: it is the optional `plotting` extra) ──
+_PLOTLY_MISSING = (
+    "plotly is required for the editor's plotly template. "
+    "Install it with: pip install 'superglm[plotting]'"
+)
+
+
 def plotly_template() -> Any:
     """The editor's grammar as a ``plotly.graph_objects.layout.Template``."""
-    import plotly.graph_objects as go
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        raise ImportError(_PLOTLY_MISSING) from None
 
     axis = dict(
         gridcolor=TOKENS["grid"],
@@ -290,7 +299,10 @@ def plotly_template() -> Any:
 
 def register_plotly_template(name: str = "superglm_editor") -> str:
     """Register :func:`plotly_template` under ``name``; idempotent."""
-    import plotly.io as pio
+    try:
+        import plotly.io as pio
+    except ImportError:
+        raise ImportError(_PLOTLY_MISSING) from None
 
     if name not in pio.templates:
         pio.templates[name] = plotly_template()

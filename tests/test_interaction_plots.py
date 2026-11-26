@@ -571,5 +571,7 @@ class TestInteractionPlotAPI:
     def test_plotly_import_error(self, interaction_data):
         model = _fit_spline_cat(interaction_data)
         with patch.dict("sys.modules", {"plotly": None, "plotly.graph_objects": None}):
-            with pytest.raises(ImportError, match="plotly is required"):
+            with pytest.raises(
+                ImportError, match=r"plotly is required.*pip install 'superglm\[plotting\]'"
+            ):
                 plot_interaction(model, "age:region", engine="plotly")

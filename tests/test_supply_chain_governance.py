@@ -94,6 +94,19 @@ def test_security_workflow_collects_core_governance_evidence():
         assert marker in workflow
 
 
+def test_dependency_review_refuses_gpl_and_agpl_by_an_allow_list():
+    """The review allows licences by name (``deny-licenses`` is deprecated), and
+    no GPL or AGPL licence is on the list; LGPL is, since it binds only its own files."""
+    job = yaml.safe_load(_read(".github/workflows/security.yml"))["jobs"]["dependency-review"]
+    (step,) = [s for s in job["steps"] if "dependency-review-action" in s.get("uses", "")]
+    settings = step["with"]
+    assert "deny-licenses" not in settings
+    allowed = [name.strip() for name in settings["allow-licenses"].split(",")]
+    assert {"MIT", "BSD-3-Clause", "Apache-2.0", "MPL-2.0", "LGPL-3.0-or-later"} <= set(allowed)
+    assert not [name for name in allowed if re.match(r"A?GPL-", name)], allowed
+    assert settings["allow-dependencies-licenses"] == "pkg:pypi/docutils"
+
+
 def test_workflow_actions_are_pinned_to_full_commit_shas():
     """Every ``uses:`` in the tree names a 40-hex commit, and some ``uses:`` exists.
 
@@ -333,7 +346,11 @@ def test_dev_ci_keeps_auxiliary_checks_without_duplicating_the_regression_suite(
         # The full suite runs as `pytest tests/` or through the shared suite runner.
         if re.search(r"pytest\s+tests/(?:\s|$)|scripts/run_test_suite\.py", block)
     ]
-    assert full_suite_jobs == [(".github/workflows/ci.yml", "test-compatibility")]
+    # The dependency-floor job reruns the quick suite in a different environment.
+    assert full_suite_jobs == [
+        (".github/workflows/ci.yml", "test-compatibility"),
+        (".github/workflows/ci.yml", "dependency-floors"),
+    ]
 
 
 def test_dev_ci_keeps_browser_and_non_test_checks_independent():

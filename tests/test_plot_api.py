@@ -1098,7 +1098,9 @@ class TestPlotlyMainEffects:
             "sys.modules",
             {"plotly": None, "plotly.graph_objects": None, "plotly.subplots": None},
         ):
-            with pytest.raises(ImportError, match="plotly is required"):
+            with pytest.raises(
+                ImportError, match=r"plotly is required.*pip install 'superglm\[plotting\]'"
+            ):
                 fitted_model.plot(engine="plotly")
 
 

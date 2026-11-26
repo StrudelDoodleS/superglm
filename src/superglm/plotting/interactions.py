@@ -201,7 +201,8 @@ def _dispatch_plotly(
         import plotly.graph_objects  # noqa: F401
     except ImportError:
         raise ImportError(
-            "plotly is required for engine='plotly'. Install it with: pip install plotly"
+            "plotly is required for engine='plotly'. "
+            "Install it with: pip install 'superglm[plotting]'"
         ) from None
 
     valid_views = {"surface", "contour", "contour_pair"}

@@ -337,6 +337,16 @@ class TestLorenzCurveGini:
         with pytest.raises(ValueError, match="engine='matplotlib'"):
             lorenz_curve([1, 2, 3], [1, 2, 3], engine="plotly", ax=ax)
 
+    @pytest.mark.parametrize("y", [[1.0, 2.0, 3.0], [0.0, 0.0, 0.0]], ids=["curve", "degenerate"])
+    def test_plotly_engine_without_plotly_names_the_plotting_extra(self, y):
+        from unittest.mock import patch
+
+        with patch.dict("sys.modules", {"plotly": None, "plotly.graph_objects": None}):
+            with pytest.raises(
+                ImportError, match=r"plotly is required.*pip install 'superglm\[plotting\]'"
+            ):
+                lorenz_curve(y, [1.0, 2.0, 3.0], engine="plotly")
+
     def test_lorenz_endpoints(self):
         rng = np.random.default_rng(42)
         n = 500
