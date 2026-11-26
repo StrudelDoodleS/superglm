@@ -32,7 +32,12 @@ MIN_ROWS = 100
 #: Actual over held-out expected further than this from 1 is marked.
 FAR = 0.25
 #: Policies named on the figure, with the label's offset in points and alignment.
-LABELLED = {4728: (8, 0, "left"), 28288: (8, 0, "left"), 32614: (8, -4, "left"), 7303: (-8, 0, "right")}
+LABELLED = {
+    4728: (8, 0, "left"),
+    28288: (8, 0, "left"),
+    32614: (8, -4, "left"),
+    7303: (-8, 0, "right"),
+}
 
 
 def main() -> None:
