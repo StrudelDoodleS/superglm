@@ -294,6 +294,19 @@ def _matrix_case(
     return _model_outputs(model, frame.iloc[TRAIN_ROWS:])
 
 
+def _golden_fit(family: str, **options) -> dict:
+    """A matrix fit, exact, with ``fit_reml`` options of the case's own."""
+    _tree_root()
+    from tests.bound_predictor_fixtures import model_from_templates
+    from tests.test_distributional_reorg_golden import _cases
+
+    cases, frame = _cases()
+    distribution, predictors, y = cases[family]
+    model = model_from_templates(family=distribution, predictors=predictors)
+    model.fit_reml(frame.iloc[:TRAIN_ROWS], y[:TRAIN_ROWS], **options)
+    return _model_outputs(model, frame.iloc[TRAIN_ROWS:])
+
+
 class _Outcomes:
     """A pytest plugin that keeps each phase's outcome of the tests it runs."""
 
@@ -338,8 +351,494 @@ def _book_case(book: str) -> dict:
     return _model_outputs(model, X, offsets)
 
 
-# Paths no test reaches, each forced by replacing a callee (filled in below).
+# Paths no test reaches, each forced by replacing a callee on the search's module. The
+# docstrings name the lines of ``fit_distributional_efs`` at f5204839b each case reaches.
 _FORCED: dict[str, Callable[[], dict]] = {}
+
+
+def _forced(name: str) -> Callable:
+    def register(builder: Callable[[], dict]) -> Callable[[], dict]:
+        _FORCED[name] = builder
+        return builder
+
+    return register
+
+
+def _loop():
+    from superglm.distributional.smoothing import loop
+
+    return loop
+
+
+def _fit_outputs(fitted) -> dict:
+    """What ``fit_dense_distributional`` returns, walked whole."""
+    return {"fit": fitted}
+
+
+def _endpoint_trial_fit(outer: str, **options) -> dict:
+    """``tests/test_distributional_endpoint_trial.py``'s fit: a strong smooth beside linear ones."""
+    import numpy as np
+    import pandas as pd
+
+    _tree_root()
+    from tests.test_distributional_endpoint_trial import _fit
+
+    model, _ = _fit(outer, **options)
+    grid = np.linspace(-0.95, 0.95, 40)
+    probe = pd.DataFrame({"x": grid, "z": grid[::-1], "w": np.sin(3.0 * grid)})
+    return _model_outputs(model, probe)
+
+
+def _history_rows_fit(**config):
+    """``tests/test_distributional_history_rows.py``'s 96-row Gaussian fit, by config."""
+    _tree_root()
+    from tests.test_distributional_history_rows import _fit
+
+    return _fit(**config)
+
+
+def _rows_before_newton(fitted) -> int:
+    history = fitted.smoothing.history
+    return next((k for k, row in enumerate(history) if row.stage == "newton"), len(history))
+
+
+def _gamma_joint_face() -> dict:
+    """``tests/test_gamma_ls_joint_infinity_face.py``'s fit, on a joint face of two caps."""
+    _tree_root()
+    from tests.test_gamma_ls_joint_infinity_face import (
+        _fit_public_gamma_joint_face,
+        _gamma_joint_face_data,
+    )
+
+    frame, response, weights = _gamma_joint_face_data()
+    model = _fit_public_gamma_joint_face(frame, response, weights)
+    return _model_outputs(model, frame.iloc[::37])
+
+
+def _rounds() -> list[int]:
+    """Count the Fellner-Schall rounds: each proposal reads ``_maximum_step`` once."""
+    loop = _loop()
+    real, count = loop._maximum_step, [0]
+
+    def counted(*args, **kwargs):
+        count[0] += 1
+        return real(*args, **kwargs)
+
+    loop._maximum_step = counted
+    return count
+
+
+def _endgame_kinds(*kinds: str | None, when: Callable[[dict], bool] = lambda kwargs: True) -> None:
+    """Replace the endgame's outcome kind on its successive calls (``None`` leaves one alone)."""
+    from dataclasses import replace
+
+    loop = _loop()
+    real, script = loop.run_newton_endgame, list(kinds)
+
+    def scripted(*args, **kwargs):
+        outcome = real(*args, **kwargs)
+        if not script or not when(kwargs):
+            return outcome
+        kind = script.pop(0)
+        if kind is None:
+            return outcome
+        changes = {"kind": kind}
+        if kind in ("derivative_unavailable", "cap_pressure"):
+            changes["derivatives"] = None
+        if kind == "cap_pressure":
+            changes["cap_pressure"] = ()
+        return replace(outcome, **changes)
+
+    loop.run_newton_endgame = scripted
+
+
+def _floor_evidence_after(record: str, *, once: bool) -> None:
+    """Fresh evidence after the first call of the history-row builder ``record`` is not
+    stationary: its largest step is at least ten times the tolerance, at the next
+    evidence (``once``) or at every one after."""
+    from dataclasses import replace
+
+    loop = _loop()
+    real_record, real_evidence, armed = getattr(loop, record), loop._fresh_raw_evidence, [0]
+
+    def recorded(*args, **kwargs):
+        armed[0] = armed[0] or 1
+        return real_record(*args, **kwargs)
+
+    def evidence(*args, **kwargs):
+        fresh = real_evidence(*args, **kwargs)
+        if armed[0] != 1:
+            return fresh
+        armed[0] = 2 if once else 1
+        config = args[3]
+        return replace(fresh, maximum=max(fresh.maximum, 10.0 * config.tolerance))
+
+    setattr(loop, record, recorded)
+    loop._fresh_raw_evidence = evidence
+
+
+def _no_hand_off_on_a_round() -> None:
+    """The tail of an accepted round never hands off; every stop is consulted as it is."""
+    loop = _loop()
+    real = loop.should_hand_off
+
+    def hand_off(reason, **kwargs):
+        return False if reason is None else real(reason, **kwargs)
+
+    loop.should_hand_off = hand_off
+
+
+@_forced("resume/multisecant-reset")
+def _resume_resets_the_accelerator() -> dict:
+    """Lines 719-720: a resumed Fellner-Schall search resets the multisecant window.
+
+    The first endgame of a multisecant ``efs+newton`` fit reports its derivatives
+    unavailable, so the search resumes Fellner-Schall rounds.
+    """
+    _endgame_kinds("derivative_unavailable")
+    return _golden_fit(
+        "gaussian", outer="efs+newton", acceleration="multisecant", practical_reml=False
+    )
+
+
+@_forced("strict-stop/no-budget")
+def _strict_stop_without_budget() -> dict:
+    """Lines 733-734 and 1124-1125: a strict stop hands an ``efs+stationary`` search off
+    with no round left, and the endgame ends the fit.
+
+    The hand-off is put out of reach of the accepted rounds and the practical plateau
+    is off, so the search runs to its strict stop; refitted with the round limit at
+    that stop, the hand-off finds the budget spent.
+    """
+    options = dict(outer="efs+stationary", practical_convergence=False, handoff_step=1e-300,
+                   handoff_iterations=10**6, tolerance=1e-6, max_log_step=5.0)  # fmt: skip
+    first = _history_rows_fit(max_iterations=60, **options)
+    second = _history_rows_fit(max_iterations=_rows_before_newton(first), **options)
+    return _fit_outputs(second)
+
+
+@_forced("stationary-plateau/endgame")
+def _stationary_plateau_hands_off() -> dict:
+    """Lines 1825-1828 and 1829-1831: an ``efs+stationary`` search reaches its practical
+    plateau before its hand-off and runs the endgame from it, which goes on.
+
+    The matrix's Gamma fit, whose plain search ends at a practical plateau; no
+    accepted round hands off.
+    """
+    _no_hand_off_on_a_round()
+    return _golden_fit("gamma", outer="efs+stationary")
+
+
+@_forced("stationary-plateau/no-budget")
+def _stationary_plateau_without_budget() -> dict:
+    """Lines 1829-1830 and 733-734: the same plateau with its round limit spent: the
+    endgame it hands to ends the fit."""
+    _tree_root()
+    from tests.bound_predictor_fixtures import model_from_templates
+    from tests.test_distributional_reorg_golden import _cases
+
+    _no_hand_off_on_a_round()
+    cases, frame = _cases()
+    distribution, predictors, y = cases["gamma"]
+    first = model_from_templates(family=distribution, predictors=predictors)
+    first.fit_reml(frame.iloc[:TRAIN_ROWS], y[:TRAIN_ROWS], outer="efs+stationary")
+    rows = _rows_before_newton(first._require_fitted())
+    return _golden_fit("gamma", outer="efs+stationary", max_reml_iter=rows)
+
+
+@_forced("bracket/release-goes-on")
+def _bracket_release_goes_on() -> dict:
+    """Lines 993-995 and 1444-1449: after a bracket release the endgame returns nothing,
+    and the passes after it run the endgame for the component beyond the cap.
+
+    The base is ``test_unavailable_gradient_after_cap_release_retains_uncertified_fit``;
+    the first two endgames after the release report cap pressure on no component and
+    the third an unresolved gradient, which ends the fit.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from superglm.distributional import GaussianLS, Predictor
+    from superglm.distributional.model import fit_dense_distributional
+    from superglm.distributional.results.iteration import DistributionalEFSConfig
+    from superglm.distributional.results.solver import DenseSolverConfig
+    from superglm.distributional.weights import WeightContract
+    from superglm.features import Spline
+
+    _endgame_kinds(
+        "cap_pressure",
+        "cap_pressure",
+        "gradient_unresolved",
+        when=lambda kwargs: bool(kwargs["upper_bounds"]),
+    )
+    rng = np.random.default_rng(17)
+    x = np.linspace(0.0, 1.0, 200)
+    y = 2.0 * np.sin(2.0 * np.pi * x) + rng.normal(0.0, 0.5, len(x))
+    fitted = fit_dense_distributional(
+        pd.DataFrame({"x": x}),
+        y,
+        family=GaussianLS(),
+        predictors=(
+            Predictor("location", {"x": Spline(kind="cr", n_knots=5)}),
+            Predictor("scale", {}),
+        ),
+        weight_contract=WeightContract("prior"),
+        config=DenseSolverConfig(max_iterations=200, tolerance=1.0e-10),
+        efs_config=DistributionalEFSConfig(
+            outer="efs+newton",
+            maximum_lambda=1.0e-4,
+            initial_lambda=1.0e-4,
+            maximum_lambda_conditioning=1.0,
+            max_iterations=12,
+        ),
+        retain_rows=True,
+    )
+    return _fit_outputs(fitted)
+
+
+@_forced("bracket/joint-attempt")
+def _bracket_after_a_joint_refusal() -> dict:
+    """Lines 809-810, 810-814 and 814-834: a refusal under cap pressure is a joint attempt
+    with no direction, so the bracket beyond the cap has no component to search.
+
+    The base is the bracket release fixture; every joint assessment is scripted as a
+    refusal without a direction.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from superglm.distributional import GaussianLS, Predictor
+    from superglm.distributional.model import fit_dense_distributional
+    from superglm.distributional.results.iteration import DistributionalEFSConfig
+    from superglm.distributional.results.solver import DenseSolverConfig
+    from superglm.distributional.smoothing.authority import _face_authority_config
+    from superglm.distributional.smoothing.faces import _JointFaceDirectionAttempt
+    from superglm.distributional.weights import WeightContract
+    from superglm.features import Spline
+
+    loop = _loop()
+
+    def refused(*args, **kwargs):
+        return None, _JointFaceDirectionAttempt(
+            component_names=tuple(kwargs["terminal_evidence"].unresolved_upper_bound),
+            direction=None,
+            assessment_fits=(),
+            coefficient_tolerance=_face_authority_config(kwargs["solver_config"]).tolerance,
+            failure_reason="joint_analytic_unavailable",
+        )
+
+    loop._try_joint_exact_face = refused
+    rng = np.random.default_rng(17)
+    x = np.linspace(0.0, 1.0, 200)
+    y = 2.0 * np.sin(2.0 * np.pi * x) + rng.normal(0.0, 0.5, len(x))
+    fitted = fit_dense_distributional(
+        pd.DataFrame({"x": x}),
+        y,
+        family=GaussianLS(),
+        predictors=(
+            Predictor("location", {"x": Spline(kind="cr", n_knots=5)}),
+            Predictor("scale", {}),
+        ),
+        weight_contract=WeightContract("prior"),
+        config=DenseSolverConfig(max_iterations=200, tolerance=1.0e-10),
+        efs_config=DistributionalEFSConfig(
+            outer="efs+newton",
+            maximum_lambda=1.0e-4,
+            initial_lambda=1.0e-4,
+            maximum_lambda_conditioning=1.0,
+            max_iterations=12,
+        ),
+        retain_rows=True,
+    )
+    return _fit_outputs(fitted)
+
+
+@_forced("face/revalidation-out-of-rounds")
+def _face_revalidation_out_of_rounds() -> dict:
+    """Lines 1137-1138: the round limit refuses a face revalidation at a strict stop.
+
+    The endpoint trial fixture under plain ``efs`` stops strictly on ``z``'s face;
+    refitted with the round limit at that stop, the revalidation has no round.
+    """
+    _tree_root()
+    from tests.test_distributional_endpoint_trial import _fit
+
+    _, plain = _fit("efs", practical_reml=False)
+    rows = next(k for k, row in enumerate(plain.history) if row.revalidated_face_components)
+    return _endpoint_trial_fit("efs", practical_reml=False, max_reml_iter=rows)
+
+
+@_forced("face/scalar-kept-goes-on")
+def _scalar_face_kept_goes_on() -> dict:
+    """Lines 1429-1433: a kept scalar face whose fresh evidence is not yet stationary.
+
+    The evidence after the first revalidation is scripted above the tolerance, so the
+    search goes on from the face and stops at the next revalidation.
+    """
+    _floor_evidence_after("_face_revalidation_iteration", once=True)
+    return _endpoint_trial_fit("efs", practical_reml=False)
+
+
+@_forced("face/joint-kept-goes-on")
+def _joint_face_kept_goes_on() -> dict:
+    """Lines 1229-1233: the same for a kept joint face (the joint infinity face fixture)."""
+    _floor_evidence_after("_joint_face_revalidation_iteration", once=True)
+    return _gamma_joint_face()
+
+
+@_forced("face/joint-without-finite-faces")
+def _joint_face_without_finite_faces() -> dict:
+    """Lines 1156-1157: building a joint face's finite companions raises
+    ``PenaltyFaceError``, so the joint revalidation is unavailable and the face is
+    rolled back (the joint infinity face fixture)."""
+    from superglm.distributional.smoothing.penalty_face import PenaltyFaceError
+
+    def unavailable(*args, **kwargs):
+        raise PenaltyFaceError("finite companion face unavailable (forced)")
+
+    _loop()._optional_penalty_face = unavailable
+    return _gamma_joint_face()
+
+
+@_forced("rejected-round/endgame-ends")
+def _rejected_round_endgame_ends() -> dict:
+    """Lines 1678-1679: an ``efs+newton`` search hands a rejected round to the endgame,
+    which ends the fit.
+
+    Every trial of the first round is scripted as rejected, and that endgame reports
+    an unresolved gradient.
+    """
+    loop, rounds = _loop(), _rounds()
+    real = loop._within_ceiling
+
+    def ceiling(*args, **kwargs):
+        return False if rounds[0] == 1 else real(*args, **kwargs)
+
+    loop._within_ceiling = ceiling
+    _endgame_kinds("gradient_unresolved")
+    return _golden_fit("gaussian", outer="efs+newton")
+
+
+@_forced("outward-plateau/goes-on")
+def _outward_plateau_goes_on() -> dict:
+    """Lines 1834-1836: an outward plateau beside a trial's held cap is not yet a result.
+
+    The base is ``test_a_search_holding_a_trials_cap_goes_on_through_a_plateau_still_falling``;
+    every practical window reads as outward, and the first remaining fall is scripted
+    beyond the tolerance.
+    """
+    import math
+
+    loop = _loop()
+    real_fall, asked = loop.remaining_fall, [0]
+
+    def fall(*args, **kwargs):
+        asked[0] += 1
+        return math.inf if asked[0] == 1 else real_fall(*args, **kwargs)
+
+    loop._practical_outward_window = lambda **kwargs: True
+    loop.remaining_fall = fall
+    _tree_root()
+    from tests.test_distributional_endpoint_trial import _PLATEAU
+
+    return _endpoint_trial_fit("efs", **_PLATEAU)
+
+
+@_forced("multisecant/box-blocked")
+def _accelerated_proposal_box_blocked() -> dict:
+    """Lines 1570-1572: the box blocks every accelerated proposal (the matrix's
+    multisecant Tweedie fit, binned)."""
+    _loop()._accelerated_proposal = lambda *args, **kwargs: None
+    return _matrix_case("tweedie", "binned", "efs", "practical", acceleration="multisecant")
+
+
+@_forced("start/supplied-lambdas")
+def _supplied_lambdas() -> dict:
+    """The golden test's own start: supplied lambdas per knot interval, under plain ``efs``."""
+    _tree_root()
+    from tests.bound_predictor_fixtures import model_from_templates
+    from tests.test_distributional_reorg_golden import _cases, _per_knot
+
+    cases, frame = _cases()
+    distribution, predictors, y = cases["gaussian"]
+    starts = {key: 0.1 * value for key, value in _per_knot(frame, predictors).items()}
+    model = model_from_templates(family=distribution, predictors=predictors)
+    model.fit_reml(frame.iloc[:TRAIN_ROWS], y[:TRAIN_ROWS], outer="efs", initial_lambda=0.1,
+                   lambdas=starts)  # fmt: skip
+    return _model_outputs(model, frame.iloc[TRAIN_ROWS:])
+
+
+@_forced("box/absolute-max-lambda")
+def _absolute_box() -> dict:
+    """``max_lambda`` set, so the box is absolute (the endpoint trial fixture, ``efs+finish``)."""
+    return _endpoint_trial_fit("efs+finish", max_lambda=1.0e6)
+
+
+@_forced("unearned/retracted-face-then-stalled-finish")
+def _unearned_survives() -> dict:
+    """Design section 8.2: does ``unearned`` from an earlier rejected round reach a later
+    stalled finish that has since earned its plateau?
+
+    ``efs+finish`` on the endpoint trial fixture. With ``z`` held at the cap a trial
+    reached, every trial of the round after it is scripted as rejected, so the round
+    is unearned and goes to the finish, which first has the held cap judged and
+    promoted. That finish runs two Newton steps and is reported stationary on the
+    face (on this fixture a real finish spends its whole budget); the strict stop's
+    revalidation is scripted to find the face's direction finite, so the face is
+    released and Fellner-Schall rounds go on. They are accepted up to a practical
+    plateau, which hands to a second finish, scripted to stall: the search reports
+    ``objective_rejected``, the rejected round's verdict, though accepted rounds have
+    since earned the plateau.
+    """
+
+    from dataclasses import replace
+
+    import superglm.distributional.smoothing.faces as faces
+
+    loop, rounds = _loop(), _rounds()
+    real_ceiling, real_check, checks = loop._within_ceiling, faces._check_face_direction, [0]
+    trial_round: list[int] = []
+    real_endpoint = loop._endpoint_proposal
+
+    def endpoint(*args, **kwargs):
+        trial_round.append(rounds[0])
+        return real_endpoint(*args, **kwargs)
+
+    def ceiling(*args, **kwargs):
+        rejected = bool(trial_round) and rounds[0] == trial_round[0] + 1
+        return False if rejected else real_ceiling(*args, **kwargs)
+
+    def check(*args, **kwargs):
+        # the face's direction at the strict stop's revalidation, made finite once
+        attempt = real_check(*args, **kwargs)
+        checks[0] += 1
+        if checks[0] != 2 or attempt.check is None:
+            return attempt
+        direction = attempt.check.direction
+        error = direction.numerical_error
+        finite = replace(direction, decision="finite", analytic_derivative=-1.0,
+                         profile_score_term=-2.0, curvature_schur_term=0.0,
+                         curvature_drift_term=0.0, lower_bound=-1.0 - error,
+                         upper_bound=-1.0 + error)  # fmt: skip
+        return replace(attempt, check=replace(attempt.check, direction=finite))
+
+    loop._endpoint_proposal = endpoint
+    loop._within_ceiling = ceiling
+    faces._check_face_direction = check
+    _endgame_kinds("stationary", "objective_rejected")
+    scripted, finishes = loop.run_newton_endgame, [0]
+
+    def two_steps_first(*args, **kwargs):
+        finishes[0] += 1
+        if finishes[0] == 1:
+            kwargs = {**kwargs, "budget": min(2, kwargs["budget"])}
+        return scripted(*args, **kwargs)
+
+    loop.run_newton_endgame = two_steps_first
+    _tree_root()
+    from tests.test_distributional_endpoint_trial import _PLATEAU
+
+    return _endpoint_trial_fit("efs+finish", **_PLATEAU)
 
 
 # --------------------------------------------------------------------------- digests
