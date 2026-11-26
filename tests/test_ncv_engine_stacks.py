@@ -399,9 +399,14 @@ def lost_levels(levels):
     return problem_of(model, c.problem.y, np.ones(n), None), from_groups(labels, n)
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("route", [None, "woodbury"], ids=["stacked", "alone"])
 def test_singular_member_of_a_stack_is_refused_with_its_neighbourhood(route):
-    """A factor level wholly inside a group of two, among fifty groups of two: the typed refusal."""
+    """A factor level wholly inside a group of two, among fifty groups of two: the typed refusal.
+
+    Pins the refusal such a group gave when every neighbourhood was solved alone: a stack
+    must leave the member out and name it as before.
+    """
     problem, nb = lost_levels({7: "e"})
     assert len(nb.drop(7)) == 2
     with pytest.raises(LeaveOutRankError, match="group 7 held out") as refusal:
@@ -409,12 +414,14 @@ def test_singular_member_of_a_stack_is_refused_with_its_neighbourhood(route):
     assert refusal.value.neighbourhood == 7
 
 
+@pytest.mark.pins_behaviour
 @pytest.mark.parametrize("route", [None, "woodbury"], ids=["stacked", "alone"])
 def test_refusal_names_the_first_unidentified_neighbourhood_in_order(route):
     """Two groups lose a level, the earlier one of three rows and the later of two: the earlier is named.
 
-    Stacks are solved by size, and the members a stack leaves out are decided in the
-    neighbourhoods' own order.
+    Pins the neighbourhood a refusal named when every neighbourhood was solved alone, in
+    order: stacks are solved by size, and the members a stack leaves out are still decided
+    in the neighbourhoods' own order.
     """
     problem, nb = lost_levels({5: "e", 127: "g"})
     assert (len(nb.drop(5)), len(nb.drop(127))) == (3, 2)
