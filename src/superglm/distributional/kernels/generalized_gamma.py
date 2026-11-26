@@ -47,6 +47,7 @@ from superglm.distributional.kernels._generalized_gamma_numba import (
 )
 from superglm.distributional.kernels._gg_log_tail import gg_log_tail_jets
 from superglm.distributional.kernels._gg_uniform_tail import Q_MAX as _UNIFORM_SHAPE
+from superglm.distributional.kernels._gg_uniform_tail import W_MAX as _UNIFORM_REACH
 from superglm.distributional.kernels.gamma import gamma_shape_plus_one_log_increment
 from superglm.distributional.kernels.log_normal import log_normal_tail_log_factors
 
@@ -54,6 +55,12 @@ Parametrisation = Literal["mean", "location"]
 _Evaluator = Callable[[NDArray[np.float64]], NDArray[np.float64]]
 
 _FLOAT = np.float64
+# Gamma shape above which a CDF or quantile reads the log tail (Temme's uniform
+# expansion, whose cost and accuracy do not depend on the shape).  Below it they
+# read SciPy's incomplete gamma, whose power series stops at 2000 terms: from
+# shape 6e4 on that is short of the tail beyond 4.5 standard deviations below
+# the mean.
+LARGE_GAMMA_SHAPE = 1.0e4
 _QUANTILE_NEWTON_STEPS = 40
 _QUANTILE_NEWTON_STEP_RTOL = 2.0**-40
 _TAIL_INVERSE_RTOL = 64.0 * math.sqrt(_EPS)
@@ -1667,15 +1674,50 @@ def _location_arguments(
     return mu_values, sigma_values, q
 
 
+def log_tail_cdf(w: NDArray, shape: NDArray) -> NDArray[np.float64]:
+    """``F(w)`` of the standardised law from its log tail, for ``|Q| <= 0.2887``.
+
+    Past ``|w| = 2^100``, the log tail's range, ``F`` is 0 or 1 as ``Phi(w)`` is.
+    """
+    out = special.ndtr(w)
+    inside = np.abs(w) <= _UNIFORM_REACH
+    out[inside] = np.exp(gg_log_tail_jets(w[inside], shape[inside], upper=False, order=0)[0])
+    return out
+
+
+def log_tail_quantile(p: NDArray, shape: NDArray) -> NDArray[np.float64]:
+    """``w_p`` of the standardised law from its log tail, for ``|Q| <= 0.2887``.
+
+    Solves ``log S(w) = log(1 - p)`` (``log F(w) = log p`` below the median) by
+    Newton from ``z - Q (z^2 + 2)/6``, ``z = Phi^-1(p)``, its expansion to first
+    order in ``Q``; monotone after one step by log-concavity.  Unresolved rows
+    are NaN.
+    """
+    z = special.ndtri(p)
+    w = z - shape * (z * z + 2.0) / 6.0
+    upper = p > 0.5
+    target = np.where(upper, np.log1p(-p), np.log(p))
+    converged = np.zeros(w.shape, dtype=np.bool_)
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        for _ in range(_QUANTILE_NEWTON_STEPS):
+            log_tail, gradient = gg_log_tail_jets(w, shape, upper=upper, order=1)
+            step = (log_tail - target) / gradient[:, 0]
+            w = w - step
+            converged = np.abs(step) <= _QUANTILE_NEWTON_STEP_RTOL * np.maximum(1.0, np.abs(w))
+            if np.all(converged):
+                break
+    return np.where(converged, w, np.nan)
+
+
 def generalized_gamma_cdf(
     y: NDArray, mu: NDArray, sigma: NDArray, shape: NDArray
 ) -> NDArray[np.float64]:
     """``P(Y <= y)`` in location coordinates.
 
     ``P(k, k e^(Q w))`` for ``Q > 0``, ``Q(k, k e^(Q w))`` for ``Q < 0`` (``W``
-    decreases in the gamma variate there).  Below ``|Q| = 1e-8``, where ``k``
-    passes ``1e16``, it is the fitted law's uniform expansion through ``Q = 0``
-    (``gg_log_tail``), ``Phi(w)`` at ``Q = 0``.
+    decreases in the gamma variate there), ``k = Q^-2``.  Above
+    :data:`LARGE_GAMMA_SHAPE` it is the fitted law's uniform expansion through
+    ``Q = 0`` (:func:`log_tail_cdf`), ``Phi(w)`` at ``Q = 0``.
     """
     y_values = _vector(y, name="y")
     mu_values, sigma_values, q = _location_arguments(mu, sigma, shape)
@@ -1689,17 +1731,17 @@ def generalized_gamma_cdf(
         sigma_inside = sigma_values[interior]
         q_inside = q[interior]
         w = (np.log(y_inside) - mu_inside) / sigma_inside
-        zero = np.abs(q_inside) < _ZERO_SHAPE
-        safe = np.where(zero, 1.0, q_inside)
-        k = 1.0 / (safe * safe)
+        with np.errstate(divide="ignore"):
+            k = 1.0 / (q_inside * q_inside)
+        large = k > LARGE_GAMMA_SHAPE
+        inside_cdf = np.empty_like(w)
+        inside_cdf[large] = log_tail_cdf(w[large], q_inside[large])
+        k, w, q_inside = k[~large], w[~large], q_inside[~large]
         with np.errstate(over="ignore", invalid="ignore"):
-            argument = k * np.exp(safe * w)
+            argument = k * np.exp(q_inside * w)
             lower = special.gammainc(k, argument)
             upper = special.gammaincc(k, argument)
-        inside_cdf = np.where(safe > 0.0, lower, upper)
-        if np.any(zero):
-            log_cdf = gg_log_tail_jets(w[zero], q_inside[zero], upper=False, order=0)[0]
-            inside_cdf[zero] = np.where(np.isnan(log_cdf), special.ndtr(w[zero]), np.exp(log_cdf))
+        inside_cdf[~large] = np.where(q_inside > 0.0, lower, upper)
         out[interior] = inside_cdf
     _finite_or_raise("cdf", out)
     return readonly(out)
@@ -1712,6 +1754,8 @@ def generalized_gamma_quantile(
 
     Below ``|Q| = 1e-8`` it is ``w = z - Q (z^2 + 2)/6``, ``z = Phi^-1(p)``, from
     ``dF/dQ = phi(w) (w^2 + 2)/6`` at ``Q = 0``; the ``O(Q^2)`` remainder is below rounding.
+    From there to gamma shape :data:`LARGE_GAMMA_SHAPE` it inverts the log tail
+    (:func:`log_tail_quantile`), and beyond it the incomplete gamma.
     """
     probabilities = np.asarray(p, dtype=_FLOAT)
     if (
@@ -1724,16 +1768,19 @@ def generalized_gamma_quantile(
     if probabilities.shape != mu_values.shape:
         raise GeneralizedGammaDomainError("generalized gamma row arrays must have the same shape")
     zero = np.abs(q) < _ZERO_SHAPE
-    safe = np.where(zero, 1.0, q)
-    k = 1.0 / (safe * safe)
+    z = special.ndtri(probabilities)
+    w = z - q * (z * z + 2.0) / 6.0
+    with np.errstate(divide="ignore"):
+        k = 1.0 / (q * q)
+    large = ~zero & (k > LARGE_GAMMA_SHAPE)
+    w[large] = log_tail_quantile(probabilities[large], q[large])
+    rest = ~zero & ~large
+    k, safe, level = k[rest], q[rest], probabilities[rest]
     gamma_quantile = np.where(
-        safe > 0.0,
-        special.gammaincinv(k, probabilities),
-        special.gammainccinv(k, probabilities),
+        safe > 0.0, special.gammaincinv(k, level), special.gammainccinv(k, level)
     )
     with np.errstate(divide="ignore", invalid="ignore"):
-        z = special.ndtri(probabilities)
-        w = np.where(zero, z - q * (z * z + 2.0) / 6.0, np.log(gamma_quantile / k) / safe)
+        w[rest] = np.log(gamma_quantile / k) / safe
         out = np.exp(mu_values + sigma_values * w)
     _finite_or_raise("quantile", out)
     return readonly(out)
@@ -1849,24 +1896,10 @@ def _size_biased_log_tail_ratio(
     ``kappa + sigma/Q`` (Stacy 1962), Prentice shape ``Q' = Q / sqrt(1 + sigma Q)``, with
     ``{Y > y_p} = {W' > (w_p - log1p(sigma Q)/Q) sqrt(1 + sigma Q)}``. Both tails use
     :func:`gg_log_tail_jets` (Temme's uniform expansion near ``Q = 0``), so nothing divides by
-    ``Q``. ``w_p`` solves ``log S(w) = log(1 - p)`` (``log F(w) = log p`` below the median) by
-    Newton from ``z - Q (z^2 + 2)/6``, monotone after one step by log-concavity. Unresolved
-    rows are NaN.
+    ``Q``. ``w_p`` is :func:`log_tail_quantile`'s; unresolved rows are NaN.
     """
-    z = special.ndtri(probabilities)
-    w = z - shape * (z * z + 2.0) / 6.0
-    upper = probabilities > 0.5
-    target = np.where(upper, np.log1p(-probabilities), np.log(probabilities))
-    converged = np.zeros(w.shape, dtype=np.bool_)
+    w = log_tail_quantile(probabilities, shape)
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-        for _ in range(_QUANTILE_NEWTON_STEPS):
-            log_tail, gradient = gg_log_tail_jets(w, shape, upper=upper, order=1)
-            step = (log_tail - target) / gradient[:, 0]
-            w = w - step
-            converged = np.abs(step) <= _QUANTILE_NEWTON_STEP_RTOL * np.maximum(1.0, np.abs(w))
-            if np.all(converged):
-                break
-        w = np.where(converged, w, np.nan)
         x = sigma * shape
         root = np.sqrt(1.0 + x)
         log_ratio_over_x = np.ones_like(x)
@@ -2170,6 +2203,7 @@ __all__ = [
     "GeneralizedGammaDomainError",
     "GeneralizedGammaInitializationWarning",
     "GeneralizedGammaKernelEvaluation",
+    "LARGE_GAMMA_SHAPE",
     "generalized_gamma_cdf",
     "generalized_gamma_expected_shortfall",
     "generalized_gamma_expected_shortfall_from_mean",
@@ -2180,6 +2214,8 @@ __all__ = [
     "location_rows",
     "location_third_fourth",
     "log_mean_loading",
+    "log_tail_cdf",
+    "log_tail_quantile",
     "mean_exists",
     "mean_expected_information",
     "mean_of_location",

@@ -480,7 +480,8 @@ def test_generalized_gamma_resolves_an_extreme_negative_near_zero_tail():
     p = np.nextafter(1.0, 0.0)
     theta = np.array([[0.2, 0.8, -1.0e-6]])
     quantile = family.quantile(np.array([p]), theta)[0]
-    assert quantile == pytest.approx(763.0580930009103, rel=64.0 * _EPS)
+    # The mpmath root of the law's survival integral at 2^-53.
+    assert quantile == pytest.approx(869.2564353170133, rel=64.0 * _EPS)
     pytest.importorskip("mpmath")
     want = EXPECTED_SHORTFALL_REFERENCE(p, 0.2, 0.8, -1.0e-6)[0]
 
