@@ -882,9 +882,10 @@ def _stop_summary(obj) -> str | None:
 
 
 # ``irls._digest`` reads ``_stop_summary`` and ``_SKIPPED_KEY`` from its module at call
-# time. ``diagnose()``'s phase profile is wall-clock too: its seconds and their shares.
+# time. ``diagnose()``'s phase profile is wall-clock too (its seconds and their shares),
+# and a fitted model's ``fit_id`` is a fresh UUID.
 irls._stop_summary = _stop_summary
-irls._SKIPPED_KEY = re.compile(irls._SKIPPED_KEY.pattern + r"|^(?:seconds|fit_share)$")
+irls._SKIPPED_KEY = re.compile(irls._SKIPPED_KEY.pattern + r"|^(?:seconds|fit_share)$|_id$")
 
 
 def _plain(value: object) -> object:
@@ -1340,10 +1341,14 @@ def _compare(args) -> int:
         a, b = a_headers[name], b_headers[name]
         if a["case_hash"] == b["case_hash"]:
             continue
-        pairs = zip(a.get("call_hashes", []), b.get("call_hashes", []), strict=False)
+        a_calls, b_calls = a.get("call_hashes", []), b.get("call_hashes", [])
+        pairs = zip(a_calls, b_calls, strict=False)
         first = next((k for k, (x, y) in enumerate(pairs) if x != y), None)
+        if first is None and len(a_calls) == len(b_calls):
+            print(f"{name}: the calls are identical; what differs is the result a user reads")
+            continue
         if first is None:
-            first = min(len(a.get("call_hashes", [])), len(b.get("call_hashes", [])))
+            first = min(len(a_calls), len(b_calls))
         a_callees, b_callees = a.get("callees", []), b.get("callees", [])
 
         def callee(names, k):
