@@ -36,6 +36,7 @@ PUBLIC_API = [
     "DiscretizationResult",
     "DispersionTestResult",
     "DoubleLiftChartResult",
+    "ExperimentalWarning",
     "FactorSmooth",
     "FactorSmoothGroupTermWarning",
     "FactorSmoothResult",

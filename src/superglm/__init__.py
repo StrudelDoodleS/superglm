@@ -30,6 +30,7 @@ from superglm._lazy import attach as _attach
 
 if _typing.TYPE_CHECKING:
     from superglm import families
+    from superglm._experimental import ExperimentalWarning
     from superglm._tweedie import NearPoissonDispersionError, generate_tweedie_cpg, tweedie_logpdf
     from superglm.constraints import (
         MonotoneRepairer as MonotoneRepairer,
@@ -203,6 +204,7 @@ if _typing.TYPE_CHECKING:
 # does not load plotting, diagnostics or scikit-learn. ``__all__`` and every importable name are as
 # before; tests/test_import_compat.py keeps this table equal to the imports above.
 _LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
+    "superglm._experimental": ("ExperimentalWarning",),
     "superglm._tweedie": ("NearPoissonDispersionError", "generate_tweedie_cpg", "tweedie_logpdf"),
     "superglm.constraints": ("MonotoneRepairResult", "MonotoneRepairer"),
     "superglm.diagnostics.convergence": ("ConvergenceWarning", "FitPrecisionWarning"),
@@ -573,6 +575,7 @@ __all__ = [
     "TermInference",
     "InteractionInference",
     "ConvergenceWarning",
+    "ExperimentalWarning",
     "FitPrecisionWarning",
     "FactorSmoothGroupTermWarning",
     "InteractionCellLabelWarning",
