@@ -73,6 +73,8 @@ dev = [
     # pyarrow 17 installs a top-level `benchmarks` package that shadows ours.
     "pyarrow>=18",
     "pytest>=9.0",
+    # pytest-cov and pre-commit had no floor, so the resolver picked releases years
+    # old; their floors are releases the suite passes on, not measured minima.
     "pytest-cov>=7.0",
     "pytest-split>=0.11.0",
     "pytest-xdist>=3.8",
