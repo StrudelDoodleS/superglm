@@ -14,7 +14,19 @@ __all__ = ["ExperimentalWarning", "warn_experimental"]
 
 
 class ExperimentalWarning(UserWarning):
-    """A feature whose name, arguments or return layout may change in a minor release."""
+    """Issued once per session on the first call to an experimental feature.
+
+    An experimental feature's name, arguments and return layout may change in a
+    minor release without a deprecation period. Its numbers are held to the same
+    tests as the rest of the library.
+
+    Silence this warning with the standard warnings filter::
+
+        import warnings
+        import superglm
+
+        warnings.filterwarnings("ignore", category=superglm.ExperimentalWarning)
+    """
 
 
 # One flag for every experimental feature, not Python's per-location registry, which

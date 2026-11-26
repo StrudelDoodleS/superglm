@@ -22,6 +22,8 @@ Building blocks:
   law at ``x = a - d``, ``d > -1``: ``rho_1`` of ``rho_n = n x/(d + n + rho_(n+1))``,
   the ratios of ``int_0^x (x - t)^n t^(a-1) e^-t dt``, which is the minimal
   solution of ``A_(n+1) = (x - a - n) A_n + n x A_(n-1)``.  Every term is positive.
+  Derived by this project from the repeated-integral recurrence and checked
+  against high-precision arithmetic (``mpmath``) to ``0.3 u``; not formally proved.
 
 Both gamma fractions are swept backward from a zero tail at 32 levels, then at
 doubled depths until two successive values agree to ``4u``.
@@ -329,7 +331,12 @@ def _gamma_excess(shape: Vector, gap: Vector) -> tuple[Vector, Rows]:
 
 
 def _gamma_deficit(shape_gap: Vector, x: Vector) -> tuple[Vector, Rows]:
-    """Mean deficit of a unit-scale gamma at ``x = shape - shape_gap``, ``shape_gap > -1``."""
+    """Mean deficit of a unit-scale gamma at ``x = shape - shape_gap``, ``shape_gap > -1``.
+
+    Continued fraction derived by this project from the repeated-integral recurrence
+    and checked against high-precision arithmetic (``mpmath``) to ``0.3 u``; not
+    formally proved.
+    """
 
     def sweep(rows: Rows, levels: int) -> Vector:
         d, at = shape_gap[rows], x[rows]
@@ -393,13 +400,18 @@ def generalized_gamma_mean_excess(
           e(v)/v = [r - (e_k* - e_k)] / [|x - k*| + e_k*],
 
       from the two continued fractions.  ``e_k* - e_k`` is under ``r/2``, so the numerator
-      keeps its sign; its relative error is a few ``u (1 + 1/sigma)``.
+      keeps its sign; its relative error is a few ``u (1 + 1/sigma)`` (about ``2e-14`` at
+      ``sigma = 0.01``).  For ``Q < 0``, the mean-deficit continued fraction was derived by
+      this project and checked against high-precision arithmetic (``mpmath``) to ``0.3 u``;
+      it is not formally proved.
     - elsewhere: ``v expm1(D)``, ``D = log E[Y] - log v + log S*(v) - log S(v)``, with
       ``log_survival(rows, mu, sigma, Q)`` the log survival at ``v[rows]`` of the law with
       those coordinates, read at the row's and at the weighted law's
       (``mu + sigma log1p(sigma Q)/Q``, ``sigma/sqrt(1 + sigma Q)``, ``Q/sqrt(1 + sigma Q)``).
-      Absolute error of ``D`` a few ``u (1 + |log S|)``, so relative error that over
-      ``1 - e^-D``; ``|log S|`` stays moderate here because the far tail is read above.
+      Absolute error of ``D`` is a few ``u (1 + |log S|)``, giving relative error about
+      ``1.4e-12`` at ``sigma = 0.01`` and ``1e-13`` at ``sigma = 0.05``; ``|log S|`` stays
+      moderate here because the far tail is read above.  At the extreme corner
+      ``sigma = 1e-300`` with ``|Q| = 1e8`` below the law, the window kernel returns ``NaN``.
 
     ``log_mean`` is ``log E[Y]`` (unused where there is no mean).
     """

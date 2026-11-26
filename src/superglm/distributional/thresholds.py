@@ -281,13 +281,35 @@ class MeanExcessFigure:
 
 @dataclass(frozen=True, eq=False)
 class MeanExcessResult:
-    """The empirical mean excess at each candidate threshold.
+    """Empirical mean excess table and settings returned by :func:`mean_excess`.
 
-    ``table`` has one line per candidate: ``threshold``, ``mean_excess``, ``se``, the band
-    ``lower`` and ``upper`` at ``level``, and ``n_above``, the claims strictly above.
-    ``dropped`` lists the requested candidates with fewer than ``min_above`` claims above.
-    The result keeps the distinct losses and their counts, sorted, for :meth:`tail_line`;
-    they are not serialised.
+    Keeps the distinct positive losses and their frequency counts sorted
+    internally so :meth:`tail_line` and :func:`plot_mean_excess` can fit a tail
+    above any chosen threshold; those stored losses are omitted from
+    :meth:`to_json`.
+
+    Attributes
+    ----------
+    table : DataFrame
+        One row per retained candidate threshold with columns ``threshold``,
+        ``mean_excess``, ``se``, ``lower``, ``upper``, and ``n_above`` (claims
+        strictly above ``threshold``). The band endpoints are unclipped
+        pointwise normal-theory intervals and can dip below zero where few
+        claims remain.
+    dropped : DataFrame
+        Explicitly requested candidates left out because fewer than
+        ``min_above`` claims lie strictly above them, with columns
+        ``threshold`` and ``n_above``.
+    level : float
+        Nominal pointwise coverage of ``lower`` and ``upper``.
+    n_claims : int
+        Total frequency of the positive-weight claims read.
+    min_above : int
+        Minimum number of claims strictly above a retained candidate.
+    kind : str
+        Payload identifier (``"mean_excess"``).
+    schema_version : int
+        Schema version of :meth:`to_json`.
     """
 
     table: pd.DataFrame
@@ -301,10 +323,16 @@ class MeanExcessResult:
     schema_version: int = SCHEMA_VERSION
 
     def tail_line(self, threshold: float) -> TailLine:
-        """Fit one scale and one shape to the excesses over ``threshold`` and return the line.
+        """Fit a one-scale, one-shape generalized Pareto tail above ``threshold``.
 
-        The fit is the one :func:`threshold_stability` makes at that threshold. A fit that did
-        not converge or sits at a wall of the shape gives one warning and is flagged on the line.
+        Uses the same engine and default walls as :func:`threshold_stability`
+        on the sorted losses stored in this result, returning the straight mean
+        excess line from ``threshold`` to the largest candidate. Refuses with
+        ``ValueError`` if ``threshold`` is not finite and positive or leaves
+        fewer than ``min_above`` claims strictly above it. Emits a
+        ``ConvergenceWarning`` and flags ``converged`` / ``wall`` on the
+        returned ``TailLine`` if the fit did not converge or sits at a shape
+        wall.
         """
         u = _one_threshold(threshold)
         keep = self._losses > u
@@ -381,34 +409,61 @@ def mean_excess(
 ) -> MeanExcessResult:
     """Return the empirical mean excess of the claims at each candidate threshold.
 
-    At a threshold ``u`` the mean excess is the mean of ``y - u`` over the claims strictly
-    above ``u``. Its band is the mean plus and minus a normal quantile times its standard
-    error, which needs a tail shape below 1/2. Experimental: the name, the arguments and the
-    layout of the result may change in a minor release.
+    At each candidate threshold ``u``, computes the mean of ``y - u`` over
+    claims strictly above ``u``, its standard error, and a pointwise
+    normal-theory band at ``level``. The band assumes finite excess variance
+    (a tail shape below 1/2), the plot has no finite limit at shape 1 or above,
+    and estimates at neighbouring thresholds share most of their claims.
+    Experimental: its name, arguments and return layout may change in a minor
+    release without a deprecation period; its numbers are tested like the rest
+    of superglm.
 
     Parameters
     ----------
     y : array-like of shape (n_claims,)
-        Positive loss amounts.
+        Positive unit-free loss amounts.
     sample_weight : array-like of shape (n_claims,), optional
-        Frequency counts: a count of ``k`` reads as ``k`` equal claims. Rows with a zero
-        count are dropped before the losses are checked.
+        Nonnegative integer frequency counts: a count of ``k`` reads as ``k``
+        identical claims. Rows with a zero count are dropped before losses are
+        validated.
     thresholds : array-like, optional
-        Candidate thresholds. By default the distinct losses with at least ``min_above``
-        claims above, thinned to ``max_points`` evenly in the logarithm of the number above.
+        Explicit candidate thresholds (sorted and deduplicated). By default,
+        the distinct losses with at least ``min_above`` claims strictly above,
+        thinned to at most ``max_points`` evenly in ``log(n_above)``.
     censored : array-like of bool, optional
-        Accepted only to refuse a flagged row: this function reads complete losses.
+        Accepted only to refuse flagged rows with a pointer to
+        :func:`threshold_stability`: this function reads complete losses only.
     level : float, default=0.95
-        Coverage of the pointwise band.
+        Nominal pointwise coverage of the band, strictly between 0 and 1.
     max_points : int, default=200
-        Most candidates of the default grid.
+        Maximum number of candidates on the default grid (at least 2).
     min_above : int, default=5
-        Fewest claims above a candidate; requested candidates with fewer go to ``dropped``.
+        Minimum number of claims strictly above a candidate (at least 2);
+        trimming the top five claims is a convention. Explicit candidates with
+        fewer claims above go to ``result.dropped``.
 
     Returns
     -------
     MeanExcessResult
-        The table, the dropped candidates and the settings.
+        Table of mean excess estimates, dropped candidates, and settings.
+
+    Raises
+    ------
+    ValueError
+        If ``level`` is not in ``(0, 1)``, ``min_above < 2`` or
+        ``max_points < 2``, any positive-weight row is flagged censored, any
+        loss is missing or not positive, explicit ``thresholds`` are empty or
+        not finite and positive, or no candidate leaves at least ``min_above``
+        claims strictly above it.
+
+    Notes
+    -----
+    Exceedance is strict (``y > u``), so ties at ``u`` are not counted as zero
+    excesses. Standard errors use the sample variance with divisor
+    ``n_above - 1``, computed in one ``O(n log n)`` downward sweep with locally
+    centred block moments so large common offsets lose no digits. Band
+    endpoints are unclipped normal-theory intervals and can dip below zero when
+    few claims remain.
     """
     warn_experimental("mean_excess")
     z = _normal_quantile(level)
@@ -462,13 +517,41 @@ def plot_mean_excess(
     few_claims: int = 50,
     engine: str = "matplotlib",
 ) -> Any:
-    """Draw the mean excess points and their band from :func:`mean_excess`.
+    """Draw the empirical mean excess points and pointwise band from :func:`mean_excess`.
 
-    With ``threshold`` the plot marks it and draws the straight line of a tail (one scale,
-    one shape) fitted to the excesses over it, on the sorted losses the result kept; the
-    stretch with fewer than ``few_claims`` claims above is shaded. ``engine`` is
-    ``"matplotlib"`` or ``"plotly"``. Experimental: the name, the arguments and the layout
-    of the result may change in a minor release.
+    Plots the observed mean excess and its pointwise normal-theory band across
+    candidate thresholds, shading the right-hand stretch where fewer than
+    ``few_claims`` claims remain. Passing ``threshold`` marks it and overlays
+    the straight mean excess line of a classical generalized Pareto tail (one
+    scale, one shape) fitted to the excesses above it on the sorted losses
+    stored in ``result``; if that fit did not converge or sits at a wall, the
+    line is drawn dashed and a ``ConvergenceWarning`` is emitted. Experimental:
+    its name, arguments and return layout may change in a minor release without
+    a deprecation period; its numbers are tested like the rest of superglm.
+
+    Parameters
+    ----------
+    result : MeanExcessResult
+        Output of :func:`mean_excess`.
+    threshold : float, optional
+        Chosen candidate threshold to mark with a vertical line and fitted
+        generalized Pareto mean excess line.
+    few_claims : int, default=50
+        Shade the plot from the first candidate with fewer than ``few_claims``
+        claims strictly above it.
+    engine : {"matplotlib", "plotly"}, default="matplotlib"
+        Plotting backend.
+
+    Returns
+    -------
+    Figure
+        Matplotlib or Plotly figure.
+
+    Raises
+    ------
+    ValueError
+        If ``threshold`` is not finite and positive, leaves fewer than
+        ``result.min_above`` claims strictly above it, or ``engine`` is unknown.
     """
     warn_experimental("plot_mean_excess")
     return _renderer(engine, "mean_excess")(result.figure(threshold, few_claims=few_claims))
@@ -668,16 +751,52 @@ def _estimates(model: SuperLSS, threshold: float, z: float, book: _Book | None) 
 
 @dataclass(frozen=True, eq=False)
 class ThresholdStabilityResult:
-    """A generalised Pareto tail fitted to the excesses over each candidate threshold.
+    """Generalized Pareto tail fits across candidate thresholds from :func:`threshold_stability`.
 
-    ``table`` has one line per fitted candidate: ``threshold``; ``n_above``, the claims kept
-    there, and ``n_censored`` among them; ``shape`` with ``shape_lower`` and
-    ``shape_upper``; ``scale``; ``modified_scale`` (``scale - shape * threshold``, which
-    does not depend on the threshold above a valid one) with its band; ``converged``;
-    ``wall`` (``None``, ``"lower"``, ``"upper"`` or ``"both"``: the fit's own decision that
-    the shape sits at a wall); and ``notes``, the fit's warnings. ``dropped`` lists the
-    candidates not fitted, with the reason. ``tail`` says what was fitted and
-    ``shape_label`` what the shape column holds.
+    Attributes
+    ----------
+    table : DataFrame
+        One row per fitted candidate threshold with columns:
+
+        - ``threshold``: candidate threshold ``u``.
+        - ``n_above``: total frequency of kept claims (complete with ``y > u``
+          plus censored with limit ``c >= u``).
+        - ``n_censored``: kept censored claims among ``n_above``.
+        - ``shape``, ``shape_lower``, ``shape_upper``: fitted tail shape (or
+          frequency-weighted mean fitted shape over all read claims when shape
+          varies across rows) and its pointwise link-scale Wald band.
+        - ``scale``: fitted tail scale when scale is constant across rows, else
+          ``NaN``.
+        - ``modified_scale``, ``modified_scale_lower``,
+          ``modified_scale_upper``: threshold-free scale
+          ``scale - shape * threshold`` and its pointwise delta-method band
+          when both scale and shape are constant across rows, else ``NaN``.
+        - ``converged``: whether that candidate's fit converged.
+        - ``wall``: ``"lower"``, ``"upper"``, ``"both"``, or empty
+          (``None`` / ``NaN``; test with ``pandas.notna``) where the fit is not
+          at a wall of the shape.
+        - ``notes``: fit warnings and any count of censored claims left out
+          below ``threshold``, joined with ``" | "``.
+    dropped : DataFrame
+        Candidates not fitted (fewer than ``min_claims`` complete claims above,
+        or a higher candidate whose fit raised ``ValueError``), with columns
+        ``threshold``, ``n_above``, ``n_censored``, and ``reason``.
+    level : float
+        Nominal pointwise coverage of the bands.
+    min_claims : int
+        Minimum number of complete claims strictly above a fitted candidate.
+    tail : str
+        Description of the fitted tail model (``"one scale, one shape"`` or the
+        supplied tail's predictors).
+    shape_label : str
+        Axis label for the shape panel: ``"tail shape"`` when constant, or
+        ``"mean fitted shape over the book"`` when shape varies across rows.
+    shape_walls : tuple of (float, float)
+        Lower and upper walls of the family's bounded shape link.
+    kind : str
+        Payload identifier (``"threshold_stability"``).
+    schema_version : int
+        Schema version of :meth:`to_json`.
     """
 
     table: pd.DataFrame
@@ -734,55 +853,93 @@ def threshold_stability(
     reml: bool | None = None,
     fit_options: Mapping[str, Any] | None = None,
 ) -> ThresholdStabilityResult:
-    """Fit a generalised Pareto tail to the excesses over each candidate threshold.
+    """Fit a generalized Pareto tail to excesses over each candidate threshold.
 
-    By default the tail has one scale and one shape for all claims. With ``tail`` the
-    supplied model's own predictors are refitted at each threshold; ``tail`` itself is
-    never fitted or changed. Experimental: the name, the arguments and the layout of the
-    result may change in a minor release.
+    By default fits one scale and one shape for all claims (the classical
+    parameter stability plot) and reports both the tail shape and the
+    threshold-free modified scale ``scale - shape * threshold`` with pointwise
+    bands. Passing ``tail`` refits a fresh copy of that specification at every
+    candidate without modifying ``tail``. Experimental: its name, arguments and
+    return layout may change in a minor release without a deprecation period;
+    its numbers are tested like the rest of superglm.
 
     Parameters
     ----------
     X : DataFrame or None
-        The columns the supplied tail's terms read. May be ``None`` without ``tail``.
+        Columns read by ``tail``'s terms or column offsets. May be ``None``
+        when ``tail`` is ``None``.
     y : array-like of shape (n_claims,)
-        Positive loss amounts, or the limit of a censored claim.
+        Positive unit-free loss amounts, or the policy limit for a censored
+        claim.
     thresholds : array-like, optional
-        Candidate thresholds. By default the 0.80, 0.81, ..., 0.99 quantiles of the
-        complete losses.
+        Explicit candidate thresholds (sorted and deduplicated). By default,
+        the 0.80, 0.81, ..., 0.99 inverted-ECDF quantiles of the complete
+        losses (weighted by ``sample_weight``).
     tail : SuperLSS, optional
-        A ``SuperLSS`` with ``GeneralizedParetoLSS``. A fitted tail is refitted the way it
-        was fitted (``fit`` or ``fit_reml``, with its fixed smoothing strengths and
-        tolerances); ``reml`` and ``fit_options`` override that.
+        A ``SuperLSS`` using ``GeneralizedParetoLSS``. A fitted tail is
+        refitted with its recorded method (``fit`` or ``fit_reml``) and
+        settings unless overridden by ``reml`` or ``fit_options``; an unfitted
+        tail uses ``reml``. ``tail`` itself is never fitted or modified.
     sample_weight : array-like of shape (n_claims,), optional
-        Frequency counts. Rows with a zero count are dropped before the losses are checked.
-    censored : array-like of bool, default=False
-        Claims settled at a limit, whose ``y`` is the limit. At a candidate ``u`` a
-        censored claim is kept when its limit is at least ``u`` and left out otherwise,
-        which assumes that limits do not depend on the loss.
+        Nonnegative integer frequency counts. Rows with a zero count are
+        dropped before losses are validated. Non-unit counts require
+        ``weight_semantics="frequency"`` on ``tail``.
+    censored : bool or array-like of bool, default=False
+        Claims settled at a limit, whose ``y`` is that limit. At candidate
+        ``u``, censored claims with limit at least ``u`` are kept as
+        right-censored excesses ``limit - u``; censored claims with limit below
+        ``u`` are left out at ``u`` and counted in ``notes``, which assumes
+        limits do not depend on the loss.
     level : float, default=0.95
-        Coverage of the pointwise bands.
+        Nominal pointwise coverage of the bands, strictly between 0 and 1.
     min_claims : int, default=20
-        Fewest complete claims above a candidate for it to be fitted.
+        Minimum number of complete claims strictly above a candidate for it to
+        be fitted; candidates with fewer go to ``result.dropped``.
     reml : bool, optional
-        ``True`` fits with ``fit_reml`` and ``False`` with ``fit``. By default a fitted
-        tail keeps its own method and anything else uses ``fit``.
+        ``True`` fits with ``fit_reml`` and ``False`` with ``fit``. When
+        ``None`` (default), a fitted ``tail`` keeps its recorded method and
+        anything else uses ``fit``.
     fit_options : mapping, optional
-        Keywords for each fit.
+        Extra keyword arguments passed to each fit. Must not contain
+        ``"truncation"``, ``"censored"``, or ``"sample_weight"``, which
+        ``threshold_stability`` supplies.
 
     Returns
     -------
     ThresholdStabilityResult
-        One line per fitted candidate, and the candidates that were dropped.
+        One row per fitted candidate in ``table``, plus any unattempted or
+        dropped candidates in ``dropped``.
+
+    Raises
+    ------
+    TypeError
+        If ``tail`` is not a ``SuperLSS`` with ``GeneralizedParetoLSS``, or
+        ``tail`` is provided with ``X=None``.
+    ValueError
+        If ``level`` is not in ``(0, 1)``, ``fit_options`` includes a managed
+        keyword, inputs are misaligned or invalid, non-unit ``sample_weight``
+        is passed with a prior-weight ``tail``, no candidate leaves at least
+        ``min_claims`` complete claims above it, or the lowest candidate's fit
+        raises ``ValueError``.
 
     Notes
     -----
-    A candidate whose fit did not converge or sits at a wall of the shape stays in the
-    table, flagged, and one warning counts them. The lowest candidate's fit raises any
-    error as itself; at a higher candidate a ``ValueError`` from the fit (a level with no
-    claim left, say) puts that candidate in ``dropped`` with the fit's message. A shape
-    with terms is reported as the mean fitted shape over all the claims read, the same
-    rows at every candidate.
+    Candidates whose fit did not converge or sits at a wall of the shape
+    (default walls are 0 and 1, so a tail with no positive shape sits at the
+    lower wall) remain in ``table``, flagged by ``converged`` and ``wall``;
+    per-fit superglm warnings are collected into ``notes`` and summarised by a
+    single ``ConvergenceWarning`` after the loop. Non-superglm warnings are
+    re-emitted. At candidates above the lowest, a ``ValueError`` from the fit
+    (such as a categorical level disappearing) moves that candidate to
+    ``dropped`` with the engine's message.
+
+    When scale has terms or an offset, no threshold-free scale exists and
+    ``scale`` / ``modified_scale`` are ``NaN``; a log-link scale model does not
+    keep its functional form as the threshold changes, so drift in the shape
+    can reflect the scale's form as well as the tail. When shape has terms or
+    an offset, ``shape`` is the frequency-weighted mean fitted shape over all
+    positive-weight rows of ``X`` (the same reference book at every candidate),
+    with a link-scale delta-method band.
     """
     warn_experimental("threshold_stability")
     z = _normal_quantile(level)
@@ -905,12 +1062,32 @@ def threshold_stability(
 def plot_threshold_stability(
     result: ThresholdStabilityResult, *, engine: str = "matplotlib"
 ) -> Any:
-    """Draw the shape and the threshold-free scale from :func:`threshold_stability`.
+    """Draw the tail shape and threshold-free scale from :func:`threshold_stability`.
 
-    Each candidate is drawn with its band; a candidate whose fit did not converge or sits
-    at a wall is drawn hollow. ``engine`` is ``"matplotlib"`` or ``"plotly"``.
-    Experimental: the name, the arguments and the layout of the result may change in a
-    minor release.
+    Plots each candidate threshold's fitted shape (or mean fitted shape over
+    the book when shape varies across rows) with its pointwise band and shape
+    walls, alongside the threshold-free modified scale panel whenever scale and
+    shape are both constant. Candidates whose fit did not converge or sits at a
+    wall are drawn hollow. Experimental: its name, arguments and return layout
+    may change in a minor release without a deprecation period; its numbers are
+    tested like the rest of superglm.
+
+    Parameters
+    ----------
+    result : ThresholdStabilityResult
+        Output of :func:`threshold_stability`.
+    engine : {"matplotlib", "plotly"}, default="matplotlib"
+        Plotting backend.
+
+    Returns
+    -------
+    Figure
+        Matplotlib or Plotly figure.
+
+    Raises
+    ------
+    ValueError
+        If ``engine`` is unknown.
     """
     warn_experimental("plot_threshold_stability")
     return _renderer(engine, "threshold_stability")(result)

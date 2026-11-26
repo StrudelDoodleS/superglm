@@ -1351,12 +1351,47 @@ class SuperLSS:
         *,
         offsets: Mapping[str, NDArray] | None = None,
     ) -> NDArray[np.float64]:
-        """Return each row's density at ``y``; ``y`` is a scalar or one value per row.
+        """Return each row's fitted probability density at ``y``.
 
-        The density is the row's unit-weight law, the one ``predict_cdf`` reports, whatever
-        weights, truncation or censoring the model was fitted with. An amount outside the
-        support reads 0; a missing amount is refused. Experimental: the name, the arguments
-        and the layout of the result may change in a minor release.
+        Evaluates each row's unit-weight parent law at ``y`` (one amount or one
+        per row), matching the law reported by :meth:`predict_cdf` regardless of
+        any weights, truncation or censoring used at fit time. Amounts outside
+        the family's response support (including ``+inf`` and ``-inf``) return
+        ``0.0``; rows whose linear predictor leaves a link's declared domain
+        return ``NaN`` with a warning. Experimental: its name, arguments and
+        return layout may change in a minor release without a deprecation
+        period; its numbers are tested like the rest of superglm.
+
+        Parameters
+        ----------
+        X : DataFrame or EagerFrame
+            Rows to evaluate.
+        y : float or array-like of shape (n_rows,)
+            Unit-free response amount(s) at which to evaluate the density.
+        offsets : mapping of str to array-like, optional
+            Prediction-time link-scale offsets, as in :meth:`predict_parameters`.
+
+        Returns
+        -------
+        ndarray of shape (n_rows,)
+            Read-only float64 density values.
+
+        Raises
+        ------
+        NotImplementedError
+            If the family has no continuous scalar density (``TweedieLSS``,
+            ``NegativeBinomialLS``, or ``DirichletLSS``); use
+            :meth:`predict_cdf` where available or :meth:`predict_parameters`.
+        ValueError
+            If any amount in ``y`` is missing (``NaN``), or if an in-support
+            amount lies too far from its row's law to evaluate in float64
+            (naming the offending rows).
+
+        Notes
+        -----
+        Computed as the exponential of the family's own unit-weight complete
+        log-likelihood, agreeing with closed-form densities to float64 rounding
+        (within ``7e-16`` relative on ordinary laws).
         """
         warn_experimental("predict_pdf")
         return self._require_fitted().predict_pdf(X, y, offsets=offsets)
@@ -1368,11 +1403,52 @@ class SuperLSS:
         *,
         offsets: Mapping[str, NDArray] | None = None,
     ) -> NDArray[np.float64]:
-        """Return ``E[Y - v | Y > v]`` per row; ``v`` is a finite scalar or one value per row.
+        """Return each row's expected excess ``E[Y - v | Y > v]`` at ``v``.
 
-        It is ``inf`` where the row's mean is infinite, as ``predict`` reports, and the mean
-        less ``v`` at or below the support. Experimental: the name, the arguments and the
-        layout of the result may change in a minor release.
+        Evaluates the expected amount by which a claim exceeds ``v`` given that
+        it does, under each row's unit-weight parent law, for a finite scalar
+        or per-row ``v``. At or below the lower end of the response support the
+        result is the row's mean minus ``v``; where the row's mean is infinite
+        (as :meth:`predict` reports), the result is ``inf``; rows outside a
+        link's declared domain return ``NaN`` with a warning. Experimental: its
+        name, arguments and return layout may change in a minor release without
+        a deprecation period; its numbers are tested like the rest of superglm.
+
+        Parameters
+        ----------
+        X : DataFrame or EagerFrame
+            Rows to evaluate.
+        v : float or array-like of shape (n_rows,)
+            Finite unit-free threshold amount(s).
+        offsets : mapping of str to array-like, optional
+            Prediction-time link-scale offsets, as in :meth:`predict_parameters`.
+
+        Returns
+        -------
+        ndarray of shape (n_rows,)
+            Read-only float64 mean excess values.
+
+        Raises
+        ------
+        NotImplementedError
+            If the family does not support mean excess (``TweedieLSS``,
+            ``NegativeBinomialLS``, or ``DirichletLSS``); use
+            :meth:`predict_cdf` where available or :meth:`predict_parameters`.
+        ValueError
+            If any amount in ``v`` is missing (``NaN``) or infinite.
+
+        Notes
+        -----
+        Evaluated directly from tail-safe positive forms and continued
+        fractions rather than ``expected_shortfall(F(v)) - v``, avoiding
+        cancellation deep in the tail (survivals down to ``1e-300`` and below).
+        On ordinary laws, relative error is a few multiples of unit roundoff
+        ``u = 2**-53`` across the covered families, up to about ``1.4e-12`` in
+        the body of ``GeneralizedGammaLSS`` at ``scale = 0.01`` (``2e-14`` in
+        its tail). For ``GeneralizedGammaLSS`` at negative shape ``Q``, the
+        tail branch uses a continued fraction for the gamma mean deficit
+        derived by this project and checked against high-precision arithmetic
+        (``mpmath``) to ``0.3 u``; it is not formally proved.
         """
         warn_experimental("predict_mean_excess")
         return self._require_fitted().predict_mean_excess(X, v, offsets=offsets)
@@ -2220,13 +2296,52 @@ class SuperLSS:
         n_points: int = 200,
         offsets: Mapping[str, NDArray] | None = None,
     ) -> DistributionCurve:
-        """Return one row's law on a grid: its density, its survival or its mean excess.
+        """Return one row's fitted law on a grid of amounts.
 
-        ``kind`` is ``"density"``, ``"survival"`` or ``"mean_excess"``. Without ``y`` the grid
-        is ``n_points`` amounts between the row's 0.001 and 0.999 quantiles, or for the
-        survival between its 0.01 and ``1 - 1e-6`` quantiles, spaced geometrically for a law
-        of positive amounts. Experimental: the name, the arguments and the layout of the
-        result may change in a minor release.
+        Builds the ``DistributionCurve`` payload behind :meth:`plot_distribution`
+        for a single row: its ``"density"``, ``"survival"`` (from the family's
+        log upper-window probability, not ``1 - predict_cdf``), or
+        ``"mean_excess"``. Without ``y``, the grid spans ``n_points`` amounts
+        between the row's 0.001 and 0.999 quantiles (evenly spaced) for density
+        and mean excess, or between its 0.01 and ``1 - 1e-6`` quantiles for
+        survival (geometrically spaced for laws on nonnegative amounts, evenly
+        spaced on the real line). Experimental: its name, arguments and return
+        layout may change in a minor release without a deprecation period; its
+        numbers are tested like the rest of superglm.
+
+        Parameters
+        ----------
+        row : DataFrame or EagerFrame
+            A single row to evaluate (for example ``X.iloc[[0]]``).
+        kind : {"density", "survival", "mean_excess"}, default="density"
+            Which curve to evaluate.
+        y : array-like of shape (n_points,), optional
+            Explicit grid of at least two finite, strictly increasing amounts.
+        n_points : int, default=200
+            Number of grid points when ``y`` is ``None`` (at least 2).
+        offsets : mapping of str to array-like, optional
+            Prediction-time link-scale offsets, as in :meth:`predict_parameters`.
+
+        Returns
+        -------
+        DistributionCurve
+            Frozen curve payload with ``to_json()``; also reachable as JSON via
+            ``plot_data("distribution", row=row, curve=kind)``.
+
+        Raises
+        ------
+        NotImplementedError
+            If the family has no continuous scalar density, or no mean excess
+            when ``kind="mean_excess"``.
+        ValueError
+            If ``row`` does not have length 1, ``kind`` is unknown,
+            ``n_points < 2`` (when ``y`` is ``None``), or ``y`` is not a 1-D
+            strictly increasing finite array of at least two amounts.
+
+        Notes
+        -----
+        A row whose predictor leaves a link's declared domain returns ``NaN`` in
+        ``values``, ``mean``, and ``parameters`` with a warning.
         """
         warn_experimental("distribution_curve")
         return model_curve(
@@ -2249,11 +2364,45 @@ class SuperLSS:
         n_points: int = 200,
         offsets: Mapping[str, NDArray] | None = None,
     ) -> Any:
-        """Draw one row's law from :meth:`distribution_curve`; ``engine`` is matplotlib or plotly.
+        """Draw one row's fitted density, survival or mean excess curve.
 
-        The survival is drawn on log axes, with a linear amount axis for a law on the whole
-        line. Experimental: the name, the arguments and the layout of the result may change
-        in a minor release.
+        Calls :meth:`distribution_curve` for the single row and renders it with
+        ``engine`` (``"matplotlib"`` or ``"plotly"``). Survival curves use a
+        logarithmic probability axis, and a logarithmic amount axis only for
+        laws on nonnegative amounts (real-line laws keep a linear amount axis
+        even on an all-positive grid); infinite mean excess values are left
+        undrawn, with a note if every grid point is infinite. Experimental: its
+        name, arguments and return layout may change in a minor release without
+        a deprecation period; its numbers are tested like the rest of superglm.
+
+        Parameters
+        ----------
+        row : DataFrame or EagerFrame
+            A single row to plot (for example ``X.iloc[[0]]``).
+        kind : {"density", "survival", "mean_excess"}, default="density"
+            Which curve to draw.
+        engine : {"matplotlib", "plotly"}, default="matplotlib"
+            Plotting backend.
+        y : array-like of shape (n_points,), optional
+            Explicit grid of at least two finite, strictly increasing amounts.
+        n_points : int, default=200
+            Number of grid points when ``y`` is ``None`` (at least 2).
+        offsets : mapping of str to array-like, optional
+            Prediction-time link-scale offsets, as in :meth:`predict_parameters`.
+
+        Returns
+        -------
+        Figure
+            Matplotlib or Plotly figure for the row's fitted law.
+
+        Raises
+        ------
+        NotImplementedError
+            If the family has no continuous scalar density, or no mean excess
+            when ``kind="mean_excess"``.
+        ValueError
+            If ``row`` does not have length 1, ``kind`` or ``engine`` is
+            unknown, or ``y`` / ``n_points`` is invalid.
         """
         warn_experimental("plot_distribution")
         curve = model_curve(

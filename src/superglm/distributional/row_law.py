@@ -35,12 +35,39 @@ _PRIOR = WeightContract("prior")
 
 @dataclass(frozen=True, eq=False)
 class DistributionCurve:
-    """One row's law on a grid of amounts: what :meth:`plot_distribution` draws.
+    """One row's fitted law on a grid of amounts: what ``plot_distribution`` draws.
 
-    ``piece`` names each point's piece: ``"law"`` for a single law, ``"body"`` or ``"tail"``
-    for a body-plus-tail law, whose grid holds the threshold twice (the body's left limit,
-    then the tail's right limit). ``amount_scale`` is ``"log"`` for the survival of a law of
-    positive amounts and ``"linear"`` otherwise.
+    Returned by :meth:`~superglm.SuperLSS.distribution_curve` and
+    :meth:`~superglm.SplitSplice.distribution_curve`. Amounts are unit-free.
+
+    Attributes
+    ----------
+    kind : {"density", "survival", "mean_excess"}
+        Which curve ``values`` holds.
+    y : ndarray of shape (n_points,)
+        Nondecreasing grid of amounts. For a body-plus-tail splice whose grid
+        spans ``threshold``, the threshold appears twice (last ``"body"`` point,
+        then first ``"tail"`` point).
+    values : ndarray of shape (n_points,)
+        Curve values at ``y``. May contain ``inf`` for an infinite mean excess,
+        or ``NaN`` if a predictor leaves a link's declared domain.
+    piece : tuple of str
+        Piece label for each grid point: ``"law"`` for a single-family
+        ``SuperLSS``, or ``"body"`` / ``"tail"`` for ``SplitSplice``.
+    threshold : float or None
+        Splice threshold for ``SplitSplice``, or ``None`` for ``SuperLSS``.
+    mean : float
+        Row's predicted mean (``inf`` where infinite, ``NaN`` where undefined).
+    family : str
+        Family name, or ``"SplitSplice(<body_family>, <tail_family>)"``.
+    parameters : mapping of str to float
+        Row's fitted natural parameters. For ``SplitSplice``, keys are
+        ``"body_<name>"``, ``"exceedance"``, and ``"tail_<name>"``.
+    amount_scale : {"linear", "log"}
+        Suggested horizontal axis scale: ``"log"`` for ``kind="survival"`` on
+        a law of nonnegative amounts, ``"linear"`` otherwise.
+    schema_version : int
+        Schema version of the JSON payload returned by :meth:`to_json`.
     """
 
     kind: str

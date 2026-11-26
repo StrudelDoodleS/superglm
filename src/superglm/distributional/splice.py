@@ -661,13 +661,41 @@ class SplitSplice:
         return np.minimum(out, w)
 
     def predict_pdf(self, X: FrameLike, y: ArrayLike, **offsets: Unpack[_Offsets]) -> NDArray:
-        """Return each row's density at ``y``: ``(1 - q) f_body / F_body(u)`` up to the threshold
-        ``u``, ``q g(y - u)`` above it.
+        """Return each row's spliced probability density at ``y``.
 
-        A loss equal to the threshold is a body loss, so the density there is the body's left
-        limit. An amount at or below 0 or infinite reads 0; a missing amount is refused.
-        Experimental: the name, the arguments and the layout of the result may change in a
-        minor release.
+        Evaluates ``(1 - q) f_body(y) / F_body(u)`` for ``0 < y <= u`` and
+        ``q g(y - u)`` for ``y > u``, where ``u`` is ``threshold`` and ``q`` is
+        the row's exceedance probability. A loss equal to ``u`` belongs to the
+        body, so the density at ``u`` is the body's left limit and the spliced
+        density is left-continuous at the step. Amounts at or below 0 or
+        infinite return ``0.0``; rows with an invalid component prediction
+        return ``NaN``. Experimental: its name, arguments and return layout may
+        change in a minor release without a deprecation period; its numbers are
+        tested like the rest of superglm.
+
+        Parameters
+        ----------
+        X : DataFrame
+            Rows to evaluate.
+        y : float or array-like of shape (n_rows,)
+            Unit-free loss amount(s).
+        **offsets
+            Optional prediction offsets: ``body_offsets``,
+            ``exceedance_offset``, ``tail_offsets``.
+
+        Returns
+        -------
+        ndarray of shape (n_rows,)
+            Spliced density values.
+
+        Raises
+        ------
+        ValueError
+            If ``y`` contains missing (``NaN``) values, has the wrong length,
+            cannot be evaluated in float64 at an in-support amount (naming the
+            rows), or if a component was refitted on a different split.
+        TypeError
+            If an unknown offset keyword is supplied.
         """
         warn_experimental("predict_pdf")
         y = _row_values(X, y, "y")
@@ -676,11 +704,39 @@ class SplitSplice:
     def predict_mean_excess(
         self, X: FrameLike, v: ArrayLike, **offsets: Unpack[_Offsets]
     ) -> NDArray:
-        """Return ``E[Y - v | Y > v]`` per row for a finite scalar or row-aligned ``v``.
+        """Return each row's expected excess ``E[Y - v | Y > v]`` at ``v``.
 
-        At or above the threshold it is the tail's ``(scale + shape (v - u)) / (1 - shape)``.
-        Experimental: the name, the arguments and the layout of the result may change in a
-        minor release.
+        At or above ``threshold`` ``u``, evaluates the generalized Pareto tail's
+        exact linear form ``(scale + shape * (v - u)) / (1 - shape)``. Below
+        ``u``, combines the truncated body layer and the tail contribution over
+        the spliced survival ``P(Y > v)``; for ``v < 0``, returns
+        ``predict(X) - v``. Rows with an invalid component prediction return
+        ``NaN``. Experimental: its name, arguments and return layout may change
+        in a minor release without a deprecation period; its numbers are tested
+        like the rest of superglm.
+
+        Parameters
+        ----------
+        X : DataFrame
+            Rows to evaluate.
+        v : float or array-like of shape (n_rows,)
+            Finite unit-free threshold amount(s).
+        **offsets
+            Optional prediction offsets: ``body_offsets``,
+            ``exceedance_offset``, ``tail_offsets``.
+
+        Returns
+        -------
+        ndarray of shape (n_rows,)
+            Mean excess values.
+
+        Raises
+        ------
+        ValueError
+            If ``v`` contains missing (``NaN``) or infinite values, has the
+            wrong length, or if a component was refitted on a different split.
+        TypeError
+            If an unknown offset keyword is supplied.
         """
         warn_experimental("predict_mean_excess")
         v = finite_amounts(_row_values(X, v, "v"), "predict_mean_excess")
@@ -695,15 +751,53 @@ class SplitSplice:
         n_points: int = 200,
         **offsets: Unpack[_Offsets],
     ) -> DistributionCurve:
-        """Return one row's law on a grid that holds the threshold twice, once per piece.
+        """Return one row's spliced law on a grid split at the threshold.
 
-        ``kind`` is ``"density"``, ``"survival"`` or ``"mean_excess"``. Without ``y`` the body
-        and the tail each get half of ``n_points``: the body from its own 0.001 quantile (0.01
-        for the survival) up to the threshold, the tail from the threshold to its own 0.999
-        quantile (``1 - 1e-6`` for the survival), so a rare tail is still drawn. The body's
-        point at the threshold is its left limit and the tail's its right limit.
-        Experimental: the name, the arguments and the layout of the result may change in a
-        minor release.
+        Builds the ``DistributionCurve`` payload behind :meth:`plot_distribution`
+        for a single row: its ``"density"``, ``"survival"``, or
+        ``"mean_excess"``. Without ``y``, the body receives
+        ``max(n_points // 2, 2)`` points from its conditional 0.001 quantile
+        (0.01 for survival) up to ``threshold``, and the tail receives
+        ``max(n_points - n_body, 2)`` points from ``threshold`` to
+        ``threshold`` plus its 0.999 quantile (``1 - 1e-6`` for survival), so
+        even a rare tail gets its own stretch of the grid. Whenever the grid
+        spans ``threshold``, ``threshold`` appears twice: as the last
+        ``"body"`` point (left limit) and as the first ``"tail"`` point (right
+        limit, ``q * g(0)`` for density). Experimental: its name, arguments and
+        return layout may change in a minor release without a deprecation
+        period; its numbers are tested like the rest of superglm.
+
+        Parameters
+        ----------
+        row : DataFrame
+            A single row to evaluate (for example ``X.iloc[[0]]``).
+        kind : {"density", "survival", "mean_excess"}, default="density"
+            Which curve to evaluate.
+        y : array-like of shape (n_points,), optional
+            Explicit grid of at least two finite, strictly increasing amounts.
+        n_points : int, default=200
+            Target grid size when ``y`` is ``None`` (at least 2; each piece
+            receives at least 2 points, so ``n_points`` of 2 or 3 returns 4
+            points).
+        **offsets
+            Optional prediction offsets: ``body_offsets``,
+            ``exceedance_offset``, ``tail_offsets``.
+
+        Returns
+        -------
+        DistributionCurve
+            Frozen curve payload with ``parameters`` keyed ``body_<name>``,
+            ``"exceedance"``, and ``tail_<name>``.
+
+        Raises
+        ------
+        ValueError
+            If ``row`` does not have length 1, ``kind`` is unknown,
+            ``n_points < 2`` (when ``y`` is ``None``), ``y`` is not a 1-D
+            strictly increasing finite array of at least two amounts, or a
+            component was refitted on a different split.
+        TypeError
+            If an unknown offset keyword is supplied.
         """
         warn_experimental("distribution_curve")
         return self._curve(row, kind, y, n_points, offsets, "distribution_curve")
@@ -718,10 +812,45 @@ class SplitSplice:
         n_points: int = 200,
         **offsets: Unpack[_Offsets],
     ) -> Any:
-        """Draw one row's law from :meth:`distribution_curve`: body and tail, and the step.
+        """Draw one row's spliced density, survival or mean excess curve.
 
-        Experimental: the name, the arguments and the layout of the result may change in a
-        minor release.
+        Calls :meth:`distribution_curve` and draws the body and tail in two
+        colours, marks the threshold, and connects the two one-sided values at
+        the threshold with a vertical step (visible on density plots; survival
+        and mean excess are continuous there). Survival is drawn on log-log
+        axes. Experimental: its name, arguments and return layout may change in
+        a minor release without a deprecation period; its numbers are tested
+        like the rest of superglm.
+
+        Parameters
+        ----------
+        row : DataFrame
+            A single row to plot (for example ``X.iloc[[0]]``).
+        kind : {"density", "survival", "mean_excess"}, default="density"
+            Which curve to draw.
+        engine : {"matplotlib", "plotly"}, default="matplotlib"
+            Plotting backend.
+        y : array-like of shape (n_points,), optional
+            Explicit grid of at least two finite, strictly increasing amounts.
+        n_points : int, default=200
+            Target grid size when ``y`` is ``None`` (at least 2).
+        **offsets
+            Optional prediction offsets: ``body_offsets``,
+            ``exceedance_offset``, ``tail_offsets``.
+
+        Returns
+        -------
+        Figure
+            Matplotlib or Plotly figure for the row's spliced law.
+
+        Raises
+        ------
+        ValueError
+            If ``row`` does not have length 1, ``kind`` or ``engine`` is
+            unknown, ``y`` / ``n_points`` is invalid, or a component was
+            refitted on a different split.
+        TypeError
+            If an unknown offset keyword is supplied.
         """
         warn_experimental("plot_distribution")
         curve = self._curve(row, kind, y, n_points, offsets, "plot_distribution")

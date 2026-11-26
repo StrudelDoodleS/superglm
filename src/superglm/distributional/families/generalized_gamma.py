@@ -758,10 +758,18 @@ class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, Shap
         )
 
     def mean_excess(self, v: NDArray, theta: NDArray) -> NDArray[np.float64]:
-        """``E[Y - v | Y > v]`` per row; ``inf`` where the location form has no mean.
+        """Return ``E[Y - v | Y > v]`` per row; ``inf`` where the location form has no mean.
 
-        The law weighted by ``y`` is read in location coordinates by the window kernel
-        itself, so its smaller scale is not held to ``scale_floor``.
+        The law weighted by ``y`` is evaluated in location coordinates directly by the
+        window kernel, so its smaller scale is not held to ``scale_floor``. Non-finite
+        amounts are refused with ``ValueError``; in the mean parametrisation, any row
+        without a finite mean raises ``GeneralizedGammaDomainError``.
+
+        Accuracy on ordinary laws is about ``2e-14`` in the tail and ``1.4e-12`` in the
+        body at ``scale = 0.01`` (``1e-13`` at ``scale = 0.05``). For negative shape
+        ``Q``, the tail branch uses a continued fraction for the gamma mean deficit
+        derived by this project and checked against high-precision arithmetic
+        (``mpmath``) to ``0.3 u``; it is not formally proved.
         """
         values = self._theta(theta, None)
         sigma, q = values[:, 1], values[:, 2]
