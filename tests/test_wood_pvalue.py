@@ -621,12 +621,17 @@ class TestWoodTestSmooth:
         # Stat should be close to Wald when rank = full
         np.testing.assert_allclose(stat, wald, rtol=0.5)
 
-    @pytest.mark.parametrize(("p_g", "rank"), [(5, 5), (10, 5), (8, 3)])
-    def test_integer_rank_statistic_is_the_rank_r_wald_statistic(self, p_g, rank):
+    @pytest.mark.parametrize(
+        ("p_g", "rank", "target_p"),
+        [(5, 5, None), (10, 5, None), (8, 3, None), (10, 5, 0.04), (8, 3, 0.04)],
+    )
+    def test_integer_rank_statistic_is_the_rank_r_wald_statistic(self, p_g, rank, target_p):
         """At integer edf the statistic is Wood's rank-r Wald statistic f' (R V R')_r^- f with
         f = R beta, R from the QR of the term's design and (.)_r^- the pseudo-inverse of the
         r leading eigenpairs, and at full rank beta' V^-1 beta (Wood, Biometrika 100, 2013,
-        section 3); the p-value is its chi-squared tail on r degrees of freedom."""
+        section 3); the p-value is its chi-squared tail on r degrees of freedom. With
+        ``target_p`` the coefficients are rescaled so that tail is moderate, where a tail
+        taken on the wrong degrees of freedom is a different decision, not a rounding."""
         from scipy import stats
 
         rng = np.random.default_rng(42)
@@ -643,6 +648,13 @@ class TestWoodTestSmooth:
         f = R @ beta_j
         projected = vectors[:, lead].T @ f
         expected = float(np.sum(projected**2 / values[lead]))
+        if target_p is not None:
+            # T is quadratic in beta, so this scale puts T at the target's quantile.
+            beta_j = beta_j * np.sqrt(stats.chi2.isf(target_p, rank) / expected)
+            f = R @ beta_j
+            projected = vectors[:, lead].T @ f
+            expected = float(np.sum(projected**2 / values[lead]))
+            assert stats.chi2.sf(expected, rank) == pytest.approx(target_p, rel=1e-6)
         if rank == p_g:
             assert expected == pytest.approx(
                 float(beta_j @ np.linalg.solve(V_b_j, beta_j)), rel=1e-10
@@ -662,6 +674,11 @@ class TestWoodTestSmooth:
         # A statistic error of rtol moves the tail by pdf(T) T rtol.
         p_tol = stats.chi2.pdf(expected, rank) * expected * rtol + 64.0 * np.finfo(float).eps
         assert p_val == pytest.approx(stats.chi2.sf(expected, rank), rel=0, abs=p_tol)
+        # Relative to the tail itself, that is pdf(T) T rtol / sf(T), beside the
+        # incomplete gamma function's own error of a few tens of roundings.
+        tail = stats.chi2.sf(expected, rank)
+        p_rel = stats.chi2.pdf(expected, rank) * expected * rtol / tail + 64.0 * u
+        assert p_val == pytest.approx(tail, rel=p_rel, abs=0)
 
     def test_reduced_edf_smaller_stat(self):
         """With edf1 < p_g, the test stat should generally be smaller."""
