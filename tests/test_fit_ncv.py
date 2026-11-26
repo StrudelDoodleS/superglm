@@ -735,6 +735,7 @@ def test_smoothing_resting_on_a_bound_is_disclosed_without_a_claim_that_it_is_he
         )
         return replace(outcome, result=result)
 
+    reference = curve_fit()
     monkeypatch.setattr(ncv_ops, "search_smoothing", resting)
     b = curve_book()
     model, caught = run(curve_model(), b, groups=b.labels)
@@ -754,7 +755,7 @@ def test_smoothing_resting_on_a_bound_is_disclosed_without_a_claim_that_it_is_he
     if side == "ceiling":
         assert model._group_edf["t"] == pytest.approx(1.0, abs=1e-6)
     else:
-        assert model._group_edf["t"] > curve_fit()._group_edf["t"] + 1.0
+        assert model._group_edf["t"] > reference._group_edf["t"] + 1.0
 
 
 def test_search_with_no_criterion_returns_a_fit_at_its_start_and_says_why():
