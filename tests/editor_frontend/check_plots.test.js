@@ -135,6 +135,46 @@ test("quantile calibration reads shares on a log axis against 1 - p", () => {
   for (const name of ["1%", "50%", "97.5%", "99.5%"]) assert.ok(texts.includes(name), name);
 });
 
+test("on 20 rows every positive share keeps its log, and a zero share sits on its own row", () => {
+  const payload = structuredClone(FIXTURE.wrong.check_calibration), body = payload.models.edited, q = body.quantiles;
+  q.n = q.n.map(() => 20);
+  q.realised_exceedance = [1, 0.95, 0.9, 0.75, 0.5, 0.25, 0.1, 0.05, 0.05, 0, 0];
+  body.band_lower = [0.85, 0.75, 0.7, 0.55, 0.3, 0.1, 0, 0, 0, 0, 0];
+  body.band_upper = [1, 1, 1, 0.95, 0.7, 0.45, 0.25, 0.15, 0.1, 0.05, 0.05];
+  const scene = checkScene("check_calibration", payload, BOX, { compare: false });
+  const reference = subpaths(layer(scene, "reference").d)[0];
+  const at = (i) => reference[2 * i + 1];
+  // 2.5%, 1% and 0.5% expected above the three top quantiles: three heights, a step apart by
+  // their logs, as every other reference point is.
+  assert.ok(at(8) < at(9) && at(9) < at(10), `${at(8)} ${at(9)} ${at(10)}`);
+  const log = affine(Math.log10(q.expected[0]), at(0), Math.log10(q.expected[10]), at(10));
+  for (const [i, expected] of q.expected.entries()) near(at(i), log(Math.log10(expected)), 0.03);
+  // No row above the 99% and 99.5% quantiles: both points on the row labelled 0, below the
+  // least positive share and inside the view.
+  const zero = scene.labels.find((l) => l.text === "0");
+  assert.ok(zero, scene.labels.map((l) => l.text).join(" "));
+  for (const i of [9, 10]) {
+    near(scene.marks[i].y, zero.y - 4);
+    assert.ok(scene.marks[i].y > at(10) + 6 && scene.marks[i].y <= BOX.height, String(scene.marks[i].y));
+  }
+});
+
+test("compare keeps both models' quantile points at their quantile, inside the band", () => {
+  const payload = FIXTURE.edited.check_calibration, q = payload.models.edited.quantiles;
+  const scene = checkScene("check_calibration", payload, BOX, { compare: true });
+  const columns = q.p.map((p) => scene.labels.find((l) => l.text === `${Math.round(p * 1000) / 10}%` && l.anchor === "middle").x);
+  const band = absolutePoints(layer(scene, "band").d).map(([x]) => x).filter((x) => x !== null);
+  const [left, right] = [Math.min(...band), Math.max(...band)];
+  const fitted = subpaths(layer(scene, "original").d).map(([x]) => x);
+  assert.equal(scene.marks.length, q.p.length);
+  assert.equal(fitted.length, q.p.length);
+  for (const [i, x] of columns.entries()) {
+    near(scene.marks[i].x, x);
+    near(fitted[i], x);
+    assert.ok(left - 0.011 <= x && x <= right + 0.011, `${x} outside ${left} to ${right}`);
+  }
+});
+
 test("each readout says what its point is, in the stated form", () => {
   const calm = FIXTURE.calm;
   const first = (report) => checkScene(report, calm[report], BOX, { compare: false }).marks;

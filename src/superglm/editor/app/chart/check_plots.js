@@ -58,6 +58,8 @@ const WEIGHT_SHARE = 0.6;
 const WEIGHT_HEIGHT = 1 / 5;
 // How far the fitted model's point sits left of the edited one's in a group's slot, at most.
 const COMPARE_SHIFT = 4;
+// The px kept between quantile calibration's zero row and its least positive share.
+const ZERO_ROW = { thumb: 8, view: 24 };
 
 /** @param {number} v a coordinate, written to 0.01 px */
 const n = (v) => String(Math.round(v * 100) / 100);
@@ -370,19 +372,16 @@ function calibrationScene(editedBody, originalBody, box) {
   const edited = /** @type {CalibrationStats} */ (/** @type {unknown} */ (editedBody));
   const original = originalBody && /** @type {CalibrationStats} */ (/** @type {unknown} */ (originalBody));
   const q = edited.quantiles;
-  // A share of zero sits at half the least share one row can make, on the axis's floor.
-  const floor = 0.5 / Math.max(1, ...q.n.filter(Number.isFinite));
-  const log = (/** @type {number} */ v) => Math.log10(Math.max(v, floor));
   const shares = [...edited.band_lower, ...edited.band_upper, ...q.realised_exceedance, ...q.expected];
   if (original) shares.push(...original.quantiles.realised_exceedance);
-  const [lo, hi] = span(shares.map(log));
+  const [lo, hi] = span(shares.filter((v) => v > 0).map(Math.log10));
   const rect = plotRect(box);
-  const k = q.p.length;
-  const slot = (rect.right - rect.left) / k;
-  const shift = original ? Math.min(COMPARE_SHIFT, slot * 0.15) : 0;
+  // A share of zero has no log: it gets its own row at the foot, below the least positive share.
+  const zero = shares.includes(0);
+  const sy = linear(lo, hi, rect.bottom - (zero ? ZERO_ROW[box.thumb ? "thumb" : "view"] : 0), rect.top);
+  const y = (/** @type {number} */ v) => (v === 0 ? rect.bottom : sy(Math.log10(v)));
+  const slot = (rect.right - rect.left) / q.p.length;
   const xAt = (/** @type {number} */ i) => rect.left + (i + 0.5) * slot;
-  const sy = linear(lo, hi, rect.bottom, rect.top);
-  const y = (/** @type {number} */ v) => sy(log(v));
   const r = radius(box);
   const parts = emptyParts();
   /** @type {Mark[]} */
@@ -393,11 +392,12 @@ function calibrationScene(editedBody, originalBody, box) {
     ...[...indices].reverse().map((i) => /** @type {[number, number]} */ ([xAt(i), y(edited.band_lower[i])]))
   ])} Z`);
   parts.reference.push(polyline(indices.map((i) => [xAt(i), y(q.expected[i])])));
-  if (original) for (const i of indices) parts.original.push(dot(xAt(i) - shift, y(original.quantiles.realised_exceedance[i]), r));
+  // Both models' points sit at their quantile; the style alone tells them apart.
+  if (original) for (const i of indices) parts.original.push(dot(xAt(i), y(original.quantiles.realised_exceedance[i]), r));
   for (const i of indices) {
     const realised = q.realised_exceedance[i];
     const outside = realised < edited.band_lower[i] || realised > edited.band_upper[i];
-    const x = xAt(i) + shift;
+    const x = xAt(i);
     parts[outside ? "outside" : "edited"].push(dot(x, y(realised), r));
     marks.push({
       x,
@@ -412,6 +412,7 @@ function calibrationScene(editedBody, originalBody, box) {
     /** @type {Array<[number, string]>} */
     const decades = [];
     for (let j = Math.ceil(lo); j <= Math.floor(hi); j++) decades.push([sy(j), fmtPercent(10 ** j)]);
+    if (zero) decades.push([rect.bottom, "0"]);
     frame(parts, labels, rect, indices.map((i) => [xAt(i), fmtPercent(q.p[i])]), decades,
       { x: "Predicted quantile", y: "Share of rows above", xGrid: false });
   }
