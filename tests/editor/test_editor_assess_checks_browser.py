@@ -434,6 +434,8 @@ def test_compare_draws_the_fit_without_asking_python(checks_page, choose_feature
 
 
 def test_compare_is_off_and_disabled_after_undo(checks_page, choose_feature):
+    """Undo turns Compare off at once, while the check is still asked about the fit, and a
+    failed answer keeps it off: the payload kept from the edit draws no fit."""
     with checks_page() as page:
         _average_mean_x(page, choose_feature)
         _open_check(page, "check_ae")
@@ -441,22 +443,34 @@ def test_compare_is_off_and_disabled_after_undo(checks_page, choose_feature):
         page.locator('#checkCompare[aria-disabled="false"]').wait_for()
         switch.click()
         page.locator("#checkFrame path.check-original").wait_for(state="attached")
-        # Live, its popover is its Help entry.
+        # Live, its popover is its own Help entry, without the checks' shared ending.
         switch.hover()
         popover = page.locator("#uiPopover")
         popover.wait_for(state="visible")
-        assert (
-            popover.locator("[data-popover-description]")
-            .inner_text()
-            .startswith("Draws the model as fitted in grey beside the model as edited in blue")
+        assert popover.locator("[data-popover-description]").inner_text() == (
+            "Draws the model as fitted in grey beside the model as edited in blue, on every check. "
+            "It changes only what is drawn."
         )
         page.mouse.move(2, 2)
+        held = hold_requests(page, "**/report")
         page.keyboard.press("Control+z")
-        page.locator('#checkCompare[aria-disabled="true"]').wait_for()
-        page.locator('#checkFrame[data-freshness="current"]').wait_for()
-        assert switch.get_attribute("aria-checked") == "false"
-        assert page.locator("#checkFrame path.check-original").count() == 0
-        assert page.locator("#checkLegend").is_hidden()
+        # The check is asked again once Undo has committed; its answer is held.
+        held.wait(1)
+        assert held[-1].request.post_data_json["report"] == "check_ae"
+
+        def assert_off() -> None:
+            assert switch.get_attribute("aria-disabled") == "true"
+            assert switch.get_attribute("aria-checked") == "false"
+            assert (
+                page.locator(
+                    "#checkFrame path:is(.check-original, .check-original-interval)"
+                ).count()
+                == 0
+            )
+            assert page.locator("#checkLegend").is_hidden()
+
+        page.locator('#checkFrame[data-freshness="updating"]').wait_for()
+        assert_off()
         # Off, its popover says why, over its Help entry.
         switch.hover()
         page.wait_for_function(
@@ -464,6 +478,14 @@ def test_compare_is_off_and_disabled_after_undo(checks_page, choose_feature):
             arg=_NO_EDIT,
         )
         assert popover.is_visible()
+        page.mouse.move(2, 2)
+        # The answer fails: the edit's payload stays on screen, and Compare stays off.
+        page.unroute("**/report")
+        page.route("**/report", lambda route: route.abort())
+        held[-1].abort()
+        page.locator('#checkFrame[data-freshness="stale"]').wait_for()
+        assert page.locator("#checkRetry").is_visible()
+        assert_off()
 
 
 def test_hovering_a_check_changes_nothing_outside_its_readout(checks_page):

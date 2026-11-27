@@ -99,18 +99,34 @@ test("the flagged checks are the offered ones whose model as edited left its ban
   assert.deepEqual(flaggedChecks({ ...wrong, check_qq: { ...wrong.check_qq, payload: null } }, ["check_qq"]), []);
 });
 
+/** The snapshot of a model edited by hand on `x`. */
+function editedSnapshot() {
+  const held = snapshot();
+  return { ...held, terms: { x: { ...held.terms.x, edited: true } } };
+}
+
 test("Compare with the fit is live only when an offered check compares an edit", () => {
-  const calm = compareSwitch(evidenceFrom(FIXTURE.calm), CHECK_REPORTS, true);
+  const calm = compareSwitch(evidenceFrom(FIXTURE.calm), CHECK_REPORTS, true, snapshot());
   assert.deepEqual(calm, { live: false, checked: false, body: "The model is as fitted; there is no edit to compare." });
   const edited = evidenceFrom(FIXTURE.edited);
-  assert.deepEqual(compareSwitch(edited, CHECK_REPORTS, false), {
+  assert.deepEqual(compareSwitch(edited, CHECK_REPORTS, false, editedSnapshot()), {
     live: true, checked: false,
     body: "Draws the model as fitted in grey beside the model as edited in blue, on every check. It changes only what is drawn."
   });
-  assert.equal(compareSwitch(edited, CHECK_REPORTS, true).checked, true);
+  assert.equal(compareSwitch(edited, CHECK_REPORTS, true, editedSnapshot()).checked, true);
+  // A model a structural step replaced differs from the fit with no hand edit.
+  assert.equal(compareSwitch(edited, CHECK_REPORTS, true, { ...snapshot(), in_force_is_original: false }).live, true);
   // A model offering no checks has nothing to compare, whatever the evidence holds.
-  assert.equal(compareSwitch(edited, [], true).live, false);
-  assert.deepEqual(neutralCopy(compareSwitch(edited, CHECK_REPORTS, true).body), []);
+  assert.equal(compareSwitch(edited, [], true, editedSnapshot()).live, false);
+  assert.deepEqual(neutralCopy(compareSwitch(edited, CHECK_REPORTS, true, editedSnapshot()).body), []);
+});
+
+test("after Undo, Compare is off while the checks still hold the edited model's payloads", () => {
+  // The model in force is the fit again; the evidence kept from the edit still draws the fit.
+  const kept = evidenceFrom(FIXTURE.edited);
+  assert.deepEqual(compareSwitch(kept, CHECK_REPORTS, true, snapshot()),
+    { live: false, checked: false, body: "The model is as fitted; there is no edit to compare." });
+  assert.equal(compareSwitch(kept, CHECK_REPORTS, true, null).live, false);
 });
 
 // The large view and its hover, on a minimal element tree that records every attribute, text and

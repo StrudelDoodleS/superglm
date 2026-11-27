@@ -81,6 +81,7 @@ import {
   bindCheckHover,
   checkPayload,
   compareSwitch,
+  differsFromFit,
   flaggedChecks,
   renderCheckView,
   renderCompareSwitch
@@ -1281,7 +1282,7 @@ function renderOverview() {
   const state = store.getState();
   const offered = selectOfferedChecks(state);
   const evidence = state.request.evidence;
-  const compare = compareSwitch(evidence, offered, state.view.compareOriginal);
+  const compare = compareSwitch(evidence, offered, state.view.compareOriginal, state.remote.snapshot);
   renderCompareSwitch(overviewCompare, compare, offered.length > 0);
   drawOverview(assessCards, overviewGroups(evidence, { offered, compare: compare.checked }));
 }
@@ -1303,7 +1304,7 @@ function renderCheckPanel() {
   // The switch reads the check on screen: only it is asked again after an edit or an Undo here.
   const shown = selectOfferedChecks(state).includes(activeView) ? [activeView] : [];
   const evidence = state.request.evidence[activeView];
-  const compare = compareSwitch(state.request.evidence, shown, state.view.compareOriginal);
+  const compare = compareSwitch(state.request.evidence, shown, state.view.compareOriginal, state.remote.snapshot);
   renderCompareSwitch(checkCompare, compare, shown.length > 0);
   checkPanel.dataset.report = activeView;
   checkFrame.setAttribute("aria-busy", evidence.status === "updating" ? "true" : "false");
@@ -3013,21 +3014,25 @@ store.subscribe(
   (next, previous) => next.evidence === previous.evidence
 );
 // The cards redraw when the evidence of a report or offered check they read moves, the offer
-// changes, or Compare with the fit is turned.
+// changes, Compare with the fit is turned, or the model in force comes to differ from the fit or
+// stops differing.
 store.subscribe(
   (state) => [
     state.view.compareOriginal,
+    differsFromFit(state.remote.snapshot),
     selectOfferedChecks(state).join(),
     ...overviewReports(selectOfferedChecks(state)).map((name) => state.request.evidence[name])
   ],
   renderOverview,
   (next, previous) => next.length === previous.length && next.every((item, index) => item === previous[index])
 );
-// The open check redraws when its evidence moves, the offer changes, or the switch is turned.
+// The open check redraws when its evidence moves, the offer changes, the switch is turned, or
+// the model in force comes to differ from the fit or stops differing.
 store.subscribe(
   (state) => [
     state.view.activeView,
     state.view.compareOriginal,
+    differsFromFit(state.remote.snapshot),
     selectOfferedChecks(state).join(),
     isCheckReport(state.view.activeView) ? state.request.evidence[state.view.activeView] : null
   ],

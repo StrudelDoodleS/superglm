@@ -15,6 +15,7 @@ import { assessEntry } from "../state/assess.js";
 /** @typedef {import('../api/contracts.js').CheckBody} CheckBody */
 /** @typedef {import('../api/contracts.js').EvidenceStatus} EvidenceStatus */
 /** @typedef {import('../api/contracts.js').EvidenceState} EvidenceState */
+/** @typedef {import('../api/contracts.js').EditorSnapshot} EditorSnapshot */
 /** @typedef {import('../chart/check_plots.js').PITStats} PITStats */
 /** @typedef {import('../chart/check_plots.js').CalibrationStats} CalibrationStats */
 /** @typedef {import('../chart/check_plots.js').Scene} Scene */
@@ -133,14 +134,25 @@ export function flaggedChecks(evidence, offered) {
 }
 
 /**
- * Compare with the fit: live once an offered check has the fitted model beside an edit, and on
- * when the analyst turned it on while it is live. Its popover says what it draws, or why it is off.
+ * Whether the model in force differs from the fit, as the snapshot records it: a model a step
+ * replaced, or a term edited by hand (Python's `compares_edit`).
+ * @param {EditorSnapshot|null} snapshot @returns {boolean}
+ */
+export function differsFromFit(snapshot) {
+  if (!snapshot) return false;
+  return !snapshot.in_force_is_original || Object.values(snapshot.terms).some((term) => term.edited === true);
+}
+
+/**
+ * Compare with the fit: live while the model in force differs from the fit and an offered check
+ * has the fitted model beside it, and on when the analyst turned it on while it is live. A payload
+ * kept from an edit since undone draws no fit. Its popover says what it draws, or why it is off.
  * @param {Readonly<Record<CheckReport, EvidenceState>>} evidence @param {readonly CheckReport[]} offered
- * @param {boolean} compareOriginal
+ * @param {boolean} compareOriginal @param {EditorSnapshot|null} snapshot
  * @returns {CompareSwitch}
  */
-export function compareSwitch(evidence, offered, compareOriginal) {
-  const live = offered.some((name) => Boolean(checkPayload(evidence[name])?.compares_edit));
+export function compareSwitch(evidence, offered, compareOriginal, snapshot) {
+  const live = differsFromFit(snapshot) && offered.some((name) => Boolean(checkPayload(evidence[name])?.compares_edit));
   return { live, checked: live && compareOriginal, body: live ? COMPARES : NO_EDIT };
 }
 
