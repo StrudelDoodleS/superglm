@@ -205,21 +205,21 @@ def _label(locator) -> str:
 def _read_list(root) -> str:
     if not _present(root, "#assessList"):
         return MISSING
-    # "Overview; **Reports**: Validation, Cross-validation": a heading starts a group.
-    groups: list[list[str]] = [[]]
+    # "Overview; **Reports**: Validation, Cross-validation": a shown heading starts a group.
+    # Entries and headings the page does not show (display, visibility, ``hidden``, a hidden
+    # ancestor: no box) are skipped, and so is a heading that shows no text.
+    groups: list[tuple[str, list[str]]] = [("", [])]
     for item in root.locator(
         "#assessList .assess-group-title, #assessList [data-assess-entry]"
     ).all():
-        if item.get_attribute("data-assess-entry") is None:
-            groups.append([f"**{_text(item)}**:"])
-        else:
-            groups[-1].append(_label(item))
+        if not item.is_visible():
+            continue
+        if item.get_attribute("data-assess-entry") is not None:
+            groups[-1][1].append(_label(item))
+        elif heading := _text(item):
+            groups.append((f"**{heading}**: ", []))
     return "; ".join(
-        " ".join(group[:1] + [", ".join(group[1:])])
-        if group[0].startswith("**")
-        else ", ".join(group)
-        for group in groups
-        if group
+        (heading + ", ".join(entries)).strip() for heading, entries in groups if heading or entries
     )
 
 
