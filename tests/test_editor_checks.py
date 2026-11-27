@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import tracemalloc
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -27,6 +28,7 @@ from superglm.distributional.kernels.generalized_pareto import (
     GeneralizedParetoInitializationWarning,
 )
 from superglm.distributional.posterior import PosteriorDraws, posterior_parameters
+from superglm.distributional.residuals import compute_residuals, replication_sample
 from superglm.editor import checks
 from superglm.editor.checks import (
     CHECK_REPORTS,
@@ -168,6 +170,30 @@ def zeros() -> Case:
         X.iloc[:400], y[:400], lambdas={"mean:x#wiggle": LAMBDA}
     )
     return Case(lss, _validation(X.iloc[400:].reset_index(drop=True), y[400:]))
+
+
+@pytest.fixture(scope="module")
+def zeros_frequency() -> Case:
+    """ZEROS's compound Poisson-gamma amounts under frequency weights of 1 to 3."""
+    rng = np.random.default_rng(SEED)
+    X, mean, _ = _rows(600, rng)
+    events = rng.poisson(1.2 * np.sqrt(mean))
+    y = np.zeros(600)
+    y[events > 0] = rng.gamma(events[events > 0], np.sqrt(mean[events > 0]) / 1.2)
+    counts = rng.integers(1, 4, 600).astype(np.float64)
+    family = TweedieLSS()
+    spec = SuperLSS(
+        family,
+        family.mu(s("x", k=5), cat("g")),
+        family.phi(),
+        family.p(),
+        weight_semantics="frequency",
+    )
+    lss = spec.fit(
+        X.iloc[:400], y[:400], sample_weight=counts[:400], lambdas={"mean:x#wiggle": LAMBDA}
+    )
+    held = X.iloc[400:].reset_index(drop=True)
+    return Case(lss, _validation(held, y[400:], counts[400:]))
 
 
 @pytest.fixture(scope="module")
@@ -385,6 +411,90 @@ def test_frequency_weights_and_repeated_rows_give_the_same_levels_and_flags(calm
         assert (a["outside"], a["flagged"]) == (b["outside"], b["flagged"])
 
 
+_UNSIMULATED_ROWS = (
+    "The band treats the fitted parameters as exact, because these rows could not be simulated."
+)
+
+
+def test_rows_no_replicate_can_draw_keep_the_known_level_and_say_so(calm, monkeypatch):
+    """A draw outside the links' domain leaves the rows no law for a replicate to draw from.
+
+    The draw scales every coefficient a millionfold, so the log links overflow. Mutation check:
+    naming the fit's uncertainty, as a refused draw does, fails it.
+    """
+    fitted = calm.lss._require_fitted()
+
+    def beyond(model, n_draws, *, covariance, seed):
+        beta = np.tile(fitted.prediction_coefficients * 1e6, (n_draws, 1))
+        names = tuple(fitted.layout.coefficient_names)
+        return PosteriorDraws(beta, covariance_kind="fixed", seed=seed, coefficient_names=names)
+
+    monkeypatch.setattr(checks, "posterior_draws", beyond)
+    replicates = null_replicates(calm.lss, calm.validation, inputs=["x", "g"])
+    assert (replicates.n_draws, replicates.note) == (0, _UNSIMULATED_ROWS)
+    for report in CHECK_REPORTS:
+        body = check_body(report, calm.lss, calm.validation, inputs=["x", "g"])
+        assert (body["level_source"], body["n_draws"], body["level_note"]) == (
+            "known",
+            0,
+            _UNSIMULATED_ROWS,
+        )
+
+
+#: The residual sampler's cap: the Q-Q plot and the PIT histogram read at most this many.
+_OCCURRENCE_CAP = 100_000
+
+
+def test_a_split_beyond_the_occurrence_cap_draws_the_sample_the_checks_read(calm_frequency):
+    """A hundred million occurrences: the replicates draw the 100,000 the Q-Q plot and PIT
+    histogram read, as the library selects them, and never hold an index of every occurrence.
+
+    The split's own responses at that sample, scored as a replicate, give the PIT histogram
+    bin by bin. Quantile calibration of the response and actual over expected read every
+    occurrence, which no replicate draws, so they keep the known level and say why. Mutation
+    check: expanding every occurrence before taking the sample allocates an 800 MB index and
+    breaks the envelope.
+    """
+    weighted, _ = calm_frequency
+    counts = weighted.validation.sample_weight * 250_000
+    split = dataclasses.replace(weighted.validation, sample_weight=counts)
+    assert np.sum(counts) > 9.0e7
+    tracemalloc.start()
+    try:
+        replicates = null_replicates(weighted.lss, split, inputs=["x", "g"], n_draws=19)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    # An index of every occurrence alone is 8 bytes each, 800 MB.
+    assert peak < 200e6
+    bodies = {
+        r: check_body(r, weighted.lss, split, inputs=["x", "g"], replicates=replicates)
+        for r in CHECK_REPORTS
+    }
+    for report in ("check_qq", "check_pit"):
+        body = bodies[report]
+        assert (body["level_source"], body["n_draws"], body["level_note"]) == (
+            "simulated",
+            19,
+            None,
+        )
+    for report in ("check_calibration", "check_ae"):
+        body = bodies[report]
+        assert (body["level_source"], body["n_draws"], body["level_note"]) == (
+            "known",
+            0,
+            _UNSIMULATED_ROWS,
+        )
+    fitted = weighted.lss._require_fitted()
+    residuals = compute_residuals(fitted, split.X, split.y, sample_weight=counts, seed=42)
+    sample = replication_sample(residuals, seed=42)
+    own = np.asarray(split.y, dtype=np.float64)[sample]
+    scored = checks._scored_replicates(weighted.lss, split, inputs=[], responses=own[None, :])
+    pit = bodies["check_pit"]
+    assert pit["n_rows"] == len(own) == _OCCURRENCE_CAP
+    assert scored.counts[0].tolist() == pit["counts"]
+
+
 def test_a_large_split_sends_at_most_800_points_and_flags_on_all():
     z = np.random.default_rng(1).standard_normal(30_000) * 1.02
     body = qq_from_residuals(z)
@@ -557,19 +667,49 @@ def test_the_training_rows_keep_the_known_parameter_bands(calm):
     assert ae["z"] == pytest.approx(stats.norm.isf(0.025 / ae["cells"]), rel=1e-12)
 
 
-@pytest.mark.parametrize("name", ["calm", "prior_weighted", "with_offset", "zeros"])
-def test_a_replicate_is_scored_as_the_split_is(name, request):
-    """The statistics of one replicate are those its responses give as a split of their own.
+def _assert_same_statistics(scored: dict[str, Any], j: int, observed: dict[str, float]) -> None:
+    """Replicate ``j``'s statistics are ``observed``: the counts' exactly, Q-Q's and A/E's to
+    the rounding of a normal round trip and of a sum in another order."""
+    for report in ("check_pit", "check_calibration"):
+        assert scored[report][j] == observed[report]
+    for report in ("check_qq", "check_ae"):
+        assert scored[report][j] == pytest.approx(observed[report], rel=1e-9)
 
-    The replicate is the one that sets the Q-Q level, whose Q-Q statistic is exact; every
-    replicate's PIT statistic is checked too. Prior weights enter each law and each total, an
-    offset each draw's parameters, and a response at the atom is randomised from the split's
-    own stream. Mutation checks: scoring
-    each replicate under the draw it was simulated from, totals without the prior weights, and
-    atoms randomised from another stream each fail it.
+
+@pytest.mark.parametrize(
+    "name", ["calm", "prior_weighted", "with_offset", "zeros", "zeros_frequency"]
+)
+def test_a_replicate_is_scored_as_the_split_is(name, request):
+    """The split's own responses, scored as a replicate, give each body's statistic.
+
+    Prior weights enter each law and each total, an offset each draw's parameters, and a
+    response at an atom is randomised as the split's is: from one stream across the rows, or
+    under frequency weights per occurrence from the occurrences' own. Where each row has one
+    response, a replicate is also a split of its own: the one that sets the Q-Q level, whose
+    Q-Q statistic is exact, gives its bodies' statistics, and every replicate gives its PIT
+    histogram's. A frequency-weighted row's occurrences share one response in a split but not
+    in a replicate, so there the first check stands alone. Mutation checks: scoring each
+    replicate under the draw it was simulated from, totals without the prior weights, and atoms
+    randomised from another stream, or weighted occurrences' atoms from the rows' stream, each
+    fail it.
     """
     case = request.getfixturevalue(name)
     replicates = null_replicates(case.lss, case.validation, inputs=["x", "g"])
+    own = np.asarray(case.validation.y, dtype=np.float64)
+    if name == "zeros_frequency":
+        own = np.repeat(own, case.validation.sample_weight.astype(np.int64))
+    scored = checks._scored_replicates(
+        case.lss, case.validation, inputs=["x", "g"], responses=own[None, :]
+    )
+    bodies = {
+        r: check_body(r, case.lss, case.validation, inputs=["x", "g"], replicates=replicates)
+        for r in CHECK_REPORTS
+    }
+    _assert_same_statistics(scored.statistics, 0, _statistics(bodies))
+    # Bin by bin, so a randomised atom drawn otherwise shows wherever it lands.
+    assert scored.counts[0].tolist() == bodies["check_pit"]["counts"]
+    if name == "zeros_frequency":
+        return
     responses = checks._replicate_responses(case.lss, case.validation)
     assert responses.shape == (99, case.validation.n_obs)
     j = int(np.argsort(replicates.statistics["check_qq"])[4])
@@ -578,11 +718,7 @@ def test_a_replicate_is_scored_as_the_split_is(name, request):
         r: check_body(r, case.lss, copy, inputs=["x", "g"], replicates=replicates)
         for r in CHECK_REPORTS
     }
-    observed = _statistics(bodies)
-    for report in ("check_pit", "check_calibration"):
-        assert replicates.statistics[report][j] == observed[report]
-    for report in ("check_qq", "check_ae"):
-        assert replicates.statistics[report][j] == pytest.approx(observed[report], rel=1e-9)
+    _assert_same_statistics(replicates.statistics, j, _statistics(bodies))
     # The PIT histogram reads every transform, so every replicate's is its own split's.
     for i, y in enumerate(responses):
         split = dataclasses.replace(case.validation, y=y)

@@ -29,8 +29,9 @@ under each, scores every replicate with the fitted model exactly as the split
 is scored, and each check's level is Barnard's Monte Carlo level of its
 replicates' statistic (Barnard 1963, as Myllymaki et al. 2017 describe it;
 :func:`superglm.stats.monte_carlo_level`). The band is drawn at that level and
-the flag is read from the drawn band. Where the draws cannot be made, the band
-keeps the known-parameter level and the body says so.
+the flag is read from the drawn band. Where the fit's uncertainty cannot be
+sampled, or the rows cannot be simulated, the band keeps the known-parameter
+level and the body says which.
 
 A body is JSON-clean: a value with no finite number is ``None``. A check the
 model or split cannot answer is the unavailable body, whose ``reason`` is a
@@ -76,6 +77,7 @@ from superglm.distributional.residuals import (
     _residual_rng,
     _sample_residuals,
     compute_residuals,
+    replication_sample,
 )
 from superglm.distributional.response import response_spec
 from superglm.distributional.weights import resolve_likelihood_weights
@@ -134,10 +136,15 @@ _NO_VARIANCE = (
     "The predicted distribution has no finite variance at these parameters, "
     "so actual over expected has no interval."
 )
-_KNOWN_LEVEL = (
+_UNSAMPLED_FIT = (
     "The band treats the fitted parameters as exact, because the fit's uncertainty could not "
     "be sampled."
 )
+_UNSIMULATED_ROWS = (
+    "The band treats the fitted parameters as exact, because these rows could not be simulated."
+)
+#: The pushforward's refusal of a draw that puts a parameter outside its support on some row.
+_OUTSIDE_SUPPORT = "outside its supported range"
 
 
 class CheckUnavailable(Exception):  # noqa: N818 - a reason the page shows, not a fault
@@ -534,7 +541,14 @@ def check_body(
 
 
 class _NotSampled(Exception):  # noqa: N818 - the level falls back, not a fault
-    """The split's replicates cannot be simulated, so its bands keep the known-parameter level."""
+    """The split's replicates cannot be simulated, so its bands keep the known-parameter level.
+
+    ``note`` is the page's sentence for why: the fit's uncertainty, or the rows.
+    """
+
+    def __init__(self, note: str) -> None:
+        super().__init__(note)
+        self.note = note
 
 
 # Compared and hashed by identity: a cache holds it as a value, keyed by what it was drawn from.
@@ -550,9 +564,11 @@ class NullReplicates:
     ``floor(CHECK_ALPHA (n_draws + 1))``-th smallest may stand at a floor above every exact one
     and at most its own value, which no level at ``CHECK_ALPHA`` reads.
 
-    Nothing simulated leaves ``n_draws`` 0 and ``note`` the page's sentence when the split
-    keeps the known-parameter level for want of draws, or ``None`` when that level is the right
-    one (the rows the model was fitted on) or no check can answer.
+    ``note`` is the page's sentence for each check that keeps the known-parameter level on this
+    split for want of a replicate: the fit's uncertainty could not be sampled, or these rows
+    could not be simulated. It is ``None`` when every check that answers was simulated, when the
+    known level is the right one (the rows the model was fitted on), or when no check can
+    answer. Nothing simulated leaves ``n_draws`` 0.
     """
 
     statistics: Mapping[str, NDArray[np.float64] | None]
@@ -574,12 +590,19 @@ class NullReplicates:
 class _Split(NamedTuple):
     """A split's retained rows as every check scores them and as each replicate draws them.
 
-    Each replicate draws one response per occurrence: a row under prior weights, every
-    literal occurrence of a row under frequency weights. ``rows`` is each occurrence's retained
-    row, ``read`` the occurrences Q-Q and PIT read (``None`` for all), and ``prior_law`` each
-    occurrence's prior weight where the row law carries one. ``total_weights`` are each
-    retained row's weight on one occurrence's response in an actual total: its prior weight,
-    or one under frequency weights, whose occurrences are each drawn.
+    Each replicate draws one response per simulated occurrence. Under prior or unit weights
+    these are the retained rows, of which Q-Q and PIT read ``read`` (``None`` for all), the rows
+    ``replication_sample`` selects. Under other frequency weights they are the occurrences
+    ``replication_sample`` selects, in its order, and every one is read: each literal
+    occurrence up to its cap, a sample of them beyond it. ``per_occurrence`` marks those
+    weights, under which ``_sample_residuals`` randomises each occurrence at an atom on its
+    own. ``complete`` says the simulated occurrences are every one that quantile calibration of
+    the response and actual over expected read.
+
+    ``rows`` is each simulated occurrence's retained row and ``prior_law`` its prior weight
+    where the row law carries one. ``total_weights`` are each retained row's weight on one
+    occurrence's response in an actual total: its prior weight, or one under frequency
+    weights, whose occurrences are each drawn.
     """
 
     fitted: Any
@@ -590,14 +613,17 @@ class _Split(NamedTuple):
     read: NDArray[np.intp] | None
     prior_law: NDArray[np.float64] | None
     total_weights: NDArray[np.float64]
+    per_occurrence: bool
+    complete: bool
 
 
 def _split(fitted: Any, dataset: EvaluationDataset) -> _Split:
     """``dataset``'s rows as the checks score them; ``_NotSampled`` when no replicate can.
 
     A replicate can be drawn for every row under prior weights, and under frequency weights
-    when each row's weight is a whole count and the checks read every occurrence, as
-    ``_sample_residuals`` does up to its cap. Truncated or censored rows are not drawn.
+    for the occurrences ``replication_sample`` selects, which it never expands in full. A
+    fractional weight has no literal occurrence, and a truncated or censored row no law a
+    replicate draws, so neither is drawn.
     """
     y = np.asarray(dataset.y, dtype=np.float64).ravel()
     residuals = compute_residuals(
@@ -609,26 +635,24 @@ def _split(fitted: Any, dataset: EvaluationDataset) -> _Split:
         seed=CHECK_SEED,
     )
     if residuals.bounds is not None:
-        raise _NotSampled
+        raise _NotSampled(_UNSIMULATED_ROWS)
     retained = _retained_rows(
         fitted, dataset.X, y, sample_weight=dataset.sample_weight, offsets=dataset.offset
     )
-    sample = _sample_residuals(residuals, seed=CHECK_SEED).rows
-    every = np.arange(residuals.n_rows, dtype=np.intp)
-    if residuals.weight_semantics == "prior":
-        rows, read = every, (None if np.array_equal(sample, every) else sample)
-        total_weights = retained.weights
+    sample = replication_sample(residuals, seed=CHECK_SEED)
+    counts = residuals.weights
+    # The rule ``_sample_residuals`` follows: such weights read each occurrence on its own.
+    per_occurrence = residuals.weight_semantics == "frequency" and bool(np.any(counts != 1.0))
+    if per_occurrence:
+        if not np.array_equal(counts, np.rint(counts)):
+            raise _NotSampled(_UNSIMULATED_ROWS)
+        rows, read, total_weights = sample, None, np.ones(residuals.n_rows)
+        frame = as_eager_frame(retained.frame.take_rows(rows))
+        complete = len(sample) == float(np.sum(counts))
     else:
-        counts = residuals.weights
-        rows = np.repeat(every, np.rint(counts).astype(np.int64))
-        if not (np.array_equal(counts, np.rint(counts)) and np.array_equal(sample, rows)):
-            raise _NotSampled
-        read, total_weights = None, np.ones(len(every))
-    frame = (
-        retained.frame
-        if len(rows) == len(every)
-        else as_eager_frame(retained.frame.take_rows(rows))
-    )
+        rows = np.arange(residuals.n_rows, dtype=np.intp)
+        read = None if np.array_equal(sample, rows) else sample
+        total_weights, frame, complete = retained.weights, retained.frame, True
     offsets = retained.offsets
     if offsets is not None:
         offsets = {name: np.asarray(values)[rows] for name, values in offsets.items()}
@@ -642,6 +666,8 @@ def _split(fitted: Any, dataset: EvaluationDataset) -> _Split:
         read=read,
         prior_law=None if law is None else law[rows],
         total_weights=total_weights,
+        per_occurrence=per_occurrence,
+        complete=complete,
     )
 
 
@@ -650,7 +676,7 @@ def _draws(fitted: Any, n_draws: int, seed: int) -> PosteriorDraws:
     try:
         return posterior_draws(fitted, n_draws, covariance="fixed", seed=seed)
     except ValueError as refused:
-        raise _NotSampled from refused
+        raise _NotSampled(_UNSAMPLED_FIT) from refused
 
 
 def _simulated_responses(
@@ -660,21 +686,22 @@ def _simulated_responses(
 
     Each draw is pushed to the occurrences' parameters and each response drawn through the
     family's quantile function at a uniform, as ``posterior_predictive`` draws them. A draw
-    with no value of a parameter on some row, or a response that is not finite, is
-    ``_NotSampled``.
+    that leaves a parameter without a value or outside its support on some row, or a response
+    that is not finite, is ``_NotSampled``.
     """
     family = split.fitted.family
     uniforms = _residual_rng(seed, _RESPONSE_STREAM)
-    for span, theta in posterior_parameters(
+    blocks = posterior_parameters(
         split.fitted,
         split.frame,
         draws,
         offsets=split.offsets,
         chunk_rows=_SIMULATION_ROWS,
         name_levels=False,
-    ):
+    )
+    for span, theta in _within_support(blocks):
         if not np.all(np.isfinite(theta)):
-            raise _NotSampled
+            raise _NotSampled(_UNSIMULATED_ROWS)
         count, width, k = theta.shape
         levels = uniforms.uniform(_PROBABILITY_MARGIN, 1.0 - _PROBABILITY_MARGIN, (count, width))
         flat = theta.reshape(-1, k)
@@ -687,8 +714,19 @@ def _simulated_responses(
         )
         responses = np.asarray(drawn, dtype=np.float64).reshape(count, width)
         if not np.all(np.isfinite(responses)):
-            raise _NotSampled
+            raise _NotSampled(_UNSIMULATED_ROWS)
         yield span, responses
+
+
+def _within_support(blocks: Iterator[tuple[slice, NDArray]]) -> Iterator[tuple[slice, NDArray]]:
+    """``posterior_parameters``' blocks; a draw it refuses as outside a support is
+    ``_NotSampled``, and any other refusal a fault."""
+    try:
+        yield from blocks
+    except ValueError as refused:
+        if _OUTSIDE_SUPPORT not in str(refused):
+            raise
+        raise _NotSampled(_UNSIMULATED_ROWS) from refused
 
 
 def _transforms(
@@ -711,26 +749,30 @@ def _transforms(
         lower = np.asarray(
             family.cdf_left_limit(values, theta, weights=law), dtype=np.float64
         ).reshape(count, width)
-        upper = np.where(lower < upper, randomise(lower, upper), upper)
+        upper = randomise(lower, upper)
     return np.clip(upper, _PROBABILITY_FLOOR, _PROBABILITY_CEILING)
 
 
-def _atom_randomiser(count: int) -> Callable[[NDArray, NDArray], NDArray]:
-    """Uniform draws across each replicate's atoms from the split's own stream.
+def _atom_randomiser(split: _Split, count: int) -> Callable[[NDArray, NDArray], NDArray]:
+    """Each replicate's transforms, each atom ``lower < upper`` drawn as the split's own are.
 
-    ``compute_residuals`` draws ``uniform(lower, upper)`` for every row from one stream of
-    ``CHECK_SEED``; each replicate continues its own copy of that stream block by block, so
-    each replicate is randomised as a split with its responses would be.
+    ``compute_residuals`` draws ``uniform(lower, upper)`` for every row, atom or not, from
+    stream 0 of ``CHECK_SEED``, and ``_sample_residuals`` keeps those under prior or unit
+    weights. Under other frequency weights it draws each selected occurrence at an atom anew,
+    in order, from stream 1, and nothing for the others. Each replicate continues its own copy
+    of that stream block by block, so it is randomised as a split with its responses would be.
     """
-    streams = [_residual_rng(CHECK_SEED, 0) for _ in range(count)]
+    streams = [_residual_rng(CHECK_SEED, 1 if split.per_occurrence else 0) for _ in range(count)]
 
     def randomise(lower: NDArray, upper: NDArray) -> NDArray:
-        return np.stack(
-            [
-                stream.uniform(low, high)
-                for stream, low, high in zip(streams, lower, upper, strict=True)
-            ]
-        )
+        drawn = np.array(upper, dtype=np.float64)
+        for stream, row, low, high in zip(streams, drawn, lower, upper, strict=True):
+            atoms = low < high
+            if split.per_occurrence:
+                row[atoms] = stream.uniform(low[atoms], high[atoms])
+            else:
+                row[atoms] = stream.uniform(low, high)[atoms]
+        return drawn
 
     return randomise
 
@@ -769,52 +811,110 @@ def _ae_statistics(tables: list[_AETable], totals: NDArray) -> NDArray[np.float6
     return np.max(np.abs(ratio - 1.0) / se[cells], axis=1)
 
 
-def _replicate_statistics(
-    split: _Split, draws: PosteriorDraws, tables: list[_AETable], seed: int
-) -> dict[str, NDArray[np.float64] | None]:
+class _Scores(NamedTuple):
+    """What the replicates give: each check's statistic per replicate, or ``None`` where it has
+    none, each replicate's PIT histogram, and each actual-over-expected table's
+    ``(replicates, cells)`` actual totals by name."""
+
+    statistics: dict[str, NDArray[np.float64] | None]
+    counts: NDArray[np.int64]
+    totals: dict[str, NDArray[np.float64]]
+
+
+def _scores(
+    split: _Split,
+    blocks: Iterable[tuple[slice, NDArray[np.float64]]],
+    count: int,
+    tables: list[_AETable],
+) -> _Scores:
     """Each check's statistic on every replicate, each scored as the split's rows are.
 
-    One pass over the occurrences keeps each replicate's transforms, its exceedance counts of
-    the predicted quantiles and its actual-over-expected cell totals; Q-Q and PIT then read the
-    transforms of the occurrences they read.
+    ``blocks`` are ``(occurrences, responses)`` with one response row per replicate. One pass
+    keeps each replicate's transforms, its exceedance counts of the predicted quantiles and its
+    actual-over-expected cell totals; Q-Q and PIT then read the transforms of the occurrences
+    they read. Quantile calibration of the response and actual over expected read every
+    occurrence, so they have no statistic unless the split's are all simulated.
     """
-    count, occurrences = draws.n_draws, len(split.rows)
+    occurrences = len(split.rows)
     randomised = isinstance(split.fitted.family, AtomFamily)
-    randomise = _atom_randomiser(count) if randomised else None
+    randomise = _atom_randomiser(split, count) if randomised else None
     grid = np.asarray(QUANTILE_GRID)
-    thresholds = None if randomised else _quantile_thresholds(split)
+    thresholds = _quantile_thresholds(split) if split.complete and not randomised else None
+    tables = tables if split.complete else []
     starts = np.cumsum([0] + [table.check.expected.size for table in tables])
-    width = int(starts[-1])
     codes = np.column_stack(
         [table.codes + start for table, start in zip(tables, starts[:-1], strict=True)]
         or [np.zeros(split.residuals.n_rows, dtype=np.intp)]
     )
+    width = max(int(starts[-1]), 1)
     transforms = np.empty((count, occurrences))
     exceeded = np.zeros((count, grid.size), dtype=np.int64)
-    totals = np.zeros((count, max(width, 1)))
-    for span, responses in _simulated_responses(split, draws, seed):
+    totals = np.zeros((count, width))
+    for span, responses in blocks:
         rows = split.rows[span]
         transforms[:, span] = _transforms(split, span, responses, randomise)
         if thresholds is not None:
             exceeded += np.count_nonzero(responses[:, :, None] > thresholds[rows], axis=1)
-        totals += _cell_totals(codes[rows], split.total_weights[rows] * responses, max(width, 1))
+        if tables:
+            totals += _cell_totals(codes[rows], split.total_weights[rows] * responses, width)
 
     read = transforms if split.read is None else transforms[:, split.read]
     # Binned as ``pit_payload`` bins the split, one replicate at a time.
     pit = np.stack([np.histogram(row, bins=PIT_BINS, range=(0.0, 1.0))[0] for row in read])
-    trials = occurrences
+    calibration = None
     if randomised:
         # A family with an atom reads quantile calibration on the randomised transform.
         exceeded = np.column_stack([np.count_nonzero(read > p, axis=1) for p in grid])
-        trials = read.shape[1]
+        calibration = _binomial_cell_levels(exceeded, read.shape[1], 1.0 - grid)
+    elif thresholds is not None:
+        calibration = _binomial_cell_levels(exceeded, occurrences, 1.0 - grid)
     read.sort(axis=1)
     resolve = max(1, _monte_carlo_rank(count, CHECK_ALPHA))
-    return {
+    statistics = {
         "check_qq": _order_statistic_levels(read, resolve=resolve),
         "check_pit": _binomial_cell_levels(pit, read.shape[1], 1.0 / PIT_BINS),
-        "check_calibration": _binomial_cell_levels(exceeded, trials, 1.0 - grid),
+        "check_calibration": calibration,
         "check_ae": _ae_statistics(tables, totals) if tables else None,
     }
+    by_table = {
+        table.check.covariate: totals[:, start:end]
+        for table, start, end in zip(tables, starts[:-1], starts[1:], strict=True)
+    }
+    return _Scores(statistics, pit, by_table)
+
+
+def _replicates(
+    fitted: Any,
+    dataset: EvaluationDataset,
+    inputs: Sequence[str],
+    *,
+    n_draws: int,
+    seed: int,
+    responses: NDArray[np.float64] | None = None,
+) -> tuple[_Split, _Scores, int]:
+    """The split, what its replicates give and how many there are; ``_NotSampled`` when none.
+
+    ``responses``, one row per replicate over the occurrences the replicates draw, stand in for
+    simulated ones.
+    """
+    y = np.asarray(dataset.y, dtype=np.float64).ravel()
+    split = _split(fitted, dataset)
+    tables: list[_AETable] = []
+    if _unsupported("check_ae", fitted.family) is None:
+        # Without a finite variance actual over expected has no statistic; the rest do.
+        with contextlib.suppress(CheckUnavailable):
+            tables = _ae_tables(fitted, dataset, y, inputs)
+    if responses is None:
+        draws = _draws(fitted, n_draws, seed)
+        count, blocks = draws.n_draws, _simulated_responses(split, draws, seed)
+    else:
+        given = np.atleast_2d(np.asarray(responses, dtype=np.float64))
+        spans = (
+            slice(start, min(start + _SIMULATION_ROWS, given.shape[1]))
+            for start in range(0, given.shape[1], _SIMULATION_ROWS)
+        )
+        count, blocks = len(given), ((span, given[:, span]) for span in spans)
+    return split, _scores(split, blocks, count, tables), count
 
 
 def null_replicates(
@@ -837,9 +937,12 @@ def null_replicates(
 
     The rows the model was fitted on keep the known-parameter bands, so nothing is simulated
     for them, nor for a model or split no check can answer. Where the posterior refuses its
-    draws, or the rows have no law a replicate can draw (fractional frequency weights,
-    occurrences beyond the checks' cap, truncated or censored rows), nothing is simulated and
-    ``note`` says so.
+    draws, or the rows have no law a replicate can draw (truncated or censored rows, a draw
+    that leaves a parameter outside its link's domain, a family with no distribution
+    function), nothing is simulated and ``note`` says which. Beyond the residual sampler's cap
+    a frequency-weighted split draws the occurrences that sampler selects, the ones Q-Q, PIT
+    and a randomised quantile calibration read; quantile calibration of the response and actual
+    over expected read every occurrence, so they keep the known level and ``note`` says why.
     """
     nothing = NullReplicates(statistics={}, n_draws=0, seed=int(seed))
     lss = _lss(model)
@@ -848,22 +951,21 @@ def null_replicates(
     fitted = lss._require_fitted()
     family = fitted.family
     if not isinstance(family, DistributionFunctionFamily) or response_spec(family).shape:
-        return NullReplicates(statistics={}, n_draws=0, seed=int(seed), note=_KNOWN_LEVEL)
-    y = np.asarray(dataset.y, dtype=np.float64).ravel()
+        return NullReplicates(statistics={}, n_draws=0, seed=int(seed), note=_UNSIMULATED_ROWS)
     try:
-        split = _split(fitted, dataset)
-        tables: list[_AETable] = []
-        if _unsupported("check_ae", family) is None:
-            # Without a finite variance actual over expected has no statistic; the rest do.
-            with contextlib.suppress(CheckUnavailable):
-                tables = _ae_tables(fitted, dataset, y, inputs)
-        draws = _draws(fitted, int(n_draws), int(seed))
-        statistics = _replicate_statistics(split, draws, tables, int(seed))
+        split, scores, count = _replicates(
+            fitted, dataset, inputs, n_draws=int(n_draws), seed=int(seed)
+        )
     except NoPredictedMeanError:
         return nothing
-    except _NotSampled:
-        return NullReplicates(statistics={}, n_draws=0, seed=int(seed), note=_KNOWN_LEVEL)
-    return NullReplicates(statistics=statistics, n_draws=draws.n_draws, seed=int(seed))
+    except _NotSampled as unsampled:
+        return NullReplicates(statistics={}, n_draws=0, seed=int(seed), note=unsampled.note)
+    return NullReplicates(
+        statistics=scores.statistics,
+        n_draws=count,
+        seed=int(seed),
+        note=None if split.complete else _UNSIMULATED_ROWS,
+    )
 
 
 def _replicate_responses(
@@ -874,6 +976,24 @@ def _replicate_responses(
     split = _split(fitted, dataset)
     blocks = _simulated_responses(split, _draws(fitted, n_draws, seed), seed)
     return np.concatenate([responses for _, responses in blocks], axis=1)
+
+
+def _scored_replicates(
+    model: Any,
+    dataset: EvaluationDataset,
+    *,
+    inputs: Sequence[str],
+    responses: NDArray[np.float64] | None = None,
+    n_draws: int = CHECK_DRAWS,
+    seed: int = CHECK_SEED,
+) -> _Scores:
+    """What :func:`null_replicates` reads from its replicates, cell totals too, for tests.
+
+    ``responses``, one row per replicate over the occurrences the replicates draw, are scored
+    in place of simulated ones.
+    """
+    fitted = _lss(model)._require_fitted()
+    return _replicates(fitted, dataset, inputs, n_draws=n_draws, seed=seed, responses=responses)[1]
 
 
 def check_report_payload(
