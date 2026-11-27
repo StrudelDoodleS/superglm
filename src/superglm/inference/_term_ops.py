@@ -525,7 +525,8 @@ class _TermReport:
         is also why no ``se_centered`` is passed: ``_recenter_term`` transforms the
         published covariance and reads the centred errors off its diagonal.  A knot value
         ``determines`` leaves open is then blank there and in the covariance
-        (``withhold_undetermined_knots``).
+        (``withhold_undetermined_knots``); the covariance before that, and the rule, stay on
+        the result for the display between knots (``KnotCombinations``).
         """
         from superglm.inference.covariance import BinaryScaledCovariance
 
@@ -574,8 +575,9 @@ class _TermReport:
             ),
             self.centering,
         )
+        combinations = None
         if inference.knot_covariance is not None and inference.se_log_relativity is not None:
-            errors, knot_cov = withhold_undetermined_knots(
+            errors, knot_cov, combinations = withhold_undetermined_knots(
                 self.spec,
                 inference.se_log_relativity,
                 inference.knot_covariance,
@@ -592,18 +594,24 @@ class _TermReport:
                     ci_lower=ci_lo,
                     ci_upper=ci_hi,
                 )
-        if not exponent or inference.se_log_relativity is None:
-            return inference
-        errors = np.ldexp(inference.se_log_relativity, exponent // 2)
-        with np.errstate(over="ignore"):
-            knot_cov = np.ldexp(inference.knot_covariance, exponent)
-        return replace(
-            inference,
-            se_log_relativity=errors,
-            knot_covariance=knot_cov,
-            ci_lower=_safe_exp(inference.log_relativity - self.z_alpha * errors),
-            ci_upper=_safe_exp(inference.log_relativity + self.z_alpha * errors),
-        )
+        if exponent and inference.se_log_relativity is not None:
+            errors = np.ldexp(inference.se_log_relativity, exponent // 2)
+            with np.errstate(over="ignore"):
+                knot_cov = np.ldexp(inference.knot_covariance, exponent)
+                if combinations is not None:
+                    raw = np.ldexp(combinations.covariance, exponent)
+                    combinations = replace(combinations, covariance=raw)
+            inference = replace(
+                inference,
+                se_log_relativity=errors,
+                knot_covariance=knot_cov,
+                ci_lower=_safe_exp(inference.log_relativity - self.z_alpha * errors),
+                ci_upper=_safe_exp(inference.log_relativity + self.z_alpha * errors),
+            )
+        if combinations is not None:
+            # read by the display between knots (``plotting.common.piecewise_display_term``)
+            object.__setattr__(inference, "_knot_combinations", combinations)
+        return inference
 
 
 # ── Main Entry Point ──────────────────────────────────────────────

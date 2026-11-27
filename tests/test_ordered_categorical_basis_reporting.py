@@ -23,12 +23,14 @@ import pytest
 
 from superglm import (
     Categorical,
+    Constraint,
     FactorSmooth,
     GroupLasso,
     Numeric,
     OrderedCategorical,
     Piecewise,
     Polynomial,
+    PSpline,
     RandomEffect,
     Spline,
     SuperGLM,
@@ -1434,6 +1436,188 @@ def test_a_level_a_coarser_grouping_leaves_determined_keeps_its_error() -> None:
             model.term_inference("c", centering=centering).se_log_relativity,
         )
     np.testing.assert_allclose(_metrics_errors(model, X, y, "c"), se[1:], rtol=1e-9)
+
+
+_MIDPOINT_KNOTS = np.array([0.0, 40 / 199, 60 / 199, 1.0])
+
+
+def _midpoint_fit(alias=True, weight=1.0):
+    """A piecewise term with adjacent knots 40/199 and 60/199, its base the first, and with
+    ``alias`` a numeric ``z``, their hats' difference: in the term's span, it trades the two
+    knots' values against each other and keeps their mean.  The default display grid, 200
+    points over [0, 1] beside the knots, holds the point midway between them.  Every row
+    has weight ``weight``."""
+    rng = np.random.default_rng(11)
+    x = np.r_[0.0, 1.0, rng.uniform(0.0, 1.0, 398)]
+    y = np.sin(3.0 * x) + rng.normal(scale=0.3, size=x.size)
+    hats = [np.interp(x, _MIDPOINT_KNOTS, row) for row in np.eye(4)]
+    X = pd.DataFrame({"x": x, "z": hats[1] - hats[2]})
+    features = {"x": Piecewise(breaks=list(_MIDPOINT_KNOTS[1:3]), base="first")}
+    if alias:
+        features["z"] = Numeric()
+    else:
+        X = X[["x"]]
+    model = SuperGLM(family="gaussian", features=features)
+    return model.fit(X, y, sample_weight=np.full(x.size, weight)), X
+
+
+def test_a_piecewise_display_shows_a_value_the_fit_determines_between_two_open_knots() -> None:
+    """The display decides each of its points, not only its knots (#771 review).
+
+    ``z`` trades the knots 40/199 and 60/199, so both values raise the design's rank when
+    appended and stay blank, in the published knot covariance too; their mean does not.  The
+    display point midway has the error of the fit without ``z``, whose column space is the
+    same, and so does the top knot; every other point raises the rank and stays blank, also
+    on rows of weight 1e-320, whose errors are the same.  The matplotlib plot draws the
+    display's limits.  At a4f9ac656 the midpoint was NaN: the
+    display read only the published covariance, blank in both knots' rows.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from superglm.plotting.common import piecewise_display_term
+
+    (model, X), (reference, _) = _midpoint_fit(), _midpoint_fit(alias=False)
+    assert np.linalg.matrix_rank(_design(model)) == np.linalg.matrix_rank(_design(reference))
+    inference = model.term_inference("x")
+    np.testing.assert_array_equal(np.isnan(inference.se_log_relativity), [False, True, True, False])
+    assert np.all(np.isnan(inference.knot_covariance[1:3, 1:]))
+
+    for centering in ("native", "mean"):
+        shown = piecewise_display_term(model.term_inference("x", centering=centering))
+        expected = piecewise_display_term(reference.term_inference("x", centering=centering))
+        np.testing.assert_array_equal(shown.x, expected.x)
+        weights = np.column_stack([np.interp(shown.x, _MIDPOINT_KNOTS, row) for row in np.eye(4)])
+        determined = _determined(model, weights @ _value_map(model, "x", centering))
+        middle = np.abs(shown.x - 50 / 199) < 1e-15
+        assert middle.sum() == 1 and determined[middle].all()
+        assert determined.sum() == 3, centering  # the end knots and the midpoint
+        se = np.asarray(shown.se_log_relativity)
+        np.testing.assert_array_equal(np.isfinite(se), determined)
+        np.testing.assert_allclose(
+            se[determined], expected.se_log_relativity[determined], rtol=1e-9
+        )
+        np.testing.assert_array_equal(np.isfinite(shown.ci_lower), determined)
+
+    shown = piecewise_display_term(inference)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the subnormal weights' precision advisory
+        tiny, _ = _midpoint_fit(weight=1e-320)  # its covariance is held a power of two apart
+    np.testing.assert_allclose(
+        piecewise_display_term(tiny.term_inference("x")).se_log_relativity,
+        shown.se_log_relativity,
+        rtol=1e-9,
+        equal_nan=True,
+    )
+    figure = model.plot("x", X=X, ci="pointwise")
+    try:
+        drawn = [np.asarray(line.get_ydata(), dtype=float) for line in figure.axes[0].lines]
+        assert any(np.array_equal(line, shown.ci_lower, equal_nan=True) for line in drawn)
+    finally:
+        plt.close(figure)
+
+
+def _drop_rank_record(model) -> None:
+    """Publish ``model``'s fit without its rank record, as a fit saved without one reads."""
+    from superglm.model.fit_state import FittedStateRevision
+
+    revision = FittedStateRevision.start(model)
+    for result_name in ("_result", "_solver_result"):
+        setattr(getattr(revision.model, result_name), "rank_info", None)
+    revision.commit()
+
+
+def _traded_levels_fit(trade="b-c"):
+    """A categorical term on four levels, its base ``a``, and a numeric ``z``: with
+    ``trade="b-c"`` it is ``[b] - [c]``, which trades b against c and keeps the levels'
+    mean; with ``"a"``, ``[a]``, which trades every level against the intercept."""
+    rng = np.random.default_rng(5)
+    c = rng.choice(np.array(list("abcd"), dtype=object), 400)
+    y = rng.normal(size=400) + 0.5 * (c == "c") + 0.2 * (c == "b")
+    z = {"b-c": (c == "b").astype(float) - (c == "c"), "a": (c == "a").astype(float)}
+    X = pd.DataFrame({"c": c, "z": z.get(trade, 0.0)})
+    features = {"c": Categorical(base="a")}
+    if trade is None:
+        X = X[["c"]]
+    else:
+        features["z"] = Numeric()
+    return SuperGLM(family="gaussian", features=features).fit(X, y)
+
+
+def test_a_fit_without_its_rank_record_keeps_the_values_its_rebuilt_rank_determines() -> None:
+    """Without a rank record, the rebuilt data rank decides contrasts as well as the mask (#771 review).
+
+    ``z`` trades b and c: those levels, native or centred, and ``z`` raise the design's rank
+    when appended; the centred base a and level d do not.  A fit read without its record (a
+    record saved without one, a revision that drops it) rebuilds the data rank for its mask
+    and keeps that rank's decider and centre beside it, so every reader shows what the fit
+    with its record shows, the errors of the fit without ``z``, also after a pickle round
+    trip and a deep copy.  The mask stays the data's: b, c and ``z`` show no error.  With
+    ``z = [a]`` the summary's intercept is not determined, and is blank there too.  A
+    Poisson fit whose post-fit shape repair moves the working weights drops its record, and
+    shows the centred a and d too.  At a4f9ac656 the centred a and d (0.08418 and 0.08837)
+    were NaN without the record, as was every centred level after the repair, and the
+    intercept beside ``[a]`` showed 0.09647.
+    """
+    import copy
+
+    retained, reference = _traded_levels_fit(), _traded_levels_fit(trade=None)
+    assert np.linalg.matrix_rank(_design(retained)) == np.linalg.matrix_rank(_design(reference))
+    centred_rows = _value_map(retained, "c", "mean")
+    np.testing.assert_array_equal(_determined(retained, centred_rows), [True, False, False, True])
+    legacy = _traded_levels_fit()
+    _drop_rank_record(legacy)
+    assert legacy._solver_pirls_result().rank_info is None
+    expected = reference.term_inference("c", centering="mean").se_log_relativity
+    for model in (legacy, pickle.loads(pickle.dumps(legacy)), copy.deepcopy(legacy)):
+        mask = model._fit_inference_info["coefficient_estimable"]
+        np.testing.assert_array_equal(mask, [False, False, True, False])  # b, c, d, z
+        for centering in ("native", "mean"):
+            se = model.term_inference("c", centering=centering).se_log_relativity
+            want = retained.term_inference("c", centering=centering).se_log_relativity
+            np.testing.assert_array_equal(np.isnan(se), np.isnan(want))
+            np.testing.assert_allclose(se, want, rtol=1e-12, equal_nan=True)
+            frame = model.relativities(with_se=True, centering=centering)["c"]
+            np.testing.assert_array_equal(frame["se_log_relativity"].to_numpy(), se)
+        se = model.term_inference("c", centering="mean").se_log_relativity
+        np.testing.assert_allclose(se[[0, 3]], expected[[0, 3]], rtol=1e-9)
+        rows = {row.name: row.se for row in model.summary()._coef_rows}
+        want = {row.name: row.se for row in retained.summary()._coef_rows}
+        assert rows.keys() == want.keys()
+        np.testing.assert_allclose(
+            np.array(list(rows.values()), dtype=float),
+            np.array(list(want.values()), dtype=float),
+            rtol=1e-12,
+            equal_nan=True,
+        )
+
+    retained, legacy = _traded_levels_fit("a"), _traded_levels_fit("a")
+    _drop_rank_record(legacy)
+    design = _design(retained)
+    intercept_row = np.eye(design.shape[1])[:1]
+    rank = np.linalg.matrix_rank(design)
+    assert np.linalg.matrix_rank(np.vstack([design, intercept_row])) == rank + 1
+    for model in (retained, legacy):
+        intercept = next(row for row in model.summary()._coef_rows if row.name == "Intercept")
+        assert intercept.se is None and not intercept.estimable
+
+    # A live fit reads the same way: a post-fit shape repair that moves the working
+    # weights drops the record.
+    rng = np.random.default_rng(0)
+    x, c = rng.uniform(0.0, 1.0, 400), rng.choice(np.array(list("abcd"), dtype=object), 400)
+    eta = 1.0 - 2.0 * (x - 0.35) ** 2 + 0.5 * (c == "c") + 0.2 * (c == "b")
+    X = pd.DataFrame({"x": x, "c": c, "z": (c == "b").astype(float) - (c == "c")})
+    convex = PSpline(n_knots=10, constraint=Constraint.postfit.convex)
+    features = {"x": convex, "c": Categorical(base="a"), "z": Numeric()}
+    repaired = SuperGLM(family="poisson", features=features).fit(X, rng.poisson(np.exp(eta)))
+    repaired.apply_shape_postfit(X)
+    assert repaired._solver_pirls_result().rank_info is None
+    se = repaired.term_inference("c", centering="mean").se_log_relativity
+    determined = _determined(repaired, _value_map(repaired, "c", "mean"))
+    np.testing.assert_array_equal(determined, [True, False, False, True])
+    np.testing.assert_array_equal(np.isfinite(se), determined)
 
 
 def test_feature_errors_and_bands_give_no_spline_error_the_fit_does_not_determine() -> None:

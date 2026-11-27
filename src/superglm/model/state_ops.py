@@ -692,12 +692,14 @@ def fit_contrast_estimable(model, inference: dict):
     over the fitted coefficients, or ``None`` for a fit without one.
 
     A dense fit's is its rank record's (``RankDecomposition.is_estimable``); a structured
-    fit's is its compact data geometry's (``_structured_contrast_estimable``).
+    fit's is its compact data geometry's (``_structured_contrast_estimable``); one with
+    neither, the data rank ``fit_inference_info`` rebuilt its mask from, kept where that
+    mask leaves a coefficient open.
     """
     if inference.get("structured_covariance"):
         return partial(_structured_contrast_estimable, inference, retained_linear_state(model))
     rank_info = model._solver_pirls_result().rank_info
-    return None if rank_info is None else rank_info.is_estimable
+    return inference.get("contrast_estimable") if rank_info is None else rank_info.is_estimable
 
 
 def rank_intercept_centre(model, rank_info) -> NDArray:
@@ -715,14 +717,16 @@ def fit_intercept_centre(model, inference: dict) -> NDArray | None:
 
     A structured fit's is its factor's column mean ``xtw / sum_w``, the mean its geometry
     reads (``_structured_contrast_estimable``), less the same shift to the public
-    columns.  ``None`` for a fit without a rank record.
+    columns.  A fit with neither keeps the one beside its rebuilt rank, else ``None``.
     """
     if inference.get("structured_covariance"):
         factor = retained_linear_state(model).profiled_factor
         width = len(factor.xtw)
         return factor.xtw / factor.sum_w - _public_intercept_shift(model, model._groups, width)
     rank_info = model._solver_pirls_result().rank_info
-    return None if rank_info is None else rank_intercept_centre(model, rank_info)
+    if rank_info is None:
+        return inference.get("intercept_centre")
+    return rank_intercept_centre(model, rank_info)
 
 
 def _structured_contrast_estimable(
@@ -976,7 +980,7 @@ def fit_inference_info(model):
             active_group.sl
         ]
 
-    return {
+    inference = {
         "W": W,
         "XtWX_inv": inverse,
         "XtWX_inv_aug": augmented,
@@ -987,6 +991,20 @@ def fit_inference_info(model):
         "group_edf_map": group_edf_map,
         "coefficient_estimable": coefficient_estimable,
     }
+    if not np.all(coefficient_estimable):
+        # The data rank the mask was read from decides each contrast the mask leaves open;
+        # the intercept's is centred on the columns' weighted mean, in public columns.
+        from superglm.inference.metrics import _active_centre, _contrast_estimability
+
+        width, sum_w = len(solver.beta), float(np.sum(W, dtype=np.float64))
+        inference["contrast_estimable"] = _contrast_estimability(
+            data_rank, model._groups, active_groups, width, sum_w
+        )
+        shift = _public_intercept_shift(model, active_groups, X_active.p)
+        inference["intercept_centre"] = _active_centre(
+            X_active.rmatvec(W), W, model._groups, active_groups, width, shift
+        )
+    return inference
 
 
 def group_edf(model) -> dict[str, float] | None:

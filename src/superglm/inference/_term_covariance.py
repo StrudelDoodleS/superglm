@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Hashable, Mapping
+from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
@@ -501,26 +502,64 @@ def knot_map(spec) -> NDArray:
     )
 
 
+def _no_knot_combinations() -> None:
+    """What a pickled ``KnotCombinations`` loads as."""
+    return None
+
+
+@dataclass(frozen=True, eq=False, repr=False)
+class KnotCombinations:
+    """A Piecewise term's knot covariance before any value was blanked, beside the rule
+    (``determines`` on the knot rows ``rows`` over the fitted coefficients ``columns``)
+    that decides which combinations of its knot values the fit determines.
+
+    The rule can hold the fit itself, so a pickle carries neither: the record loads as
+    ``None`` (``__reduce__``), and a copy shares it.
+    """
+
+    covariance: NDArray
+    determines: Determinacy
+    columns: NDArray
+    rows: NDArray
+
+    def determined(self, weights: NDArray) -> NDArray:
+        """Which rows of ``weights``, each weighing the knot values, the fit determines."""
+        return _determined_rows(self.determines, self.columns, weights @ self.rows)
+
+    def __reduce__(self):
+        return (_no_knot_combinations, ())
+
+    def __copy__(self) -> KnotCombinations:
+        return self
+
+    def __deepcopy__(self, memo) -> KnotCombinations:
+        return self
+
+
 def withhold_undetermined_knots(
     spec, se: NDArray, knot_covariance: NDArray, determines, columns: NDArray, *, center: bool
-) -> tuple[NDArray, NDArray]:
+) -> tuple[NDArray, NDArray, KnotCombinations | None]:
     """``se`` and ``knot_covariance`` of a Piecewise term with each knot value ``determines``
-    leaves open blank (``withhold_undetermined`` on ``knot_map``, centred with ``center``).
+    leaves open blank (``withhold_undetermined`` on ``knot_map``, centred with ``center``),
+    and the ``KnotCombinations`` a display reads between knots, ``None`` with none blank.
 
     An open value's covariance with any value is NaN but with the base's, identically
     zero; two determined values ``a'b``, ``c'b`` keep theirs, as ``a' G c`` is one number
     for every generalised inverse ``G`` of the information when both lie in its range.
     """
+    if determines is None or np.all(determines.coefficient_estimable[columns]):
+        return se, knot_covariance, None
     rows = knot_map(spec)
     if center:
         rows = rows - rows.mean(axis=0)
     shown = ~np.isnan(withhold_undetermined(se, determines, columns, rows)) | np.isnan(se)
     if shown.all():
-        return se, knot_covariance
+        return se, knot_covariance, None
     moving = np.any(rows != 0.0, axis=1)
     blank = np.outer(~shown, moving) | np.outer(moving, ~shown)
     covariance = np.where(blank, np.nan, np.asarray(knot_covariance, dtype=np.float64))
-    return np.where(shown, se, np.nan), covariance
+    combinations = KnotCombinations(knot_covariance, determines, columns, rows)
+    return np.where(shown, se, np.nan), covariance, combinations
 
 
 def feature_se_from_cov(
