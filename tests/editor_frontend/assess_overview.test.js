@@ -125,6 +125,12 @@ test("a Validation split the model could not score shows the report's reason, wi
     { value: "—", note: NO_QUOTE });
   assert.deepEqual(validationCard({ ...LSS_VALIDATION, compares_edit: true, splits: [LSS_TRAIN, refusedSplit] }),
     { value: "—", note: NO_QUOTE });
+  // No split scored at all: the report names no score column, and the refusal still shows.
+  const unscoredTrain = {
+    ...LSS_TRAIN, metrics: { edited: { log_score: null, crps: null, actual_expected: null } }
+  };
+  assert.deepEqual(validationCard({ ...LSS_VALIDATION, splits: [unscoredTrain, refusedSplit] }),
+    { value: "—", note: NO_QUOTE });
 });
 
 test("Cross-validation reads the newest result's first score", () => {

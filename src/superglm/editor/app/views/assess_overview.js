@@ -45,8 +45,10 @@ export function validationCard(payload) {
   const metric = metricColumns(labels, splits)[0];
   const split = splits.find((candidate) => candidate.name === "validation")
     ?? splits.find((candidate) => candidate.available !== false && candidate.metrics);
+  // A refused split says why before anything asks which score to show: with no other split
+  // scored, the report may name no score column at all.
+  if (payload.available && split?.available === false) return { value: MISSING, note: split.error || note };
   if (!payload.available || !split || metric === undefined) return { value: MISSING, note };
-  if (split.available === false) return { value: MISSING, note: split.error || note };
   const value = `${labels[metric] ?? metric} ${metricText(metric, split.metrics?.edited?.[metric])}`;
   if (split.name !== "validation") return { value, note };
   const delta = payload.compares_edit ? ` · Δ ${deltaText(metric, split.metrics?.delta?.[metric])}` : "";
