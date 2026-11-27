@@ -15,7 +15,11 @@ import { niceTicks } from "./fan.js";
  * @typedef {'band'|'reference'|'edited'|'original'|'original-interval'|'outside'|'interval'|'weight'|'grid'} Role
  */
 /** @typedef {{role: Role, d: string}} Layer one path per role; points are arcs inside the path */
-/** @typedef {{x:number, y:number, text:string}} Mark a hover target in px and its readout */
+/**
+ * A hover target in px, its readout, and the readout's accessible text when the readout shortens
+ * a name.
+ * @typedef {{x:number, y:number, text:string, aria?:string}} Mark
+ */
 /**
  * A tick label, or with `axis` an axis or panel title.
  * @typedef {{x:number, y:number, text:string, anchor:'start'|'middle'|'end', axis?:boolean}} Label
@@ -319,6 +323,13 @@ function pitScene(editedBody, originalBody, box) {
 /** @param {AETable} table @param {number} i */
 const aeGroup = (table, i) => (table.levels ? String(table.levels[i]) : `band ${i + 1}`);
 
+// A readout names a group by at most this many characters, the last of them an ellipsis, so it
+// is a few lines at most and fits the smallest frame; the panel's label keeps the whole name.
+const READOUT_NAME = 40;
+
+/** @param {string} name @returns {string} */
+const readoutName = (name) => (name.length > READOUT_NAME ? `${name.slice(0, READOUT_NAME - 1)}…` : name);
+
 /** @param {AETable} table @param {number} i */
 const aeDrawn = (table, i) => [table.ratio[i], table.lower[i], table.upper[i]].every(Number.isFinite);
 
@@ -358,12 +369,12 @@ function aePanel(parts, labels, marks, rect, domain, table, original, box) {
     const outside = table.lower[i] > 1 || table.upper[i] < 1;
     parts.interval.push(vline(x, sy(table.lower[i]), sy(table.upper[i])));
     parts[outside ? "outside" : "edited"].push(dot(x, y, r));
-    marks.push({
-      x,
-      y,
-      text: `${table.covariate} ${aeGroup(table, i)} · ${fmt(table.ratio[i])}`
-        + ` · interval ${fmt(table.lower[i])} to ${fmt(table.upper[i])} · ${fmtCount(table.n[i])} rows`
-    });
+    const group = aeGroup(table, i);
+    const values = ` · ${fmt(table.ratio[i])} · interval ${fmt(table.lower[i])} to ${fmt(table.upper[i])}`
+      + ` · ${fmtCount(table.n[i])} rows`;
+    const shown = readoutName(group);
+    const mark = { x, y, text: `${table.covariate} ${shown}${values}` };
+    marks.push(shown === group ? mark : { ...mark, aria: `${table.covariate} ${group}${values}` });
   }
   if (box.thumb) return;
   for (const v of niceTicks(domain[0], domain[1], 4)) {

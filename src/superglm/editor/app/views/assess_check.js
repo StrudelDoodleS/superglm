@@ -376,6 +376,7 @@ export function bindCheckHover(frame, getScene) {
     const view = visible(scene);
     const room = view.right - view.left - 2 * READOUT_EDGE;
     label.textContent = mark.text;
+    label.setAttribute("aria-label", mark.aria ?? mark.text);
     const measured = "getComputedTextLength" in label && typeof label.getComputedTextLength === "function"
       ? label.getComputedTextLength() : 0;
     const charWidth = measured > 0 ? measured / Math.max(1, mark.text.length) : READOUT_CHAR;

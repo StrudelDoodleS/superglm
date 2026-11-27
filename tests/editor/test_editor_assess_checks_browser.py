@@ -592,18 +592,23 @@ def test_a_tall_check_scrolls_and_hover_reads_through_the_scroll(chromium_browse
 
 
 def test_a_long_readout_stays_inside_the_frame(checks_page):
-    """A group's readout too wide for the plot breaks into lines inside the frame, every value
-    kept; the rightmost point's readout turns to its left."""
+    """A group name over 40 characters is shortened in its readout to 39 characters and an
+    ellipsis, every value kept, and the readout lies inside the frame, with the whole name in its
+    accessible text; the rightmost point's readout turns to its left."""
+    shortened = f"g {_LONG_GROUP[:39]}… · "
     with checks_page(_long_name_session) as page:
         _open_check(page, "check_ae")
         marks = page.evaluate(_MARKS_FROM_REPORT, ["check_ae", False])
-        long = next(mark for mark in marks if _LONG_GROUP in mark["text"])
+        long = next(mark for mark in marks if mark["text"].startswith(shortened))
+        assert long["text"].endswith(" rows") and " · interval " in long["text"]
         rightmost = max(marks, key=lambda mark: mark["x"])
         for mark in (long, rightmost):
             _hover_mark(page, mark, marks)
             _assert_readout_in_view(page)
         _hover_mark(page, long, marks)
-        assert page.locator("#checkFrame .check-readout text tspan").count() > 1
+        text = page.locator("#checkFrame .check-readout text")
+        assert text.get_attribute("aria-label") == long["aria"]
+        assert long["aria"].startswith(f"g {_LONG_GROUP} · ")
 
 
 def test_a_resize_redraws_the_check_without_a_request(checks_page):

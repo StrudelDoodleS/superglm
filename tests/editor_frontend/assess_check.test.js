@@ -5,6 +5,7 @@ import test from "node:test";
 
 import { CHECK_REPORTS } from "../../src/superglm/editor/app/api/contracts.js";
 import { countText } from "../../src/superglm/editor/app/reports.js";
+import { fmt, fmtCount } from "../../src/superglm/editor/app/format.js";
 import { createInitialEditorState } from "../../src/superglm/editor/app/state/store.js";
 import { nearestMark } from "../../src/superglm/editor/app/chart/check_plots.js";
 import {
@@ -434,19 +435,49 @@ test("a readout keeps to the side of its point with room, inside the frame", () 
 });
 
 test("a readout too long for the frame breaks between its values and stays inside", () => {
-  const name = "a group whose name runs on for long enough that its readout cannot fit on one line of the plot";
-  const dom = fakeFrame();
-  const scene = renderCheckView(dom.nodes, "check_ae", namedGroup(name), VIEW);
+  const name = "a group name of exactly forty characters";
+  assert.equal(name.length, 40);
+  const width = 400;
+  const dom = fakeFrame({ width });
+  const scene = renderCheckView(dom.nodes, "check_ae", namedGroup(name), { ...VIEW, width });
   bindCheckHover(dom.nodes.frame, () => scene);
   const mark = scene.marks.find((m) => m.text.includes(name));
-  assert.ok(mark.text.length * CHAR_PX > VIEW.width, "the readout fits on one line");
+  assert.ok(mark.text.length * CHAR_PX > width, "the readout fits on one line");
   dom.pointerMove(mark.x, mark.y); dom.flushFrame();
   const box = readoutBox(dom);
   assert.ok(box.lines.length > 1);
   assert.equal(box.lines.join(""), mark.text);
   assert.equal(dom.readoutText(), mark.text);
-  assert.ok(box.left >= 0 && box.right <= VIEW.width, `${box.left} to ${box.right}`);
+  assert.ok(box.left >= 0 && box.right <= width, `${box.left} to ${box.right}`);
   assert.ok(box.top >= 0 && box.bottom <= scene.height, `${box.top} to ${box.bottom}`);
+});
+
+test("a group name over 40 characters is shortened in the readout, which keeps every value and fits", () => {
+  const name = "q".repeat(2100);
+  const frame = { width: 600, height: 350 };
+  const dom = fakeFrame(frame);
+  const payload = namedGroup(name);
+  const scene = renderCheckView(dom.nodes, "check_ae", payload, { ...VIEW, ...frame });
+  bindCheckHover(dom.nodes.frame, () => scene);
+  const table = payload.models.edited.tables.find((t) => t.covariate === "g");
+  const i = table.levels.indexOf(name);
+  const mark = scene.marks.find((m) => m.text.startsWith(`g ${"q".repeat(39)}…`));
+  assert.ok(mark, "no readout names the group by its first 39 characters");
+  dom.pointerMove(mark.x, mark.y); dom.flushFrame();
+  const text = dom.readoutText();
+  assert.equal(text, `g ${"q".repeat(39)}… · ${fmt(table.ratio[i])} · interval ${fmt(table.lower[i])}`
+    + ` to ${fmt(table.upper[i])} · ${fmtCount(table.n[i])} rows`);
+  const box = readoutBox(dom);
+  assert.ok(box.left >= 0 && box.right <= frame.width && box.top >= 0 && box.bottom <= frame.height,
+    `${box.left} to ${box.right}, ${box.top} to ${box.bottom}`);
+  // The hover's accessible text and the panel's own label keep the whole name.
+  assert.equal(dom.readout().querySelector("text").getAttribute("aria-label"), text.replace(`${"q".repeat(39)}…`, name));
+  const first = structuredClone(payload);
+  first.models.edited.tables.find((t) => t.covariate === "g").levels[0] = name;
+  assert.ok(renderCheckView(fakeFrame(frame).nodes, "check_ae", first, { ...VIEW, ...frame }).labels.some((label) => label.text === name));
+  // A name of 40 characters is kept whole.
+  const forty = "r".repeat(40);
+  assert.ok(renderCheckView(fakeFrame().nodes, "check_ae", namedGroup(forty), VIEW).marks.some((m) => m.text.startsWith(`g ${forty} · `)));
 });
 
 test("a readout stays inside the frame's visible part when it is scrolled", () => {
