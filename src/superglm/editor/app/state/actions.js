@@ -7,10 +7,10 @@ import {
   commitStructuralTransition,
   completeEvidence,
   failEvidence,
-  jobResultsMoved,
   lapseReports as lapseReportEvidence,
   normalizeSelectionIndices,
   patchView as patchViewState,
+  sessionKey,
   waitingListChanged
 } from "./store.js";
 import { isHeld, moveMutation } from "./mutation.js";
@@ -217,6 +217,8 @@ export function createEditorActions({
   let reportsDraining = false;
   /** @type {Map<ReportName, ((current:boolean)=>void)[]>} */
   const reportRetries = new Map();
+  /** The session key each report was last asked at. @type {Map<ReportName, string>} */
+  const reportAskedAt = new Map();
 
   /** @returns {boolean} whether a change is running and the next must wait for it */
   const held = () => isHeld(store.getState().request);
@@ -579,11 +581,9 @@ export function createEditorActions({
     try {
       if (snapshot.model_revision !== previousRevision) {
         void Promise.resolve(scheduleVisibleEvidence(snapshot.model_revision)).catch(() => {});
-      } else if (
-        waitingListChanged(previousSnapshot, snapshot) || jobResultsMoved(previousSnapshot, snapshot)
-      ) {
-        // Undo or Redo of a waiting change, or a job's result this answer brings: the model is
-        // as it was, but a report showing what moved went stale (commitRemote).
+      } else if (waitingListChanged(previousSnapshot, snapshot)) {
+        // Undo or Redo of a waiting change: the model is as it was, but a
+        // report showing the waiting list went stale (commitRemote).
         void Promise.resolve(
           scheduleVisibleEvidence(snapshot.model_revision, { immediate: true, onlyStale: true })
         ).catch(() => {});
@@ -637,8 +637,7 @@ export function createEditorActions({
     if (noteSave && !(await afterNoteSave())) return skippedMutation(NOTE_NOT_SAVED);
     if (held()) return skippedMutation(ALREADY_RUNNING);
 
-    const previousSnapshot = store.getState().remote.snapshot;
-    const previousRevision = previousSnapshot?.model_revision ?? -1;
+    const previousRevision = store.getState().remote.snapshot?.model_revision ?? -1;
     const requestPayload = snapshotPayload(payload);
     store.update((state) => moved(state, { type: "hold", operation: name, blocking }));
 
@@ -682,26 +681,16 @@ export function createEditorActions({
     }
     await notifyTimingHook(onPaintSettled);
     finishStructuralMutation(envelope.state.notice ?? null);
-    try {
-      if (envelope.state.model_revision !== previousRevision) {
+    // A staged change leaves the model, so its evidence, as it was.
+    if (envelope.state.model_revision !== previousRevision) {
+      try {
         void Promise.resolve(scheduleVisibleEvidence(envelope.state.model_revision, {
           immediate: true,
           summaryCommitted: true
         })).catch(() => {});
-      } else if (
-        waitingListChanged(previousSnapshot, envelope.state) ||
-        jobResultsMoved(previousSnapshot, envelope.state)
-      ) {
-        // A staged change leaves the model as it was, but a report showing the waiting list, or a
-        // job's result the answer brings, went stale (commitRemote), and a request in flight for
-        // it was dropped: ask again.
-        void Promise.resolve(scheduleVisibleEvidence(envelope.state.model_revision, {
-          immediate: true,
-          onlyStale: true
-        })).catch(() => {});
+      } catch {
+        // Evidence refresh cannot change an authoritative structural success.
       }
-    } catch {
-      // Evidence refresh cannot change an authoritative structural success.
     }
     return { ok: true, envelope };
   }
@@ -825,6 +814,7 @@ export function createEditorActions({
         const [panel] = reportQueue;
         reportQueue.delete(panel);
         if (selectReportNeedsAsk(store.getState(), panel)) {
+          reportAskedAt.set(panel, sessionKey(store.getState().remote.snapshot));
           await refreshEvidence(panel, "/report", { report: panel });
         }
         settleReportRetries(panel);
@@ -876,11 +866,43 @@ export function createEditorActions({
   }
 
   /**
+   * The reports the page shows that hold nothing current and wait for nothing: `idle`, or
+   * `stale` with no request in flight (a request a lapse superseded is not), not queued, and not
+   * yet asked at the session's key. A report whose request failed (an error, or a payload kept
+   * over one) is left to Retry, so a failing report is never asked in a loop.
+   * @param {EditorState} state
+   * @returns {ReportName[]}
+   */
+  function reportsLeftStale(state) {
+    const snapshot = state.remote.snapshot;
+    if (snapshot === null) return [];
+    const waiting = selectVisibleEvidencePanels(state).filter(isReportName).filter((panel) => {
+      const { status, error } = state.request.evidence[panel];
+      return (status === "idle" || (status === "stale" && error === null)) && !reportQueue.has(panel);
+    });
+    if (waiting.length === 0) return waiting;
+    const key = sessionKey(snapshot);
+    return waiting.filter((panel) => reportAskedAt.get(panel) !== key);
+  }
+
+  // Whatever change left a report the page shows stale with nothing asked (a staged change, an
+  // answer or a recovery at the same revision that superseded its request), it joins the queue
+  // after the shared debounce, which a change that asks at once overtakes.
+  store.subscribe(
+    reportsLeftStale,
+    (panels) => {
+      if (panels.length > 0) scheduleReports(panels);
+    },
+    (next, previous) => next.join() === previous.join()
+  );
+
+  /**
    * A background job finished, and `reports` show what it changed. The page re-reads Python,
    * so its snapshot holds the job's result as the other windows' do. Whichever snapshot first
    * brought that result, this re-read's or an earlier answer's, lapsed the job reports as it
-   * was committed (commitRemote), so a re-read the page took needs no other invalidation. A re-read that failed, was skipped or was refused lapses
-   * `reports` here and asks for the open one.
+   * was committed (commitRemote), so a re-read the page took needs no other invalidation. A
+   * re-read that failed, was skipped or was refused lapses `reports` here and asks for the open
+   * one.
    *
    * @param {string} _kind the job's kind, `cv` or `final_fit`
    * @param {readonly ReportName[]} reports

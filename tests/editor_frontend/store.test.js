@@ -859,6 +859,7 @@ test("state modules expose only their requested public symbols", () => {
     "normalizeSelectionIndices",
     "patchView",
     "selectionIndicesEqual",
+    "sessionKey",
     "setPreviewTerm",
     "waitingListChanged"
   ]);

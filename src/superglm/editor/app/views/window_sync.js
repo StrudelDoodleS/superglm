@@ -1,7 +1,9 @@
 // @ts-check
 
 import { isReportName } from "../api/contracts.js";
-import { jobResultsKey } from "../state/store.js";
+import { sessionKey } from "../state/store.js";
+
+export { sessionKey };
 
 /** @typedef {import('../api/contracts.js').EditorSnapshot} EditorSnapshot */
 /** @typedef {import('../api/contracts.js').ReportName} ReportName */
@@ -58,24 +60,6 @@ export function assessWindowUrl(href, view) {
 export function syncChannelName(href) {
   const url = new URL(href);
   return `superglm-editor:${url.port}:${url.searchParams.get("token") ?? ""}`;
-}
-
-/**
- * What two windows must agree on to show the same session: the model and the
- * one in force, what waits for Refit, and what the job reports read (the jobs
- * running, the Final fit, the jobs that ended). A selection is not in
- * it, so moving through the Editor tells nobody anything.
- * @param {EditorSnapshot|null} snapshot
- * @returns {string}
- */
-export function sessionKey(snapshot) {
-  if (!snapshot) return "";
-  return [
-    snapshot.model_revision,
-    snapshot.in_force ?? "",
-    (snapshot.pending ?? []).map((step) => step.id).join(),
-    jobResultsKey(snapshot),
-  ].join("|");
 }
 
 /** @param {unknown} value @returns {value is JobNotice} */

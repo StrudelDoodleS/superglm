@@ -273,6 +273,24 @@ export function jobResultsKey(snapshot) {
 }
 
 /**
+ * What two windows must agree on to show the same session: the model and the
+ * one in force, what waits for Refit, and what the job reports read (the jobs
+ * running, the Final fit, the jobs that ended). A selection is not in
+ * it, so moving through the Editor tells nobody anything.
+ * @param {EditorSnapshot|null} snapshot
+ * @returns {string}
+ */
+export function sessionKey(snapshot) {
+  if (!snapshot) return "";
+  return [
+    snapshot.model_revision,
+    snapshot.in_force ?? "",
+    (snapshot.pending ?? []).map((step) => step.id).join(),
+    jobResultsKey(snapshot),
+  ].join("|");
+}
+
+/**
  * Whether the job reports' part of the snapshot moved between two snapshots: a job started or
  * ended, or the Final fit's state changed.
  * @param {EditorSnapshot|null} previous @param {EditorSnapshot} next
