@@ -561,7 +561,7 @@ def test_fold_curves_are_left_to_the_editor():
     X, y = _rows()
     result = _fixed_cv(X, y, return_estimators=True)
     assert result.curve_similarity is None
-    with pytest.raises(ValueError, match="Cross-validation tab"):
+    with pytest.raises(ValueError, match="Cross-validation, under Assess"):
         result.plot_terms_by_fold(X)
 
 

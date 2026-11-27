@@ -15,10 +15,14 @@ import {
 } from "../../src/superglm/editor/app/state/store.js";
 import {
   selectActiveTermName,
-  selectCurrentSelection
+  selectCurrentSelection,
+  selectReportNeedsAsk
 } from "../../src/superglm/editor/app/state/selectors.js";
 
 /** @typedef {import('../../src/superglm/editor/app/api/contracts.js').EditorState} EditorState */
+/** @typedef {import('../../src/superglm/editor/app/api/contracts.js').ReportName} ReportName */
+/** @typedef {import('../../src/superglm/editor/app/api/contracts.js').AppView} AppView */
+/** @typedef {import('../../src/superglm/editor/app/api/contracts.js').PendingStep} PendingStep */
 
 const { createEditorActions } = actionsModule;
 
@@ -1141,7 +1145,7 @@ test("evidence asked for before an edit and its undo lands as current", async ()
     }
   });
 
-  const pending = actions.refreshEvidence("report", "/report", { report: "validation" });
+  const pending = actions.refreshEvidence("validation", "/report", { report: "validation" });
   store.update((state) => commitRemote(state, snapshotOf(4, "fit-b")));
   store.update((state) => commitRemote(state, snapshotOf(5, "fit-a")));
   pendingEvidence.resolve({
@@ -1150,7 +1154,7 @@ test("evidence asked for before an edit and its undo lands as current", async ()
 
   assert.equal(await pending, true);
   assert.equal(requests[0].in_force, "fit-a");
-  const report = store.getState().request.evidence.report;
+  const report = store.getState().request.evidence.validation;
   assert.equal(report.status, "current");
   assert.equal(report.revision, 5);
   assert.equal(/** @type {{value:string}} */ (report.payload).value, "validation");
@@ -1260,7 +1264,7 @@ test("a failure about the model an undo put back is dropped, not shown", async (
   });
 
   // The server checked while the edit was in force; the undo commits before its answer.
-  const pending = actions.refreshEvidence("report", "/report", { report: "validation" });
+  const pending = actions.refreshEvidence("validation", "/report", { report: "validation" });
   store.update((state) => commitRemote(state, snapshotOf(4, "fit-b")));
   store.update((state) => commitRemote(state, snapshotOf(5, "fit-a")));
   pendingEvidence.resolve({
@@ -1268,7 +1272,7 @@ test("a failure about the model an undo put back is dropped, not shown", async (
   });
 
   assert.equal(await pending, false);
-  const report = store.getState().request.evidence.report;
+  const report = store.getState().request.evidence.validation;
   assert.deepEqual([report.status, report.error], ["stale", null]);
 });
 
@@ -1494,7 +1498,7 @@ test("dismiss and missing retries are deterministic", async () => {
   if (missingMutation.ok) assert.fail("missing retry unexpectedly succeeded");
   assert.equal(missingMutation.skipped, true);
   assert.match(missingMutation.error.message, /No failed/);
-  assert.equal(await actions.retryEvidence("report"), false);
+  assert.equal(await actions.retryEvidence("validation"), false);
 
   await actions.executeStateMutation({ name: "shift", path: "/op", payload: {} });
   assert.equal(store.getState().request.mutation.status, "error");
@@ -1519,6 +1523,7 @@ test("action module exposes only the controller factory, paint helper, and exact
     "executeStructuralMutation",
     "holdEditor",
     "initialize",
+    "lapseReports",
     "patchView",
     "refreshEvidence",
     "refreshFromPython",
@@ -1526,8 +1531,10 @@ test("action module exposes only the controller factory, paint helper, and exact
     "retryEvidence",
     "retryMutation",
     "schedulePanelEvidence",
+    "scheduleReports",
     "setActiveTerm",
     "setSelection",
+    "settleJob",
     "showNotice"
   ]);
 });
@@ -1555,6 +1562,253 @@ test("refreshFromPython commits an equal-revision snapshot and re-requests visib
   assert.strictEqual(store.getState().remote.snapshot, refreshed);
   assert.deepEqual(selectCurrentSelection(store.getState()), []);
   assert.deepEqual(scheduled, [[3, { immediate: true }]]);
+});
+
+test("reports are asked one at a time, in the order given", async () => {
+  /** @type {string[]} */
+  const sent = [];
+  /** @type {{body:Record<string, unknown>, reply:ReturnType<typeof deferred>}[]} */
+  const held = [];
+  const store = createEditorStore(createInitialEditorState(snapshot(0)));
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: (path, body) => {
+        assert.equal(path, "/report");
+        sent.push(String(body.report));
+        const reply = deferred();
+        held.push({ body, reply });
+        return reply.promise;
+      },
+      getState: async () => snapshot(0)
+    }
+  });
+  /** @param {number} i */
+  const answer = async (i) => {
+    const { body, reply } = held[i];
+    reply.resolve({
+      report: body.report, model_revision: 0, request_sequence: body.request_sequence
+    });
+    await settled();
+  };
+
+  actions.scheduleReports(["validation", "cv", "diagnose"], { immediate: true });
+  assert.deepEqual(sent, ["validation"]);
+  await answer(0);
+  assert.deepEqual(sent, ["validation", "cv"]);
+  actions.scheduleReports(["cv", "final"], { immediate: true });
+  await answer(1);
+  assert.deepEqual(sent, ["validation", "cv", "diagnose"]);
+  await answer(2);
+  assert.deepEqual(sent, ["validation", "cv", "diagnose", "final"]);
+});
+
+test("a report asked before a job settled is asked again once its answer lands", async () => {
+  /** @type {string[]} */
+  const sent = [];
+  /** @type {{body:Record<string, unknown>, reply:ReturnType<typeof deferred>}[]} */
+  const held = [];
+  const store = createEditorStore(createInitialEditorState(snapshot(0)));
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: (_path, body) => {
+        sent.push(String(body.report));
+        const reply = deferred();
+        held.push({ body, reply });
+        return reply.promise;
+      },
+      getState: async () => snapshot(0)
+    }
+  });
+
+  actions.scheduleReports(["cv"], { immediate: true });
+  assert.deepEqual(sent, ["cv"]);
+  // The job settles while that request is held: its reports lapse and the open one is asked.
+  actions.lapseReports(["cv", "final", "diagnose"]);
+  actions.scheduleReports(["cv"], { immediate: true });
+  const { body, reply } = held[0];
+  reply.resolve({ report: "cv", model_revision: 0, request_sequence: body.request_sequence });
+  await settled();
+
+  assert.deepEqual(sent, ["cv", "cv"]);
+});
+
+/**
+ * A client whose `/report` replies are held until answered, in the order sent.
+ * @param {()=>Promise<unknown>} getState
+ */
+function heldReportClient(getState) {
+  /** @type {string[]} */
+  const sent = [];
+  /** @type {{body:Record<string, unknown>, reply:ReturnType<typeof deferred>}[]} */
+  const held = [];
+  const client = {
+    /** @param {string} _path @param {Record<string, unknown>} body */
+    postJSON: (_path, body) => {
+      sent.push(String(body.report));
+      const reply = deferred();
+      held.push({ body, reply });
+      return reply.promise;
+    },
+    getState
+  };
+  /** @param {number} i @param {number} revision */
+  const answer = async (i, revision) => {
+    const { body, reply } = held[i];
+    reply.resolve({
+      report: body.report, model_revision: revision, request_sequence: body.request_sequence
+    });
+    await settled();
+  };
+  return { sent, held, client, answer };
+}
+
+test("Retry of a report waits its turn behind the report in flight", async () => {
+  const { sent, held, client, answer } = heldReportClient(async () => snapshot(0));
+  const store = createEditorStore(createInitialEditorState(snapshot(0)));
+  const actions = createEditorActions({ store, client });
+  actions.scheduleReports(["cv"], { immediate: true });
+  held[0].reply.reject(new Error("offline"));
+  await settled();
+  assert.equal(store.getState().request.evidence.cv.status, "error");
+
+  actions.scheduleReports(["validation"], { immediate: true });
+  const retried = actions.retryEvidence("cv");
+  assert.deepEqual(sent, ["cv", "validation"]);
+  await answer(1, 0);
+  assert.deepEqual(sent, ["cv", "validation", "cv"]);
+  await answer(2, 0);
+  assert.equal(await retried, true);
+  assert.equal(store.getState().request.evidence.cv.status, "current");
+});
+
+test("an older snapshot from Refresh from Python leaves the newer model's reports alone", async () => {
+  const older = { ...snapshot(3), state_generation: 1 };
+  const newer = { ...snapshot(4), state_generation: 2 };
+  const reread = deferred();
+  const { sent, client, answer } = heldReportClient(() => reread.promise);
+  const store = createEditorStore(createInitialEditorState(older));
+  const actions = createEditorActions({ store, client });
+
+  const refreshing = actions.refreshFromPython();
+  // Undo commits revision 4 and asks for its open report before the re-read answers.
+  store.update((state) => commitRemote(state, newer));
+  actions.scheduleReports(["cv"], { immediate: true });
+  reread.resolve(older);
+  await refreshing;
+  assert.strictEqual(store.getState().remote.snapshot, newer);
+  await answer(0, 4);
+
+  assert.deepEqual(sent, ["cv"]);
+  assert.equal(store.getState().request.evidence.cv.status, "current");
+});
+
+test("a report opened before the first snapshot is asked once it lands", async () => {
+  const initial = deferred();
+  const { sent, client } = heldReportClient(() => initial.promise);
+  const store = createEditorStore(createInitialEditorState());
+  const actions = createEditorActions({ store, client });
+
+  const loading = actions.initialize();
+  actions.scheduleReports(["cv"], { immediate: true });
+  assert.deepEqual(sent, []);
+  initial.resolve(snapshot(0));
+  await loading;
+
+  assert.deepEqual(sent, ["cv"]);
+});
+
+test("a Final fit re-read that is taken asks for the open report once, though the selection moved", async () => {
+  const reread = deferred();
+  const { sent, client, answer } = heldReportClient(() => reread.promise);
+  const reportsOnly = {
+    ...client,
+    /** @param {string} path @param {Record<string, unknown>} body */
+    postJSON: (path, body) => (path === "/report" ? client.postJSON(path, body) : Promise.resolve({}))
+  };
+  const opened = snapshot(0);
+  opened.terms.age = { ...termPayload(), x: [1, 2], y: [1, 1], original_y: [1, 1], n_points: 2 };
+  const store = createEditorStore(patchViewState(createInitialEditorState(opened), { activeView: "cv" }));
+  /** @type {ReturnType<typeof createEditorActions>} */
+  let actions;
+  actions = createEditorActions({
+    store,
+    client: reportsOnly,
+    // The page's scheduler: the open report is Cross-validation.
+    scheduleVisibleEvidence: (_revision, options) => actions.scheduleReports(["cv"], options),
+    setTimer: () => 0,
+    clearTimer: () => {}
+  });
+
+  const settling = actions.settleJob("final_fit", ["cv", "final", "diagnose"]);
+  // The analyst moves the selection while the re-read is held, so the page keeps its view.
+  actions.setSelection("age", [1]);
+  const python = snapshot(0);
+  python.terms.age = opened.terms.age;
+  reread.resolve(python);
+  await settled();
+  assert.deepEqual(sent, ["cv"]);
+  // The page holds a copy that keeps its selection, not the object Python sent.
+  assert.notStrictEqual(store.getState().remote.snapshot, python);
+  assert.deepEqual(store.getState().remote.snapshot?.selection.age, [1]);
+  await answer(0, 0);
+  await settling;
+
+  assert.deepEqual(sent, ["cv"]);
+  assert.equal(store.getState().request.evidence.cv.status, "current");
+});
+
+test("a Run CV that settles lapses its reports and asks for the open one", async () => {
+  // The re-read shows the job's published result.
+  const { sent, client, answer } = heldReportClient(async () => ({ ...snapshot(0), results_generation: 1 }));
+  const retry = { path: "/report", payload: { report: "cv" } };
+  let state = patchViewState(createInitialEditorState(snapshot(0)), { activeView: "cv" });
+  state = completeEvidence(beginEvidence(state, "cv", 0, 1, retry), "cv", 0, 1, { report: "cv" });
+  state = { ...state, request: { ...state.request, nextSequence: 2 } };
+  const store = createEditorStore(state);
+  /** @type {ReturnType<typeof createEditorActions>} */
+  let actions;
+  actions = createEditorActions({
+    store,
+    client,
+    // The page's scheduler: the open report is Cross-validation.
+    scheduleVisibleEvidence: (_revision, options) => actions.scheduleReports(["cv"], options)
+  });
+
+  const settling = actions.settleJob("cv", ["cv", "final", "diagnose"]);
+  await settled();
+  assert.deepEqual(sent, ["cv"]);
+  await answer(0, 0);
+  await settling;
+  assert.equal(store.getState().request.evidence.cv.status, "current");
+});
+
+test("Refresh from Python lapses the job reports only when a job's result moved", async () => {
+  let state = createInitialEditorState({ ...snapshot(3), results_generation: 4 });
+  for (const [sequence, report] of /** @type {ReportName[]} */ (["validation", "cv"]).entries()) {
+    const retry = { path: "/report", payload: { report } };
+    state = beginEvidence(state, report, 3, sequence + 1, retry);
+    state = completeEvidence(state, report, 3, sequence + 1, { report });
+  }
+  const read = [{ ...snapshot(3), results_generation: 4 }, { ...snapshot(3), results_generation: 5 }];
+  const store = createEditorStore(state);
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async () => { throw new Error("refresh must not post"); },
+      getState: async () => read.shift()
+    }
+  });
+  /** @returns {string[]} */
+  const statuses = () => /** @type {ReportName[]} */ (["validation", "cv"]).map((name) => store.getState().request.evidence[name].status);
+
+  // The session is as this page holds it: every report stays.
+  await actions.refreshFromPython();
+  assert.deepEqual(statuses(), ["current", "current"]);
+  // A job published a result meanwhile: its reports lapse, and Validation stays.
+  await actions.refreshFromPython();
+  assert.deepEqual(statuses(), ["current", "stale"]);
 });
 
 test("refreshFromPython is skipped while a mutation is running", async () => {
@@ -1686,6 +1940,62 @@ test("a staged change runs without blocking the page and, at an unchanged revisi
   assert.deepEqual(scheduled, []);
 });
 
+test("a report opened while a staged change is answered is asked again, not left loading", async () => {
+  /** @param {string} id @returns {PendingStep} */
+  const step = (id) => ({
+    id, operation: "collapse", term: "age", label: "Collapse", params: {}, note: null, time: 0
+  });
+  // Refit is staged: one change waits.
+  const opened = snapshot(2);
+  opened.pending = [step("a1b2c3d")];
+  const envelope = transitionEnvelope(2);
+  envelope.state.pending = [step("a1b2c3d"), step("e4f5a6b")];
+  const stage = deferred();
+  const { sent, client, answer } = heldReportClient(async () => envelope.state);
+  // Assess is open on Validation.
+  const store = createEditorStore(patchViewState(createInitialEditorState(opened), { activeView: "validation" }));
+  /** @type {ReturnType<typeof createEditorActions>} */
+  let actions;
+  actions = createEditorActions({
+    store,
+    client: {
+      ...client,
+      /** @param {string} path @param {Record<string, unknown>} body */
+      postJSON: (path, body) => (path === "/stage" ? stage.promise : client.postJSON(path, body))
+    },
+    waitForPaint: async () => {},
+    // The page's scheduler: the open report is Validation.
+    scheduleVisibleEvidence: (_revision, options) => actions.scheduleReports(
+      /** @type {ReportName[]} */ (["validation"]).filter(
+        (panel) => !options?.onlyStale || selectReportNeedsAsk(store.getState(), panel)
+      ),
+      options
+    )
+  });
+
+  // Collapse, then open Assess while /stage is still answering.
+  const staging = actions.executeStructuralMutation({
+    name: "collapse levels",
+    path: "/stage",
+    payload: { operation: "collapse", term: "age", params: { levels: ["1", "2"] } },
+    blocking: false
+  });
+  await settled();
+  actions.scheduleReports(["validation"], { immediate: true });
+  assert.deepEqual(sent, ["validation"]);
+  stage.resolve(envelope);
+  assert.equal((await staging).ok, true);
+  await settled();
+  // The waiting list moved under the request in flight, so its answer is dropped.
+  await answer(0, 2);
+  assert.deepEqual(sent, ["validation", "validation"]);
+  await answer(1, 2);
+
+  const validation = store.getState().request.evidence.validation;
+  assert.equal(validation.status, "current");
+  assert.notEqual(validation.payload, null);
+});
+
 test("a refused structural request shows Python's fixed sentence, not an uncertain outcome", async () => {
   const refusal = "The refit was refused. Undo the last waiting change and try again.";
   const store = createEditorStore(createInitialEditorState(snapshot(4)));
@@ -1708,6 +2018,162 @@ test("a refused structural request shows Python's fixed sentence, not an uncerta
   assert.equal(store.getState().request.recovery?.message, refusal);
   assert.equal(store.getState().request.recovery?.retry, null);
   assert.equal(store.getState().remote.snapshot?.model_revision, 4);
+});
+
+test("a Run CV result a note's answer brings first is asked for, never left at the old score", async () => {
+  // Python's state and its Cross-validation score, which a finished Run CV moves.
+  const python = { results: 0, score: 10 };
+  const state = () => ({ ...snapshot(0), results_generation: python.results });
+  /** @type {string[]} */
+  const sent = [];
+  const store = createEditorStore(patchViewState(createInitialEditorState(state()), { activeView: "cv" }));
+  /** @type {ReturnType<typeof createEditorActions>} */
+  let actions;
+  actions = createEditorActions({
+    store,
+    client: {
+      /** @param {string} path @param {Record<string, unknown>} body */
+      postJSON: async (path, body) => {
+        sent.push(path === "/report" ? String(body.report) : path);
+        if (path === "/note") return { ok: true, state: state() };
+        return { report: "cv", model_revision: 0, request_sequence: body.request_sequence, score: python.score };
+      },
+      getState: async () => state()
+    },
+    // The page's scheduler: the open report is Cross-validation.
+    scheduleVisibleEvidence: (_revision, options) => actions.scheduleReports(
+      /** @type {ReportName[]} */ (["cv"]).filter(
+        (panel) => !options?.onlyStale || selectReportNeedsAsk(store.getState(), panel)
+      ),
+      options
+    )
+  });
+  const cv = () => store.getState().request.evidence.cv;
+  const cvScore = () => /** @type {{score: number}} */ (cv().payload).score;
+  actions.scheduleReports(["cv"], { immediate: true });
+  await settled();
+  assert.deepEqual([cv().status, cvScore()], ["current", 10]);
+
+  // Run CV publishes, and a note's answer carries the new state before the poll sees the end.
+  python.results += 1;
+  python.score = 20;
+  const noted = await actions.executeStateMutation({
+    name: "note", path: "/note", payload: { id: "a1b2c3d", note: "Thin exposure" }
+  });
+  assert.equal(noted.ok, true);
+  await settled();
+  await actions.settleJob("cv", ["cv", "final", "diagnose"]);
+  await settled();
+  await actions.refreshFromPython();
+  await settled();
+
+  assert.deepEqual([cv().status, cvScore()], ["current", 20]);
+  assert.deepEqual(sent, ["cv", "/note", "cv"]);
+});
+
+test("a report a failed note's recovery superseded is asked again, not left loading", async () => {
+  // Another view ran and cancelled a Run CV this page never saw: only the count moved.
+  const recovered = { ...snapshot(0), results_generation: 1 };
+  const { sent, client, answer } = heldReportClient(async () => recovered);
+  const store = createEditorStore(patchViewState(createInitialEditorState(snapshot(0)), { activeView: "cv" }));
+  const actions = createEditorActions({
+    store,
+    client: {
+      ...client,
+      /** @param {string} path @param {Record<string, unknown>} body */
+      postJSON: (path, body) => (path === "/note"
+        ? Promise.reject(new Error("The note was not saved."))
+        : client.postJSON(path, body))
+    }
+  });
+
+  actions.scheduleReports(["cv"], { immediate: true });
+  assert.deepEqual(sent, ["cv"]);
+  const noted = await actions.executeStateMutation({
+    name: "note", path: "/note", payload: { id: "a1b2c3d", note: "Thin exposure" }
+  });
+  assert.equal(noted.ok, false);
+  assert.strictEqual(store.getState().remote.snapshot, recovered);
+  // The answer to the superseded request lands last and is dropped; the report is asked again.
+  await answer(0, 0);
+  assert.deepEqual(sent, ["cv", "cv"]);
+  await answer(1, 0);
+
+  assert.equal(store.getState().request.evidence.cv.status, "current");
+});
+
+/**
+ * A page open on Cross-validation, its report current, with Python's answers held and the
+ * report debounce run by hand.
+ */
+function openCrossValidation() {
+  const { sent, held, client, answer } = heldReportClient(async () => snapshot(0));
+  const timers = manualTimers();
+  const retry = { path: "/report", payload: { report: "cv" } };
+  let state = patchViewState(createInitialEditorState(snapshot(0)), { activeView: "cv" });
+  state = completeEvidence(beginEvidence(state, "cv", 0, 1, retry), "cv", 0, 1, { report: "cv" });
+  state = { ...state, request: { ...state.request, nextSequence: 2 } };
+  const store = createEditorStore(state);
+  const actions = createEditorActions({ store, client, ...timers });
+  return { sent, held, answer, timers, store, actions };
+}
+
+test("a report the page shows, left stale with nothing asked, is asked exactly once", async () => {
+  const { sent, answer, timers, store, actions } = openCrossValidation();
+  const otherView = snapshot(1);
+  store.update((state) => commitRemote(state, otherView));
+  assert.equal(store.getState().request.evidence.cv.status, "stale");
+  // Every later change finds it queued, then asked, and adds nothing.
+  actions.patchView({ inspectorOpen: true });
+  actions.patchView({ inspectorOpen: false });
+  timers.fire();
+  await settled();
+  actions.patchView({ inspectorOpen: true });
+  timers.fire();
+  assert.deepEqual(sent, ["cv"]);
+  await answer(0, 1);
+  timers.fire();
+  await settled();
+
+  assert.deepEqual(sent, ["cv"]);
+  assert.equal(store.getState().request.evidence.cv.status, "current");
+  // Lapsed again at the key it was asked at, it is not asked again by itself.
+  actions.lapseReports(["cv"]);
+  timers.fire();
+  await settled();
+  assert.deepEqual(sent, ["cv"]);
+});
+
+test("a report whose request failed is left to Retry, not asked again by itself", async () => {
+  const { sent, held, timers, store, actions } = openCrossValidation();
+  store.update((state) => commitRemote(state, snapshot(1)));
+  timers.fire();
+  await settled();
+  held[0].reply.reject(new Error("Python stopped answering."));
+  await settled();
+  // A payload kept over a failure, then a failure with nothing to keep.
+  assert.deepEqual(
+    [store.getState().request.evidence.cv.status, store.getState().request.evidence.cv.error],
+    ["stale", "Python stopped answering."]
+  );
+  actions.patchView({ activeView: "validation" });
+  timers.fire();
+  await settled();
+  held[1].reply.reject(new Error("Python stopped answering."));
+  await settled();
+  assert.equal(store.getState().request.evidence.validation.status, "error");
+  for (const view of /** @type {AppView[]} */ (["cv", "validation", "cv", "validation"])) {
+    actions.patchView({ activeView: view });
+    timers.fire();
+    await settled();
+  }
+  // A job's end moves the session's key, and Validation's failure still waits for Retry.
+  store.update((state) => commitRemote(state, { ...snapshot(1), results_generation: 1 }));
+  timers.fire();
+  await settled();
+
+  assert.deepEqual(sent, ["cv", "validation"]);
+  assert.equal(store.getState().request.evidence.validation.status, "error");
 });
 
 test("a note's answer, the state wrapped as {ok, state}, commits the state it carries", async () => {

@@ -1,5 +1,5 @@
 // @ts-check
-import { createEmptyEvidenceState } from "../api/contracts.js";
+import { EVIDENCE_PANELS, REPORT_NAMES, createEmptyEvidenceState } from "../api/contracts.js";
 import { defineMachine } from "./machine.js";
 import { createRiskProfiles } from "./risk.js";
 import { selectActiveTermName } from "./selectors.js";
@@ -9,6 +9,7 @@ import { selectActiveTermName } from "./selectors.js";
 /** @typedef {import('../api/contracts.js').EvidencePanel} EvidencePanel */
 /** @typedef {import('../api/contracts.js').EvidenceState} EvidenceState */
 /** @typedef {import('../api/contracts.js').EvidenceStatus} EvidenceStatus */
+/** @typedef {import('../api/contracts.js').ReportName} ReportName */
 /** @typedef {import('../api/contracts.js').StructuralTransitionEnvelope} StructuralTransitionEnvelope */
 /** @typedef {import('../api/contracts.js').TermPayload} TermPayload */
 
@@ -39,11 +40,9 @@ export function createInitialEditorState(snapshot = null) {
     },
     request: {
       mutation: { status: "idle", operation: null, error: null },
-      evidence: {
-        metrics: createEmptyEvidenceState(),
-        summary: createEmptyEvidenceState(),
-        report: createEmptyEvidenceState()
-      },
+      evidence: /** @type {Record<EvidencePanel, EvidenceState>} */ (Object.fromEntries(
+        EVIDENCE_PANELS.map((panel) => [panel, createEmptyEvidenceState()])
+      )),
       recovery: null,
       nextSequence: 1
     }
@@ -227,7 +226,7 @@ function clearRemotePreviews(state) {
 function invalidatePriorEvidence(state, revision) {
   const evidence = { ...state.request.evidence };
   let changed = false;
-  for (const panel of /** @type {EvidencePanel[]} */ (["metrics", "summary", "report"])) {
+  for (const panel of EVIDENCE_PANELS) {
     const current = evidence[panel];
     evidence[panel] = moveEvidence(current, { type: "lapse", revision }, state.remote.snapshot);
     changed ||= evidence[panel] !== current;
@@ -250,12 +249,65 @@ export function waitingListChanged(previous, next) {
   return previous !== null && ids(previous) !== ids(next);
 }
 
-/** @param {EditorState} state */
-function invalidateReportEvidence(state) {
-  const current = state.request.evidence.report;
-  const report = moveEvidence(current, { type: "lapse" }, state.remote.snapshot);
-  if (report === current) return state.request;
-  return { ...state.request, evidence: { ...state.request.evidence, report } };
+/**
+ * The reports a background job changes: Cross-validation, Final fit and Smoothing search.
+ * @type {readonly ReportName[]}
+ */
+export const JOB_REPORTS = Object.freeze(["cv", "final", "diagnose"]);
+
+/**
+ * What the job reports read beside the model, as a snapshot shows it: the jobs running, the
+ * Final fit's state, and how many jobs have ended. A Run CV that ended, done, failed or
+ * cancelled, shows only in the last, so a page that missed its end still sees this move.
+ * @param {EditorSnapshot|null} snapshot
+ * @returns {string}
+ */
+export function jobResultsKey(snapshot) {
+  if (!snapshot) return "";
+  return [
+    (snapshot.jobs_running ?? []).map((job) => job.job_id).join(),
+    snapshot.final_fit?.available ?? "",
+    snapshot.final_fit?.stale ?? "",
+    snapshot.results_generation ?? "",
+  ].join("|");
+}
+
+/**
+ * What two windows must agree on to show the same session: the model and the
+ * one in force, what waits for Refit, and what the job reports read (the jobs
+ * running, the Final fit, the jobs that ended). A selection is not in
+ * it, so moving through the Editor tells nobody anything.
+ * @param {EditorSnapshot|null} snapshot
+ * @returns {string}
+ */
+export function sessionKey(snapshot) {
+  if (!snapshot) return "";
+  return [
+    snapshot.model_revision,
+    snapshot.in_force ?? "",
+    (snapshot.pending ?? []).map((step) => step.id).join(),
+    jobResultsKey(snapshot),
+  ].join("|");
+}
+
+/**
+ * Whether the job reports' part of the snapshot moved between two snapshots: a job started or
+ * ended, or the Final fit's state changed.
+ * @param {EditorSnapshot|null} previous @param {EditorSnapshot} next
+ */
+export function jobResultsMoved(previous, next) {
+  return previous !== null && jobResultsKey(previous) !== jobResultsKey(next);
+}
+
+/**
+ * Lapse the reports `names`, every report by default: what they show may have moved
+ * though the model revision did not (a finished job, a waiting change undone).
+ *
+ * @param {EditorState} state @param {readonly ReportName[]} [names]
+ * @returns {EditorState} `state` itself where no report moves
+ */
+export function lapseReports(state, names = REPORT_NAMES) {
+  return names.reduce((next, name) => movePanel(next, name, { type: "lapse" }), state);
 }
 
 /**
@@ -284,11 +336,15 @@ export function commitRemote(state, snapshot) {
     return clearRemotePreviews(state);
   }
   const previousRevision = state.remote.snapshot?.model_revision;
-  const request = previousRevision !== undefined && previousRevision !== snapshot.model_revision
+  const modelRequest = previousRevision !== undefined && previousRevision !== snapshot.model_revision
     ? invalidatePriorEvidence(state, snapshot.model_revision)
     : waitingListChanged(state.remote.snapshot, snapshot)
-      ? invalidateReportEvidence(state)
+      ? lapseReports(state).request
       : state.request;
+  // Whatever response carries it, a snapshot whose job results moved lapses the job reports.
+  const request = jobResultsMoved(state.remote.snapshot, snapshot)
+    ? lapseReports({ ...state, request: modelRequest }, JOB_REPORTS).request
+    : modelRequest;
   const selectionAnchor = anchorFollowingItsLevel(
     state.view.selectionAnchor, state.remote.snapshot, snapshot
   );
@@ -344,7 +400,8 @@ function describesSnapshot(snapshot, revision, inForce) {
  * What happens to an evidence panel. `ask` sends a request, which the panel then waits for;
  * `answer` and `fail` end the request they name by its `sequence` and by what it asked about;
  * `lapse` is a snapshot the panel no longer describes, by a new `revision` (a panel already at
- * that revision keeps its state) or, with none, by a changed waiting list; `install` puts in a
+ * that revision keeps its state) or, with none, by what moved at the same revision (a waiting
+ * list, a finished job), which supersedes any request in flight; `install` puts in a
  * payload that came with the snapshot, as a structural change's summary does.
  * @typedef {{type:'ask', revision:number, inForce:string|null, sequence:number,
  *     retry:{path:string, payload:Record<string, unknown>}}
@@ -439,7 +496,14 @@ export function moveEvidence(evidence, event, snapshot) {
       return { ...evidence, status: target, error: String(event.error) };
     case "lapse":
       if (event.revision !== undefined && evidence.revision === event.revision) return evidence;
-      return { ...evidence, status: target, error: null };
+      // At the same revision a request in flight was asked about what moved, so its answer is
+      // dropped: no request has sequence 0. Across revisions an undo can put back its model.
+      return {
+        ...evidence,
+        status: target,
+        sequence: event.revision === undefined ? 0 : evidence.sequence,
+        error: null
+      };
     case "install":
       return {
         ...evidence,

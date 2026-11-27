@@ -7,18 +7,32 @@ import {
   commitStructuralTransition,
   completeEvidence,
   failEvidence,
+  lapseReports as lapseReportEvidence,
   normalizeSelectionIndices,
   patchView as patchViewState,
+  sessionKey,
   waitingListChanged
 } from "./store.js";
 import { isHeld, moveMutation } from "./mutation.js";
-import { selectModelRevision } from "./selectors.js";
+import { isReportName } from "../api/contracts.js";
+import {
+  selectModelRevision,
+  selectReportNeedsAsk,
+  selectVisibleEvidencePanels
+} from "./selectors.js";
 
 /** @typedef {import('../api/contracts.js').ActionResult} ActionResult */
+/**
+ * A re-read of Python; `taken` says whether the page took its snapshot, which it refuses when
+ * it already holds a newer one.
+ * @typedef {{ok:true, snapshot:EditorSnapshot, taken:boolean}|
+ * {ok:false, skipped?:boolean, error:Error}} RereadResult
+ */
 /** @typedef {import('../api/contracts.js').EditorSnapshot} EditorSnapshot */
 /** @typedef {import('../api/contracts.js').EditorState} EditorState */
 /** @typedef {import('../api/contracts.js').EvidencePanel} EvidencePanel */
 /** @typedef {import('../api/contracts.js').MutationDescriptor} MutationDescriptor */
+/** @typedef {import('../api/contracts.js').ReportName} ReportName */
 /** @typedef {import('./mutation.js').MutationEvent} MutationEvent */
 /** @typedef {import('../api/contracts.js').SummaryPayload} SummaryPayload */
 /** @typedef {import('../api/contracts.js').StructuralActionResult} StructuralActionResult */
@@ -28,7 +42,7 @@ import { selectModelRevision } from "./selectors.js";
  * @typedef {Object} EditorStore
  * @property {()=>EditorState} getState
  * @property {(updater:(state:EditorState)=>EditorState)=>void} update
- * @property {<T>(selector:(state:EditorState)=>T, listener:(next:T, previous:T)=>void)=>()=>void} subscribe
+ * @property {<T>(selector:(state:EditorState)=>T, listener:(next:T, previous:T)=>void, equals?:(next:T, previous:T)=>boolean)=>()=>void} subscribe
  */
 /**
  * @typedef {Object} ActionClient
@@ -195,6 +209,16 @@ export function createEditorActions({
   clearTimer = globalThis.clearTimeout.bind(globalThis)
 }) {
   const evidenceTimers = new Map();
+  // Reports wait here in the order asked, and Python answers them one at a time.
+  /** @type {Set<ReportName>} */
+  const reportQueue = new Set();
+  /** @type {any} */
+  let reportTimer = null;
+  let reportsDraining = false;
+  /** @type {Map<ReportName, ((current:boolean)=>void)[]>} */
+  const reportRetries = new Map();
+  /** The session key each report was last asked at. @type {Map<ReportName, string>} */
+  const reportAskedAt = new Map();
 
   /** @returns {boolean} whether a change is running and the next must wait for it */
   const held = () => isHeld(store.getState().request);
@@ -451,7 +475,7 @@ export function createEditorActions({
    * revision equal while the selection or structure moved, so the snapshot is accepted at an
    * equal revision and the visible evidence is re-requested at once.
    *
-   * @returns {Promise<ActionResult>}
+   * @returns {Promise<RereadResult>}
    */
   async function refreshFromPython() {
     if (noteSave && !(await afterNoteSave())) return skippedMutation(NOTE_NOT_SAVED);
@@ -468,10 +492,18 @@ export function createEditorActions({
       return { ok: false, error: new Error("Python returned an editor state this page cannot read.") };
     }
     const snapshot = /** @type {EditorSnapshot} */ (candidate);
-    store.update((state) => withNotice(withLatestView(commitRemote(state, snapshot), made), snapshot));
+    // commitRemote lapses what moved: a new model or waiting list its reports, a job result the
+    // job reports. A re-read of an unchanged session keeps every report. An older snapshot is
+    // not taken.
+    let taken = false;
+    store.update((state) => {
+      const committed = commitRemote(state, snapshot);
+      taken = committed.remote.snapshot === snapshot;
+      return withNotice(withLatestView(committed, made), snapshot);
+    });
     void Promise.resolve(scheduleVisibleEvidence(snapshot.model_revision, { immediate: true }))
       .catch(() => {});
-    return { ok: true, snapshot };
+    return { ok: true, snapshot, taken };
   }
 
   /**
@@ -480,7 +512,7 @@ export function createEditorActions({
    * and refreshFromPython is skipped while it runs, so this waits for the
    * mutation to settle first.
    *
-   * @returns {Promise<ActionResult>}
+   * @returns {Promise<RereadResult>}
    */
   async function refreshFromPythonWhenIdle() {
     if (held()) {
@@ -502,6 +534,8 @@ export function createEditorActions({
   async function initialize() {
     const snapshot = /** @type {EditorSnapshot} */ (await client.getState());
     store.update((state) => withNotice(commitRemote(state, snapshot), snapshot));
+    // A report opened before the first snapshot waited for it.
+    void drainReports();
     return snapshot;
   }
 
@@ -768,6 +802,121 @@ export function createEditorActions({
     evidenceTimers.set(panel, setTimer(invoke, EVIDENCE_DEBOUNCE_MS));
   }
 
+  /**
+   * Ask each queued report in turn, skipping one the page already holds by its turn. Before
+   * the first snapshot the queue waits; `initialize` resumes it.
+   */
+  async function drainReports() {
+    if (reportsDraining) return;
+    reportsDraining = true;
+    try {
+      while (reportQueue.size > 0 && store.getState().remote.snapshot !== null) {
+        const [panel] = reportQueue;
+        reportQueue.delete(panel);
+        if (selectReportNeedsAsk(store.getState(), panel)) {
+          reportAskedAt.set(panel, sessionKey(store.getState().remote.snapshot));
+          await refreshEvidence(panel, "/report", { report: panel });
+        }
+        settleReportRetries(panel);
+      }
+    } finally {
+      reportsDraining = false;
+    }
+  }
+
+  /**
+   * Answer each Retry of `panel` once its turn is over: whether it is now current.
+   * @param {ReportName} panel
+   */
+  function settleReportRetries(panel) {
+    const waiting = reportRetries.get(panel);
+    if (!waiting) return;
+    reportRetries.delete(panel);
+    const current = store.getState().request.evidence[panel].status === "current";
+    for (const resolve of waiting) resolve(current);
+  }
+
+  /**
+   * Queue reports to ask of Python, after one shared debounce unless `immediate`. A report
+   * already queued keeps its place, and one queued while others are asked waits its turn.
+   *
+   * @param {readonly ReportName[]} panels
+   * @param {{immediate?:boolean}} [options]
+   */
+  function scheduleReports(panels, { immediate = false } = {}) {
+    for (const panel of panels) reportQueue.add(panel);
+    if (reportTimer !== null) {
+      clearTimer(reportTimer);
+      reportTimer = null;
+    }
+    const start = () => {
+      reportTimer = null;
+      void drainReports();
+    };
+    if (immediate) {
+      start();
+      return;
+    }
+    reportTimer = setTimer(start, EVIDENCE_DEBOUNCE_MS);
+  }
+
+  /** @param {readonly ReportName[]} [names] every report by default @returns {void} */
+  function lapseReports(names) {
+    store.update((state) => lapseReportEvidence(state, names));
+  }
+
+  /**
+   * The reports the page shows that hold nothing current and wait for nothing: `idle`, or
+   * `stale` with no request in flight (a request a lapse superseded is not), not queued, and not
+   * yet asked at the session's key. A report whose request failed (an error, or a payload kept
+   * over one) is left to Retry, so a failing report is never asked in a loop.
+   * @param {EditorState} state
+   * @returns {ReportName[]}
+   */
+  function reportsLeftStale(state) {
+    const snapshot = state.remote.snapshot;
+    if (snapshot === null) return [];
+    const waiting = selectVisibleEvidencePanels(state).filter(isReportName).filter((panel) => {
+      const { status, error } = state.request.evidence[panel];
+      return (status === "idle" || (status === "stale" && error === null)) && !reportQueue.has(panel);
+    });
+    if (waiting.length === 0) return waiting;
+    const key = sessionKey(snapshot);
+    return waiting.filter((panel) => reportAskedAt.get(panel) !== key);
+  }
+
+  // Whatever change left a report the page shows stale with nothing asked (a staged change, an
+  // answer or a recovery at the same revision that superseded its request), it joins the queue
+  // after the shared debounce, which a change that asks at once overtakes.
+  store.subscribe(
+    reportsLeftStale,
+    (panels) => {
+      if (panels.length > 0) scheduleReports(panels);
+    },
+    (/** @type {ReportName[]} */ next, /** @type {ReportName[]} */ previous) =>
+      next.join() === previous.join()
+  );
+
+  /**
+   * A background job finished, and `reports` show what it changed. The page re-reads Python,
+   * so its snapshot holds the job's result as the other windows' do. Whichever snapshot first
+   * brought that result, this re-read's or an earlier answer's, lapsed the job reports as it
+   * was committed (commitRemote), so a re-read the page took needs no other invalidation. A
+   * re-read that failed, was skipped or was refused lapses `reports` here and asks for the open
+   * one.
+   *
+   * @param {string} _kind the job's kind, `cv` or `final_fit`
+   * @param {readonly ReportName[]} reports
+   * @returns {Promise<void>}
+   */
+  async function settleJob(_kind, reports) {
+    const reread = await refreshFromPythonWhenIdle();
+    if (reread.ok && reread.taken) return;
+    lapseReports(reports);
+    const open = selectVisibleEvidencePanels(store.getState()).filter(isReportName);
+    scheduleReports(open, { immediate: true });
+  }
+
   /** @returns {Promise<ActionResult>} */
   function retryMutation() {
     const retry = store.getState().request.recovery?.retry;
@@ -777,10 +926,20 @@ export function createEditorActions({
     return executeStateMutation(retry);
   }
 
-  /** @param {EvidencePanel} panel @returns {Promise<boolean>} */
+  /**
+   * Ask a failed or lapsed panel again. A report takes its turn in the queue, so Python
+   * still answers one report at a time.
+   *
+   * @param {EvidencePanel} panel @returns {Promise<boolean>}
+   */
   function retryEvidence(panel) {
     const retry = store.getState().request.evidence[panel].retry;
-    return retry ? refreshEvidence(panel, retry.path, retry.payload) : Promise.resolve(false);
+    if (!retry) return Promise.resolve(false);
+    if (!isReportName(panel)) return refreshEvidence(panel, retry.path, retry.payload);
+    return new Promise((resolve) => {
+      reportRetries.set(panel, [...(reportRetries.get(panel) ?? []), resolve]);
+      scheduleReports([panel], { immediate: true });
+    });
   }
 
   /** @returns {void} */
@@ -807,11 +966,14 @@ export function createEditorActions({
     refreshFromPythonWhenIdle,
     setSelection,
     setActiveTerm,
+    settleJob,
     executeStateMutation,
     executeStructuralMutation,
     holdEditor,
     refreshEvidence,
     schedulePanelEvidence,
+    scheduleReports,
+    lapseReports,
     retryMutation,
     retryEvidence,
     dismissRecovery,

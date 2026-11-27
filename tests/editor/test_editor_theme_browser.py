@@ -31,7 +31,7 @@ STARTED = """() => Promise.allSettled(document.getAnimations().map((a) => a.read
   .then(() => new Promise((done) => requestAnimationFrame(done)))"""
 SCHEME = "() => getComputedStyle(document.documentElement).colorScheme"
 # Body text, inherited text in the inspector, and a muted app-bar tab.
-TEXT = """() => ['body', '.inspector', '#validationTab']
+TEXT = """() => ['body', '.inspector', '#assessTab']
   .map((selector) => getComputedStyle(document.querySelector(selector)).color)"""
 # styles/dark.css: gruvbox's dark0_hard ground and the editor's own edit blue.
 DARK_GROUND = "rgb(29, 32, 33)"

@@ -14,7 +14,7 @@ test("frontend tests execute as native ES modules", () => {
 });
 
 test("foundation contracts define all evidence panels", () => {
-  assert.deepEqual(EVIDENCE_PANELS, ["metrics", "summary", "report"]);
+  assert.deepEqual(EVIDENCE_PANELS, ["metrics", "summary", "validation", "cv", "final", "diagnose"]);
   assert.equal(Object.isFrozen(EVIDENCE_PANELS), true);
   assert.deepEqual(createEmptyEvidenceState(), {
     status: "idle",

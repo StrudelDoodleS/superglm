@@ -6775,7 +6775,9 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     assert "createEvidenceTimingTracker" in main_js
     assert 'evidenceTiming.observe("metrics"' in main_js
     assert 'evidenceTiming.observe("summary"' in main_js
-    assert 'evidenceTiming.observe("report"' in main_js
+    # Each report keeps its own evidence, so each is timed under its own name.
+    assert "for (const name of REPORT_NAMES)" in main_js
+    assert "evidenceTiming.observe(name, evidence, previous)" in main_js
     assert "formatEvidenceTimingDetails" in main_js
     assert "formatTimingDetails" in main_js
     assert "Refit completed in" in main_js

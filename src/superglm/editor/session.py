@@ -434,11 +434,11 @@ class EditorSession:
     ) -> EditorSession:
         """Build an editor session from fitted 1D main-effect inference.
 
-        ``cv`` is a :func:`superglm.cross_validate` result for the
-        Cross-validation tab, and ``cv_data`` the ``(X, y[, sample_weight[,
-        offset]])`` rows its folds index. Without ``cv_data`` the train data
-        is used when its row count matches the folds. ``cv_report`` is the
-        older free-form report the Validation tab shows.
+        ``cv`` is a :func:`superglm.cross_validate` result for
+        Cross-validation, under the editor's Assess tab, and ``cv_data`` the
+        ``(X, y[, sample_weight[, offset]])`` rows its folds index. Without
+        ``cv_data`` the train data is used when its row count matches the
+        folds. ``cv_report`` is the older free-form report Validation shows.
 
         A :class:`~superglm.SuperLSS` model needs ``train_data``, with its
         offsets a dict keyed by parameter name. Its terms are keyed
@@ -2637,10 +2637,10 @@ def edit(
     """Create an editor session for a fitted model.
 
     The split data are ``(X, y[, sample_weight[, offset]])`` tuples.
-    ``cv`` is a :func:`superglm.cross_validate` result for the
-    Cross-validation tab and ``cv_data`` the rows its folds index; see
-    :meth:`EditorSession.from_model`, which also describes opening a
-    :class:`~superglm.SuperLSS` model (``amount_unit``).
+    ``cv`` is a :func:`superglm.cross_validate` result for
+    Cross-validation, under the editor's Assess tab, and ``cv_data`` the
+    rows its folds index; see :meth:`EditorSession.from_model`, which also
+    describes opening a :class:`~superglm.SuperLSS` model (``amount_unit``).
     """
     return EditorSession.from_model(
         model,

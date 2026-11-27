@@ -16,6 +16,17 @@
     document.documentElement.dataset.theme = dark ? "dark" : "light";
   }
 </script>
+<script>
+  // A second window, opened from Assess, holds Assess alone: the rest is hidden
+  // before the first paint. These are the views readAssessWindow
+  // (views/window_sync.js) takes.
+  {
+    const ASSESS_WINDOW_VIEWS = ["assess", "validation", "cv", "final", "diagnose"];
+    if (ASSESS_WINDOW_VIEWS.includes(new URLSearchParams(location.search).get("assess"))) {
+      document.documentElement.dataset.window = "assess";
+    }
+  }
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bangers&family=Source+Sans+3:wght@400;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
@@ -28,6 +39,7 @@
 <link rel="stylesheet" href="/assets/styles/dialogs.css">
 <link rel="stylesheet" href="/assets/styles/cv.css">
 <link rel="stylesheet" href="/assets/styles/diagnose.css">
+<link rel="stylesheet" href="/assets/styles/assess.css">
 </head>
 <body>
   <div class="app-shell">
@@ -55,20 +67,14 @@
       <div class="app-tabs" role="tablist" aria-label="Editor views">
         <button id="editorTab" class="app-tab active" type="button" data-view="editor"
           role="tab" aria-selected="true" aria-controls="editorView">Editor</button>
-        <button id="validationTab" class="app-tab" type="button" data-view="validation"
-          role="tab" aria-selected="false" aria-controls="reportPanel" tabindex="-1">Validation</button>
-        <button id="cvTab" class="app-tab" type="button" data-view="cv"
-          role="tab" aria-selected="false" aria-controls="reportPanel" tabindex="-1">Cross-validation</button>
-        <button id="finalTab" class="app-tab" type="button" data-view="final"
-          role="tab" aria-selected="false" aria-controls="reportPanel" tabindex="-1">Final Fit</button>
-        <button id="diagnoseTab" class="app-tab" type="button" data-view="diagnose"
-          role="tab" aria-selected="false" aria-controls="reportPanel" tabindex="-1">Diagnose</button>
+        <button id="assessTab" class="app-tab" type="button" data-view="assess"
+          role="tab" aria-selected="false" aria-controls="assessView" tabindex="-1">Assess</button>
         <button id="explainTab" class="app-tab" type="button" data-view="risk"
           role="tab" aria-selected="false" aria-controls="riskView" tabindex="-1" hidden>Explain</button>
       </div>
       <button id="jobPill" class="job-pill" type="button" hidden aria-live="polite"
         data-popover-title="Background job"
-        data-popover-body="It runs in the background, so keep working. Click to see it; cancel it from the Cross-validation tab.">
+        data-popover-body="It runs in the background, so keep working. Click to see it; cancel it from Cross-validation, under Assess.">
         <span class="job-pill-ticks" data-pill-ticks aria-hidden="true"></span>
         <span data-pill-text></span>
         <span class="job-pill-time" data-pill-time></span>
@@ -725,19 +731,50 @@
   <section id="riskView" class="risk-view app-view" aria-label="One risk, explained" hidden>
     <div id="riskPanel" class="distribution-panel risk-panel"></div>
   </section>
-  <section id="reportPanel" class="report-panel app-view" hidden>
-    <div class="report-header">
-      <div>
-        <h2 id="reportTitle">Validation Report</h2>
-        <p id="reportStatus">Loading report...</p>
-        <div class="evidence-status-row">
-          <div id="reportFreshness" class="evidence-freshness" aria-live="polite">Loading report...</div>
-          <button id="reportRetry" class="evidence-retry" type="button" hidden>Retry</button>
+  <section id="assessView" class="assess-view app-view" data-view="assess" hidden>
+    <nav id="assessList" class="assess-list" aria-label="Assess">
+      <div id="assessRows" class="assess-rows"></div>
+    </nav>
+    <div id="assessMain" class="assess-main">
+      <section id="assessOverview" class="assess-overview" aria-labelledby="assessOverviewTitle">
+        <div class="assess-overview-header">
+          <div>
+            <h2 id="assessOverviewTitle">Overview</h2>
+          </div>
+          <div class="assess-tools">
+            <button class="icon-button" type="button" data-assess-window
+              aria-label="Open in new window" data-help-control="new_window">
+              <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M14 4h6v6M20 4l-8 8M18 14v5H5V6h5"></path>
+              </svg>
+            </button>
+          </div>
         </div>
-      </div>
+        <div id="assessCards" class="assess-cards"></div>
+      </section>
+      <section id="reportPanel" class="report-panel" hidden>
+        <div class="report-header">
+          <div>
+            <h2 id="reportTitle">Validation</h2>
+            <p id="reportStatus">Loading report...</p>
+            <div class="evidence-status-row">
+              <div id="reportFreshness" class="evidence-freshness" aria-live="polite">Loading report...</div>
+              <button id="reportRetry" class="evidence-retry" type="button" hidden>Retry</button>
+            </div>
+          </div>
+          <div class="report-tools">
+            <button class="icon-button" type="button" data-assess-window
+              aria-label="Open in new window" data-help-control="new_window">
+              <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M14 4h6v6M20 4l-8 8M18 14v5H5V6h5"></path>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div id="reportFrame" class="report-frame" aria-busy="true"
+          data-freshness="idle"></div>
+      </section>
     </div>
-    <div id="reportFrame" class="report-frame" aria-busy="true"
-      data-freshness="idle"></div>
   </section>
   </div>
 

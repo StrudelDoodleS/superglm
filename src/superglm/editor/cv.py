@@ -232,7 +232,7 @@ FINAL_SOLVER_FAILED = (
     "The solver failed numerically while Final fit fitted the {rows} rows, so no model was "
     "kept; the editor's log records where it failed."
 )
-FINAL_NOT_RUN = "Run Final fit on all rows, on the Cross-validation tab, first."
+FINAL_NOT_RUN = "Run Final fit on all rows, from Cross-validation under Assess, first."
 FINAL_STALE = "The model changed after the final fit. Run Final fit on all rows again."
 
 # name, label, column heading, and whether lower is better (None: closer to 1 is).

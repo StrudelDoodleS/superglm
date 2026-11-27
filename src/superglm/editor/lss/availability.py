@@ -34,7 +34,7 @@ LSS_UNAVAILABLE: Mapping[str, str] = MappingProxyType(
         "fit itself.",
         "summary": "The coefficient summary is not available here for SuperLSS models; call "
         "model.summary() in Python.",
-        "metrics": "Compare SuperLSS fits in the Validation tab.",
+        "metrics": "Compare SuperLSS fits in Validation, under Assess.",
         "export_structure": "This export is for SuperGLM models; export a SuperLSS model as "
         "joblib.",
         "save_session": "Session files hold SuperGLM models. Export the edited SuperLSS model as "

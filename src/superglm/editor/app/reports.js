@@ -12,8 +12,9 @@ const reportMetricKeys = [
   "effective_df"
 ];
 
-export function renderReport(payload, { reportTitle, reportStatus, reportFrame }, cvTab = null, diagnoseTab = null) {
-  reportTitle.textContent = payload.title || "Report";
+// `title`, the name the Assess list gives the report, wins over the payload's own.
+export function renderReport(payload, { reportTitle, reportStatus, reportFrame, title = "" }, cvTab = null, diagnoseTab = null) {
+  reportTitle.textContent = title || payload.title || "Report";
   if (payload.report === "cv" && cvTab) {
     reportStatus.textContent = cvSourceLine(payload);
     cvTab.render(payload);
@@ -39,7 +40,7 @@ export function renderReport(payload, { reportTitle, reportStatus, reportFrame }
 // names other metrics (a SuperLSS scores by log score and CRPS) shows those,
 // less any a family cannot compute for any of its splits (a family with
 // no CRPS), as the Cross-validation tab leaves it out.
-function metricColumns(labels, splits = []) {
+export function metricColumns(labels, splits = []) {
   const named = Object.keys(labels);
   if (!named.length || named.some((metric) => reportMetricKeys.includes(metric))) return reportMetricKeys;
   const scored = splits.filter((split) => split.available !== false && split.metrics);
@@ -48,18 +49,18 @@ function metricColumns(labels, splits = []) {
 }
 
 // An actual over expected is read to the fourth decimal, as on the Cross-validation tab.
-function metricText(metric, value) {
+export function metricText(metric, value) {
   if (!Number.isFinite(value)) return "--";
   return metric === "actual_expected" ? value.toFixed(4) : fmt(value);
 }
 
-function deltaText(metric, delta) {
+export function deltaText(metric, delta) {
   if (!Number.isFinite(delta)) return "--";
   if (metric !== "actual_expected") return fmtSigned(delta);
   return Math.abs(delta) < 1e-15 ? "0" : `${delta > 0 ? "+" : ""}${delta.toFixed(4)}`;
 }
 
-function countText(value) {
+export function countText(value) {
   return Number.isFinite(Number(value)) ? Number(value).toLocaleString("en-US") : "--";
 }
 

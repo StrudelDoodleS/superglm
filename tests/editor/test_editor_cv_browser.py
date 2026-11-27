@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from sklearn.model_selection import KFold
+from tests.editor.assess_table import open_report
 
 from superglm import Categorical, Spline, SuperGLM, cross_validate
 from superglm.editor import EditorSession
@@ -52,7 +53,7 @@ def _open_cv_tab(chromium_browser, widget, width: int = 1280):
     page = chromium_browser.new_page(viewport={"width": width, "height": 900})
     page.goto(widget.app_url, wait_until="domcontentloaded")
     page.locator("#chart path.edited").first.wait_for()
-    page.locator("#cvTab").click()
+    open_report(page, "cv")
     page.locator("#reportFrame .cv-card").first.wait_for()
     return page
 
@@ -180,7 +181,7 @@ def test_final_fit_from_the_tab_shows_on_final_fit_and_in_export(cv_widget, chro
         assert done.text_content() == (
             "Final fit finished on 400 rows. Export offers it as Final fit model."
         )
-        page.locator("#finalTab").click()
+        open_report(page, "final")
         section = page.locator("#reportFrame .final-fit")
         section.locator("table").wait_for()
         assert "Refitted on 400 train and validation rows" in section.text_content()

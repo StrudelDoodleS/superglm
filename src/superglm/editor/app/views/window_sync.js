@@ -1,0 +1,241 @@
+// @ts-check
+
+import { isReportName } from "../api/contracts.js";
+import { sessionKey } from "../state/store.js";
+
+export { sessionKey };
+
+/** @typedef {import('../api/contracts.js').EditorSnapshot} EditorSnapshot */
+/** @typedef {import('../api/contracts.js').ReportName} ReportName */
+/** @typedef {'assess'|ReportName} AssessView */
+/**
+ * A job's start or end, as one window tells the others of it.
+ * @typedef {{id: string, phase: "started"|"settled"}} JobNotice
+ */
+/**
+ * What a window tells the editor's other windows: its session key, with a job
+ * notice, or `hello` from a page that has just loaded.
+ * @typedef {{type: "superglm.changed", key: string, job?: JobNotice, hello?: true}} WindowMessage
+ */
+/**
+ * @typedef {object} SyncChannel
+ * @property {((event: {data: unknown}) => unknown)|null} onmessage
+ * @property {(data: unknown) => void} postMessage
+ * @property {() => void} close
+ */
+/** @typedef {new (name: string) => SyncChannel} SyncChannelConstructor */
+
+const ASSESS_PARAM = "assess";
+
+/**
+ * The view an Assess window opens on, from the page's query, or null on an
+ * ordinary page.
+ * @param {string} search
+ * @returns {AssessView|null}
+ */
+export function readAssessWindow(search) {
+  const view = new URLSearchParams(search).get(ASSESS_PARAM);
+  return view === "assess" || isReportName(view) ? view : null;
+}
+
+/**
+ * The address of an Assess window on `view`: the page's own path and query,
+ * so its token and test flag come along.
+ * @param {string} href
+ * @param {AssessView} view
+ * @returns {string}
+ */
+export function assessWindowUrl(href, view) {
+  const url = new URL(href);
+  url.searchParams.set(ASSESS_PARAM, view);
+  return url.pathname + url.search;
+}
+
+/**
+ * The channel one editor's windows share: an editor on another port, or with
+ * another token, never hears it.
+ * @param {string} href
+ * @returns {string}
+ */
+export function syncChannelName(href) {
+  const url = new URL(href);
+  return `superglm-editor:${url.port}:${url.searchParams.get("token") ?? ""}`;
+}
+
+/** @param {unknown} value @returns {value is JobNotice} */
+function isJobNotice(value) {
+  if (!value || typeof value !== "object") return false;
+  const notice = /** @type {Record<string, unknown>} */ (value);
+  return typeof notice.id === "string" && (notice.phase === "started" || notice.phase === "settled");
+}
+
+/** @param {unknown} data @returns {data is WindowMessage} */
+function isWindowMessage(data) {
+  if (!data || typeof data !== "object") return false;
+  const message = /** @type {Record<string, unknown>} */ (data);
+  return message.type === "superglm.changed"
+    && typeof message.key === "string"
+    && (message.job === undefined || isJobNotice(message.job))
+    && (message.hello === undefined || message.hello === true);
+}
+
+/**
+ * Tell the editor's other windows what changed here, and hear them. Without a
+ * channel (an old browser) both do nothing. The page passes its
+ * `BroadcastChannel`; there is no default, so a caller that passes none
+ * opens nothing.
+ * @param {object} options
+ * @param {string} options.name
+ * @param {(message: WindowMessage) => unknown} options.onMessage
+ * @param {SyncChannelConstructor|undefined} options.Channel
+ * @returns {{announce(message: WindowMessage): void, close(): void}}
+ */
+export function createWindowSync({ name, onMessage, Channel }) {
+  if (!Channel) return Object.freeze({ announce() {}, close() {} });
+  /** @type {SyncChannel|null} */
+  let channel = new Channel(name);
+  channel.onmessage = (event) => {
+    if (isWindowMessage(event.data)) onMessage(event.data);
+  };
+  return Object.freeze({
+    /** @param {WindowMessage} message */
+    announce(message) {
+      channel?.postMessage(message);
+    },
+    close() {
+      channel?.close();
+      channel = null;
+    },
+  });
+}
+
+/**
+ * Run `run` once for a burst of asks: single flight with one trailing run.
+ * With nothing running, an ask starts a run and gets its promise. Every ask
+ * made while a run goes shares one trailing promise, and the trailing run
+ * starts the moment the running one settles, before any other callback can
+ * start a run, and settles that promise with its own outcome. So each ask
+ * gets the outcome of a run that started after it, waits behind at most one
+ * run, and the queue is at most one promise.
+ * @template T
+ * @param {() => Promise<T>} run
+ * @returns {() => Promise<T>}
+ */
+export function coalesce(run) {
+  /** @type {Promise<T>|null} */
+  let running = null;
+  /** @type {{promise: Promise<T>, resolve: (value: T) => void, reject: (reason: unknown) => void}|null} */
+  let trailing = null;
+
+  /** @returns {Promise<T>} */
+  function start() {
+    const current = Promise.resolve().then(run);
+    running = current;
+    // Registered before any caller's handler, so it runs first when `current` settles.
+    current.then(handOn, handOn);
+    return current;
+  }
+
+  function handOn() {
+    const next = trailing;
+    trailing = null;
+    if (next === null) {
+      running = null;
+      return;
+    }
+    start().then(next.resolve, next.reject);
+  }
+
+  return function ask() {
+    if (running === null) return start();
+    if (trailing === null) {
+      /** @type {(value: T) => void} */
+      let resolve = () => {};
+      /** @type {(reason: unknown) => void} */
+      let reject = () => {};
+      const promise = /** @type {Promise<T>} */ (new Promise((onResolve, onReject) => {
+        resolve = onResolve;
+        reject = onReject;
+      }));
+      trailing = { promise, resolve, reject };
+    }
+    return trailing.promise;
+  };
+}
+
+/** @param {JobNotice} notice */
+const noticeId = (notice) => `${notice.phase}:${notice.id}`;
+
+/**
+ * One window's part in following the session with the others.
+ *
+ * A window re-reads when another's key differs from its own, or when it hears
+ * news: a job notice it has not had yet, or a page's hello. A job notice also
+ * lapses the reports a job changes; after a hello the re-read alone decides,
+ * lapsing them only where what they read moved. A job's start or end that a peer's notice brought
+ * is not handled again when this window's own polling sees it, unless the
+ * re-read that notice asked for failed: then the window settles it itself.
+ * Two windows that agree send nothing back, so a change costs each window a
+ * bounded number of re-reads and the windows go quiet.
+ * @param {object} options
+ * @param {string} options.name
+ * @param {SyncChannelConstructor|undefined} options.Channel
+ * @param {() => string} options.key this window's session key now
+ * @param {() => unknown} options.onJobNews lapse the reports a job changes
+ * @param {() => Promise<boolean>} options.reread re-read the session; whether it succeeded
+ */
+export function createSessionPeer({ name, Channel, key, onJobNews, reread }) {
+  /** Each phase this window has had, with whether its handling succeeded. @type {Map<string, Promise<boolean>>} */
+  const handled = new Map();
+  /** @returns {Promise<boolean>} */
+  const refresh = () => Promise.resolve().then(reread).then(Boolean, () => false);
+  const sync = createWindowSync({
+    name,
+    Channel,
+    onMessage: (message) => {
+      const notice = message.job;
+      const fresh = notice !== undefined && !handled.has(noticeId(notice));
+      if (fresh) {
+        onJobNews();
+        handled.set(noticeId(notice), refresh());
+      } else if (message.hello === true || message.key !== key()) {
+        void refresh();
+      }
+    },
+  });
+  /** @param {{job?: JobNotice, hello?: true}} extra */
+  const post = (extra) => sync.announce({ type: "superglm.changed", key: key(), ...extra });
+  /** @param {JobNotice} [job] */
+  function tell(job) {
+    post(job ? { job } : {});
+  }
+  return Object.freeze({
+    /**
+     * This window's own polling saw a job start or end: `settle` handles it here,
+     * then the others are told. A phase a peer's notice brought, and whose
+     * re-read succeeded, is neither settled nor told again.
+     * @param {JobNotice} notice
+     * @param {() => unknown} [settle]
+     * @returns {Promise<void>}
+     */
+    async sawJob(notice, settle) {
+      const id = noticeId(notice);
+      const earlier = handled.get(id);
+      if (earlier && (await earlier)) return;
+      const done = Promise.resolve().then(settle).then(() => true, () => false);
+      handled.set(id, done);
+      await done;
+      if (!earlier) tell(notice);
+    },
+    /** Tell the others this window's key. */
+    tell,
+    /**
+     * A page that has just loaded may have missed a job's end: every other window re-reads
+     * once, and a job result published meanwhile moves its key.
+     */
+    hello() {
+      post({ hello: true });
+    },
+    close: sync.close,
+  });
+}

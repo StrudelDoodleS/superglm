@@ -16,6 +16,9 @@ from sklearn.model_selection import KFold
 
 from superglm import Categorical, Numeric, Spline, SuperGLM, cross_validate
 from superglm.editor import EditorSession
+from superglm.editor.cv import FINAL_NOT_RUN
+from superglm.editor.lss.availability import LSS_UNAVAILABLE
+from superglm.model_selection import _NO_LSS_FOLD_PLOT
 from superglm.reml.observed_geometry import (
     ObservedGeometryInfeasibleError,
     ObservedModeNotCertifiedError,
@@ -981,6 +984,38 @@ def test_job_routes_run_a_job_off_the_widget_lock(cv_fit):
     assert finished["status"] == "cancelled"
     assert published == []
     assert unknown == (400, {"error": "Unknown job kind."})
+
+
+@pytest.mark.parametrize("kind", ["cv", "final_fit"])
+def test_a_job_cancelled_or_failed_moves_the_count_a_reconnecting_page_compares(cv_fit, kind):
+    """A Run CV or Final fit that ends with no result still moves ``results_generation``."""
+    from superglm.editor.errors import EditorValueError
+
+    def refused(context):
+        raise EditorValueError("A sentence written for the browser.")
+
+    model, _supplied = cv_fit
+    widget = EditorSession.from_model(model, terms=["region"]).widget()
+    entered, release, published = threading.Event(), threading.Event(), []
+    try:
+        opened = widget._state()["results_generation"]
+        widget._job_starters[kind] = lambda: _blocking_job(entered, release, published)
+        cancelled = widget._job_start(kind)["job_id"]
+        assert entered.wait(30)
+        widget._job_cancel(cancelled)
+        release.set()
+        assert widget._job_status(cancelled, wait=True)["status"] == "cancelled"
+        after_cancel = widget._state()["results_generation"]
+        widget._job_starters[kind] = lambda: (refused, lambda value: {})
+        failed = widget._job_start(kind)["job_id"]
+        assert widget._job_status(failed, wait=True)["status"] == "failed"
+        after_failure = widget._state()["results_generation"]
+    finally:
+        release.set()
+        widget.close()
+
+    assert opened < after_cancel < after_failure
+    assert published == []
 
 
 # ── Run CV and Final fit ─────────────────────────────────────────
@@ -3314,7 +3349,7 @@ def test_run_cv_scores_every_fold_when_one_fold_never_trained_on_a_level(rare_le
 # ── The tab in the app ───────────────────────────────────────────
 
 
-def test_app_has_a_cross_validation_tab_and_a_final_fit_export():
+def test_app_has_an_assess_tab_and_a_final_fit_export():
     from pathlib import Path
 
     import superglm.editor
@@ -3322,10 +3357,17 @@ def test_app_has_a_cross_validation_tab_and_a_final_fit_export():
     root = Path(superglm.editor.__file__).parent / "app"
     html = (root / "index.html").read_text()
 
-    assert html.index('id="validationTab"') < html.index('id="cvTab"') < html.index('id="finalTab"')
-    assert 'data-view="cv"' in html
+    assert 'id="assessTab"' in html and 'data-view="assess"' in html
+    for gone in ("validationTab", "cvTab", "finalTab", "diagnoseTab"):
+        assert f'id="{gone}"' not in html
+    assert '<link rel="stylesheet" href="/assets/styles/assess.css">' in html
     assert 'id="exportFinalFit" type="radio" name="exportFormat" value="final"' in html
     assert '<link rel="stylesheet" href="/assets/styles/cv.css">' in html
+
+
+@pytest.mark.parametrize("text", [FINAL_NOT_RUN, LSS_UNAVAILABLE["metrics"], _NO_LSS_FOLD_PLOT])
+def test_messages_name_the_assess_entry_not_a_tab(text):
+    assert "under Assess" in text and " tab" not in text
 
 
 def test_cv_report_folds_carry_their_own_fold_number(cv_frame, cv_fit):

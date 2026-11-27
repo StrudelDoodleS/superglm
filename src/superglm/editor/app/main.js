@@ -1,5 +1,6 @@
 import { canShowContributions, showsRelativity } from "./chart/display.js";
 import { EditorAPIError, editorClient } from "./api/client.js";
+import { REPORT_NAMES, isReportName } from "./api/contracts.js";
 import {
   bindPointLens,
   bindPointTooltip,
@@ -19,6 +20,7 @@ import { renderMetricGrid } from "./metrics.js";
 import { renderReport } from "./reports.js";
 import { shapeButtonState, shapeRangeForSelection } from "./shapes.js";
 import { createEditorActions } from "./state/actions.js";
+import { OVERVIEW_REPORTS, assessEntry, openableView, tabOf } from "./state/assess.js";
 import {
   selectActiveTermName,
   selectCurrentSelection,
@@ -28,12 +30,14 @@ import {
   selectModelRevision,
   selectPendingSteps,
   selectRenderableTerm,
+  selectReportNeedsAsk,
   selectSnapshot,
   selectSummaryLevelDisplay,
   selectVisibleEvidencePanels,
   selectWaitingTerms
 } from "./state/selectors.js";
 import {
+  JOB_REPORTS,
   createEditorStore,
   createInitialEditorState,
   patchView as patchViewState,
@@ -70,6 +74,8 @@ import {
 import { createRiskController } from "./views/risk_controller.js";
 import { defaultRiskLine, renderRiskPanel, riskPlotsHost } from "./views/risk_panel.js";
 import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
+import { bindAssessList, renderAssessList } from "./views/assess_list.js";
+import { bindOverview, drawOverview, overviewGroups } from "./views/assess_overview.js";
 import {
   placeTermViewToggle,
   renderContextBar,
@@ -137,6 +143,28 @@ import {
   renderTermViewToggle
 } from "./views/rating_table.js";
 import { bindToolRail, renderToolRail } from "./views/tool_rail.js";
+import {
+  assessWindowUrl,
+  coalesce,
+  createSessionPeer,
+  readAssessWindow,
+  sessionKey,
+  syncChannelName
+} from "./views/window_sync.js";
+
+// Inside a notebook cell the page reaches Python over widget messages.
+const notebookHost = globalThis.superglmEditorHost?.kind === "notebook";
+// A second window, opened from Assess, shows Assess alone on the view its address
+// names, and only watches: it edits nothing and starts no job. index.html's head
+// script marks it before the first paint; a notebook cell strips that script.
+const assessWindowView = notebookHost ? null : readAssessWindow(window.location.search);
+const assessWindow = assessWindowView !== null;
+if (assessWindow) {
+  document.documentElement.dataset.window = "assess";
+  document.title = "Assess · SuperGLM Editor";
+  // Hidden, not only by style, so the tabs' arrow keys pass over it.
+  document.getElementById("editorTab").hidden = true;
+}
 
 const appBar = document.getElementById("appBar");
 const undoAction = document.getElementById("undoAction");
@@ -157,6 +185,10 @@ const appAlertRetry = document.getElementById("appAlertRetry");
 const appAlertDismiss = document.getElementById("appAlertDismiss");
 const contextBar = document.querySelector(".context-bar");
 const editorView = document.getElementById("editorView");
+const assessView = document.getElementById("assessView");
+const assessRows = document.getElementById("assessRows");
+const assessOverview = document.getElementById("assessOverview");
+const assessCards = document.getElementById("assessCards");
 const reportPanel = document.getElementById("reportPanel");
 const reportTitle = document.getElementById("reportTitle");
 const reportStatus = document.getElementById("reportStatus");
@@ -320,6 +352,20 @@ const evidenceTiming = createEvidenceTimingTracker({
   onComplete: () => renderTimingReadout()
 });
 
+// A re-read of the session asked for by another view of it: once for a burst.
+// It resolves to whether the re-read succeeded.
+const rereadSession = coalesce(async () => (await actions.refreshFromPythonWhenIdle()).ok);
+
+// The windows of one editor tell each other when the session moved, and when a
+// job started or ended (views/window_sync.js). A notebook cell has no second window.
+const peer = notebookHost ? null : createSessionPeer({
+  name: syncChannelName(window.location.href),
+  Channel: globalThis.BroadcastChannel,
+  key: () => sessionKey(store.getState().remote.snapshot),
+  onJobNews: () => actions.lapseReports(JOB_REPORTS),
+  reread: rereadSession
+});
+
 // The Cross-validation tab draws into the report frame, which the other
 // reports share, so it draws a job's progress only while it is the open view.
 // A finished Run CV or Final fit changes the tab, and a Final fit also what
@@ -328,19 +374,24 @@ const evidenceTiming = createEvidenceTimingTracker({
 const cvTab = createCVTab({
   frame: reportFrame,
   client: editorClient,
-  onJobSettled: async (kind) => {
-    if (kind === "final_fit") {
-      await actions.refreshFromPythonWhenIdle();
+  onJobSettled: async (kind, job) => {
+    const settle = () => actions.settleJob(kind, JOB_REPORTS);
+    // An end another window told of, and whose re-read succeeded, is not settled twice.
+    await (peer ? peer.sawJob({ id: job.job_id, phase: "settled" }, settle) : settle());
+    renderPill();
+  },
+  onJobChange: () => {
+    for (const job of Object.values(cvTab.jobs())) {
+      if (job?.status === "running") void peer?.sawJob({ id: job.job_id, phase: "started" });
     }
     renderPill();
-    await refreshActiveReport();
   },
-  onJobChange: () => renderPill(),
   onDiagnose: (fitId) => {
     diagnoseTab.select(fitId);
     void showView("diagnose");
   },
-  isShown: () => store.getState().view.activeView === "cv"
+  isShown: () => store.getState().view.activeView === "cv",
+  watchOnly: assessWindow
 });
 const diagnoseTab = createDiagnoseTab({
   frame: reportFrame,
@@ -387,7 +438,8 @@ bindAppBar({
   onRedo: redo,
   onRevert: () => runStructuralRefit(revertTransition()),
   onRefresh: refreshFromPython,
-  onRefit: refitPending
+  onRefit: refitPending,
+  shortcuts: !assessWindow
 });
 // The DAY / NIGHT switch keeps "Follow the browser" equal to the theme key.
 mountThemeSwitch({
@@ -803,29 +855,10 @@ if (
 }
 // Inside a notebook cell the kernel runs on another machine, so its file
 // manager would open there: the dialog saves to a kernel path and stops.
-const notebookHost = globalThis.superglmEditorHost?.kind === "notebook";
 if (notebookHost && exportOpenDirectory instanceof HTMLElement) exportOpenDirectory.hidden = true;
 // One editor can show in several notebook outputs. When another output
 // changes the session, this one re-reads it, once for a burst of changes.
-if (notebookHost) {
-  let refreshing = false;
-  let again = false;
-  globalThis.superglmEditorHost.onRemoteChange = async () => {
-    if (refreshing) {
-      again = true;
-      return;
-    }
-    refreshing = true;
-    try {
-      do {
-        again = false;
-        await actions.refreshFromPythonWhenIdle();
-      } while (again);
-    } finally {
-      refreshing = false;
-    }
-  };
-}
+if (notebookHost) globalThis.superglmEditorHost.onRemoteChange = rereadSession;
 bindExportDialog({
   client: editorClient,
   nodes: {
@@ -939,11 +972,11 @@ async function refreshSummaryView() {
   await actions.refreshEvidence("summary", "/summary", summaryRequestPayload());
 }
 
-async function refreshActiveReport() {
-  const activeView = store.getState().view.activeView;
-  // The Explain tab is drawn in the browser from its own request, not from a report.
-  if (activeView === "editor" || activeView === "risk") return;
-  await actions.refreshEvidence("report", "/report", { report: activeView });
+// A report the page holds for this model is drawn again from the page; one it
+// lacks, or holds lapsed or failed, is asked of Python.
+function refreshVisibleReports() {
+  const reports = selectVisibleEvidencePanels(store.getState()).filter(isReportName);
+  actions.scheduleReports(reports, { immediate: true });
 }
 
 function scheduleVisibleEvidence(
@@ -953,16 +986,14 @@ function scheduleVisibleEvidence(
   const state = store.getState();
   if (state.remote.snapshot?.model_revision !== revision) return;
   if (!onlyStale) resetSummarySourceAfterInvalidatingEdit();
+  const reports = [];
   for (const panel of selectVisibleEvidencePanels(state, { summaryCommitted })) {
+    if (isReportName(panel)) {
+      if (!onlyStale || selectReportNeedsAsk(state, panel)) reports.push(panel);
+      continue;
+    }
     if (onlyStale && !selectEvidenceNeedsRefresh(state, panel)) continue;
-    if (panel === "report") {
-      actions.schedulePanelEvidence(
-        panel,
-        "/report",
-        { report: state.view.activeView },
-        { immediate }
-      );
-    } else if (panel === "metrics") {
+    if (panel === "metrics") {
       actions.schedulePanelEvidence(
         panel,
         "/metrics",
@@ -978,6 +1009,7 @@ function scheduleVisibleEvidence(
       );
     }
   }
+  if (reports.length > 0) actions.scheduleReports(reports, { immediate });
 }
 
 function scheduleVisibleEvidenceCatchUp() {
@@ -1081,7 +1113,7 @@ function setAppBusy(active, title = "Working...", detail = "") {
     clearInterval(appBusyTimer);
     appBusyTimer = null;
   }
-  for (const region of [appBar, contextBar, editorView, riskView, reportPanel]) {
+  for (const region of [appBar, contextBar, editorView, riskView, assessView]) {
     if (region) region.toggleAttribute("inert", active);
   }
   appBusyActive = active;
@@ -1112,7 +1144,12 @@ function setAppBusy(active, title = "Working...", detail = "") {
 }
 
 function restoreFocusAfterBusy(opener) {
-  for (const candidate of [opener, featureListNodes.search, inspectorToggle]) {
+  // In Assess the Editor's controls are hidden: the entry open in its list takes focus, else
+  // its tab.
+  const fallbacks = editorView?.hidden
+    ? [assessRows?.querySelector('[aria-current="true"]'), document.getElementById("assessTab")]
+    : [featureListNodes.search, inspectorToggle];
+  for (const candidate of [opener, ...fallbacks]) {
     if (!candidate || !candidate.isConnected || typeof candidate.focus !== "function") continue;
     candidate.focus({ preventScroll: true });
     if (document.activeElement === candidate) return;
@@ -1188,22 +1225,32 @@ function formatMilliseconds(value) {
   return `${(number / 1000).toFixed(2)} s`;
 }
 
+// The one writer of the view on screen.
 async function showView(view) {
-  const activeView = ["validation", "cv", "final", "diagnose", "risk"].includes(view) ? view : "editor";
+  const activeView = openableView(view, { assessWindow });
   actions.patchView({ activeView });
   if (activeView === "editor") {
     scheduleVisibleEvidenceCatchUp();
     return;
   }
-  await refreshActiveReport();
+  refreshVisibleReports();
 }
 
 function renderAppView(activeView) {
-  editorView.hidden = activeView !== "editor";
-  riskView.hidden = activeView !== "risk";
-  reportPanel.hidden = activeView === "editor" || activeView === "risk";
-  // The Cross-validation tab lays the panel out its own way (cv.css).
+  const tab = tabOf(activeView);
+  editorView.hidden = tab !== "editor";
+  riskView.hidden = tab !== "risk";
+  assessView.hidden = tab !== "assess";
+  assessOverview.hidden = activeView !== "assess";
+  reportPanel.hidden = !isReportName(activeView);
+  assessView.dataset.view = activeView;
+  // Cross-validation and Smoothing search lay the panel out their own way (cv.css).
   reportPanel.dataset.report = activeView;
+  renderAssessList(assessRows, activeView);
+}
+
+function renderOverview() {
+  drawOverview(assessCards, overviewGroups(store.getState().request.evidence));
 }
 
 function renderChartWorkspace() {
@@ -1773,7 +1820,7 @@ function selectAppBarRenderState(state) {
   const snapshot = state.remote.snapshot;
   return {
     ready: snapshot !== null,
-    activeView: state.view.activeView,
+    activeView: tabOf(state.view.activeView),
     undoLabel: snapshot?.undo_redo.undo ?? null,
     redoLabel: snapshot?.undo_redo.redo ?? null,
     canRevert: Boolean(snapshot && revertAvailable(snapshot)),
@@ -1833,7 +1880,8 @@ function renderActiveViewState({ ready, activeView }) {
   if (!ready) return;
   renderAppView(activeView);
   renderPill();
-  renderReportEvidence(store.getState().request.evidence.report, activeView);
+  const evidence = openReportEvidence(store.getState());
+  if (evidence) renderReportEvidence(evidence, activeView);
 }
 
 function renderSnapshotRevision(revision) {
@@ -1991,23 +2039,23 @@ function renderMetricsEvidence(evidence) {
   });
 }
 
-const REPORT_TITLES = Object.freeze({
-  validation: "Validation Report",
-  cv: "Cross-validation",
-  final: "Final Fit Report",
-  diagnose: "Diagnose"
-});
+// The evidence of the report on screen, or null on a view that is not a report.
+function openReportEvidence(state) {
+  const activeView = state.view.activeView;
+  return isReportName(activeView) ? state.request.evidence[activeView] : null;
+}
 
 function renderReportEvidence(evidence, activeView) {
   const busy = evidence.status === "updating";
   reportFrame.setAttribute("aria-busy", busy ? "true" : "false");
   reportFrame.dataset.freshness = evidence.status;
-  if (activeView === "editor" || activeView === "risk") return;
+  if (!isReportName(activeView)) return;
+  const title = assessEntry(activeView)?.label ?? "";
   const payloadMatchesView = evidence.payload !== null && evidence.payload.report === activeView;
   if (payloadMatchesView) {
-    renderReport(evidence.payload, { reportTitle, reportStatus, reportFrame }, cvTab, diagnoseTab);
+    renderReport(evidence.payload, { reportTitle, reportStatus, reportFrame, title }, cvTab, diagnoseTab);
   } else {
-    reportTitle.textContent = REPORT_TITLES[activeView] || REPORT_TITLES.validation;
+    reportTitle.textContent = title;
     reportFrame.innerHTML = "";
   }
   if (!payloadMatchesView && evidence.status !== "error" && evidence.status !== "stale") {
@@ -2551,6 +2599,31 @@ bindFeatureList(featureListNodes, {
 });
 renderFeatureListState();
 
+bindAssessList(assessRows, { onOpen: showView });
+// Open in new window shows the open Assess view in one second window; a click
+// again moves that window to the view now open. A notebook cell cannot offer
+// it, and the second window does not offer it again.
+for (const button of document.querySelectorAll("[data-assess-window]")) {
+  button.hidden = notebookHost || assessWindow;
+  button.addEventListener("click", () => {
+    const view = store.getState().view.activeView;
+    window.open(
+      assessWindowUrl(window.location.href, tabOf(view) === "assess" ? view : "assess"),
+      `superglm-assess-${window.location.port}`,
+      "popup,width=1280,height=860"
+    );
+  });
+}
+// A card opens its report, and focus goes to the report's entry in the list.
+bindOverview(assessCards, {
+  onOpen: (id) => {
+    void showView(id);
+    assessRows.querySelector(`[data-assess-entry="${id}"]`)?.focus();
+  }
+});
+renderAssessList(assessRows, store.getState().view.activeView);
+renderOverview();
+
 bindSummarySearch(summarySearch, (query) => {
   summaryQuery = query;
   summaryToggled.clear();
@@ -2668,14 +2741,17 @@ if (summaryRetry) {
   summaryRetry.addEventListener("click", () => { void actions.retryEvidence("summary"); });
 }
 if (reportRetry) {
-  reportRetry.addEventListener("click", () => { void actions.retryEvidence("report"); });
+  reportRetry.addEventListener("click", () => {
+    const activeView = store.getState().view.activeView;
+    if (isReportName(activeView)) void actions.retryEvidence(activeView);
+  });
 }
 summarySource.addEventListener("change", refreshSummaryView);
 refitOffset.addEventListener("click", async () => {
   const payload = await runOffsetRefit(summaryNodes(), refreshMetricsView);
   if (payload) {
     await actions.initialize();
-    await refreshActiveReport();
+    refreshVisibleReports();
   }
 });
 if (reprofileTweedie) {
@@ -2771,7 +2847,7 @@ store.subscribe(
 store.subscribe(
   (state) => isLssSession(state.remote.snapshot),
   (lss) => {
-    explainTab.hidden = !lss;
+    explainTab.hidden = !lss || assessWindow;
     if (!lss && store.getState().view.activeView === "risk") void showView("editor");
   }
 );
@@ -2838,19 +2914,45 @@ store.subscribe(
     evidenceTiming.observe("metrics", evidence, previous);
   }
 );
+// A change of view draws its report in renderActiveViewState; this draws the open
+// report's evidence as it moves.
 store.subscribe(
-  (state) => state.request.evidence.report,
-  (evidence, previous) => {
-    renderReportEvidence(evidence, store.getState().view.activeView);
-    evidenceTiming.observe("report", evidence, previous);
-  }
+  (state) => ({ activeView: state.view.activeView, evidence: openReportEvidence(state) }),
+  ({ activeView, evidence }, previous) => {
+    if (evidence && activeView === previous.activeView) renderReportEvidence(evidence, activeView);
+  },
+  (next, previous) => next.evidence === previous.evidence
 );
+// The cards redraw when the evidence of a report they read moves.
+store.subscribe(
+  (state) => OVERVIEW_REPORTS.map((name) => state.request.evidence[name]),
+  renderOverview,
+  (next, previous) => next.every((evidence, index) => evidence === previous[index])
+);
+for (const name of REPORT_NAMES) {
+  store.subscribe(
+    (state) => state.request.evidence[name],
+    (evidence, previous) => evidenceTiming.observe(name, evidence, previous)
+  );
+}
 
 for (const input of summaryLevelDisplayInputs) {
   input.checked = input.value === selectSummaryLevelDisplay(store.getState());
 }
 
+// Tell this editor's other windows whenever the session here moves; the first
+// snapshot is told by the hello below.
+store.subscribe((state) => sessionKey(state.remote.snapshot), (_key, previous) => {
+  if (previous) peer?.tell();
+});
+
+// An Assess window asks for its view's reports, which wait for the first
+// snapshot, and never for the Editor's metrics and summary.
+if (assessWindow) void showView(assessWindowView);
 loadState().then(async () => {
+  // This page may have missed a job's end while it was closed or loading.
+  peer?.hello();
+  if (assessWindow) return;
   await refreshMetricsView();
   await refreshSummaryView();
 }).catch((error) => {

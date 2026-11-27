@@ -1050,7 +1050,9 @@ def test_selection_popovers_keep_focus_and_explain_parent_icons(open_editor_page
         popover = page.locator("#uiPopover")
         trigger.hover()
         popover.wait_for(state="visible")
-        trigger.focus()
+        # Keyboard focus: a tooltip shows for focus the browser marks focus-visible, and a
+        # programmatic focus() after a click is not.
+        trigger.evaluate("node => node.focus({focusVisible: true})")
         page.mouse.move(4, 4)
 
         assert popover.is_visible()
@@ -1060,7 +1062,7 @@ def test_selection_popovers_keep_focus_and_explain_parent_icons(open_editor_page
         popover.wait_for(state="hidden")
         assert trigger.get_attribute("aria-describedby") is None
 
-        trigger.focus()
+        trigger.evaluate("node => node.focus({focusVisible: true})")
         popover.wait_for(state="visible")
         assert popover.locator("[data-popover-heading]").inner_text() == "Straighten selection"
         assert popover.locator("[data-popover-description]").inner_text() == (
@@ -1389,7 +1391,7 @@ def test_busy_state_makes_all_editor_regions_inert_and_cleans_up(open_editor_pag
 
         page.evaluate("window.__superglmTest.setAppBusy(true, 'Testing busy state', 'Waiting')")
 
-        for selector in ["#appBar", ".context-bar", "#editorView", "#reportPanel"]:
+        for selector in ["#appBar", ".context-bar", "#editorView", "#assessView"]:
             assert page.locator(selector).get_attribute("inert") == ""
         assert page.locator(".app-shell").get_attribute("aria-busy") == "true"
         overlay = page.locator("#appBusyOverlay")
@@ -1443,7 +1445,7 @@ def test_busy_state_makes_all_editor_regions_inert_and_cleans_up(open_editor_pag
 
         page.evaluate("window.__superglmTest.setAppBusy(false)")
 
-        for selector in ["#appBar", ".context-bar", "#editorView", "#reportPanel"]:
+        for selector in ["#appBar", ".context-bar", "#editorView", "#assessView"]:
             assert page.locator(selector).get_attribute("inert") is None
         assert page.locator(".app-shell").get_attribute("aria-busy") == "false"
         assert overlay.is_hidden()
@@ -1455,8 +1457,25 @@ def test_busy_state_makes_all_editor_regions_inert_and_cleans_up(open_editor_pag
         page.evaluate("window.__superglmTest.setAppBusy(false)")
 
         assert page.evaluate("document.activeElement?.id") in {"featureSearch", "inspectorToggle"}
-        for selector in ["#appBar", ".context-bar", "#editorView", "#reportPanel"]:
+        for selector in ["#appBar", ".context-bar", "#editorView", "#assessView"]:
             assert page.locator(selector).get_attribute("inert") is None
+
+
+def test_a_refit_that_ends_in_assess_gives_focus_to_the_open_assess_entry(open_editor_page):
+    """Refit's button, disabled once the last waiting change is applied, cannot take focus
+    back, and the Editor's fallbacks are hidden in Assess: the entry open in its list does."""
+    with open_editor_page() as (page, _session):
+        page.locator("#assessTab").click()
+        page.locator('[data-assess-entry="validation"]').click()
+        page.locator('[data-assess-entry="validation"][aria-current="true"]').wait_for()
+        refit = page.locator("#refitPendingAction")
+        refit.evaluate("node => { node.disabled = false; node.focus(); }")
+        assert refit.evaluate("node => document.activeElement === node")
+        page.evaluate("window.__superglmTest.setAppBusy(true, 'Refitting', 'Waiting')")
+        refit.evaluate("node => { node.disabled = true; }")
+        page.evaluate("window.__superglmTest.setAppBusy(false)")
+
+        assert page.evaluate("document.activeElement?.dataset.assessEntry") == "validation"
 
 
 def test_text_selection_is_scoped_and_reduced_motion_stops_spinner(open_editor_page):
@@ -1493,13 +1512,7 @@ def test_text_selection_is_scoped_and_reduced_motion_stops_spinner(open_editor_p
 def test_application_bar_exposes_views_undo_redo_and_export(open_editor_page):
     with open_editor_page() as (page, _session):
         tabs = page.get_by_role("tablist", name="Editor views")
-        assert tabs.get_by_role("tab").all_inner_texts() == [
-            "Editor",
-            "Validation",
-            "Cross-validation",
-            "Final Fit",
-            "Diagnose",
-        ]
+        assert tabs.get_by_role("tab").all_inner_texts() == ["Editor", "Assess"]
         assert page.get_by_role("button", name="Undo edit").is_disabled()
         assert page.get_by_role("button", name="Redo edit").is_disabled()
         assert page.get_by_role("button", name="Export model or workbook").is_visible()
@@ -1554,7 +1567,9 @@ def test_analyst_can_discover_edit_undo_redo_help_and_export(open_editor_page):
         page.locator("#selectionMenu").wait_for(state="visible")
 
         increase = page.get_by_role("button", name="Increase selection", exact=True)
-        increase.focus()
+        # Keyboard focus: a tooltip shows for focus the browser marks focus-visible, and a
+        # programmatic focus() after a click is not.
+        increase.evaluate("node => node.focus({focusVisible: true})")
         tooltip = page.get_by_role("tooltip")
         tooltip.wait_for(state="visible")
         assert tooltip.locator("[data-popover-heading]").inner_text() == "Increase selection"

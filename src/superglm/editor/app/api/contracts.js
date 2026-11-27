@@ -1,11 +1,12 @@
 // @ts-check
 
-/** @typedef {'editor'|'validation'|'cv'|'final'|'diagnose'|'risk'} AppView */
+/** @typedef {'editor'|'assess'|ReportName|'risk'} AppView */
 /** @typedef {'select'|'move'|'zoom'|'handles'|'knots'} EditorMode */
 /** @typedef {'chart'|'table'} TermView */
 /** @typedef {'idle'|'running'|'error'} MutationStatus */
 /** @typedef {'idle'|'updating'|'current'|'stale'|'error'} EvidenceStatus */
-/** @typedef {'metrics'|'summary'|'report'} EvidencePanel */
+/** @typedef {'validation'|'cv'|'final'|'diagnose'} ReportName */
+/** @typedef {'metrics'|'summary'|ReportName} EvidencePanel */
 /** @typedef {'expanded'|'grouped'} SummaryLevelDisplay */
 /**
  * @typedef {Object} SummaryPayload
@@ -504,6 +505,8 @@
  * @property {PendingStep[]} [pending]
  * @property {{available:boolean, stale:boolean}} [final_fit] whether Export can offer the Final fit model
  * @property {JobStatus[]} [jobs_running] jobs still running when this state was read
+ * @property {number} [results_generation] counts the Run CV and Final fit jobs that ended, done,
+ *   failed or cancelled: it moves when a job ends
  * @property {number} [fit_token] changes only when the fitted model in force is replaced
  * @property {Record<string, string>} [unavailable] SuperLSS sessions only: the reason for each session tool that is off
  */
@@ -551,7 +554,7 @@
 /**
  * @typedef {Object} EditorViewState
  * @property {string} activeTerm
- * @property {AppView} activeView
+ * @property {AppView} activeView the view on screen; 'assess' is the Assess tab's overview
  * @property {EditorMode} mode
  * @property {TermView} termView
  * @property {boolean} showCi
@@ -697,9 +700,19 @@
  * {ok:false, skipped?:boolean, error:Error}} StructuralActionResult
  */
 
-export const EVIDENCE_PANELS = Object.freeze(
-  /** @type {const} */ (["metrics", "summary", "report"])
+/** The reports, each with its own evidence, in the order the page lists them. */
+export const REPORT_NAMES = Object.freeze(
+  /** @type {const} */ (["validation", "cv", "final", "diagnose"])
 );
+
+export const EVIDENCE_PANELS = Object.freeze(
+  /** @type {const} */ (["metrics", "summary", ...REPORT_NAMES])
+);
+
+/** @param {unknown} value @returns {value is ReportName} */
+export function isReportName(value) {
+  return typeof value === "string" && /** @type {readonly string[]} */ (REPORT_NAMES).includes(value);
+}
 
 /** @returns {EvidenceState} */
 export function createEmptyEvidenceState() {

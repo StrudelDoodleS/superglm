@@ -414,3 +414,59 @@ test("Refit stays disabled with its reason when the model cannot be refitted her
   assert.equal(buttons.refitButton.dataset.popoverBody, reason);
   assert.equal(buttons.refitCount.textContent, "2");
 });
+
+test("an app bar without shortcuts leaves Ctrl+Z and R alone", (t) => {
+  const documentHub = installDocument(t);
+  const calls = [];
+  const binding = bindAppBar({
+    root: new FakeElement("nav"),
+    undoButton: new FakeButton(),
+    redoButton: new FakeButton(),
+    revertButton: new FakeButton(),
+    refreshButton: new FakeButton(),
+    refitButton: new FakeButton(),
+    shortcuts: false,
+    onView: () => {},
+    onUndo: () => calls.push("undo"),
+    onRedo: () => calls.push("redo"),
+    onRevert: () => {},
+    onRefresh: () => {},
+    onRefit: () => calls.push("refit"),
+  });
+  const pressed = [
+    documentHub.emit("keydown", { key: "z", ctrlKey: true }),
+    documentHub.emit("keydown", { key: "y", ctrlKey: true }),
+    documentHub.emit("keydown", { key: "r" }),
+  ];
+  assert.deepEqual(calls, []);
+  assert.deepEqual(pressed.map((event) => event.defaultPrevented), [false, false, false]);
+  binding.destroy();
+});
+
+test("with one tab shown, the arrow keys stay where they are", (t) => {
+  installDocument(t);
+  const tab = (view, hidden = false) => {
+    const button = new FakeButton();
+    Object.assign(button.dataset, { view });
+    button.hidden = hidden;
+    button.focus = () => {};
+    return button;
+  };
+  const tabs = [tab("editor", true), tab("assess")];
+  const root = new FakeElement("nav");
+  root.querySelectorAll = () => tabs;
+  const views = [];
+  const binding = bindAppBar({
+    root,
+    undoButton: new FakeButton(),
+    redoButton: new FakeButton(),
+    revertButton: new FakeButton(),
+    refreshButton: new FakeButton(),
+    refitButton: new FakeButton(),
+    onView: (view) => views.push(view),
+    onUndo: () => {}, onRedo: () => {}, onRevert: () => {}, onRefresh: () => {}, onRefit: () => {},
+  });
+  for (const key of ["ArrowLeft", "ArrowRight", "Home", "End"]) root.emit("keydown", { key, target: tabs[1] });
+  assert.deepEqual(views, []);
+  binding.destroy();
+});
