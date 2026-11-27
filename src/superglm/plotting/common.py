@@ -191,16 +191,35 @@ def piecewise_display_term(ti, n_points: int = 200):
         return ti
 
     grid = np.unique(np.concatenate([knots, np.linspace(knots[0], knots[-1], n_points)]))
-    log_rel = np.interp(grid, knots, np.asarray(ti.log_relativity, dtype=np.float64))
+    knot_log_rel = np.asarray(ti.log_relativity, dtype=np.float64)
+    log_rel = np.interp(grid, knots, knot_log_rel)
     se = ci_lo = ci_hi = None
     if has_band:
         V = np.asarray(ti.knot_covariance, dtype=np.float64)
         seg = np.clip(np.searchsorted(knots, grid, side="right") - 1, 0, knots.size - 2)
         h2 = (grid - knots[seg]) / (knots[seg + 1] - knots[seg])
         h1 = 1.0 - h2
+        # Between knots, a term with an open knot value reads the covariance from before
+        # any was blanked, at the points the fit determines (``KnotCombinations``), while
+        # that is the covariance it publishes.
+        combinations = getattr(ti, "_knot_combinations", None)
+        if combinations is not None and not combinations.describes(knots, knot_log_rel, V):
+            combinations = None
+        U = V if combinations is None else combinations.covariance
         variance = (
-            h1 * h1 * V[seg, seg] + 2.0 * h1 * h2 * V[seg, seg + 1] + h2 * h2 * V[seg + 1, seg + 1]
+            h1 * h1 * U[seg, seg] + 2.0 * h1 * h2 * U[seg, seg + 1] + h2 * h2 * U[seg + 1, seg + 1]
         )
+        # A knot reads its own variance alone, which a neighbour the fit leaves open (a NaN
+        # row of the covariance) does not reach.
+        variance = np.where(
+            h2 == 0.0, V[seg, seg], np.where(h1 == 0.0, V[seg + 1, seg + 1], variance)
+        )
+        if combinations is not None:
+            inside = np.flatnonzero((h1 != 0.0) & (h2 != 0.0))
+            weights = np.zeros((inside.size, knots.size))
+            weights[np.arange(inside.size), seg[inside]] = h1[inside]
+            weights[np.arange(inside.size), seg[inside] + 1] = h2[inside]
+            variance[inside[~combinations.determined(weights)]] = np.nan
         se = np.sqrt(np.maximum(variance, 0.0))
         z = float(norm.ppf(1.0 - ti.alpha / 2.0))
         ci_lo = np.asarray(_safe_exp(log_rel - z * se))

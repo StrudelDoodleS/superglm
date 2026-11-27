@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass, field
 from typing import Any, cast
 
 import numpy as np
@@ -158,6 +158,16 @@ class TermInference:
     covariance_method: str | None = None
     covariance_n_units: float | None = None
     covariance_n_clusters: int | None = None
+
+    # Piecewise only, on a fit that leaves a knot value open: the knot covariance before it
+    # was blanked and the fit's rule over data alone, which the display between knots reads
+    # (a ``KnotCombinations``).  None otherwise, and on a result saved before it was kept.
+    # An InitVar carries it through dataclasses.replace without exporting it as a field.
+    _knot_combinations: InitVar[Any] = field(default=None, kw_only=True)
+
+    def __post_init__(self, _knot_combinations: Any) -> None:
+        if _knot_combinations is not None:
+            object.__setattr__(self, "_knot_combinations", _knot_combinations)
 
     def to_dataframe(self) -> pd.DataFrame:
         """Convert to a tidy DataFrame for plotting or export."""

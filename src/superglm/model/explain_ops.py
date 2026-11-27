@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import warnings
+from functools import partial
 
 import numpy as np
 
@@ -98,20 +99,25 @@ def _default_determinacy(model, names):
 
     The mask is read without the rest of the fit's inference record
     (``fit_coefficient_mask``); the decider forms that record on the first contrast the
-    mask leaves open (``fit_contrast_estimable``).
+    mask leaves open (``fit_contrast_estimable``), and gives the same rule over data alone
+    to a result that keeps it (``fit_data_contrast_estimable``).
     """
-    from superglm.inference._term_covariance import Determinacy, reads_determinacy
-    from superglm.model.state_ops import fit_coefficient_mask, fit_contrast_estimable
+    from superglm.inference._term_covariance import Determinacy, FitRule, reads_determinacy
+    from superglm.model.state_ops import (
+        fit_coefficient_mask,
+        fit_contrast_estimable,
+        fit_data_contrast_estimable,
+    )
 
-    specs, interactions = model._specs, model._interaction_specs
-    if not any(reads_determinacy(specs.get(name), name, interactions) for name in names):
+    if not any(reads_determinacy(model._specs.get(name)) for name in names):
         return None
 
     def decide(*args, **kwargs) -> bool:
         decider = fit_contrast_estimable(model, model._fit_inference_info)
         return decider is not None and bool(decider(*args, **kwargs))
 
-    return Determinacy(fit_coefficient_mask(model), decide)
+    rule = FitRule(decide, partial(fit_data_contrast_estimable, model))
+    return Determinacy(fit_coefficient_mask(model), rule)
 
 
 _ALIASED_INFERENCE_MESSAGE = (
@@ -286,7 +292,11 @@ def simultaneous_bands(
     seed=42,
     covariance=None,
 ):
-    """Simultaneous confidence bands for a spline feature."""
+    """Simultaneous confidence bands for a spline feature.
+
+    On the default covariance a point the fit does not determine has a NaN error, and the
+    curve then no band (``simultaneous_band_and_critical_value``).
+    """
     if model._result is None:
         raise RuntimeError("Model must be fitted before calling simultaneous_bands().")
     robust_cov = (
@@ -304,7 +314,6 @@ def simultaneous_bands(
         )
     if robust_cov is not None and str(feature) in _aliased_features(model, covariance):
         raise RuntimeError(_ALIASED_INFERENCE_MESSAGE.format(terms=repr(feature)))
-    from superglm.features.factor_smooth import population_curve_terms
     from superglm.model.fit_ops import _ensure_factor_smooth_levels_recorded
 
     _ensure_factor_smooth_levels_recorded(model)
@@ -321,9 +330,7 @@ def simultaneous_bands(
         n_sim=n_sim,
         n_points=n_points,
         seed=seed,
-        determines=_default_determinacy(model, [feature])
-        if robust_cov is None and population_curve_terms(feature, model._interaction_specs)
-        else None,
+        determines=_default_determinacy(model, [feature]) if robust_cov is None else None,
     )
     return bands
 

@@ -23,12 +23,14 @@ import pytest
 
 from superglm import (
     Categorical,
+    Constraint,
     FactorSmooth,
     GroupLasso,
     Numeric,
     OrderedCategorical,
     Piecewise,
     Polynomial,
+    PSpline,
     RandomEffect,
     Spline,
     SuperGLM,
@@ -1222,6 +1224,635 @@ def test_a_centred_curve_the_fit_determines_keeps_its_simultaneous_band() -> Non
     np.testing.assert_allclose(centred.ci_lower_simultaneous, lower, rtol=1e-12)
 
 
+_TERM_CLASSES = {
+    "polynomial": lambda: Polynomial(degree=3),
+    "piecewise": lambda: Piecewise(breaks=[0.3, 0.6]),
+    "numeric": Numeric,
+    "categorical": lambda: Categorical(base="a"),
+}
+
+
+def _class_fit(kind, names):
+    """Terms of class ``kind`` on one column, as ``_numeric_twin_fit``; a categorical one on
+    four levels."""
+    row = np.arange(160.0)
+    if kind == "categorical":
+        column = np.tile(np.array(list("abcd"), dtype=object), 40)
+        y = 0.1 * np.searchsorted(list("abcd"), column) + np.cos(row)
+    else:
+        column = np.tile(np.linspace(0.0, 1.0, 40), 4)
+        y = np.sin(3.0 * column) + np.cos(row)
+    X = pd.DataFrame({name: column for name in names})
+    features = {name: _TERM_CLASSES[kind]() for name in names}
+    return SuperGLM(family="gaussian", features=features).fit(X, y), X, y
+
+
+def _value_map(model, name, centering="native"):
+    """Term ``name``'s reported log relativities as rows over the fitted slopes.
+
+    Each column is ``reconstruct`` of one unit coefficient, which is linear in them;
+    less the values' mean when centred.
+    """
+    group = next(g for g in model._groups if g.feature_name == name)
+    spec = model._specs[name]
+    columns = []
+    for k in range(group.size):
+        raw = spec.reconstruct(np.eye(group.size)[k])
+        if "log_relativities" in raw:
+            columns.append([raw["log_relativities"][level] for level in raw["levels"]])
+        else:
+            columns.append(np.atleast_1d(raw.get("log_relativity", raw.get("coef"))))
+    values = np.asarray(columns, dtype=float).T
+    if centering == "mean" and len(values) > 1:
+        values = values - values.mean(axis=0)
+    rows = np.zeros((len(values), len(model.result.beta)))
+    rows[:, group.sl] = values
+    return rows
+
+
+def _determined(model, rows):
+    """Which rows leave the design's rank when appended: the contrasts its data determine."""
+    return np.array([_rank_gain(model, row[None], 1e-10) == 0 for row in rows])
+
+
+def _metrics_errors(model, X, y, name):
+    """``metrics(X, y).feature_se(name)``'s errors, whatever key the term class uses."""
+    errors = model.metrics(X, y).feature_se(name)
+    key = next(key for key in ("se_log_relativity", "se", "se_coef") if key in errors)
+    return np.atleast_1d(np.asarray(errors[key], dtype=float))
+
+
+@pytest.mark.parametrize("kind", list(_TERM_CLASSES))
+def test_twin_terms_of_every_class_carry_no_error_the_fit_does_not_determine(kind) -> None:
+    """Twins on one column: each reader blanks every value the twins can trade (#771).
+
+    A reported value is a contrast of the term's coefficients (``_value_map``); moving the
+    effect between the twins leaves the fit, so each one but a base's raises the design's
+    rank when appended.  ``term_inference`` and ``relativities(with_se=True)``, native and
+    centred, and ``metrics().feature_se()`` give it no error or interval, around a finite
+    value; a base level or knot keeps error 0, as does a piecewise term's knot covariance
+    with it.  At ddebae041 every reader gave the first twin the errors of the term fitted
+    alone (the numeric slope 0.2043) and the second twin 0.0 at every value.
+    """
+    model, X, y = _class_fit(kind, ["u", "v"])
+    for name in ("u", "v"):
+        for centering in ("native", "mean"):
+            rows = _value_map(model, name, centering)
+            determined = _determined(model, rows)
+            assert np.array_equal(determined, ~np.any(rows != 0.0, axis=1)), (name, centering)
+            inference = model.term_inference(name, centering=centering)
+            se = np.asarray(inference.se_log_relativity)
+            np.testing.assert_array_equal(np.isfinite(se), determined)
+            assert np.all(se[determined] == 0.0)
+            assert np.all(np.isnan(np.asarray(inference.ci_lower)[~determined]))
+            assert np.isfinite(inference.log_relativity).all()
+            frame = model.relativities(with_se=True, centering=centering)[name]
+            np.testing.assert_array_equal(frame["se_log_relativity"].to_numpy(), se)
+            if kind == "piecewise":
+                covariance = inference.knot_covariance
+                moving = np.any(rows != 0.0, axis=1)
+                np.testing.assert_array_equal(
+                    np.isnan(covariance), np.outer(moving, moving), err_msg=centering
+                )
+        errors = _metrics_errors(model, X, y, name)
+        if kind == "categorical":
+            errors = np.r_[0.0, errors]  # the base level, which this reader leaves out
+        native = np.asarray(model.term_inference(name).se_log_relativity)
+        if kind == "polynomial":  # the reader reports the coefficients' errors
+            assert np.all(np.isnan(errors))
+        else:
+            np.testing.assert_array_equal(np.isnan(errors), np.isnan(native))
+
+
+def _hinge_fit(hinge=True):
+    """A piecewise term with knots at 0.3 and 0.6, its base the first, and with ``hinge`` a
+    numeric ``max(x - 0.6, 0)``: in the term's span, it trades with the top knot alone."""
+    rng = np.random.default_rng(3)
+    x = rng.uniform(0.0, 1.0, 300)
+    y = np.sin(3.0 * x) + rng.normal(scale=0.3, size=300)
+    X = pd.DataFrame({"x": x, "h": np.maximum(x - 0.6, 0.0)})
+    features = {"x": Piecewise(breaks=[0.3, 0.6], base="first")}
+    if hinge:
+        features["h"] = Numeric()
+    else:
+        X = X[["x"]]
+    return SuperGLM(family="gaussian", features=features).fit(X, y), X, y
+
+
+def test_a_piecewise_term_keeps_the_knot_errors_a_hinge_beside_it_leaves_determined() -> None:
+    """A hinge at a knot opens that knot's value alone: the other knots keep theirs (#771).
+
+    ``max(x - 0.6, 0)`` is in the term's span, so the fit has the column space of the term
+    alone, and the values the data determine have that fit's errors: knots 0.3 and 0.6,
+    and their block of the knot covariance, to rounding.  The top knot raises the design's
+    rank when appended; its error, and its covariance with every knot but the base, are
+    NaN, as is the hinge's error, and every centred value, which reads it.  The display
+    band keeps every knot up to 0.6 and the segments between them.  At ddebae041 the top
+    knot showed 0.08695, the centred knots 0.04018 to 0.05541, and the hinge 0.0.
+    """
+    from superglm.plotting.common import piecewise_display_term
+
+    model, X, y = _hinge_fit()
+    reference, _, _ = _hinge_fit(hinge=False)
+    assert np.linalg.matrix_rank(_design(model)) == np.linalg.matrix_rank(_design(reference))
+    assert np.linalg.matrix_rank(_design(reference)) == _design(reference).shape[1]
+    native = _value_map(model, "x")
+    np.testing.assert_array_equal(_determined(model, native), [True, True, True, False])
+    assert not np.any(_determined(model, _value_map(model, "x", "mean")))
+
+    inference, expected = model.term_inference("x"), reference.term_inference("x")
+    se = np.asarray(inference.se_log_relativity)
+    assert np.isnan(se[3]) and se[0] == 0.0
+    np.testing.assert_allclose(se[:3], expected.se_log_relativity[:3], rtol=1e-9)
+    covariance = inference.knot_covariance
+    np.testing.assert_allclose(covariance[:3, :3], expected.knot_covariance[:3, :3], rtol=1e-9)
+    assert np.all(covariance[0] == 0.0) and np.all(covariance[:, 0] == 0.0)
+    assert np.all(np.isnan(covariance[1:, 3])) and np.all(np.isnan(covariance[3, 1:]))
+    centred = model.term_inference("x", centering="mean")
+    assert np.all(np.isnan(centred.se_log_relativity))
+    assert np.all(np.isnan(centred.knot_covariance))
+    for centering, errors in (("native", se), ("mean", centred.se_log_relativity)):
+        frame = model.relativities(with_se=True, centering=centering)["x"]
+        np.testing.assert_array_equal(frame["se_log_relativity"].to_numpy(), errors)
+    np.testing.assert_allclose(_metrics_errors(model, X, y, "x"), se, rtol=1e-9)
+    assert np.isnan(model.term_inference("h").se_log_relativity[0])
+    assert np.isnan(_metrics_errors(model, X, y, "h")[0])
+
+    shown = piecewise_display_term(inference)
+    reach = shown.x <= inference.x[2]
+    assert np.all(np.isnan(shown.se_log_relativity[~reach]))
+    np.testing.assert_allclose(
+        shown.se_log_relativity[reach],
+        piecewise_display_term(expected).se_log_relativity[reach],
+        rtol=1e-9,
+    )
+
+
+def _coarse_fit(coarse=True):
+    """A categorical term on four levels and, with ``coarse``, one grouping a, b against c, d:
+    in the term's span, it trades with c and d together."""
+    rng = np.random.default_rng(4)
+    c = rng.choice(np.array(list("abcd"), dtype=object), 400)
+    y = rng.normal(size=400) + 0.5 * (c == "c") + 0.2 * (c == "b")
+    X = pd.DataFrame({"c": c, "d": np.where(np.isin(c, ["a", "b"]), "lo", "hi")})
+    features = {"c": Categorical(base="a")}
+    if coarse:
+        features["d"] = Categorical(base="lo")
+    else:
+        X = X[["c"]]
+    return SuperGLM(family="gaussian", features=features).fit(X, y), X, y
+
+
+def test_a_level_a_coarser_grouping_leaves_determined_keeps_its_error() -> None:
+    """A grouping of a term's levels beside it opens the levels it moves, not the others (#771).
+
+    ``lo`` = {a, b} and ``hi`` = {c, d}: the grouping is in the term's span, so the levels
+    the data determine have the errors of the fit without it.  ``b`` against the base
+    keeps its error; ``c`` and ``d`` raise the design's rank when appended and have none,
+    nor has ``hi``, nor any centred level, which reads them.  At ddebae041
+    ``term_inference("c")`` gave ``c`` 0.1382 and ``d`` 0.1454, and ``"d"`` 0.0 on ``hi``.
+    """
+    model, X, y = _coarse_fit()
+    reference, _, _ = _coarse_fit(coarse=False)
+    assert np.linalg.matrix_rank(_design(model)) == np.linalg.matrix_rank(_design(reference))
+    native = _value_map(model, "c")
+    np.testing.assert_array_equal(_determined(model, native), [True, True, False, False])
+    assert not np.any(_determined(model, _value_map(model, "c", "mean")))
+
+    inference = model.term_inference("c")
+    se = np.asarray(inference.se_log_relativity)
+    expected = np.asarray(reference.term_inference("c").se_log_relativity)
+    assert se[0] == 0.0 and np.all(np.isnan(se[2:]))
+    np.testing.assert_allclose(se[1], expected[1], rtol=1e-9)
+    assert np.all(np.isnan(model.term_inference("c", centering="mean").se_log_relativity))
+    grouping = model.term_inference("d")
+    np.testing.assert_array_equal(
+        np.isnan(grouping.se_log_relativity), np.asarray(grouping.levels) == "hi"
+    )
+    for centering in ("native", "mean"):
+        frame = model.relativities(with_se=True, centering=centering)["c"]
+        np.testing.assert_array_equal(
+            frame["se_log_relativity"].to_numpy(),
+            model.term_inference("c", centering=centering).se_log_relativity,
+        )
+    np.testing.assert_allclose(_metrics_errors(model, X, y, "c"), se[1:], rtol=1e-9)
+
+
+_MIDPOINT_KNOTS = np.array([0.0, 40 / 199, 60 / 199, 1.0])
+
+
+def _midpoint_frame(trade=(1.0, -1.0), group=False):
+    """``_midpoint_fit``'s rows, its ``z`` the knots 40/199 and 60/199's hats weighed by
+    ``trade``, or with ``None`` drawn apart from them; with ``group``, a level ``g`` of 40."""
+    rng = np.random.default_rng(11)
+    x = np.r_[0.0, 1.0, rng.uniform(0.0, 1.0, 398)]
+    y = np.sin(3.0 * x) + rng.normal(scale=0.3, size=x.size)
+    hats = [np.interp(x, _MIDPOINT_KNOTS, row) for row in np.eye(4)]
+    z = rng.normal(size=x.size) if trade is None else trade[0] * hats[1] + trade[1] * hats[2]
+    X = pd.DataFrame({"x": x, "z": z})
+    if group:
+        X["g"] = (np.arange(x.size) % 40).astype(str)
+    return X, y
+
+
+def _midpoint_fit(alias=True, weight=1.0):
+    """A piecewise term with adjacent knots 40/199 and 60/199, its base the first, and with
+    ``alias`` a numeric ``z``, their hats' difference: in the term's span, it trades the two
+    knots' values against each other and keeps their mean.  The default display grid, 200
+    points over [0, 1] beside the knots, holds the point midway between them.  Every row
+    has weight ``weight``."""
+    X, y = _midpoint_frame()
+    features = {"x": Piecewise(breaks=list(_MIDPOINT_KNOTS[1:3]), base="first")}
+    if alias:
+        features["z"] = Numeric()
+    else:
+        X = X[["x"]]
+    model = SuperGLM(family="gaussian", features=features)
+    return model.fit(X, y, sample_weight=np.full(len(y), weight)), X
+
+
+def test_a_piecewise_display_shows_a_value_the_fit_determines_between_two_open_knots() -> None:
+    """The display decides each of its points, not only its knots (#771 review).
+
+    ``z`` trades the knots 40/199 and 60/199, so both values raise the design's rank when
+    appended and stay blank, in the published knot covariance too; their mean does not.  The
+    display point midway has the error of the fit without ``z``, whose column space is the
+    same, and so does the top knot; every other point raises the rank and stays blank, also
+    on rows of weight 1e-320, whose errors are the same.  The matplotlib plot draws the
+    display's limits.  At a4f9ac656 the midpoint was NaN: the
+    display read only the published covariance, blank in both knots' rows.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from superglm.plotting.common import piecewise_display_term
+
+    (model, X), (reference, _) = _midpoint_fit(), _midpoint_fit(alias=False)
+    assert np.linalg.matrix_rank(_design(model)) == np.linalg.matrix_rank(_design(reference))
+    inference = model.term_inference("x")
+    np.testing.assert_array_equal(np.isnan(inference.se_log_relativity), [False, True, True, False])
+    assert np.all(np.isnan(inference.knot_covariance[1:3, 1:]))
+
+    for centering in ("native", "mean"):
+        shown = piecewise_display_term(model.term_inference("x", centering=centering))
+        expected = piecewise_display_term(reference.term_inference("x", centering=centering))
+        np.testing.assert_array_equal(shown.x, expected.x)
+        weights = np.column_stack([np.interp(shown.x, _MIDPOINT_KNOTS, row) for row in np.eye(4)])
+        determined = _determined(model, weights @ _value_map(model, "x", centering))
+        middle = np.abs(shown.x - 50 / 199) < 1e-15
+        assert middle.sum() == 1 and determined[middle].all()
+        assert determined.sum() == 3, centering  # the end knots and the midpoint
+        se = np.asarray(shown.se_log_relativity)
+        np.testing.assert_array_equal(np.isfinite(se), determined)
+        np.testing.assert_allclose(
+            se[determined], expected.se_log_relativity[determined], rtol=1e-9
+        )
+        np.testing.assert_array_equal(np.isfinite(shown.ci_lower), determined)
+
+    shown = piecewise_display_term(inference)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # the subnormal weights' precision advisory
+        tiny, _ = _midpoint_fit(weight=1e-320)  # its covariance is held a power of two apart
+    np.testing.assert_allclose(
+        piecewise_display_term(tiny.term_inference("x")).se_log_relativity,
+        shown.se_log_relativity,
+        rtol=1e-9,
+        equal_nan=True,
+    )
+    figure = model.plot("x", X=X, ci="pointwise")
+    try:
+        drawn = [np.asarray(line.get_ydata(), dtype=float) for line in figure.axes[0].lines]
+        assert any(np.array_equal(line, shown.ci_lower, equal_nan=True) for line in drawn)
+    finally:
+        plt.close(figure)
+
+
+_STORED_RECORDS = ["rank record", "no rank record", "structured"]
+
+
+def _stored_midpoint_fit(record):
+    """The midpoint fit read by its rank record, by the rank a fit without one rebuilds
+    (``"no rank record"``) or by a random effect's structured geometry (``"structured"``),
+    and its refit on ``_midpoint_frame(trade)``."""
+    structured = record == "structured"
+
+    def refit(model, trade):
+        X, y = _midpoint_frame(trade, group=structured)
+        return model.fit_reml(X, y) if structured else model.fit(X, y)
+
+    features = {"x": Piecewise(breaks=list(_MIDPOINT_KNOTS[1:3]), base="first"), "z": Numeric()}
+    if structured:
+        features = {"g": RandomEffect(), **features}
+    model = refit(SuperGLM(family="gaussian", features=features), (1.0, -1.0))
+    if record == "no rank record":
+        _drop_rank_record(model)
+    assert bool(model._fit_inference_info.get("structured_covariance")) is structured
+    return model, refit
+
+
+def _display_errors(inference):
+    """The piecewise display's errors and their grid."""
+    from superglm.plotting.common import piecewise_display_term
+
+    shown = piecewise_display_term(inference)
+    return np.asarray(shown.se_log_relativity), np.asarray(shown.x)
+
+
+@pytest.mark.parametrize("record", _STORED_RECORDS)
+def test_a_stored_piecewise_display_keeps_the_fit_it_was_read_from(record) -> None:
+    """A piecewise result keeps the decisions of the fit it was read from (#771 review).
+
+    Read by the midpoint fit's rank record, by the rank a fit without one rebuilds, or by a
+    random effect's structured geometry, the display shows the end knots and the point
+    midway between the open knots, with the errors of the fit without ``z`` (0.07648475
+    native, 0.02794032 centred).  So do the result and its shallow and deep copies after
+    refits with ``z`` drawn apart from the knots and with ``z = 2 h1 - h2``, and after the
+    model is released.  At a574c4932 the first refit gave them 199 errors (0.07496775 at
+    x = 51/199) and the second none midway, as the result read the refitted model, which it
+    kept alive.
+    """
+    import copy
+    import gc
+    import weakref
+
+    model, refit = _stored_midpoint_fit(record)
+    reference, _ = _midpoint_fit(alias=False)
+    kept = {}
+    for centering in ("native", "mean"):
+        inference = model.term_inference("x", centering=centering)
+        shown, x = _display_errors(inference)
+        midway = np.abs(x - 50 / 199) < 1e-15
+        determined = np.isin(x, [0.0, 1.0]) | midway
+        np.testing.assert_array_equal(np.isfinite(shown), determined)
+        if record != "structured":
+            want, _ = _display_errors(reference.term_inference("x", centering=centering))
+            np.testing.assert_allclose(shown[determined], want[determined], rtol=1e-9)
+        kept[centering] = shown, (inference, copy.copy(inference), copy.deepcopy(inference))
+
+    for trade in (None, (2.0, -1.0)):
+        refit(model, trade)
+        for centering, (shown, results) in kept.items():
+            for result in results:
+                errors, _ = _display_errors(result)
+                np.testing.assert_array_equal(errors, shown, err_msg=f"{trade} {centering}")
+    released = weakref.ref(model)
+    del model
+    gc.collect()
+    assert released() is None
+    for shown, results in kept.values():
+        np.testing.assert_array_equal(_display_errors(results[0])[0], shown)
+
+
+@pytest.mark.parametrize("record", _STORED_RECORDS)
+def test_a_piecewise_display_survives_a_pickle_and_a_replacement(record) -> None:
+    """A pickle round trip of a piecewise result, and a replacement that keeps its
+    covariance, show the points the result shows, also after a refit (#771 review).
+
+    A replacement with another covariance draws the knots alone, as the record no longer
+    describes it.  At a574c4932 the round trip and the replacement drew the knots alone:
+    the record was an attribute outside the dataclass's fields, which neither kept.
+    """
+    import dataclasses
+
+    model, refit = _stored_midpoint_fit(record)
+    kept = {}
+    for centering in ("native", "mean"):
+        inference = model.term_inference("x", centering=centering)
+        shown, x = _display_errors(inference)
+        results = (
+            pickle.loads(pickle.dumps(inference)),
+            dataclasses.replace(
+                inference,
+                x=inference.x.copy(),
+                log_relativity=inference.log_relativity.copy(),
+                knot_covariance=inference.knot_covariance.copy(),
+                alpha=0.1,
+            ),
+        )
+        for result in results:
+            np.testing.assert_array_equal(_display_errors(result)[0], shown, err_msg=centering)
+        other = dataclasses.replace(inference, knot_covariance=4.0 * inference.knot_covariance)
+        errors, _ = _display_errors(other)
+        np.testing.assert_array_equal(np.isfinite(errors), np.isin(x, [0.0, 1.0]))
+        np.testing.assert_allclose(errors[x == 1.0], 2.0 * shown[x == 1.0], rtol=1e-15)
+        kept[centering] = shown, results
+    refit(model, None)
+    for centering, (shown, results) in kept.items():
+        for result in results:
+            np.testing.assert_array_equal(_display_errors(result)[0], shown, err_msg=centering)
+
+
+@pytest.mark.parametrize("field", ["x", "log_relativity", "knot_covariance"])
+def test_an_edited_piecewise_result_drops_the_original_fit_rule(field) -> None:
+    """Edits must not recover an interval with the old fit's knot rule (#771 review)."""
+    from copy import deepcopy
+    from dataclasses import replace
+
+    model, _ = _midpoint_fit()
+    inference = model.term_inference("x")
+    edits = {
+        "x": np.array([0.0, 80 / 199, 120 / 199, 1.0]),
+        "log_relativity": inference.log_relativity + 1.0,
+        "knot_covariance": np.full_like(inference.knot_covariance, np.nan),
+    }
+    edited_in_place = deepcopy(inference)
+    getattr(edited_in_place, field)[...] = edits[field]
+    for result in (replace(inference, **{field: edits[field]}), edited_in_place):
+        errors, grid = _display_errors(result)
+        shown = (
+            np.zeros(grid.size, dtype=bool) if field == "knot_covariance" else np.isin(grid, [0, 1])
+        )
+        np.testing.assert_array_equal(np.isfinite(errors), shown)
+
+
+@pytest.mark.pins_behaviour
+def test_piecewise_result_exports_only_published_uncertainty() -> None:
+    """Keep the existing export contract: public covariance and no private fit rule."""
+    from dataclasses import asdict
+
+    model, _ = _midpoint_fit()
+    inference = model.term_inference("x")
+    exported = asdict(inference)
+    assert "_knot_combinations" not in exported
+    np.testing.assert_array_equal(exported["knot_covariance"], inference.knot_covariance)
+
+
+def _drop_rank_record(model) -> None:
+    """Publish ``model``'s fit without its rank record, as a fit saved without one reads."""
+    from superglm.model.fit_state import FittedStateRevision
+
+    revision = FittedStateRevision.start(model)
+    for result_name in ("_result", "_solver_result"):
+        setattr(getattr(revision.model, result_name), "rank_info", None)
+    revision.commit()
+
+
+def _traded_levels_fit(trade="b-c"):
+    """A categorical term on four levels, its base ``a``, and a numeric ``z``: with
+    ``trade="b-c"`` it is ``[b] - [c]``, which trades b against c and keeps the levels'
+    mean; with ``"a"``, ``[a]``, which trades every level against the intercept."""
+    rng = np.random.default_rng(5)
+    c = rng.choice(np.array(list("abcd"), dtype=object), 400)
+    y = rng.normal(size=400) + 0.5 * (c == "c") + 0.2 * (c == "b")
+    z = {"b-c": (c == "b").astype(float) - (c == "c"), "a": (c == "a").astype(float)}
+    X = pd.DataFrame({"c": c, "z": z.get(trade, 0.0)})
+    features = {"c": Categorical(base="a")}
+    if trade is None:
+        X = X[["c"]]
+    else:
+        features["z"] = Numeric()
+    return SuperGLM(family="gaussian", features=features).fit(X, y)
+
+
+def test_a_fit_without_its_rank_record_keeps_the_values_its_rebuilt_rank_determines() -> None:
+    """Without a rank record, the rebuilt data rank decides contrasts as well as the mask (#771 review).
+
+    ``z`` trades b and c: those levels, native or centred, and ``z`` raise the design's rank
+    when appended; the centred base a and level d do not.  A fit read without its record (a
+    record saved without one, a revision that drops it) rebuilds the data rank for its mask
+    and keeps that rank's decider and centre beside it, so every reader shows what the fit
+    with its record shows, the errors of the fit without ``z``, also after a pickle round
+    trip and a deep copy.  The mask stays the data's: b, c and ``z`` show no error.  With
+    ``z = [a]`` the summary's intercept is not determined, and is blank there too.  A
+    Poisson fit whose post-fit shape repair moves the working weights drops its record, and
+    shows the centred a and d too.  At a4f9ac656 the centred a and d (0.08418 and 0.08837)
+    were NaN without the record, as was every centred level after the repair, and the
+    intercept beside ``[a]`` showed 0.09647.
+    """
+    import copy
+
+    retained, reference = _traded_levels_fit(), _traded_levels_fit(trade=None)
+    assert np.linalg.matrix_rank(_design(retained)) == np.linalg.matrix_rank(_design(reference))
+    centred_rows = _value_map(retained, "c", "mean")
+    np.testing.assert_array_equal(_determined(retained, centred_rows), [True, False, False, True])
+    legacy = _traded_levels_fit()
+    _drop_rank_record(legacy)
+    assert legacy._solver_pirls_result().rank_info is None
+    expected = reference.term_inference("c", centering="mean").se_log_relativity
+    for model in (legacy, pickle.loads(pickle.dumps(legacy)), copy.deepcopy(legacy)):
+        mask = model._fit_inference_info["coefficient_estimable"]
+        np.testing.assert_array_equal(mask, [False, False, True, False])  # b, c, d, z
+        for centering in ("native", "mean"):
+            se = model.term_inference("c", centering=centering).se_log_relativity
+            want = retained.term_inference("c", centering=centering).se_log_relativity
+            np.testing.assert_array_equal(np.isnan(se), np.isnan(want))
+            np.testing.assert_allclose(se, want, rtol=1e-12, equal_nan=True)
+            frame = model.relativities(with_se=True, centering=centering)["c"]
+            np.testing.assert_array_equal(frame["se_log_relativity"].to_numpy(), se)
+        se = model.term_inference("c", centering="mean").se_log_relativity
+        np.testing.assert_allclose(se[[0, 3]], expected[[0, 3]], rtol=1e-9)
+        rows = {row.name: row.se for row in model.summary()._coef_rows}
+        want = {row.name: row.se for row in retained.summary()._coef_rows}
+        assert rows.keys() == want.keys()
+        np.testing.assert_allclose(
+            np.array(list(rows.values()), dtype=float),
+            np.array(list(want.values()), dtype=float),
+            rtol=1e-12,
+            equal_nan=True,
+        )
+
+    retained, legacy = _traded_levels_fit("a"), _traded_levels_fit("a")
+    _drop_rank_record(legacy)
+    design = _design(retained)
+    intercept_row = np.eye(design.shape[1])[:1]
+    rank = np.linalg.matrix_rank(design)
+    assert np.linalg.matrix_rank(np.vstack([design, intercept_row])) == rank + 1
+    for model in (retained, legacy):
+        intercept = next(row for row in model.summary()._coef_rows if row.name == "Intercept")
+        assert intercept.se is None and not intercept.estimable
+
+    # A live fit reads the same way: a post-fit shape repair that moves the working
+    # weights drops the record.
+    rng = np.random.default_rng(0)
+    x, c = rng.uniform(0.0, 1.0, 400), rng.choice(np.array(list("abcd"), dtype=object), 400)
+    eta = 1.0 - 2.0 * (x - 0.35) ** 2 + 0.5 * (c == "c") + 0.2 * (c == "b")
+    X = pd.DataFrame({"x": x, "c": c, "z": (c == "b").astype(float) - (c == "c")})
+    convex = PSpline(n_knots=10, constraint=Constraint.postfit.convex)
+    features = {"x": convex, "c": Categorical(base="a"), "z": Numeric()}
+    repaired = SuperGLM(family="poisson", features=features).fit(X, rng.poisson(np.exp(eta)))
+    repaired.apply_shape_postfit(X)
+    assert repaired._solver_pirls_result().rank_info is None
+    se = repaired.term_inference("c", centering="mean").se_log_relativity
+    determined = _determined(repaired, _value_map(repaired, "c", "mean"))
+    np.testing.assert_array_equal(determined, [True, False, False, True])
+    np.testing.assert_array_equal(np.isfinite(se), determined)
+
+
+def test_feature_errors_and_bands_give_no_spline_error_the_fit_does_not_determine() -> None:
+    """``metrics().feature_se()`` and ``simultaneous_bands()`` decide each point (#771).
+
+    They take the rule ``term_inference`` reads.  Twin splines: no point of either curve
+    is determined, and neither reader gives an error, nor ``simultaneous_bands`` a band;
+    twin ordered splines: no level but the base.  A spline on three support points keeps
+    its error at those points, ``term_inference``'s there, and has no band, as one band
+    is a statement about every point.  At ddebae041 both readers gave every error, the
+    twins' curve errors from 0.60 to 2.84, and drew the band.
+    """
+    model, X, y = _numeric_twin_fit(["u", "v"], "spline")
+    for name in ("u", "v"):
+        assert np.all(np.isnan(_metrics_errors(model, X, y, name)))
+        bands = model.simultaneous_bands(name, n_sim=200)
+        assert bands["se"].isna().all() and bands["ci_upper_simultaneous"].isna().all()
+        assert np.isfinite(bands["log_relativity"]).all()
+    ordered, X, y = _twin_fit(["a", "b"], None, basis=_TWIN_BASES["spline"])
+    for name in ("a", "b"):
+        errors = _metrics_errors(ordered, X, y, name)
+        np.testing.assert_array_equal(
+            np.isnan(errors), np.isnan(ordered.term_inference(name).se_log_relativity)
+        )
+        assert np.isnan(errors).sum() == len(errors) - 1
+
+    model, X, y = _three_point_spline()
+    inference = model.term_inference("x", n_points=11)
+    support = np.isfinite(inference.se_log_relativity)
+    np.testing.assert_array_equal(support, np.isin(inference.x, [0.0, 0.4, 1.0]))
+    errors = model.metrics(X, y).feature_se("x", n_points=11)["se_log_relativity"]
+    np.testing.assert_array_equal(np.isfinite(errors), support)
+    bands = model.simultaneous_bands("x", n_points=11, n_sim=200)
+    np.testing.assert_allclose(bands["se"].to_numpy(), inference.se_log_relativity, rtol=1e-12)
+    assert bands["ci_upper_simultaneous"].isna().all()
+    assert np.isfinite(bands["ci_upper_pointwise"].to_numpy()[support]).all()
+
+
+@pytest.mark.pins_behaviour
+@pytest.mark.parametrize("kind", list(_TERM_CLASSES))
+def test_a_single_term_of_every_class_keeps_its_errors_on_every_reader(kind) -> None:
+    """Control (pins): one unaliased term of each class keeps every error and knot covariance.
+
+    Each is ``sqrt(diag(R V R'))`` with ``R`` the reported values' map (``_value_map``) and
+    ``V`` the Gaussian ``phi (X'X)^-1`` slope block, native and centred, on
+    ``term_inference``, ``relativities`` and ``metrics().feature_se()``, which reports a
+    polynomial's coefficient errors; a piecewise term's knot covariance is ``R V R'``.
+    A centred piecewise ``relativities`` maps the covariance before it squares, so it
+    agrees with ``term_inference`` to rounding rather than bit for bit.
+    """
+    model, X, y = _class_fit(kind, ["u"])
+    design = _design(model)
+    residual = y - design @ np.linalg.lstsq(design, y, rcond=None)[0]
+    phi = float(residual @ residual) / (len(y) - design.shape[1])
+    V = phi * np.linalg.inv(design.T @ design)[1:, 1:]
+    for centering in ("native", "mean"):
+        R = _value_map(model, "u", centering)
+        expected = np.sqrt(np.maximum(np.einsum("ij,jk,ik->i", R, V, R), 0.0))
+        inference = model.term_inference("u", centering=centering)
+        np.testing.assert_allclose(inference.se_log_relativity, expected, rtol=1e-9, atol=1e-15)
+        frame = model.relativities(with_se=True, centering=centering)["u"]
+        np.testing.assert_allclose(
+            frame["se_log_relativity"].to_numpy(), inference.se_log_relativity, rtol=1e-12
+        )
+        if kind == "piecewise":
+            np.testing.assert_allclose(
+                inference.knot_covariance, R @ V @ R.T, rtol=1e-9, atol=1e-15
+            )
+    errors = _metrics_errors(model, X, y, "u")
+    R = _value_map(model, "u")
+    native = np.sqrt(np.einsum("ij,jk,ik->i", R, V, R))
+    reference = {"polynomial": np.sqrt(np.diag(V)), "categorical": native[1:]}.get(kind, native)
+    np.testing.assert_allclose(errors, reference, rtol=1e-9, atol=1e-15)
+
+
 def _population_fit(names, direct_solve, bound=None):
     """Splines ``names`` on one column beside an ``sz`` smooth of ``x`` by four levels, every
     lambda fixed.  The last level has one row: it is thin and left out of the population,
@@ -1991,14 +2622,15 @@ def test_the_low_level_readers_still_take_a_bare_decider(polynomial_model) -> No
         assert errors[base] == 0.0
 
 
+@pytest.mark.pins_behaviour
 def test_readers_form_the_rule_only_for_a_term_that_reads_it(monkeypatch) -> None:
-    """Work counts: no mask or centre is formed where no reader would use it (issue #752).
+    """Control (pins): no mask or centre is formed where no reader would use it (#752, #771).
 
-    ``relativities(with_se=True)`` and ``term_inference`` put a spline's curve and an
-    ordered term's levels to the covariance's rule, and no other class, so a numeric
-    term forms no coefficient mask.  A structured summary reads its columns' mean only
-    to decide the intercept beside a coefficient the mask leaves open.  At 07ceaec50 the
-    numeric-only readers formed the mask once each and the certified summary the mean.
+    ``relativities(with_se=True)`` and ``term_inference`` put every main-effect class but
+    a random effect to the covariance's rule, so a random effect's levels form no
+    coefficient mask.  A structured summary reads its columns' mean only to decide the
+    intercept beside a coefficient the mask leaves open.  At 07ceaec50 the certified
+    summary formed the mean.
     """
     from superglm.model import state_ops
 
@@ -2016,14 +2648,15 @@ def test_readers_form_the_rule_only_for_a_term_that_reads_it(monkeypatch) -> Non
     monkeypatch.setattr(state_ops, "fit_intercept_centre", counted("centre", centre))
 
     x = np.tile(np.linspace(0.0, 1.0, 40), 4)
-    X = pd.DataFrame({"u": x, "v": np.cos(7.0 * x)})
-    y = np.sin(3.0 * x) + np.cos(np.arange(160.0))
-    numeric = SuperGLM(family="gaussian", features={"u": Numeric(), "v": Numeric()}).fit(X, y)
-    numeric.relativities(with_se=True)
-    numeric.term_inference("u")
+    level = np.repeat(np.arange(40), 4)
+    X = pd.DataFrame({"u": x, "g": level.astype(str)})
+    y = np.sin(3.0 * x) + np.cos(np.arange(160.0)) + 0.3 * np.cos(level)
+    levels = SuperGLM(family="gaussian", features={"g": RandomEffect()}).fit_reml(X[["g"]], y)
+    levels.relativities(with_se=True)
+    levels.term_inference("g")
     assert calls["mask"] == 0
-    mixed = SuperGLM(family="gaussian", features={"u": Spline(n_knots=5), "v": Numeric()})
-    mixed.fit(X, y).term_inference("v")
+    mixed = SuperGLM(family="gaussian", features={"u": Spline(n_knots=5), "g": RandomEffect()})
+    mixed.fit_reml(X, y).term_inference("g")
     assert calls["mask"] == 0
     mixed.term_inference("u")
     mixed.relativities(with_se=True)

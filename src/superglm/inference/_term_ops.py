@@ -15,6 +15,7 @@ from superglm.inference._term_covariance import (
     feature_se_from_cov,
     piecewise_knot_covariance,
     simultaneous_band_and_critical_value,
+    withhold_undetermined_knots,
 )
 from superglm.inference._term_helpers import (
     _VALID_CENTERING,
@@ -522,7 +523,10 @@ class _TermReport:
         ``sqrt(diag)`` of the knot covariance IS the per-knot SE (the same basis map as
         ``feature_se_from_cov``'s Piecewise branch), so the two stay one computation.  It
         is also why no ``se_centered`` is passed: ``_recenter_term`` transforms the
-        published covariance and reads the centred errors off its diagonal.
+        published covariance and reads the centred errors off its diagonal.  A knot value
+        ``determines`` leaves open is then blank there and in the covariance
+        (``withhold_undetermined_knots``); the covariance before that, and the rule, stay on
+        the result for the display between knots (``KnotCombinations``).
         """
         from superglm.inference.covariance import BinaryScaledCovariance
 
@@ -571,18 +575,44 @@ class _TermReport:
             ),
             self.centering,
         )
-        if not exponent or inference.se_log_relativity is None:
-            return inference
-        errors = np.ldexp(inference.se_log_relativity, exponent // 2)
-        with np.errstate(over="ignore"):
-            knot_cov = np.ldexp(inference.knot_covariance, exponent)
-        return replace(
-            inference,
-            se_log_relativity=errors,
-            knot_covariance=knot_cov,
-            ci_lower=_safe_exp(inference.log_relativity - self.z_alpha * errors),
-            ci_upper=_safe_exp(inference.log_relativity + self.z_alpha * errors),
-        )
+        combinations = None
+        if inference.knot_covariance is not None and inference.se_log_relativity is not None:
+            errors, knot_cov, combinations = withhold_undetermined_knots(
+                self.spec,
+                np.asarray(inference.log_relativity),
+                inference.se_log_relativity,
+                inference.knot_covariance,
+                self.determines,
+                np.concatenate([np.arange(g.start, g.end) for g in self.feature_groups]),
+                center=inference.centering_mode == "mean",
+            )
+            if errors is not inference.se_log_relativity:
+                ci_lo, ci_hi = self.interval(np.asarray(inference.log_relativity), errors)
+                inference = replace(
+                    inference,
+                    se_log_relativity=errors,
+                    knot_covariance=knot_cov,
+                    ci_lower=ci_lo,
+                    ci_upper=ci_hi,
+                )
+        if exponent and inference.se_log_relativity is not None:
+            errors = np.ldexp(inference.se_log_relativity, exponent // 2)
+            with np.errstate(over="ignore"):
+                knot_cov = np.ldexp(inference.knot_covariance, exponent)
+                if combinations is not None:
+                    raw = np.ldexp(combinations.covariance, exponent)
+                    combinations = replace(combinations, covariance=raw)
+            inference = replace(
+                inference,
+                se_log_relativity=errors,
+                knot_covariance=knot_cov,
+                ci_lower=_safe_exp(inference.log_relativity - self.z_alpha * errors),
+                ci_upper=_safe_exp(inference.log_relativity + self.z_alpha * errors),
+            )
+        if combinations is not None:
+            # read by the display between knots (``plotting.common.piecewise_display_term``)
+            inference = replace(inference, _knot_combinations=combinations)
+        return inference
 
 
 # ── Main Entry Point ──────────────────────────────────────────────
@@ -650,9 +680,10 @@ def term_inference(
         values -- see ``_recenter_term``.
     determines : Determinacy, callable or None
         The covariance's rule for a contrast over the fitted coefficients
-        (``contrast_determined``); the errors of a spline's curve and of an ordered term's
-        levels and curve that it does not determine are NaN.  A callable, the earlier
-        form, decides each contrast itself.  ``None`` reports every one.
+        (``contrast_determined``); each reported error it does not determine is NaN, as
+        is a Piecewise term's knot covariance there.  A random effect's levels are
+        reported as they are.  A callable, the earlier form, decides each contrast
+        itself.  ``None`` reports every one.
 
     Returns
     -------

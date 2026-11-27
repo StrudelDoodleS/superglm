@@ -2024,7 +2024,12 @@ class ModelMetrics:
         from superglm.features.piecewise import Piecewise
         from superglm.features.random_effect import RandomEffect
         from superglm.features.spline import _SplineBase
-        from superglm.inference._term_covariance import Determinacy, feature_se_from_cov
+        from superglm.inference._term_covariance import (
+            Determinacy,
+            feature_se_from_cov,
+            knot_map,
+            withhold_undetermined,
+        )
 
         # Inactive feature: return zeros (all subgroups zeroed)
         selected_names = selected_group_name_set(
@@ -2048,6 +2053,9 @@ class ModelMetrics:
                 self._model._specs,
                 self._model._interaction_specs,
                 n_points=n_points,
+                determines=Determinacy(
+                    self._current_coefficient_estimable, self._current_contrast_estimable
+                ),
             )
             return {
                 "levels": spec._ordered_levels,
@@ -2095,6 +2103,10 @@ class ModelMetrics:
             # (every nested chain level counts against its cap, §6).
             variance = phi * covariance_selected_diagonal(XtWX_inv_aug, aug_indices)
             return {"se": np.sqrt(np.maximum(variance, 0.0))}
+        # Each error the fit does not determine is NaN, as on the summary's rows.
+        determines = Determinacy(
+            self._current_coefficient_estimable, self._current_contrast_estimable
+        )
         if isinstance(spec, _SplineBase) and population_curve_terms(
             name, self._model._interaction_specs
         ):
@@ -2107,40 +2119,46 @@ class ModelMetrics:
                 self._model._specs,
                 self._model._interaction_specs,
                 n_points=n_points,
-                determines=Determinacy(
-                    self._current_coefficient_estimable, self._current_contrast_estimable
-                ),
+                determines=determines,
             )
             return {"x": np.linspace(spec._lo, spec._hi, n_points), "se_log_relativity": se}
         Cov_g = phi * covariance_selected_block(XtWX_inv_aug, aug_indices)
+        active_cols = _active_feature_columns(name, groups, active_subs)
+        columns = groups[0].start + active_cols
 
         if isinstance(spec, _SplineBase):
             x_grid = np.linspace(spec._lo, spec._hi, n_points)
             M = np.asarray(spec.transform(x_grid), dtype=np.float64)
-            active_cols = _active_feature_columns(name, groups, active_subs)
             M = M[:, active_cols]
 
             Q = M @ Cov_g
             se = np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0))
-            return {"x": x_grid, "se_log_relativity": se}
+            return {
+                "x": x_grid,
+                "se_log_relativity": withhold_undetermined(se, determines, columns, M),
+            }
 
         elif isinstance(spec, Piecewise):
             # One SE per knot with a hard zero at the base, matching
             # `term_inference(...).se_log_relativity`; the unlabelled `{"se": diag}` fallback has
             # no knot vector, so zipping it against knots misaligns every SE from the base onward.
-            M = np.asarray(spec._raw_basis_matrix(spec._knots), dtype=np.float64)[
-                :, spec._non_base_indices
-            ]
+            M = knot_map(spec)
             Q = M @ Cov_g
             se = np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0))
-            return {"x": spec._knots.copy(), "se_log_relativity": se}
+            return {
+                "x": spec._knots.copy(),
+                "se_log_relativity": withhold_undetermined(se, determines, columns, M),
+            }
 
         elif isinstance(spec, Numeric):
-            return {"se_coef": float(np.sqrt(max(Cov_g[0, 0], 0.0)))}
+            se = np.array([np.sqrt(max(Cov_g[0, 0], 0.0))])
+            return {
+                "se_coef": float(withhold_undetermined(se, determines, columns, np.ones((1, 1)))[0])
+            }
 
         else:
             se = np.sqrt(np.maximum(np.diag(Cov_g), 0.0))
-            return {"se": se}
+            return {"se": withhold_undetermined(se, determines, columns, np.eye(se.size))}
 
     def feature_se(self, name: str, n_points: int = 200) -> dict[str, Any]:
         """Quasi-likelihood SE of a feature curve, levels, or coefficient.

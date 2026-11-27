@@ -34,10 +34,10 @@ def relativities(
 ) -> dict[str, pd.DataFrame]:
     """Extract plot-ready relativity DataFrames for all features.
 
-    ``determines`` is ``term_inference``'s: the errors of a spline's curve and of an
-    ordered term's levels that the covariance does not determine are NaN.  A callable is
-    the earlier form: ``determines(name)`` gives term ``name``'s decider of a contrast,
-    or ``None``.  ``None`` reports every one.
+    ``determines`` is ``term_inference``'s: each main-effect error the covariance does
+    not determine is NaN, a random effect's levels aside.  A callable is the earlier
+    form: ``determines(name)`` gives term ``name``'s decider of a contrast, or ``None``.
+    ``None`` reports every one.
     """
     if centering not in _VALID_CENTERING:
         raise ValueError(f"centering must be one of {_VALID_CENTERING}, got {centering!r}")
@@ -159,6 +159,7 @@ def relativities(
                     interaction_specs,
                     center=center_se,
                     flags=flags,
+                    determines=_determinacy(name),
                 )
             # A level a separating direction moves keeps its relativity, flagged, and
             # leaves the centre (``separated_levels.level_flags``).
@@ -185,6 +186,7 @@ def relativities(
                     groups,
                     specs,
                     interaction_specs,
+                    determines=_determinacy(name),
                 )
             out[name] = df
 
