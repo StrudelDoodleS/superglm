@@ -527,6 +527,14 @@ test("a finished job lapses Cross-validation, Final fit and Smoothing search", (
   assert.equal(lapseReports(state, []), state);
 });
 
+test("a report lapsed while its request is in flight takes no answer from that request", () => {
+  const asked = beginEvidence(createInitialEditorState(snapshot(0)), "cv", 0, 1, RETRY);
+  const lapsed = lapseReports(asked, ["cv"]);
+  const answered = completeEvidence(lapsed, "cv", 0, 1, { report: "cv" });
+  assert.notEqual(answered.request.evidence.cv.status, "current");
+  assert.equal(selectReportNeedsAsk(answered, "cv"), true);
+});
+
 test("a report that failed at this revision is asked again when shown", () => {
   let state = createInitialEditorState(snapshot(0));
   assert.equal(selectReportNeedsAsk(state, "final"), true);

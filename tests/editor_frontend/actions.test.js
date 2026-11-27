@@ -1598,6 +1598,37 @@ test("reports are asked one at a time, in the order given", async () => {
   assert.deepEqual(sent, ["validation", "cv", "diagnose", "final"]);
 });
 
+test("a report asked before a job settled is asked again once its answer lands", async () => {
+  /** @type {string[]} */
+  const sent = [];
+  /** @type {{body:Record<string, unknown>, reply:ReturnType<typeof deferred>}[]} */
+  const held = [];
+  const store = createEditorStore(createInitialEditorState(snapshot(0)));
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: (_path, body) => {
+        sent.push(String(body.report));
+        const reply = deferred();
+        held.push({ body, reply });
+        return reply.promise;
+      },
+      getState: async () => snapshot(0)
+    }
+  });
+
+  actions.scheduleReports(["cv"], { immediate: true });
+  assert.deepEqual(sent, ["cv"]);
+  // The job settles while that request is held: its reports lapse and the open one is asked.
+  actions.lapseReports(["cv", "final", "diagnose"]);
+  actions.scheduleReports(["cv"], { immediate: true });
+  const { body, reply } = held[0];
+  reply.resolve({ report: "cv", model_revision: 0, request_sequence: body.request_sequence });
+  await settled();
+
+  assert.deepEqual(sent, ["cv", "cv"]);
+});
+
 test("Refresh from Python lapses every report the page holds", async () => {
   const retry = { path: "/report", payload: { report: "validation" } };
   let state = beginEvidence(createInitialEditorState(snapshot(3)), "validation", 3, 1, retry);

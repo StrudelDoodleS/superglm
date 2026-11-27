@@ -346,7 +346,8 @@ function describesSnapshot(snapshot, revision, inForce) {
  * What happens to an evidence panel. `ask` sends a request, which the panel then waits for;
  * `answer` and `fail` end the request they name by its `sequence` and by what it asked about;
  * `lapse` is a snapshot the panel no longer describes, by a new `revision` (a panel already at
- * that revision keeps its state) or, with none, by a changed waiting list; `install` puts in a
+ * that revision keeps its state) or, with none, by what moved at the same revision (a waiting
+ * list, a finished job), which supersedes any request in flight; `install` puts in a
  * payload that came with the snapshot, as a structural change's summary does.
  * @typedef {{type:'ask', revision:number, inForce:string|null, sequence:number,
  *     retry:{path:string, payload:Record<string, unknown>}}
@@ -441,7 +442,14 @@ export function moveEvidence(evidence, event, snapshot) {
       return { ...evidence, status: target, error: String(event.error) };
     case "lapse":
       if (event.revision !== undefined && evidence.revision === event.revision) return evidence;
-      return { ...evidence, status: target, error: null };
+      // At the same revision a request in flight was asked about what moved, so its answer is
+      // dropped: no request has sequence 0. Across revisions an undo can put back its model.
+      return {
+        ...evidence,
+        status: target,
+        sequence: event.revision === undefined ? 0 : evidence.sequence,
+        error: null
+      };
     case "install":
       return {
         ...evidence,
