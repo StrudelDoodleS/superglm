@@ -470,7 +470,7 @@ class _SmoothingSearch:
         # finishes. With the fall taken the same steps can be rejected at every length,
         # so beside a cap a trial holds a rejected round goes to the finish as that
         # plateau does. It has earned no plateau (``unearned``), so a finish that stalls
-        # leaves the round's verdict.
+        # before another round is accepted leaves the round's verdict.
         self.endpoint_tried: set[str] = set()
         self.endpoint_caps: set[str] = set()
         self.endgame_due = False
@@ -1764,6 +1764,7 @@ class _SmoothingSearch:
             else math.inf
         )
         self.history.append(round_.row(self.state))
+        self.unearned = False  # a rejected round's verdict lasts until a round is accepted
         self.previous_fall, self.fall = self.fall, self.state.objective - trial.objective
         self.state = replace(
             self.state,
