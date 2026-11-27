@@ -478,8 +478,8 @@ Offsets are a dict by parameter, as in `fit`. The `"nll"` of a SuperLSS and of a
 SuperGLM are the same quantity, so the two can be compared on the same folds.
 `std_scores` says how far the folds spread. It is not a standard error of the
 mean, because the folds share training rows (Bates, Hastie and Tibshirani 2024).
-Pass the result to `superglm.editor.edit(model, cv=folds)` to see it on the
-Cross-validation tab, with each term drawn by fold.
+Pass the result to `superglm.editor.edit(model, cv=folds)` to see it in
+Cross-validation, under Assess, with each term drawn by fold.
 
 The continuous ranked probability score is available in closed form for the
 Gaussian, gamma, log-normal, Tweedie and negative binomial families (the

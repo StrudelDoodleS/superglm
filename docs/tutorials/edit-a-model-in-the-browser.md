@@ -26,11 +26,11 @@ Each data argument is a tuple `(X, y)`, `(X, y, sample_weight)` or `(X, y, sampl
 
 - **`train_data`** is the data the model was fit on. Refit, the rating table and Final fit use it.
   Without it they use the fit data the model kept, if it kept any.
-- **`validation_data`** is scored on the metric strip and in the Validation report. Final fit also
-  trains on these rows.
-- **`test_data`** is scored in the Validation report. Final fit never trains on it.
-- **`cv`** is a `cross_validate` result for the Cross-validation tab, and **`cv_data`** holds the
-  rows its folds were drawn on. See [Cross-validation](#cross-validation).
+- **`validation_data`** is scored on the metric strip and in Validation, under Assess. Final fit
+  also trains on these rows.
+- **`test_data`** is scored in Validation, under Assess. Final fit never trains on it.
+- **`cv`** is a `cross_validate` result for Cross-validation, under Assess, and **`cv_data`** holds
+  the rows its folds were drawn on. See [Cross-validation](#cross-validation).
 - **`terms`** limits the editor to the named features. Leave it out to edit every feature.
 
 The standard iframe is 1180 by 720 pixels. At narrower notebook widths the inspector becomes a
@@ -57,7 +57,7 @@ the link that predictor was fitted on:
 The negative binomial's θ is the one exception: its curve is the relativity of the
 overdispersion, 1/θ, so it rises where overdispersion rises. The axis label says which
 quantity a curve shows, for example *relativity of the CV*, *effect on the mean* or *effect on
-the probit scale of the mean*, and the Cross-validation tab draws the same values.
+the probit scale of the mean*, and Cross-validation, under Assess, draws the same values.
 
 The Explain tab draws log-normal (mean form), gamma, negative binomial and Tweedie models on
 their usual links, and the distribution panel the same families except the negative binomial,
@@ -84,7 +84,7 @@ it, the editor keeps its web server and warns with the install line. Use `mode="
 notebook whose browser is not on the machine running Python, such as a remote JupyterHub, and
 `mode="server"` to keep the web server where both run on one machine.
 
-The editor behaves the same in either mode, with four differences:
+The editor behaves the same in either mode, with five differences:
 
 - It answers only while the notebook is idle, so it waits while another cell runs.
 - **Export** downloads through the browser, which some workplaces block. **Save to Kernel Path**
@@ -92,6 +92,7 @@ The editor behaves the same in either mode, with four differences:
   `/Volumes/catalog/schema/volume`.
 - **Open Folder** is not offered, because the folder is on the cluster rather than on your
   computer.
+- **Open in new window** is not offered, because a second window cannot reach the notebook.
 - Each change travels to Python as one notebook message, which carries at most 4 MB. A larger
   one, such as a very long History note, is refused with a message saying so; make it in smaller
   steps or in Python on the session.
@@ -673,8 +674,8 @@ Choose **Export** in the application bar, then one of four formats:
   `ModelOverview` and `TermInference` tables, so numbers remain numeric Excel cells rather than one
   large formatted text block. For a SuperLSS model it holds one sheet per parameter that has a
   table, then a summary; if no parameter has one, the export says why.
-- **Final fit model** is the latest Final fit on all rows, from the Cross-validation tab. It is
-  offered while the model has not changed since that fit.
+- **Final fit model** is the latest Final fit on all rows, from Cross-validation, under Assess. It
+  is offered while the model has not changed since that fit.
 - **Structure (JSON)** writes each term's groupings, reference, shaped ranges and where new levels
   go, without coefficients or hand edits. See [Structure Files](#structure-files).
 
@@ -778,9 +779,49 @@ estimated is not carried over, so fit the copy with `fit_reml` to estimate it ag
 
 Each refusal from `apply` is a `superglm.StructureError` whose message names the feature.
 
+## Assess
+
+The top bar has two tabs: **Editor** and **Assess** (plus **Explain** for a SuperLSS model).
+**Assess** holds every report on the model you are editing, with a list on the left:
+
+- **Overview** opens first every time you select **Assess**. It shows one card per report, each
+  with its headline number and a short note. Click a card, or a name in the list, to open the
+  report large.
+- Under **Reports**, the list holds four reports:
+  - **Validation** scores the model as edited on each split beside the model as fitted.
+  - **Cross-validation** shows fold scores and term curves from a `cross_validate` result, and
+    starts Run CV and Final fit.
+  - **Final fit** shows the model refitted on train and validation rows with your hand edits put
+    back.
+  - **Smoothing search** (formerly Diagnose) reports whether each fit's smoothing search converged
+    and what to try if not, without refitting.
+
+Overview cards show these states:
+
+- While a report loads: "Loading report...".
+- When a first request fails: "Report unavailable.".
+- When a card keeps a number from an earlier result: "Earlier result", with "Update failed. …" when
+  an update failed.
+- Without `cv=`: "No cross-validation result supplied".
+- Before Final fit has run: "Not run", with Python's own note.
+
+Switching back to a report already loaded for the current model is instant. The page keeps each
+report and asks Python again only after a change.
+
+The square-arrow icon (**Open in new window**) on the overview and on each report opens the current
+view in a second browser window for another monitor. That window shows **Assess** only and only
+watches:
+
+- it has no editing controls, and **Run CV**, **Final fit** and **Cancel** are not offered there;
+- it follows every change made in the main window;
+- it is not offered inside a notebook cell, because a second window cannot reach the notebook.
+
+Below 1086 pixels wide, the list shows its icons only; hover over or focus an entry for its name.
+Arrow keys, Home and End step through the list, and Enter opens an entry.
+
 ## Cross-validation
 
-Pass a `cross_validate` result as `cv=` to fill the **Cross-validation** tab:
+Pass a `cross_validate` result as `cv=` to fill **Cross-validation**, under Assess:
 
 ```python
 from sklearn.model_selection import KFold
@@ -798,12 +839,12 @@ session = EditorSession.from_model(
 session.widget()
 ```
 
-- **`return_estimators=True`** keeps each fold's model, which the tab needs to draw every term's
-  relativities by fold. Without it the tab shows the fold scores and says how to get the curves.
+- **`return_estimators=True`** keeps each fold's model, which the report needs to draw every term's
+  relativities by fold. Without it the report shows the fold scores and says how to get the curves.
 - **`cv_data=(X, y, sample_weight)`** gives the rows the folds were drawn on. Without it the editor
   uses `train_data` when its row count matches the folds.
 
-The tab shows:
+The report shows:
 
 - a header naming the folds, the splitter, the rows and where the result came from;
 - **Performance across folds**: each score's mean, with one dot per fold;
@@ -825,7 +866,7 @@ Two buttons run jobs in the background, each with a **Cancel** button while it r
   beside the supplied ones, and its fold curves replace the supplied curves. A hand-edited term is
   marked **held**: it is the same curve on every fold.
 - **Final fit on all rows** uses the train and validation rows and leaves the test rows out, when
-  there are any. It puts your hand edits back too. Its result appears on the **Final Fit** tab, with
+  there are any. It puts your hand edits back too. Its result appears under **Final fit**, with
   a line saying whether the refit converged, and Export offers it as **Final fit model**.
 
 Run CV scores the folds with whichever of deviance, Gini and NLL the supplied result scored, or
@@ -839,12 +880,12 @@ with. Both jobs estimate what the opened model declares they estimate: a
 A job whose model changed while it ran is not kept; run it again.
 
 Both run in the background, so you can keep working. A pill beside the tabs shows how far a job has
-got on every tab, and how it ended; click it to open the job's tab. While Run CV runs, each fold's
+got, and how it ended; click it to open its report. While Run CV runs, each fold's
 scores land on the cards and in the fold table as it finishes. When the folds split the rows, as
 K-fold does, the **Held out** column shows the piece of the book each fold scored, and **Rounds**
 shows how much smoothing search a `fit_reml` fold took, which is usually why one fold is slower.
 
-The **Diagnose** tab answers whether each fit converged, whether its numbers can be used and what to
+**Smoothing search** answers whether each fit converged, whether its numbers can be used and what to
 try if not, from what the fits recorded, so opening it refits nothing. It opens on the first fit
 that did not converge, and one line above the table names every such fit; each name selects it.
 
@@ -853,10 +894,10 @@ that did not converge, and one line above the table names every such fit; each n
   are usable, the smoothing was not checked to the strictest standard); did not converge, with the
   reason it stopped; or no smoothing search, because you set the smoothing. A fit that did not
   converge carries a cross and the words, not only a colour, and its fitted numbers, standard errors
-  and degrees of freedom should not be relied on until it is refitted as the tab's **What to try**
+  and degrees of freedom should not be relied on until it is refitted as the report's **What to try**
   says. A SuperLSS fit also names the smoothing search that made it, for example *Quick smoothing
   updates, then Newton steps to an optimum*. A fold that took at least twice the middle fold's rounds, and
-  at least ten, is marked *slow*, here and in the fold table, whose mark opens that fold in this tab.
+  at least ten, is marked *slow*, here and in the fold table, whose mark opens that fold in this report.
 - **Search path**: how much REML score the fit in view gained in each smoothing round, beside the
   other fits. A search that settled ends at the bottom; one that stopped while still gaining ends
   higher, and its last point is crossed.
@@ -872,19 +913,19 @@ that did not converge, and one line above the table names every such fit; each n
 - **Where the time went**: a SuperLSS's work profile, folded until opened, without the phases that
   took under five milliseconds.
 
-When every fit had its smoothing set, the tab says so once and shows only each term's flexibility.
+When every fit had its smoothing set, the report says so once and shows only each term's flexibility.
 
 Folds come from Run CV, or from a supplied result with `return_estimators=True`.
 
 A SuperLSS model works the same way: pass `cross_validate(model, X_train, y_train, cv=folds,
 fit_mode="fit_reml", return_estimators=True)` as `cv=`, with no `scoring=` argument. Its folds are
 scored by log score, CRPS, Gini and actual over expected; a family with neither a closed-form CRPS
-nor a distribution function has no CRPS, and its Validation and Final Fit tabs leave that column
+nor a distribution function has no CRPS, and Validation and Final fit leave that column
 out. Its `offset` is a dict by parameter, and its fold curves are listed under **Mean** and then
 **CV** (**Overdispersion** for a negative binomial, **Dispersion** for a Tweedie), the least stable
-first in each. Every curve on this tab is drawn as the Editor tab draws it, by its link (see
+first in each. Every curve in this report is drawn as the Editor tab draws it, by its link (see
 [Which models open, and what a curve shows](#which-models-open-and-what-a-curve-shows)), and
-the two tabs agree: the heading names the parameter and what the curve shows, for example
+the two agree: the heading names the parameter and what the curve shows, for example
 *Area · CV · relativity of the CV* (*relativity of σ* for a log-normal, *relativity of the
 overdispersion* for a negative binomial, *relativity of the dispersion* for a Tweedie), and on
 those four families higher always means more variation. The parameters and their labels are in
@@ -908,9 +949,9 @@ Run CV is disabled, with the reason on hover, when it cannot use the rows:
 
 A result from an older superglm version records no fingerprint of its data, so only the row count
 is checked. An older result records no fit method either, so Run CV fits each fold the way the current
-model was fitted. The tab says so in both cases. A result from before `cross_validate` took
+model was fitted. The report says so in both cases. A result from before `cross_validate` took
 `warm_start` and `fit_kwargs` was fitted without them, and Run CV replays it the same way. The older `cv_report=` argument of `EditorSession.from_model`
-still works: its report is shown on the Validation tab.
+still works: its report appears in Validation, under Assess.
 
 ## Explain Risks (SuperLSS)
 
@@ -963,6 +1004,7 @@ act on σ, the standard deviation of the log amount. The labels are in
   palette, and the inspector.
 - Use arrow keys inside tab lists, the mode switch and the join toggle; Home and End jump to the
   first and last item.
+- Arrow keys, Home and End step through the Assess list.
 - Use Enter or Space to activate a focused control.
 - Use Escape to close the current popover, Help drawer, inspector drawer, or dialog.
 - Use Ctrl/Cmd+Z to undo and Ctrl/Cmd+Shift+Z or Ctrl+Y to redo an edit, a waiting change or a

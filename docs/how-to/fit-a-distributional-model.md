@@ -182,7 +182,7 @@ any other link the effect on the link scale, both with 0 for no effect; the
 table in
 [Which models open, and what a curve shows](../tutorials/edit-a-model-in-the-browser.md#which-models-open-and-what-a-curve-shows)
 has every case. No curve is read at a reference row, so editing one curve
-never moves another, and the Cross-validation tab draws each term's curve
+never moves another, and Cross-validation, under Assess, draws each term's curve
 exactly as the Editor tab does. The axis says what the curve is of:
 
 | Parameter | Axis label | The curve multiplies |

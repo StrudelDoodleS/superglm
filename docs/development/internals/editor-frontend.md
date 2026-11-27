@@ -51,7 +51,7 @@ functions that take the session as their first argument:
 - `carry.py`: re-applies edited curves onto another fitted model, for Refit's carry-over and for
   Run CV and Final fit;
 - `unseen.py`: the **New levels →** choice (`set_unseen`), an edit that refits nothing;
-- `cv.py` and `jobs.py`: the Cross-validation tab's payload, and Run CV and Final fit as
+- `cv.py` and `jobs.py`: the Cross-validation report's payload, and Run CV and Final fit as
   cancellable background jobs;
 - `rating_preview.py`: one term's block of the rating table, from the Excel export's own payload
   builder;
@@ -82,8 +82,18 @@ request  the editor's hold (idle, running or error), per-panel evidence freshnes
 `selectors.js` derives the active term, selection, renderable preview, and model revision.
 `actions.js` is the single mutation/evidence controller. It snapshots request payloads, posts
 actions, validates structural envelopes, commits confirmed state, reconciles uncertain failures,
-debounces evidence per panel, and rejects stale responses.
+debounces evidence per panel, and rejects stale responses. Each report (`validation`, `cv`, `final`,
+`diagnose`) is its own evidence panel in `request.evidence`, asked of Python one at a time by
+`scheduleReports` (`drainReports`) and kept until the model changes.
 `timing.js` keeps structural request, DOM commit, paint, and per-panel evidence durations separate.
+
+`view.activeView` holds the single tagged value for the view on screen (`"editor"`, `"assess"` for
+the Assess overview, a report name, or `"risk"` for Explain), written only by `showView` in
+`main.js`. `state/assess.js` defines `ASSESS_GROUPS`, the table of Assess groups and entries to
+which later check groups are appended, together with `tabOf`, `assessEntry` and `openableView`.
+`views/window_sync.js` keeps the second Assess window (`?assess=<view>`) in step with the main
+window over a per-port, per-token `BroadcastChannel`, coalescing bursts of updates into one
+re-read.
 
 `machine.js` declares a lifecycle as a table: each state, the events it takes, and the state each
 leads to. It refuses a table with a move to an undefined state, a state nothing reaches, or a state
@@ -267,7 +277,7 @@ animation and transition off under `prefers-reduced-motion: reduce`.
 The older keys `superglm.editor.featureList` and `superglm.editor.shapeJoin` are separate and
 unchanged.
 
-## Background Jobs and the Cross-validation Tab
+## Background Jobs and Cross-validation
 
 Run CV and Final fit take one fit per fold, or one fit on every row, so they run as background
 jobs (`jobs.py`), polled by id:
@@ -284,11 +294,13 @@ lock and keeps the result only if the model revision is still the one it started
 is a flag the work checks between folds, so a cancelled job publishes nothing. A finished job
 evicts the finished jobs of its kind before it, so the runner keeps the last of each kind.
 
-The tab is the fourth app view, `cv`. It reuses `#reportPanel`: `report_payload` has a `"cv"` kind
-beside `"validation"` and `"final"`, and `app/views/cv_tab.js` renders it and starts, polls and
-cancels the two jobs. `cv.py` checks the supplied result against the rows (`cv_data`, else train
-data of the same row count, and the result's data fingerprint when it records one) and builds the
-payload; `carry.py` puts the hand edits back on every fold and on the Final fit.
+Cross-validation is an Assess entry (`cv`) rendered in `#reportPanel` inside `#assessView`.
+`report_payload` has a `"cv"` kind beside `"validation"`, `"final"` and `"diagnose"`; each report
+is its own evidence panel, asked one at a time, and `app/views/cv_tab.js` renders Cross-validation
+and starts, polls and cancels the two jobs. `cv.py` checks the supplied result against the rows
+(`cv_data`, else train data of the same row count, and the result's data fingerprint when it
+records one) and builds the payload; `carry.py` puts the hand edits back on every fold and on the
+Final fit.
 
 ## Rating-Table Preview
 
@@ -360,7 +372,8 @@ The styles are plain CSS loaded directly by `index.html`:
 - `styles/panels.css` owns inspector, evidence, Help, and report regions;
 - `styles/dialogs.css` owns native dialogs and profiling UI;
 - `styles/dark.css` holds the warm dark palette, keyed on `<html data-theme="dark">`;
-- `styles/cv.css` owns the Cross-validation tab;
+- `styles/cv.css` owns the Cross-validation report;
+- `styles/assess.css` owns the Assess list, overview cards, narrow-width icon rail, and watch-only second window;
 - `styles.css` contains the remaining shared and legacy component rules.
 
 The normal workspace is a tool rail, flexible chart, and inspector. Below 1048 px the inspector is a
