@@ -14,9 +14,19 @@ import {
 } from "./store.js";
 import { isHeld, moveMutation } from "./mutation.js";
 import { isReportName } from "../api/contracts.js";
-import { selectModelRevision, selectReportNeedsAsk } from "./selectors.js";
+import {
+  selectModelRevision,
+  selectReportNeedsAsk,
+  selectVisibleEvidencePanels
+} from "./selectors.js";
 
 /** @typedef {import('../api/contracts.js').ActionResult} ActionResult */
+/**
+ * A re-read of Python; `taken` says whether the page took its snapshot, which it refuses when
+ * it already holds a newer one.
+ * @typedef {{ok:true, snapshot:EditorSnapshot, taken:boolean}|
+ * {ok:false, skipped?:boolean, error:Error}} RereadResult
+ */
 /** @typedef {import('../api/contracts.js').EditorSnapshot} EditorSnapshot */
 /** @typedef {import('../api/contracts.js').EditorState} EditorState */
 /** @typedef {import('../api/contracts.js').EvidencePanel} EvidencePanel */
@@ -462,7 +472,7 @@ export function createEditorActions({
    * revision equal while the selection or structure moved, so the snapshot is accepted at an
    * equal revision and the visible evidence is re-requested at once.
    *
-   * @returns {Promise<ActionResult>}
+   * @returns {Promise<RereadResult>}
    */
   async function refreshFromPython() {
     if (noteSave && !(await afterNoteSave())) return skippedMutation(NOTE_NOT_SAVED);
@@ -481,16 +491,17 @@ export function createEditorActions({
     const snapshot = /** @type {EditorSnapshot} */ (candidate);
     // What Python holds beside the model, a job's result, can have moved: every report lapses,
     // unless the snapshot is older than one already held and so not taken.
+    let taken = false;
     store.update((state) => {
       const committed = commitRemote(state, snapshot);
-      const taken = committed.remote.snapshot === snapshot;
+      taken = committed.remote.snapshot === snapshot;
       return withNotice(
         withLatestView(taken ? lapseReportEvidence(committed) : committed, made), snapshot
       );
     });
     void Promise.resolve(scheduleVisibleEvidence(snapshot.model_revision, { immediate: true }))
       .catch(() => {});
-    return { ok: true, snapshot };
+    return { ok: true, snapshot, taken };
   }
 
   /**
@@ -499,7 +510,7 @@ export function createEditorActions({
    * and refreshFromPython is skipped while it runs, so this waits for the
    * mutation to settle first.
    *
-   * @returns {Promise<ActionResult>}
+   * @returns {Promise<RereadResult>}
    */
   async function refreshFromPythonWhenIdle() {
     if (held()) {
@@ -851,6 +862,24 @@ export function createEditorActions({
     store.update((state) => lapseReportEvidence(state, names));
   }
 
+  /**
+   * A background job finished, and `reports` show what it changed. A Final fit re-reads
+   * Python; a re-read the page took has lapsed every report and asked for the open one, so
+   * that is the one invalidation. A Run CV, or a re-read that failed, was skipped or was
+   * refused, lapses `reports` here and asks for the open one.
+   *
+   * @param {string} kind the job's kind, `cv` or `final_fit`
+   * @param {readonly ReportName[]} reports
+   * @returns {Promise<void>}
+   */
+  async function settleJob(kind, reports) {
+    const reread = kind === "final_fit" ? await refreshFromPythonWhenIdle() : null;
+    if (reread?.ok && reread.taken) return;
+    lapseReports(reports);
+    const open = selectVisibleEvidencePanels(store.getState()).filter(isReportName);
+    scheduleReports(open, { immediate: true });
+  }
+
   /** @returns {Promise<ActionResult>} */
   function retryMutation() {
     const retry = store.getState().request.recovery?.retry;
@@ -900,6 +929,7 @@ export function createEditorActions({
     refreshFromPythonWhenIdle,
     setSelection,
     setActiveTerm,
+    settleJob,
     executeStateMutation,
     executeStructuralMutation,
     holdEditor,

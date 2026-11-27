@@ -1530,6 +1530,7 @@ test("action module exposes only the controller factory, paint helper, and exact
     "scheduleReports",
     "setActiveTerm",
     "setSelection",
+    "settleJob",
     "showNotice"
   ]);
 });
@@ -1712,6 +1713,63 @@ test("a report opened before the first snapshot is asked once it lands", async (
   await loading;
 
   assert.deepEqual(sent, ["cv"]);
+});
+
+test("a Final fit re-read that is taken asks for the open report once, though the selection moved", async () => {
+  const reread = deferred();
+  const { sent, client, answer } = heldReportClient(() => reread.promise);
+  const reportsOnly = {
+    ...client,
+    /** @param {string} path @param {Record<string, unknown>} body */
+    postJSON: (path, body) => (path === "/report" ? client.postJSON(path, body) : Promise.resolve({}))
+  };
+  const opened = snapshot(0);
+  opened.terms.age = { ...termPayload(), x: [1, 2], y: [1, 1], original_y: [1, 1], n_points: 2 };
+  const store = createEditorStore(patchViewState(createInitialEditorState(opened), { activeView: "cv" }));
+  /** @type {ReturnType<typeof createEditorActions>} */
+  let actions;
+  actions = createEditorActions({
+    store,
+    client: reportsOnly,
+    // The page's scheduler: the open report is Cross-validation.
+    scheduleVisibleEvidence: (_revision, options) => actions.scheduleReports(["cv"], options),
+    setTimer: () => 0,
+    clearTimer: () => {}
+  });
+
+  const settling = actions.settleJob("final_fit", ["cv", "final", "diagnose"]);
+  // The analyst moves the selection while the re-read is held, so the page keeps its view.
+  actions.setSelection("age", [1]);
+  const python = snapshot(0);
+  python.terms.age = opened.terms.age;
+  reread.resolve(python);
+  await settled();
+  assert.deepEqual(sent, ["cv"]);
+  // The page holds a copy that keeps its selection, not the object Python sent.
+  assert.notStrictEqual(store.getState().remote.snapshot, python);
+  assert.deepEqual(store.getState().remote.snapshot?.selection.age, [1]);
+  await answer(0, 0);
+  await settling;
+
+  assert.deepEqual(sent, ["cv"]);
+  assert.equal(store.getState().request.evidence.cv.status, "current");
+});
+
+test("a Run CV that settles lapses its reports and asks for the open one", async () => {
+  const { sent, client, answer } = heldReportClient(async () => snapshot(0));
+  const retry = { path: "/report", payload: { report: "cv" } };
+  let state = patchViewState(createInitialEditorState(snapshot(0)), { activeView: "cv" });
+  state = completeEvidence(beginEvidence(state, "cv", 0, 1, retry), "cv", 0, 1, { report: "cv" });
+  state = { ...state, request: { ...state.request, nextSequence: 2 } };
+  const store = createEditorStore(state);
+  const actions = createEditorActions({ store, client });
+
+  const settling = actions.settleJob("cv", ["cv", "final", "diagnose"]);
+  await settled();
+  assert.deepEqual(sent, ["cv"]);
+  await answer(0, 0);
+  await settling;
+  assert.equal(store.getState().request.evidence.cv.status, "current");
 });
 
 test("Refresh from Python lapses every report the page holds", async () => {

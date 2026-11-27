@@ -335,12 +335,8 @@ const cvTab = createCVTab({
   frame: reportFrame,
   client: editorClient,
   onJobSettled: async (kind) => {
-    const reread = kind === "final_fit" ? await actions.refreshFromPythonWhenIdle() : null;
+    await actions.settleJob(kind, JOB_REPORTS);
     renderPill();
-    // A re-read that was taken lapsed every report and asked for the open one already.
-    if (reread?.ok && selectSnapshot(store.getState()) === reread.snapshot) return;
-    actions.lapseReports(JOB_REPORTS);
-    refreshVisibleReports();
   },
   onJobChange: () => renderPill(),
   onDiagnose: (fitId) => {
