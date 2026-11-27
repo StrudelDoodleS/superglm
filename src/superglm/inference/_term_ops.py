@@ -610,7 +610,7 @@ class _TermReport:
             )
         if combinations is not None:
             # read by the display between knots (``plotting.common.piecewise_display_term``)
-            object.__setattr__(inference, "_knot_combinations", combinations)
+            inference = replace(inference, _knot_combinations=combinations)
         return inference
 
 

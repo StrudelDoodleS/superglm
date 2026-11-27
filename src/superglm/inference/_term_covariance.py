@@ -347,6 +347,20 @@ class Determinacy(NamedTuple):
     contrast_estimable: Callable[..., bool] | None
 
 
+@dataclass(frozen=True)
+class FitRule:
+    """A fit's decider of a contrast, which reads the fit on each call (``decide``), beside
+    the same rule over data alone (``data_only``), formed on request for a result that
+    outlives this reading of the fit (``KnotCombinations``).
+    """
+
+    decide: Callable[..., bool]
+    data_only: Callable[[], Callable[..., bool] | None]
+
+    def __call__(self, *args, **kwargs) -> bool:
+        return self.decide(*args, **kwargs)
+
+
 def reads_determinacy(spec: Any) -> bool:
     """Whether ``feature_se_from_cov`` puts a main term's errors to ``determines``.
 
@@ -502,19 +516,14 @@ def knot_map(spec) -> NDArray:
     )
 
 
-def _no_knot_combinations() -> None:
-    """What a pickled ``KnotCombinations`` loads as."""
-    return None
-
-
 @dataclass(frozen=True, eq=False, repr=False)
 class KnotCombinations:
     """A Piecewise term's knot covariance before any value was blanked, beside the rule
     (``determines`` on the knot rows ``rows`` over the fitted coefficients ``columns``)
     that decides which combinations of its knot values the fit determines.
 
-    The rule can hold the fit itself, so a pickle carries neither: the record loads as
-    ``None`` (``__reduce__``), and a copy shares it.
+    The rule is the fit's over data alone (``FitRule.data_only``), so the record keeps the
+    fit's decisions past a refit and travels with copies and pickles, holding no model.
     """
 
     covariance: NDArray
@@ -526,14 +535,13 @@ class KnotCombinations:
         """Which rows of ``weights``, each weighing the knot values, the fit determines."""
         return _determined_rows(self.determines, self.columns, weights @ self.rows)
 
-    def __reduce__(self):
-        return (_no_knot_combinations, ())
-
-    def __copy__(self) -> KnotCombinations:
-        return self
-
-    def __deepcopy__(self, memo) -> KnotCombinations:
-        return self
+    def describes(self, knot_covariance: NDArray) -> bool:
+        """Whether ``knot_covariance`` is this covariance wherever it is not blank."""
+        published = np.asarray(knot_covariance, dtype=np.float64)
+        if published.shape != self.covariance.shape:
+            return False
+        shown = ~np.isnan(published)
+        return bool(np.array_equal(published[shown], self.covariance[shown]))
 
 
 def withhold_undetermined_knots(
@@ -541,7 +549,8 @@ def withhold_undetermined_knots(
 ) -> tuple[NDArray, NDArray, KnotCombinations | None]:
     """``se`` and ``knot_covariance`` of a Piecewise term with each knot value ``determines``
     leaves open blank (``withhold_undetermined`` on ``knot_map``, centred with ``center``),
-    and the ``KnotCombinations`` a display reads between knots, ``None`` with none blank.
+    and the ``KnotCombinations`` a display reads between knots, which keeps a ``FitRule``'s
+    rule over data alone: ``None`` with none blank, or with any other rule.
 
     An open value's covariance with any value is NaN but with the base's, identically
     zero; two determined values ``a'b``, ``c'b`` keep theirs, as ``a' G c`` is one number
@@ -558,7 +567,12 @@ def withhold_undetermined_knots(
     moving = np.any(rows != 0.0, axis=1)
     blank = np.outer(~shown, moving) | np.outer(moving, ~shown)
     covariance = np.where(blank, np.nan, np.asarray(knot_covariance, dtype=np.float64))
-    combinations = KnotCombinations(knot_covariance, determines, columns, rows)
+    rule = determines.contrast_estimable
+    rule = rule.data_only() if isinstance(rule, FitRule) else None
+    combinations = None
+    if rule is not None:
+        mask = np.array(determines.coefficient_estimable, dtype=bool)
+        combinations = KnotCombinations(knot_covariance, Determinacy(mask, rule), columns, rows)
     return np.where(shown, se, np.nan), covariance, combinations
 
 

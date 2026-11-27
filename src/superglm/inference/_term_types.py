@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 import numpy as np
@@ -158,6 +158,12 @@ class TermInference:
     covariance_method: str | None = None
     covariance_n_units: float | None = None
     covariance_n_clusters: int | None = None
+
+    # Piecewise only, on a fit that leaves a knot value open: the knot covariance before it
+    # was blanked and the fit's rule over data alone, which the display between knots reads
+    # (a ``KnotCombinations``).  None otherwise, and on a result saved before it was kept.
+    # Typed ``Any`` so ``typing.get_type_hints`` resolves every field at runtime.
+    _knot_combinations: Any = field(default=None, repr=False, compare=False, kw_only=True)
 
     def to_dataframe(self) -> pd.DataFrame:
         """Convert to a tidy DataFrame for plotting or export."""

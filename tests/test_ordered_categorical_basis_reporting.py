@@ -1441,24 +1441,34 @@ def test_a_level_a_coarser_grouping_leaves_determined_keeps_its_error() -> None:
 _MIDPOINT_KNOTS = np.array([0.0, 40 / 199, 60 / 199, 1.0])
 
 
+def _midpoint_frame(trade=(1.0, -1.0), group=False):
+    """``_midpoint_fit``'s rows, its ``z`` the knots 40/199 and 60/199's hats weighed by
+    ``trade``, or with ``None`` drawn apart from them; with ``group``, a level ``g`` of 40."""
+    rng = np.random.default_rng(11)
+    x = np.r_[0.0, 1.0, rng.uniform(0.0, 1.0, 398)]
+    y = np.sin(3.0 * x) + rng.normal(scale=0.3, size=x.size)
+    hats = [np.interp(x, _MIDPOINT_KNOTS, row) for row in np.eye(4)]
+    z = rng.normal(size=x.size) if trade is None else trade[0] * hats[1] + trade[1] * hats[2]
+    X = pd.DataFrame({"x": x, "z": z})
+    if group:
+        X["g"] = (np.arange(x.size) % 40).astype(str)
+    return X, y
+
+
 def _midpoint_fit(alias=True, weight=1.0):
     """A piecewise term with adjacent knots 40/199 and 60/199, its base the first, and with
     ``alias`` a numeric ``z``, their hats' difference: in the term's span, it trades the two
     knots' values against each other and keeps their mean.  The default display grid, 200
     points over [0, 1] beside the knots, holds the point midway between them.  Every row
     has weight ``weight``."""
-    rng = np.random.default_rng(11)
-    x = np.r_[0.0, 1.0, rng.uniform(0.0, 1.0, 398)]
-    y = np.sin(3.0 * x) + rng.normal(scale=0.3, size=x.size)
-    hats = [np.interp(x, _MIDPOINT_KNOTS, row) for row in np.eye(4)]
-    X = pd.DataFrame({"x": x, "z": hats[1] - hats[2]})
+    X, y = _midpoint_frame()
     features = {"x": Piecewise(breaks=list(_MIDPOINT_KNOTS[1:3]), base="first")}
     if alias:
         features["z"] = Numeric()
     else:
         X = X[["x"]]
     model = SuperGLM(family="gaussian", features=features)
-    return model.fit(X, y, sample_weight=np.full(x.size, weight)), X
+    return model.fit(X, y, sample_weight=np.full(len(y), weight)), X
 
 
 def test_a_piecewise_display_shows_a_value_the_fit_determines_between_two_open_knots() -> None:
@@ -1517,6 +1527,115 @@ def test_a_piecewise_display_shows_a_value_the_fit_determines_between_two_open_k
         assert any(np.array_equal(line, shown.ci_lower, equal_nan=True) for line in drawn)
     finally:
         plt.close(figure)
+
+
+_STORED_RECORDS = ["rank record", "no rank record", "structured"]
+
+
+def _stored_midpoint_fit(record):
+    """The midpoint fit read by its rank record, by the rank a fit without one rebuilds
+    (``"no rank record"``) or by a random effect's structured geometry (``"structured"``),
+    and its refit on ``_midpoint_frame(trade)``."""
+    structured = record == "structured"
+
+    def refit(model, trade):
+        X, y = _midpoint_frame(trade, group=structured)
+        return model.fit_reml(X, y) if structured else model.fit(X, y)
+
+    features = {"x": Piecewise(breaks=list(_MIDPOINT_KNOTS[1:3]), base="first"), "z": Numeric()}
+    if structured:
+        features = {"g": RandomEffect(), **features}
+    model = refit(SuperGLM(family="gaussian", features=features), (1.0, -1.0))
+    if record == "no rank record":
+        _drop_rank_record(model)
+    assert bool(model._fit_inference_info.get("structured_covariance")) is structured
+    return model, refit
+
+
+def _display_errors(inference):
+    """The piecewise display's errors and their grid."""
+    from superglm.plotting.common import piecewise_display_term
+
+    shown = piecewise_display_term(inference)
+    return np.asarray(shown.se_log_relativity), np.asarray(shown.x)
+
+
+@pytest.mark.parametrize("record", _STORED_RECORDS)
+def test_a_stored_piecewise_display_keeps_the_fit_it_was_read_from(record) -> None:
+    """A piecewise result keeps the decisions of the fit it was read from (#771 review).
+
+    Read by the midpoint fit's rank record, by the rank a fit without one rebuilds, or by a
+    random effect's structured geometry, the display shows the end knots and the point
+    midway between the open knots, with the errors of the fit without ``z`` (0.07648475
+    native, 0.02794032 centred).  So do the result and its shallow and deep copies after
+    refits with ``z`` drawn apart from the knots and with ``z = 2 h1 - h2``, and after the
+    model is released.  At a574c4932 the first refit gave them 199 errors (0.07496775 at
+    x = 51/199) and the second none midway, as the result read the refitted model, which it
+    kept alive.
+    """
+    import copy
+    import gc
+    import weakref
+
+    model, refit = _stored_midpoint_fit(record)
+    reference, _ = _midpoint_fit(alias=False)
+    kept = {}
+    for centering in ("native", "mean"):
+        inference = model.term_inference("x", centering=centering)
+        shown, x = _display_errors(inference)
+        midway = np.abs(x - 50 / 199) < 1e-15
+        determined = np.isin(x, [0.0, 1.0]) | midway
+        np.testing.assert_array_equal(np.isfinite(shown), determined)
+        if record != "structured":
+            want, _ = _display_errors(reference.term_inference("x", centering=centering))
+            np.testing.assert_allclose(shown[determined], want[determined], rtol=1e-9)
+        kept[centering] = shown, (inference, copy.copy(inference), copy.deepcopy(inference))
+
+    for trade in (None, (2.0, -1.0)):
+        refit(model, trade)
+        for centering, (shown, results) in kept.items():
+            for result in results:
+                errors, _ = _display_errors(result)
+                np.testing.assert_array_equal(errors, shown, err_msg=f"{trade} {centering}")
+    released = weakref.ref(model)
+    del model
+    gc.collect()
+    assert released() is None
+    for shown, results in kept.values():
+        np.testing.assert_array_equal(_display_errors(results[0])[0], shown)
+
+
+@pytest.mark.parametrize("record", _STORED_RECORDS)
+def test_a_piecewise_display_survives_a_pickle_and_a_replacement(record) -> None:
+    """A pickle round trip of a piecewise result, and a replacement that keeps its
+    covariance, show the points the result shows, also after a refit (#771 review).
+
+    A replacement with another covariance draws the knots alone, as the record no longer
+    describes it.  At a574c4932 the round trip and the replacement drew the knots alone:
+    the record was an attribute outside the dataclass's fields, which neither kept.
+    """
+    import dataclasses
+
+    model, refit = _stored_midpoint_fit(record)
+    kept = {}
+    for centering in ("native", "mean"):
+        inference = model.term_inference("x", centering=centering)
+        shown, x = _display_errors(inference)
+        results = (
+            pickle.loads(pickle.dumps(inference)),
+            dataclasses.replace(inference, alpha=0.1),
+        )
+        for result in results:
+            np.testing.assert_array_equal(_display_errors(result)[0], shown, err_msg=centering)
+        other = dataclasses.replace(inference, knot_covariance=4.0 * inference.knot_covariance)
+        errors, _ = _display_errors(other)
+        np.testing.assert_array_equal(np.isfinite(errors), np.isin(x, [0.0, 1.0]))
+        np.testing.assert_allclose(errors[x == 1.0], 2.0 * shown[x == 1.0], rtol=1e-15)
+        kept[centering] = shown, results
+    refit(model, None)
+    for centering, (shown, results) in kept.items():
+        for result in results:
+            np.testing.assert_array_equal(_display_errors(result)[0], shown, err_msg=centering)
 
 
 def _drop_rank_record(model) -> None:

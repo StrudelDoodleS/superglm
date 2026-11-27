@@ -199,8 +199,11 @@ def piecewise_display_term(ti, n_points: int = 200):
         h2 = (grid - knots[seg]) / (knots[seg + 1] - knots[seg])
         h1 = 1.0 - h2
         # Between knots, a term with an open knot value reads the covariance from before
-        # any was blanked, at the points the fit determines (``KnotCombinations``).
+        # any was blanked, at the points the fit determines (``KnotCombinations``), while
+        # that is the covariance it publishes.
         combinations = getattr(ti, "_knot_combinations", None)
+        if combinations is not None and not combinations.describes(V):
+            combinations = None
         U = V if combinations is None else combinations.covariance
         variance = (
             h1 * h1 * U[seg, seg] + 2.0 * h1 * h2 * U[seg, seg + 1] + h2 * h2 * U[seg + 1, seg + 1]

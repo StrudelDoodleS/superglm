@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import warnings
+from functools import partial
 
 import numpy as np
 
@@ -98,10 +99,15 @@ def _default_determinacy(model, names):
 
     The mask is read without the rest of the fit's inference record
     (``fit_coefficient_mask``); the decider forms that record on the first contrast the
-    mask leaves open (``fit_contrast_estimable``).
+    mask leaves open (``fit_contrast_estimable``), and gives the same rule over data alone
+    to a result that keeps it (``fit_data_contrast_estimable``).
     """
-    from superglm.inference._term_covariance import Determinacy, reads_determinacy
-    from superglm.model.state_ops import fit_coefficient_mask, fit_contrast_estimable
+    from superglm.inference._term_covariance import Determinacy, FitRule, reads_determinacy
+    from superglm.model.state_ops import (
+        fit_coefficient_mask,
+        fit_contrast_estimable,
+        fit_data_contrast_estimable,
+    )
 
     if not any(reads_determinacy(model._specs.get(name)) for name in names):
         return None
@@ -110,7 +116,8 @@ def _default_determinacy(model, names):
         decider = fit_contrast_estimable(model, model._fit_inference_info)
         return decider is not None and bool(decider(*args, **kwargs))
 
-    return Determinacy(fit_coefficient_mask(model), decide)
+    rule = FitRule(decide, partial(fit_data_contrast_estimable, model))
+    return Determinacy(fit_coefficient_mask(model), rule)
 
 
 _ALIASED_INFERENCE_MESSAGE = (

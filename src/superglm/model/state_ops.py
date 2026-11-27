@@ -750,6 +750,22 @@ def _structured_contrast_estimable(
     """
     factor = state.profiled_factor
     population = shared is not None and isinstance(factor, ProfiledSumToZeroTreeFactor)
+    decision = _structured_decision(inference, state, population)
+    if design_rows:
+        if isinstance(decision, BorderNullSpace):
+            return decision.function_estimable(
+                np.asarray(contrast, dtype=bool), shared=shared, group_columns=group_columns
+            )
+        return decision.function_estimable(np.asarray(contrast, dtype=bool), shared=shared)
+    if isinstance(decision, RankDecomposition):
+        return decision.is_estimable(contrast, abs(intercept) / math.sqrt(factor.sum_w))
+    return decision.is_estimable(contrast, intercept)
+
+
+def _structured_decision(inference: dict, state, population: bool):
+    """The structured geometry ``_structured_contrast_estimable`` decides with, formed and kept
+    in ``inference`` on first use: the population curves' with ``population``."""
+    factor = state.profiled_factor
     key = "population_estimability" if population else "contrast_estimability"
     decision = inference.get(key)
     if decision is None or (isinstance(decision, BorderNullSpace) and decision.centre is None):
@@ -761,15 +777,33 @@ def _structured_contrast_estimable(
             )
         )
         inference[key] = decision
-    if design_rows:
+    return decision
+
+
+def fit_data_contrast_estimable(model):
+    """``fit_contrast_estimable`` on the fit's inference record, over data alone, or ``None``.
+
+    It decides each contrast and intercept weight as that decider does, and holds neither
+    the model nor anything that reads it, so a result keeps the fit's decisions past a
+    refit, a copy, a pickle or the model's release.  A dense fit's is its rank record's data
+    rank on the columns it selected (``estimability_only``), a structured fit's its resolved
+    geometry, and one without a record the decider of the data rank it rebuilt.
+    """
+    from superglm.inference.metrics import _active_contrast_estimable
+
+    inference = model._fit_inference_info
+    if inference.get("structured_covariance"):
+        state = retained_linear_state(model)
+        decision = _structured_decision(inference, state, population=False)
         if isinstance(decision, BorderNullSpace):
-            return decision.function_estimable(
-                np.asarray(contrast, dtype=bool), shared=shared, group_columns=group_columns
-            )
-        return decision.function_estimable(np.asarray(contrast, dtype=bool), shared=shared)
-    if isinstance(decision, RankDecomposition):
-        return decision.is_estimable(contrast, abs(intercept) / math.sqrt(factor.sum_w))
-    return decision.is_estimable(contrast, intercept)
+            return decision.is_estimable
+        columns, sum_w = np.arange(decision.width), state.profiled_factor.sum_w
+        return partial(_active_contrast_estimable, decision, columns, sum_w=sum_w)
+    rank_info = model._solver_pirls_result().rank_info
+    if rank_info is None:
+        return inference.get("contrast_estimable")
+    data_rank, columns = rank_info.data.estimability_only(), rank_info.selected_columns
+    return partial(_active_contrast_estimable, data_rank, columns, sum_w=rank_info.sum_w)
 
 
 def refit_shows_every_standard_error(model, penalized=None) -> bool:
