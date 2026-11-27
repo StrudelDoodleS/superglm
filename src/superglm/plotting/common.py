@@ -201,6 +201,11 @@ def piecewise_display_term(ti, n_points: int = 200):
         variance = (
             h1 * h1 * V[seg, seg] + 2.0 * h1 * h2 * V[seg, seg + 1] + h2 * h2 * V[seg + 1, seg + 1]
         )
+        # A knot reads its own variance alone, which a neighbour the fit leaves open (a NaN
+        # row of the covariance) does not reach.
+        variance = np.where(
+            h2 == 0.0, V[seg, seg], np.where(h1 == 0.0, V[seg + 1, seg + 1], variance)
+        )
         se = np.sqrt(np.maximum(variance, 0.0))
         z = float(norm.ppf(1.0 - ti.alpha / 2.0))
         ci_lo = np.asarray(_safe_exp(log_rel - z * se))

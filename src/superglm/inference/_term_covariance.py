@@ -52,6 +52,14 @@ def _covariance_apply(covariance, vector: NDArray) -> NDArray:
     return cast(NDArray, np.asarray(covariance, dtype=np.float64) @ vector)
 
 
+def _centre_weights(n_rows: int, centre_on: NDArray | None) -> NDArray:
+    """The weights over a level table's rows whose sum is its centre: each row's ``1/n``,
+    or over the rows ``centre_on`` marks."""
+    if centre_on is None:
+        return np.full(n_rows, 1.0 / n_rows, dtype=np.float64)
+    return cast(NDArray, centre_on / float(np.count_nonzero(centre_on)))
+
+
 def _scatter_centered_variance(
     diagonal: NDArray,
     covariance_block: NDArray,
@@ -68,12 +76,7 @@ def _scatter_centered_variance(
     centering.  ``C = I - 1p'`` with ``p`` the mean over the rows ``centre_on``
     marks (every row when ``None``).
     """
-    row_weights = (
-        np.full(n_rows, 1.0 / n_rows, dtype=np.float64)
-        if centre_on is None
-        else centre_on / float(np.count_nonzero(centre_on))
-    )
-    weights = row_weights[row_of_column]
+    weights = _centre_weights(n_rows, centre_on)[row_of_column]
     column = covariance_block @ weights
     cross = np.zeros(n_rows, dtype=np.float64)
     cross[row_of_column] = column
@@ -343,18 +346,21 @@ class Determinacy(NamedTuple):
     contrast_estimable: Callable[..., bool] | None
 
 
-def reads_determinacy(spec: Any, name: Hashable, interaction_specs: Mapping[Any, Any]) -> bool:
-    """Whether ``feature_se_from_cov`` puts main term ``name``'s errors to ``determines``.
+def reads_determinacy(spec: Any) -> bool:
+    """Whether ``feature_se_from_cov`` puts a main term's errors to ``determines``.
 
-    It does for a spline's curve, an ordered term's levels and the levels an ``sz`` term
-    folds (``_held_levels``); the other term classes are reported as they are.
+    It does for every main-effect class but a random effect, whose levels are reported as
+    they are.
     """
+    from superglm.features.categorical import Categorical
+    from superglm.features.numeric import Numeric
     from superglm.features.ordered_categorical import OrderedCategorical
+    from superglm.features.piecewise import Piecewise
+    from superglm.features.polynomial import Polynomial
     from superglm.features.spline import _SplineBase
 
-    if isinstance(spec, _SplineBase | OrderedCategorical):
-        return True
-    return _held_levels(spec, name, interaction_specs) is not None
+    reads = (_SplineBase, OrderedCategorical, Categorical, Polynomial, Piecewise, Numeric)
+    return isinstance(spec, reads)
 
 
 def as_determinacy(determines: Any, width: int) -> Determinacy | None:
@@ -452,6 +458,71 @@ def _determined_rows(determines: Determinacy, columns: NDArray, rows: NDArray) -
     return determined
 
 
+def _withhold_undetermined_levels(
+    se: NDArray,
+    determines: Determinacy | None,
+    columns: NDArray,
+    levels: list,
+    non_base: list,
+    centre_weights: NDArray | None,
+) -> NDArray:
+    """``withhold_undetermined`` of a level table, its map formed one row at a time.
+
+    Level ``l``'s row reads the coefficient at ``columns`` that ``non_base`` names it by
+    (none for the base or a pinned level), less ``centre_weights`` over the levels when
+    centring: the map ``_scatter_centered_variance`` reads, never formed whole.
+    """
+    if determines is None or np.all(determines.coefficient_estimable[columns]):
+        return se
+    row_of = {level: row for row, level in enumerate(levels)}
+    row_of_column = np.array([row_of[level] for level in non_base], dtype=np.intp)
+    centre = np.zeros(len(determines.coefficient_estimable))
+    if centre_weights is not None:
+        centre[columns] = centre_weights[row_of_column]
+    column_of_row = dict(zip(row_of_column.tolist(), columns.tolist(), strict=True))
+    determined = np.empty(len(se), dtype=bool)
+    for row in range(len(se)):
+        contrast = -centre
+        if row in column_of_row:
+            contrast[column_of_row[row]] += 1.0
+        determined[row] = contrast_determined(contrast, *determines)
+    return np.where(determined, se, np.nan)
+
+
+def knot_map(spec) -> NDArray:
+    """A Piecewise term's knot values as rows over its coefficients.
+
+    ``_raw_basis_matrix`` at the knots is the identity; its retained columns are the
+    identity with a zero row at the base knot, so the base knot's error is 0 without a
+    special case.
+    """
+    return np.asarray(
+        spec._raw_basis_matrix(spec._knots)[:, spec._non_base_indices], dtype=np.float64
+    )
+
+
+def withhold_undetermined_knots(
+    spec, se: NDArray, knot_covariance: NDArray, determines, columns: NDArray, *, center: bool
+) -> tuple[NDArray, NDArray]:
+    """``se`` and ``knot_covariance`` of a Piecewise term with each knot value ``determines``
+    leaves open blank (``withhold_undetermined`` on ``knot_map``, centred with ``center``).
+
+    An open value's covariance with any value is NaN but with the base's, identically
+    zero; two determined values ``a'b``, ``c'b`` keep theirs, as ``a' G c`` is one number
+    for every generalised inverse ``G`` of the information when both lie in its range.
+    """
+    rows = knot_map(spec)
+    if center:
+        rows = rows - rows.mean(axis=0)
+    shown = ~np.isnan(withhold_undetermined(se, determines, columns, rows)) | np.isnan(se)
+    if shown.all():
+        return se, knot_covariance
+    moving = np.any(rows != 0.0, axis=1)
+    blank = np.outer(~shown, moving) | np.outer(moving, ~shown)
+    covariance = np.where(blank, np.nan, np.asarray(knot_covariance, dtype=np.float64))
+    return np.where(shown, se, np.nan), covariance
+
+
 def feature_se_from_cov(
     name: Hashable,
     Cov_active: NDArray,
@@ -471,10 +542,9 @@ def feature_se_from_cov(
     estimable contrast ``C b`` with ``C = I - 11'/L`` and covariance
     ``C V C'``. An inactive term returns zeros either way.  ``flags`` takes the
     calling reader's ``separated_levels.separation_flags``.  ``determines``
-    leaves NaN each error of a spline's curve and of an ordered term's levels
-    that the covariance does not determine, decided where its map is formed
-    (``_spline_se``, ``_held_level_se``, ``_population_curve_se``); the other
-    term classes are reported as they are.
+    leaves NaN each reported error whose row of the map it was formed with the
+    covariance does not determine (``withhold_undetermined``); a random effect's
+    levels are reported as they are.
     """
     from superglm.features.categorical import Categorical
     from superglm.features.numeric import Numeric
@@ -587,6 +657,7 @@ def feature_se_from_cov(
         return cast(NDArray, np.sqrt(variance))
 
     Cov_g = Cov_active[np.ix_(indices, indices)]
+    columns = feature_groups[0].start + _active_subgroup_columns(name, feature_groups, active_subs)
 
     if isinstance(spec, _SplineBase):
         shifted = _population_curve_se(
@@ -620,7 +691,8 @@ def feature_se_from_cov(
         if center:
             M = M - M.mean(axis=0)
         Q = M @ Cov_g
-        return cast(NDArray, np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0)))
+        se = np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0))
+        return withhold_undetermined(se, determines, columns, M)
 
     if isinstance(spec, Categorical):
         levels = list(spec._levels)
@@ -661,25 +733,24 @@ def feature_se_from_cov(
                     se_all[i] = se_nonbase[idx]
         if separated is not None:
             se_all[separated] = np.nan
-        return cast(NDArray, se_all)
+        centre = _centre_weights(len(levels), centre_on) if center else None
+        return _withhold_undetermined_levels(
+            se_all, determines, columns, levels, spec._non_base, centre
+        )
 
     if isinstance(spec, Piecewise):
-        # ``_raw_basis_matrix`` at the knots is the identity; its retained
-        # columns are the identity with a zero row at the base knot.  Going
-        # through the basis keeps this a plain quadratic form, so the base
-        # knot's SE is 0 without a special case.
-        M = np.asarray(
-            spec._raw_basis_matrix(spec._knots)[:, spec._non_base_indices], dtype=np.float64
-        )
+        M = knot_map(spec)
         if center:
             M = M - M.mean(axis=0)
         Q = M @ Cov_g
-        return cast(NDArray, np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0)))
+        se = np.sqrt(np.maximum(np.sum(Q * M, axis=1), 0.0))
+        return withhold_undetermined(se, determines, columns, M)
 
     if isinstance(spec, Numeric):
         # A single reported value: ``centering="mean"`` declines to shift it,
         # so there is no contrast to propagate and ``center`` cannot apply.
-        return np.array([np.sqrt(max(Cov_g[0, 0], 0.0))])
+        se = np.array([np.sqrt(max(Cov_g[0, 0], 0.0))])
+        return withhold_undetermined(se, determines, columns, np.ones((1, 1)))
 
     variance = np.maximum(np.diag(Cov_g), 0.0)
     if center:
@@ -764,7 +835,9 @@ def simultaneous_band_and_critical_value(
     differs, so it is computed through the centered map. A curve an ``sz``
     term moves onto its population curve is banded on that curve with its
     covariance ``V_f`` (``_population_curve_map``). Every covariance is drawn
-    through its principal square root (``_principal_root``).
+    through its principal square root (``_principal_root``).  ``determines`` leaves
+    NaN each error it does not determine, and then no band: the band is one
+    statement about every point.
     """
     import scipy.spatial
     from scipy.stats import norm
@@ -840,8 +913,11 @@ def simultaneous_band_and_critical_value(
             else None
         )
     else:
-        beta_sim = rng.standard_normal((n_sim, Cov_g.shape[0])) @ _principal_root(Cov_g)
-        f_sim = beta_sim @ M.T
+        se = withhold_undetermined(se, determines, feature_groups[0].start + active_cols, M)
+        f_sim = None
+        if not np.isnan(se).any():
+            beta_sim = rng.standard_normal((n_sim, Cov_g.shape[0])) @ _principal_root(Cov_g)
+            f_sim = beta_sim @ M.T
 
     # A standard error below the rounding of the largest one carries no
     # information; the floor is relative, so rescaling the response moves it too.
