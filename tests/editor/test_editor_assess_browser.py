@@ -1,4 +1,4 @@
-"""The editor's reports, as the Assess tab will hold them: each keeps its own evidence."""
+"""The editor's Assess tab: its list, its overview, and the reports it holds, each with its own evidence."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 
 import pytest
 from tests.editor.assess_table import (
+    assert_report_open,
     bare_glm_session,
     binomial_cv_session,
     open_report,
@@ -101,3 +102,50 @@ def test_a_final_fit_that_finishes_shows_on_final_fit(assess_page):
         open_report(page, "final")
         page.locator("#reportFrame .final-fit table").wait_for()
         assert "Refitted on" in page.locator("#reportFrame .final-fit").inner_text()
+
+
+def test_the_top_bar_is_editor_and_assess_and_assess_opens_on_its_overview(assess_page):
+    with assess_page() as (page, _session):
+        tabs = page.get_by_role("tablist", name="Editor views").get_by_role("tab")
+        assert tabs.all_inner_texts() == ["Editor", "Assess"]
+        page.locator("#assessTab").click()
+        assert page.locator("#assessOverviewTitle").inner_text() == "Is this model any good?"
+        assert page.locator("#assessList [data-assess-entry]").all_inner_texts() == [
+            "Overview",
+            "Validation",
+            "Cross-validation",
+            "Final fit",
+            "Smoothing search",
+        ]
+        assert page.locator("#assessList .assess-group-title").all_inner_texts() == ["Reports"]
+        assert page.locator("#assessCards .assess-card-title").all_inner_texts() == [
+            "Validation",
+            "Cross-validation",
+            "Final fit",
+            "Smoothing search",
+        ]
+        page.locator('#assessCards [data-card="diagnose"]').click()
+        wait_for_report(page, "diagnose")
+        assert page.locator("#reportTitle").inner_text() == "Smoothing search"
+        assert_report_open(page, "diagnose")
+        assert page.evaluate("document.activeElement?.dataset.assessEntry") == "diagnose"
+        page.locator("#editorTab").click()
+        page.locator("#assessTab").click()
+        assert page.locator("#assessOverview").is_visible()
+
+
+def test_a_superlss_session_has_explain_after_assess(assess_page):
+    with assess_page(case="pareto") as (page, _session):
+        tabs = page.get_by_role("tablist", name="Editor views").get_by_role("tab")
+        assert tabs.all_inner_texts() == ["Editor", "Assess", "Explain"]
+
+
+def test_the_list_steps_with_the_keyboard(assess_page):
+    with assess_page() as (page, _session):
+        page.locator("#assessTab").click()
+        page.locator('[data-assess-entry="assess"]').focus()
+        page.keyboard.press("ArrowDown")
+        page.keyboard.press("End")
+        page.keyboard.press("Enter")
+        wait_for_report(page, "diagnose")
+        assert page.locator('#assessList [tabindex="0"]').count() == 1

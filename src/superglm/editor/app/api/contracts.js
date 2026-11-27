@@ -1,6 +1,6 @@
 // @ts-check
 
-/** @typedef {'editor'|'validation'|'cv'|'final'|'diagnose'|'risk'} AppView */
+/** @typedef {'editor'|'assess'|ReportName|'risk'} AppView */
 /** @typedef {'select'|'move'|'zoom'|'handles'|'knots'} EditorMode */
 /** @typedef {'chart'|'table'} TermView */
 /** @typedef {'idle'|'running'|'error'} MutationStatus */
@@ -552,7 +552,7 @@
 /**
  * @typedef {Object} EditorViewState
  * @property {string} activeTerm
- * @property {AppView} activeView
+ * @property {AppView} activeView the view on screen; 'assess' is the Assess tab's overview
  * @property {EditorMode} mode
  * @property {TermView} termView
  * @property {boolean} showCi

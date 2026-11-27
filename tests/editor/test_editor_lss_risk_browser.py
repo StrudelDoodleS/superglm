@@ -116,7 +116,7 @@ def test_the_explain_tab_is_a_page_of_its_own_and_starts_at_the_reference_risk(
 def test_a_superglm_session_has_no_explain_tab(open_editor_page):
     with open_editor_page() as (page, _session):
         assert page.locator("#explainTab").is_hidden()
-        assert page.get_by_role("tab", name="Diagnose", exact=True).is_visible()
+        assert page.get_by_role("tab", name="Assess", exact=True).is_visible()
 
 
 @pytest.mark.parametrize(

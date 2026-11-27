@@ -20,6 +20,7 @@ import { renderMetricGrid } from "./metrics.js";
 import { renderReport } from "./reports.js";
 import { shapeButtonState, shapeRangeForSelection } from "./shapes.js";
 import { createEditorActions } from "./state/actions.js";
+import { assessEntry, openableView, tabOf } from "./state/assess.js";
 import {
   selectActiveTermName,
   selectCurrentSelection,
@@ -72,6 +73,8 @@ import {
 import { createRiskController } from "./views/risk_controller.js";
 import { defaultRiskLine, renderRiskPanel, riskPlotsHost } from "./views/risk_panel.js";
 import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
+import { bindAssessList, renderAssessList } from "./views/assess_list.js";
+import { bindOverview, overviewGroups, overviewMarkup } from "./views/assess_overview.js";
 import {
   placeTermViewToggle,
   renderContextBar,
@@ -159,6 +162,10 @@ const appAlertRetry = document.getElementById("appAlertRetry");
 const appAlertDismiss = document.getElementById("appAlertDismiss");
 const contextBar = document.querySelector(".context-bar");
 const editorView = document.getElementById("editorView");
+const assessView = document.getElementById("assessView");
+const assessRows = document.getElementById("assessRows");
+const assessOverview = document.getElementById("assessOverview");
+const assessCards = document.getElementById("assessCards");
 const reportPanel = document.getElementById("reportPanel");
 const reportTitle = document.getElementById("reportTitle");
 const reportStatus = document.getElementById("reportStatus");
@@ -1083,7 +1090,7 @@ function setAppBusy(active, title = "Working...", detail = "") {
     clearInterval(appBusyTimer);
     appBusyTimer = null;
   }
-  for (const region of [appBar, contextBar, editorView, riskView, reportPanel]) {
+  for (const region of [appBar, contextBar, editorView, riskView, assessView]) {
     if (region) region.toggleAttribute("inert", active);
   }
   appBusyActive = active;
@@ -1190,8 +1197,9 @@ function formatMilliseconds(value) {
   return `${(number / 1000).toFixed(2)} s`;
 }
 
+// The one writer of the view on screen.
 async function showView(view) {
-  const activeView = ["validation", "cv", "final", "diagnose", "risk"].includes(view) ? view : "editor";
+  const activeView = openableView(view, { assessWindow: false });
   actions.patchView({ activeView });
   if (activeView === "editor") {
     scheduleVisibleEvidenceCatchUp();
@@ -1201,11 +1209,20 @@ async function showView(view) {
 }
 
 function renderAppView(activeView) {
-  editorView.hidden = activeView !== "editor";
-  riskView.hidden = activeView !== "risk";
-  reportPanel.hidden = activeView === "editor" || activeView === "risk";
-  // The Cross-validation tab lays the panel out its own way (cv.css).
+  const tab = tabOf(activeView);
+  editorView.hidden = tab !== "editor";
+  riskView.hidden = tab !== "risk";
+  assessView.hidden = tab !== "assess";
+  assessOverview.hidden = activeView !== "assess";
+  reportPanel.hidden = !isReportName(activeView);
+  assessView.dataset.view = activeView;
+  // Cross-validation and Smoothing search lay the panel out their own way (cv.css).
   reportPanel.dataset.report = activeView;
+  renderAssessList(assessRows, activeView);
+}
+
+function renderOverview() {
+  assessCards.innerHTML = overviewMarkup(overviewGroups(store.getState().request.evidence));
 }
 
 function renderChartWorkspace() {
@@ -1775,7 +1792,7 @@ function selectAppBarRenderState(state) {
   const snapshot = state.remote.snapshot;
   return {
     ready: snapshot !== null,
-    activeView: state.view.activeView,
+    activeView: tabOf(state.view.activeView),
     undoLabel: snapshot?.undo_redo.undo ?? null,
     redoLabel: snapshot?.undo_redo.redo ?? null,
     canRevert: Boolean(snapshot && revertAvailable(snapshot)),
@@ -1994,13 +2011,6 @@ function renderMetricsEvidence(evidence) {
   });
 }
 
-const REPORT_TITLES = Object.freeze({
-  validation: "Validation Report",
-  cv: "Cross-validation",
-  final: "Final Fit Report",
-  diagnose: "Diagnose"
-});
-
 // The evidence of the report on screen, or null on a view that is not a report.
 function openReportEvidence(state) {
   const activeView = state.view.activeView;
@@ -2011,12 +2021,13 @@ function renderReportEvidence(evidence, activeView) {
   const busy = evidence.status === "updating";
   reportFrame.setAttribute("aria-busy", busy ? "true" : "false");
   reportFrame.dataset.freshness = evidence.status;
-  if (activeView === "editor" || activeView === "risk") return;
+  if (!isReportName(activeView)) return;
+  const title = assessEntry(activeView)?.label ?? "";
   const payloadMatchesView = evidence.payload !== null && evidence.payload.report === activeView;
   if (payloadMatchesView) {
-    renderReport(evidence.payload, { reportTitle, reportStatus, reportFrame }, cvTab, diagnoseTab);
+    renderReport(evidence.payload, { reportTitle, reportStatus, reportFrame, title }, cvTab, diagnoseTab);
   } else {
-    reportTitle.textContent = REPORT_TITLES[activeView] || REPORT_TITLES.validation;
+    reportTitle.textContent = title;
     reportFrame.innerHTML = "";
   }
   if (!payloadMatchesView && evidence.status !== "error" && evidence.status !== "stale") {
@@ -2560,6 +2571,17 @@ bindFeatureList(featureListNodes, {
 });
 renderFeatureListState();
 
+bindAssessList(assessRows, { onOpen: showView });
+// A card opens its report, and focus goes to the report's entry in the list.
+bindOverview(assessCards, {
+  onOpen: (id) => {
+    void showView(id);
+    assessRows.querySelector(`[data-assess-entry="${id}"]`)?.focus();
+  }
+});
+renderAssessList(assessRows, store.getState().view.activeView);
+renderOverview();
+
 bindSummarySearch(summarySearch, (query) => {
   summaryQuery = query;
   summaryToggled.clear();
@@ -2858,6 +2880,10 @@ store.subscribe(
     if (evidence && activeView === previous.activeView) renderReportEvidence(evidence, activeView);
   },
   (next, previous) => next.evidence === previous.evidence
+);
+store.subscribe(
+  (state) => REPORT_NAMES.map((name) => state.request.evidence[name].status).join(),
+  renderOverview
 );
 for (const name of REPORT_NAMES) {
   store.subscribe(

@@ -246,8 +246,8 @@ class CrossValidationResult:
 
 _NO_LSS_FOLD_PLOT = (
     "plot_terms_by_fold() draws SuperGLM folds. To compare a SuperLSS model's terms across folds, "
-    "pass this result to superglm.editor.edit(model, cv=result): its Cross-validation tab draws "
-    "each term by fold."
+    "pass this result to superglm.editor.edit(model, cv=result): Cross-validation, under Assess, "
+    "draws each term by fold."
 )
 _FOLD_ROWS = (
     "{name} has {rows:,} rows, but the folds were drawn on {expected:,}; pass the data given "

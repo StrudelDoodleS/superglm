@@ -13,6 +13,7 @@ import pytest
 from sklearn.model_selection import KFold
 from tests._lss_editor_fixtures import curved_lognormal_case, lognormal_case, ruled_case
 from tests.editor._chart_layout import wait_for_chart_to_fit
+from tests.editor.assess_table import assert_report_open, open_report
 from tests.editor.test_editor_workspace_browser import select_chart_tool
 
 from superglm import SuperLSS, cross_validate
@@ -102,7 +103,7 @@ def test_cv_tab_draws_folds_and_runs_cv_and_final_fit(open_lss_editor_page):
         error_score="raise",
     )
     with open_lss_editor_page(cv=cv) as (page, _session):
-        page.locator("#cvTab").click()
+        open_report(page, "cv")
         frame = page.locator("#reportFrame")
         frame.locator(".cv-card").first.wait_for()
         titles = frame.locator(".cv-card-title").all_inner_texts()
@@ -153,7 +154,7 @@ def test_cv_tab_draws_folds_and_runs_cv_and_final_fit(open_lss_editor_page):
             timeout=60000,
         )
         pill.click()
-        assert page.locator("#cvTab").get_attribute("aria-selected") == "true"
+        assert_report_open(page, "cv")
         frame.locator('[data-origin="run"]').first.wait_for(timeout=60000)
         assert "Current model" in frame.locator(".cv-card").first.inner_text()
         pill.wait_for(state="hidden", timeout=30000)
@@ -163,7 +164,7 @@ def test_cv_tab_draws_folds_and_runs_cv_and_final_fit(open_lss_editor_page):
             "() => /Final fit finished/.test(document.querySelector('#reportFrame').innerText)",
             timeout=60000,
         )
-        page.locator("#finalTab").click()
+        open_report(page, "final")
         frame.get_by_text("Refitted on", exact=False).first.wait_for()
         final = frame.locator(".final-fit").inner_text()
         # The session has no test split, so none is said to stay held out; the refit's status
@@ -198,10 +199,10 @@ def test_diagnose_tab_lists_the_fits_and_switches_between_them(open_lss_editor_p
     with open_lss_editor_page(cv=cv, case=case) as (page, _session):
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
-        page.locator("#diagnoseTab").click()
+        open_report(page, "diagnose")
         frame = page.locator("#reportFrame")
         frame.locator(".diagnose-table").first.wait_for()
-        assert page.locator("#diagnoseTab").get_attribute("aria-selected") == "true"
+        assert_report_open(page, "diagnose")
         fits = frame.locator(".diagnose-fits [data-diagnose-fit]")
         assert fits.all_inner_texts() == ["All rows", "Fold 1", "Fold 2", "Fold 3"]
         # What the converged fits share is said once, not on every row, and no code shows.
@@ -223,9 +224,9 @@ def test_diagnose_tab_lists_the_fits_and_switches_between_them(open_lss_editor_p
         assert "Fold 2's held-out rows" in frame.inner_text()
         assert frame.locator('table[aria-label="Rows that cost the most"] tbody tr').count() == 10
         # A poll or a return to the tab keeps the fit in view.
-        page.locator("#cvTab").click()
+        open_report(page, "cv")
         page.locator("#reportFrame .cv-card").first.wait_for()
-        page.locator("#diagnoseTab").click()
+        open_report(page, "diagnose")
         frame.locator(".diagnose-table").first.wait_for()
         assert frame.locator('[data-diagnose-fit][aria-pressed="true"]').inner_text() == "Fold 2"
         assert errors == []
@@ -244,14 +245,14 @@ def test_a_slow_fold_s_mark_opens_it_in_diagnose(open_lss_editor_page):
     )
     slow = dataclasses.replace(cv, fold_scores=cv.fold_scores.assign(n_reml_iter=[10, 40, 10]))
     with open_lss_editor_page(cv=slow) as (page, _session):
-        page.locator("#cvTab").click()
+        open_report(page, "cv")
         frame = page.locator("#reportFrame")
         frame.locator(".cv-card").first.wait_for()
         marks = frame.locator("[data-diagnose-open]")
         assert marks.count() == 1
         marks.first.click()
         frame.locator(".diagnose-table").first.wait_for()
-        assert page.locator("#diagnoseTab").get_attribute("aria-selected") == "true"
+        assert_report_open(page, "diagnose")
         assert frame.locator('[data-diagnose-fit][aria-pressed="true"]').inner_text() == "Fold 2"
 
 

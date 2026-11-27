@@ -8,6 +8,7 @@ import warnings
 import pytest
 from sklearn.model_selection import KFold
 from tests._lss_editor_fixtures import curved_lognormal_case, lognormal_case
+from tests.editor.assess_table import open_report
 
 from superglm import LogNormalLS, SuperLSS, cat, cross_validate, s
 
@@ -54,7 +55,7 @@ def _a_fold_that_did_not_converge():
 
 def test_diagnose_opens_on_the_fit_that_did_not_converge(open_lss_editor_page):
     with open_lss_editor_page(**_a_fold_that_did_not_converge()) as (page, _session):
-        page.locator("#diagnoseTab").click()
+        open_report(page, "diagnose")
         frame = page.locator("#reportFrame")
         frame.locator(".diagnose-table").first.wait_for()
         assert frame.locator('[data-diagnose-fit][aria-pressed="true"]').inner_text() == "Fold 2"
@@ -92,7 +93,7 @@ def test_every_fit_s_verdict_and_the_search_path_are_on_the_first_screen(
         page,
         _session,
     ):
-        page.locator("#diagnoseTab").click()
+        open_report(page, "diagnose")
         frame = page.locator("#reportFrame")
         frame.locator(".diagnose-chart").wait_for()
         seen = page.evaluate(
@@ -112,7 +113,7 @@ def test_every_fit_s_verdict_and_the_search_path_are_on_the_first_screen(
 
 def test_a_folded_section_stays_as_it_was_left_when_another_fit_opens(open_lss_editor_page):
     with open_lss_editor_page(**_a_fold_that_did_not_converge()) as (page, _session):
-        page.locator("#diagnoseTab").click()
+        open_report(page, "diagnose")
         frame = page.locator("#reportFrame")
         frame.locator(".diagnose-table").first.wait_for()
         fold = frame.locator('[data-diagnose-fold="search"]')
@@ -167,7 +168,7 @@ def test_fits_on_an_exact_face_read_as_converged_and_the_search_path_stays_on_sc
         page,
         _session,
     ):
-        page.locator("#diagnoseTab").click()
+        open_report(page, "diagnose")
         frame = page.locator("#reportFrame")
         frame.locator(".diagnose-chart").wait_for()
         converged = frame.locator('.diagnose-fits tr[data-status="converged"]')

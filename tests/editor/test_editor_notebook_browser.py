@@ -19,6 +19,7 @@ import pandas as pd
 import pytest
 from PIL import Image
 from sklearn.model_selection import KFold
+from tests.editor.assess_table import open_report
 
 import superglm.editor.notebook as notebook
 import superglm.editor.widget as widget_module
@@ -411,7 +412,7 @@ def test_run_cv_reports_its_job_over_widget_messages(chromium_browser, monkeypat
         cv=supplied,
     )
     with _notebook_editor(chromium_browser, session, monkeypatch) as (_page, frame, _w, _v):
-        frame.locator("#cvTab").click()
+        open_report(frame, "cv")
         frame.locator('#reportFrame [data-cv-start="cv"]').click()
         frame.locator('#reportFrame .cv-card-row[data-origin="run"]').first.wait_for()
         assert frame.locator('#reportFrame .cv-card-row[data-origin="run"]').count() == 3

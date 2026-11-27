@@ -5,6 +5,7 @@ import json
 import numpy as np
 import pytest
 from tests.editor._editor_waits import wait_for_interception
+from tests.editor.assess_table import open_report
 
 from superglm.editor.payloads import session_payload, timeline_payload
 
@@ -131,7 +132,7 @@ def test_editor_evidence_catches_up_after_an_edit_in_report_view(open_editor_pag
         with page.expect_response(
             lambda response: response.request.method == "POST" and _path(response.url) == "/report"
         ):
-            page.get_by_role("tab", name="Validation", exact=True).click()
+            open_report(page, "validation")
 
         with page.expect_response(
             lambda response: response.request.method == "POST" and _path(response.url) == "/op"

@@ -878,10 +878,11 @@ function roundsPayload(rounds) {
   return payload;
 }
 
-test("a fold with at least twice the middle fold's rounds links to Diagnose", () => {
+test("a fold with at least twice the middle fold's rounds links to Smoothing search", () => {
   const html = foldTableMarkup(roundsPayload([11, 42, 13, 11, 12]));
   assert.match(html, /data-diagnose-open="fold-2"/);
   assert.equal((html.match(/data-diagnose-open/g) ?? []).length, 1);
+  assert.match(html, /data-popover-body="[^"]*Open it in Smoothing search\."/);
 });
 
 test("a short search or too few folds gets no mark", () => {

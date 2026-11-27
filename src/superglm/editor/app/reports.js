@@ -12,8 +12,9 @@ const reportMetricKeys = [
   "effective_df"
 ];
 
-export function renderReport(payload, { reportTitle, reportStatus, reportFrame }, cvTab = null, diagnoseTab = null) {
-  reportTitle.textContent = payload.title || "Report";
+// `title`, the name the Assess list gives the report, wins over the payload's own.
+export function renderReport(payload, { reportTitle, reportStatus, reportFrame, title = "" }, cvTab = null, diagnoseTab = null) {
+  reportTitle.textContent = title || payload.title || "Report";
   if (payload.report === "cv" && cvTab) {
     reportStatus.textContent = cvSourceLine(payload);
     cvTab.render(payload);

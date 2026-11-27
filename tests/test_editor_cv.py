@@ -16,6 +16,9 @@ from sklearn.model_selection import KFold
 
 from superglm import Categorical, Numeric, Spline, SuperGLM, cross_validate
 from superglm.editor import EditorSession
+from superglm.editor.cv import FINAL_NOT_RUN
+from superglm.editor.lss.availability import LSS_UNAVAILABLE
+from superglm.model_selection import _NO_LSS_FOLD_PLOT
 from superglm.reml.observed_geometry import (
     ObservedGeometryInfeasibleError,
     ObservedModeNotCertifiedError,
@@ -3314,7 +3317,7 @@ def test_run_cv_scores_every_fold_when_one_fold_never_trained_on_a_level(rare_le
 # ── The tab in the app ───────────────────────────────────────────
 
 
-def test_app_has_a_cross_validation_tab_and_a_final_fit_export():
+def test_app_has_an_assess_tab_and_a_final_fit_export():
     from pathlib import Path
 
     import superglm.editor
@@ -3322,10 +3325,17 @@ def test_app_has_a_cross_validation_tab_and_a_final_fit_export():
     root = Path(superglm.editor.__file__).parent / "app"
     html = (root / "index.html").read_text()
 
-    assert html.index('id="validationTab"') < html.index('id="cvTab"') < html.index('id="finalTab"')
-    assert 'data-view="cv"' in html
+    assert 'id="assessTab"' in html and 'data-view="assess"' in html
+    for gone in ("validationTab", "cvTab", "finalTab", "diagnoseTab"):
+        assert f'id="{gone}"' not in html
+    assert '<link rel="stylesheet" href="/assets/styles/assess.css">' in html
     assert 'id="exportFinalFit" type="radio" name="exportFormat" value="final"' in html
     assert '<link rel="stylesheet" href="/assets/styles/cv.css">' in html
+
+
+@pytest.mark.parametrize("text", [FINAL_NOT_RUN, LSS_UNAVAILABLE["metrics"], _NO_LSS_FOLD_PLOT])
+def test_messages_name_the_assess_entry_not_a_tab(text):
+    assert "under Assess" in text and " tab" not in text
 
 
 def test_cv_report_folds_carry_their_own_fold_number(cv_frame, cv_fit):

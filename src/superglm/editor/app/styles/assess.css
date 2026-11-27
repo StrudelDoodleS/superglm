@@ -1,0 +1,155 @@
+/* assess.css: the Assess tab (views/assess_list.js, views/assess_overview.js).
+   The list sits where the Editor's feature list does and looks like it; the
+   overview's cards and the reports share the space beside it. */
+
+.assess-view {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: var(--feature-list-width) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 12px;
+  padding: 10px 12px 12px;
+}
+
+.assess-list {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 6px;
+  border-radius: var(--radius-lg);
+  background: var(--surface-subtle);
+}
+
+.assess-group-title {
+  margin: 8px 6px 2px;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--muted);
+}
+
+/* An icon and a name, the open entry marked as the feature list marks its row. */
+.assess-row {
+  display: grid;
+  width: 100%;
+  height: auto;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: 8px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--text);
+  text-align: left;
+  line-height: 1.3;
+  box-shadow: inset 2px 0 0 transparent;
+}
+
+.assess-row:hover {
+  background: var(--surface-hover);
+}
+
+.assess-row[aria-current="true"] {
+  background: var(--surface);
+  box-shadow: inset 2px 0 0 var(--blue), 0 1px 2px color-mix(in srgb, var(--ink) 8%, transparent);
+}
+
+.assess-row-label {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* One of the overview and a report shows at a time. The report panel keeps
+   its own scrolling: its frame for Validation and Final fit, the whole panel
+   for Cross-validation and Smoothing search (cv.css). */
+.assess-main {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.assess-main > .report-panel {
+  padding: 2px 4px 4px;
+}
+
+.assess-overview {
+  min-height: 0;
+  overflow: auto;
+  padding: 2px 4px 4px;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
+.assess-overview-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.assess-overview-header h2 {
+  margin: 0 0 2px;
+  font-size: var(--font-size-xl);
+  font-weight: 600;
+}
+
+.assess-overview-lede {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--font-size-md);
+}
+
+.assess-section-title {
+  margin: 0 0 6px;
+  font-size: var(--font-size-md);
+  font-weight: 600;
+}
+
+.assess-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.assess-card {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-width: 0;
+  height: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  line-height: 1.3;
+}
+
+.assess-card:hover {
+  border-color: var(--border-strong);
+  background: var(--surface);
+}
+
+.assess-card-title {
+  font-weight: 600;
+}
+
+.assess-card-value {
+  font-size: var(--font-size-lg);
+  font-variant-numeric: tabular-nums;
+}
+
+.assess-card-value:empty {
+  display: none;
+}
+
+.assess-card-note {
+  color: var(--muted);
+  font-size: var(--font-size-sm);
+}
