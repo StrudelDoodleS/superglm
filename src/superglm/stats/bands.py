@@ -311,8 +311,9 @@ def _order_statistic_levels(u_sorted: NDArray[np.float64], *, resolve: int) -> N
        of each row whose level is at most ``t``: at least ``resolve`` rows. A non-finite bound
        counts as outside.
 
-    Every other row's level is above ``t`` and is returned as ``t``: at most its own level and
-    at least every exact one, which is all a rank up to ``resolve`` reads.
+    Every other row's level is above ``t`` and is returned as the next float above ``t``: at
+    most its own level and above every exact one, so ranks up to ``resolve`` read exact levels
+    and name the rows that hold them.
     """
     count, n = u_sorted.shape
     i = np.arange(1, n + 1, dtype=np.float64)
@@ -331,7 +332,7 @@ def _order_statistic_levels(u_sorted: NDArray[np.float64], *, resolve: int) -> N
         bounds[start : start + len(block)] = np.min(_beta_tail_levels(values, i[points], n), axis=1)
     target = float(np.partition(bounds, min(resolve, count) - 1)[min(resolve, count) - 1])
     lower, upper = _bounds(n, min(1.0, 2.0 * target))
-    levels = np.full(count, target)
+    levels = np.full(count, np.nextafter(target, np.inf) if target > 0.0 else 0.0)
     for start in range(0, count, _SCREEN_BLOCK):
         block = u_sorted[start : start + _SCREEN_BLOCK]
         rows, columns = np.nonzero(~((block >= lower) & (block <= upper)))
