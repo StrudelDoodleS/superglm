@@ -279,15 +279,17 @@ test("the view is headed by the check's label, with its split and rows beside it
   assert.equal(points, FIXTURE.calm.check_qq.models.edited.index.length);
   assert.ok(dom.nodes.frame.innerHTML.startsWith('<svg class="check-plot"'));
   assert.equal(dom.nodes.legend.hidden, true);
-  assert.deepEqual(splitLine(FIXTURE.wrong.check_qq), { text: "Validation, 1,000 rows", note: null });
-  assert.deepEqual(splitLine({ ...FIXTURE.calm.check_qq, split: null }), { text: "", note: null });
+  assert.deepEqual(splitLine(FIXTURE.wrong.check_qq, false), { text: "Validation, 1,000 rows", level: null, note: null });
+  assert.deepEqual(splitLine({ ...FIXTURE.calm.check_qq, split: null }, false), { text: "", level: null, note: null });
 });
 
 test("a held-out split whose level was not simulated says its parameters are taken as exact", () => {
   const payload = structuredClone(FIXTURE.calm.check_pit);
   const note = "The band treats the fitted parameters as exact, because these rows could not be simulated.";
   Object.assign(payload.models.edited, { level_source: "known", n_draws: 0, level_note: note });
-  assert.deepEqual(splitLine(payload), { text: "Validation, 200 rows", note });
+  assert.deepEqual(splitLine(payload, false), { text: "Validation, 200 rows", level: "parameters taken as exact", note });
+  // With no fit beside it, compare draws the edit alone, and the line names no model.
+  assert.deepEqual(splitLine(payload, true).level, "parameters taken as exact");
   const dom = fakeFrame();
   renderCheckView(dom.nodes, "check_pit", payload, VIEW);
   const html = dom.nodes.split.innerHTML;
@@ -316,4 +318,30 @@ test("compare draws the fit and names both models; a check with no answer says w
   assert.equal(renderCheckView(dom.nodes, "check_ae", null, VIEW), null);
   assert.equal(dom.nodes.frame.innerHTML, "");
   assert.equal(dom.nodes.title.textContent, "Actual over expected");
+});
+
+test("compared, the split line names the one model whose band took its parameters as exact", () => {
+  const note = "The band treats the fitted parameters as exact, because these rows could not be simulated.";
+  /** The edited fixture's PIT check, with the models in `known` keeping the known level. */
+  const fellBack = (...known) => {
+    const payload = structuredClone(FIXTURE.edited.check_pit);
+    for (const role of known) Object.assign(payload.models[role], { level_source: "known", n_draws: 0, level_note: note });
+    return payload;
+  };
+  const level = (payload, compare) => splitLine(payload, compare).level;
+  // The edit alone fell back: named once the fit is drawn beside it.
+  assert.equal(level(fellBack("edited"), true), "parameters taken as exact (as edited)");
+  assert.equal(level(fellBack("edited"), false), "parameters taken as exact");
+  // The fit alone fell back: named while it is drawn, and nothing to say while it is not.
+  assert.equal(level(fellBack("original"), true), "parameters taken as exact (as fitted)");
+  assert.deepEqual(splitLine(fellBack("original"), true).note, note);
+  assert.equal(level(fellBack("original"), false), null);
+  // Both fell back: the line holds for both.
+  assert.equal(level(fellBack("edited", "original"), true), "parameters taken as exact");
+  assert.equal(level(fellBack(), true), null);
+  const dom = fakeFrame();
+  renderCheckView(dom.nodes, "check_pit", fellBack("original"), { ...VIEW, compare: true });
+  const html = dom.nodes.split.innerHTML;
+  assert.match(html, />parameters taken as exact \(as fitted\)<\/span>$/);
+  assert.match(html, new RegExp(`data-popover-body="${note}"`));
 });

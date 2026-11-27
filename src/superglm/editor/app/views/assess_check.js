@@ -156,7 +156,8 @@ export function renderCompareSwitch(button, state, shown) {
 }
 
 const SVG_NS = "http://www.w3.org/2000/svg";
-// What the split line adds when a held-out split's band takes the fitted parameters as exact.
+// What the split line adds when a held-out split's band takes the fitted parameters as exact,
+// and the model it names when only one of the two drawn fell back.
 const LEVEL_TEXT = "parameters taken as exact";
 const LEVEL_TITLE = "Parameters taken as exact";
 // The readout's text sits this far from its point, and below it when the point is this near the top.
@@ -165,16 +166,29 @@ const READOUT_TOP_ROOM = 30;
 /** @type {Readonly<Record<string, number>>} */
 const KEY_STEPS = Object.freeze({ ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 });
 
+/** @param {CheckBody|null|undefined} body @returns {string|null} its fallback sentence, if it has one */
+const levelNote = (body) => (body?.available && typeof body.level_note === "string" && body.level_note ? body.level_note : null);
+
 /**
- * A check's split line: the rows it reads, and the sentence that says its band took the fitted
- * parameters as exact on a held-out split, when it did.
- * @param {CheckPayload|null} payload @returns {{text: string, note: string|null}}
+ * A check's split line: the rows it reads, and on a held-out split whose band took the fitted
+ * parameters as exact, the marker that says so and its sentence. With `compare`, the fit is
+ * drawn beside the edit, and when only one of the two fell back the marker names it.
+ * @param {CheckPayload|null} payload @param {boolean} compare
+ * @returns {{text: string, level: string|null, note: string|null}}
  */
-export function splitLine(payload) {
+export function splitLine(payload, compare) {
   const split = payload?.split;
-  if (!payload || !split) return { text: "", note: null };
-  const note = answered(payload)?.level_note;
-  return { text: `${split.label}, ${countText(split.n_obs)} rows`, note: typeof note === "string" && note ? note : null };
+  if (!payload || !split) return { text: "", level: null, note: null };
+  const text = `${split.label}, ${countText(split.n_obs)} rows`;
+  const edited = levelNote(answered(payload));
+  const fitted = compare && payload.models.original?.available ? levelNote(payload.models.original) : undefined;
+  // `fitted` is undefined when the fit is not drawn, and null when it is drawn and simulated.
+  const note = edited ?? fitted ?? null;
+  if (note === null) return { text, level: null, note: null };
+  // The model is named only when the fit is drawn and exactly one of the two fell back.
+  const one = fitted !== undefined && (edited === null) !== (fitted === null);
+  const named = !one ? "" : edited === null ? " (as fitted)" : " (as edited)";
+  return { text, level: `${LEVEL_TEXT}${named}`, note };
 }
 
 /**
@@ -188,10 +202,10 @@ export function splitLine(payload) {
 export function renderCheckView(nodes, report, payload, { compare, width, height }) {
   const label = assessEntry(report)?.label ?? "";
   nodes.title.textContent = label;
-  const line = splitLine(payload);
-  nodes.split.innerHTML = escapeHTML(line.text) + (line.note === null ? ""
+  const line = splitLine(payload, compare);
+  nodes.split.innerHTML = escapeHTML(line.text) + (line.level === null || line.note === null ? ""
     : ` · <span class="check-level" tabindex="0" data-popover-title="${LEVEL_TITLE}"`
-      + ` data-popover-body="${escapeHTML(line.note)}">${LEVEL_TEXT}</span>`);
+      + ` data-popover-body="${escapeHTML(line.note)}">${line.level}</span>`);
   const { frame } = nodes;
   if (payload === null || answered(payload) === null) {
     nodes.legend.hidden = true;
