@@ -19,16 +19,18 @@ middle. The local level depends on ``n`` and ``alpha`` only:
 
 * one point is tested at the global level, ``eta = alpha``;
 * from 2 to 249 points, ``eta`` is found by searching for the local level whose
-  exact global level is ``alpha`` (Weine et al., section 2.3). The global level
-  of a band comes from the recursion of their appendix A, so the band's level is
-  ``alpha`` to a relative ``1e-8``;
+  exact global level is ``alpha`` (Weine et al., section 2.3), the global level
+  of a band coming from the recursion of their appendix A. The band's level is
+  ``alpha`` to a relative ``1e-7``; measured, it is within ``3e-10`` at every
+  ``n`` from 2 to 249 and each of the three levels;
 * from 250 points, the asymptotic local level of Gontscharuk and Finner
   (2017), *Communications in Statistics - Theory and Methods* 46(5),
-  2332-2342, with its second-order correction, at the constants Weine et al.
-  (section 2.4) checked: 1.591, 1.3 and 1.1 at ``alpha`` = 0.01, 0.05 and
-  0.1. Those are the levels the band accepts. Its global level runs about 1.6% of
-  ``alpha`` high at 250 points (4.5% at 0.01) and falls toward ``alpha`` as
-  ``n`` grows.
+  2332-2342, with its second-order correction. Gontscharuk and Finner chose its
+  constant as 1.6, 1.3 and 1.1 at ``alpha`` = 0.01, 0.05 and 0.1; Weine et al.
+  (section 2.4) replaced 1.6 by 1.591 and confirmed 1.3. The band takes 1.591,
+  1.3 and 1.1, and accepts only those three levels. Its global level runs about
+  1.6% of ``alpha`` high at 250 points (4.5% at 0.01) and falls toward
+  ``alpha`` as ``n`` grows.
 
 ``bonferroni_binomial_band`` bounds the counts of ``m`` cells, each
 ``Binomial(trials, probability)``, by the ``alpha / (2 m)`` and
@@ -38,9 +40,11 @@ chance that any cell leaves is at most ``alpha`` whatever the dependence
 between cells, so the band holds for the multinomial bins of a histogram too.
 
 Both assume iid continuous values on the probability scale from a law whose
-parameters are known. Parameters estimated from the same rows pull the values
-toward the law, so a check on in-sample rows is slightly conservative (Weine
-et al., sections 2.6 and 4).
+parameters are known, and that is where their level holds. With parameters
+fitted to the same rows the level moves, by an amount and in a direction that
+depend on the estimator: for a normal Q-Q band at 5% on 100 to 10,000 rows,
+Weine et al. (section 2.6, table 1) measure about 0.1% with the sample
+standard deviation and about 10% with the median absolute deviation.
 """
 
 from __future__ import annotations
@@ -48,6 +52,7 @@ from __future__ import annotations
 import functools
 import math
 import operator
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -55,11 +60,13 @@ from numpy.typing import ArrayLike, NDArray
 
 #: The global levels whose large-sample correction constant ``c`` is published.
 _CORRECTION = {0.01: 1.591, 0.05: 1.3, 0.1: 1.1}
-#: From this many points on, the local level is the asymptotic approximation: below it the
-#: exact search's first call costs at most about 0.2 s on one core, and its cost grows faster than n.
+#: From this many points on, the local level is the asymptotic approximation: below it the exact
+#: search's first call costs at most about 0.2 s on one core, and its cost grows faster than n.
 _ASYMPTOTIC_FROM = 250
 #: The exact search stops once ``eta`` is known to this relative tolerance.
 _SEARCH_RTOL = 1e-9
+#: The least positive float64, a subnormal.
+_LEAST_POSITIVE = float(np.nextafter(0.0, 1.0))
 
 
 @dataclass(frozen=True)
@@ -151,30 +158,41 @@ def _local_level(n: int, alpha: float) -> float:
     )
 
 
-def _readonly(values: NDArray[np.float64]) -> NDArray[np.float64]:
-    values.setflags(write=False)
-    return values
-
-
-# The cache belongs to this module and lives for the process. Its key, ``(n, alpha)``, is the
-# whole input: no model state enters the band, so nothing invalidates an entry. Its arrays are
-# read-only, so every caller shares them safely; 32 bands at the residual sampler's cap of
-# 100,000 rows hold under 80 MB.
+# The cache belongs to this module and lives for the process. Its key is the validated
+# ``(points, level)``, the whole input: no model state enters the band, so nothing invalidates an
+# entry. It holds bytes, which no caller can reach or change; each call reads new arrays over
+# them. 32 bands at the residual sampler's cap of 100,000 rows hold under 80 MB.
 @functools.lru_cache(maxsize=32)
+def _stored_band(points: int, level: float) -> tuple[bytes, bytes, bytes, float]:
+    """The band's lower and upper bounds and medians as bytes, and its local level."""
+    from scipy import special
+
+    eta = float(_local_level(points, level))
+    lower, upper = _bounds(points, eta)
+    i = np.arange(1, points + 1, dtype=np.float64)
+    median = special.betaincinv(i, points + 1 - i, 0.5)
+    return lower.tobytes(), upper.tobytes(), median.tobytes(), eta
+
+
+def _frozen(stored: bytes) -> NDArray[np.float64]:
+    """A new array over immutable bytes: read-only, and no caller can make it writeable."""
+    return np.frombuffer(stored, dtype=np.float64)
+
+
 def equal_local_levels_band(n: int, *, alpha: float = 0.05) -> UniformBand:
     """Return the equal-local-levels band for ``n`` order statistics at global level ``alpha``.
 
     Under iid uniform values the chance that any order statistic leaves its interval is
-    ``alpha``. The result depends on ``n`` and ``alpha`` alone and is cached for the
-    process, so a redraw costs nothing.
+    ``alpha``: to a relative ``1e-7`` below 250 points, and from 250 to the accuracy of the
+    asymptotic local level (about 1.6% of ``alpha`` high at 250 points, 4.5% at 0.01). The
+    band depends on ``n`` and ``alpha`` alone and is cached for the process, so a redraw
+    costs nothing. Its arrays are read-only and the caller's own.
 
     Raises
     ------
     ValueError
         If ``n`` is below one, or ``alpha`` is not 0.01, 0.05 or 0.1.
     """
-    from scipy import special
-
     points = operator.index(n)
     if points < 1:
         raise ValueError(f"equal_local_levels_band needs at least one point; got n={points}")
@@ -184,16 +202,31 @@ def equal_local_levels_band(n: int, *, alpha: float = 0.05) -> UniformBand:
             "equal_local_levels_band: alpha must be 0.01, 0.05 or 0.1, the levels whose "
             f"large-sample local level is published; got alpha={alpha!r}"
         )
-    eta = float(_local_level(points, level))
-    lower, upper = _bounds(points, eta)
-    i = np.arange(1, points + 1, dtype=np.float64)
+    lower, upper, median, eta = _stored_band(points, level)
     return UniformBand(
-        lower=_readonly(lower),
-        upper=_readonly(upper),
-        median=_readonly(special.betaincinv(i, points + 1 - i, 0.5)),
+        lower=_frozen(lower),
+        upper=_frozen(upper),
+        median=_frozen(median),
         local_level=eta,
         alpha=level,
     )
+
+
+def _least_count(
+    trials: NDArray[np.float64], holds: Callable[[NDArray[np.float64]], NDArray[np.bool_]]
+) -> NDArray[np.float64]:
+    """The least count ``k`` in ``[0, trials]`` at which ``holds(k)``, cell by cell.
+
+    ``holds`` is monotone in ``k`` and true at ``trials``. Bisection reads one probability per
+    cell per step, about ``log2(trials)`` steps.
+    """
+    low, high = np.zeros_like(trials), trials.copy()
+    while np.any(low < high):
+        middle = np.floor((low + high) / 2.0)
+        met = holds(middle)
+        high = np.where(met, middle, high)
+        low = np.where(met, low, middle + 1.0)
+    return low
 
 
 def bonferroni_binomial_band(
@@ -201,18 +234,18 @@ def bonferroni_binomial_band(
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Return count bounds for ``m`` binomial cells that hold for all cells at once.
 
-    Cell ``k``'s count is ``Binomial(trials[k], probability[k])``, and its bounds are the
-    ``alpha / (2 m)`` and ``1 - alpha / (2 m)`` quantiles of that law: the chance that a
-    cell's count falls below its ``lower`` is under ``alpha / (2 m)``, and above its
-    ``upper`` at most ``alpha / (2 m)``. So any cell leaves with chance at most ``alpha``,
-    whatever the dependence between cells. ``trials`` and ``probability`` broadcast
-    together, and the bounds take their shape.
+    Cell ``k``'s count is ``Binomial(trials[k], probability[k])``, and with
+    ``cut = alpha / (2 m)`` its bounds are the ``cut`` and ``1 - cut`` quantiles of that law,
+    each decided in its own tail: ``lower`` is the least count with ``P(X <= lower) >= cut``,
+    so ``P(X < lower) < cut``, and ``upper`` the least with ``P(X > upper) <= cut``. So any
+    cell leaves with chance at most ``alpha``, whatever the dependence between cells.
+    ``trials`` and ``probability`` broadcast together, and the bounds take their shape.
 
     Raises
     ------
     ValueError
-        If a count of trials is negative or not whole, a probability lies outside
-        ``[0, 1]``, or ``alpha`` outside ``(0, 1)``.
+        If a count of trials is not a whole number from 0 to ``2**53 - 1``, a probability
+        lies outside ``[0, 1]``, or ``alpha`` outside ``(0, 1)``.
     """
     from scipy import stats
 
@@ -222,15 +255,21 @@ def bonferroni_binomial_band(
     level = float(alpha)
     if not 0.0 < level < 1.0:
         raise ValueError(f"bonferroni_binomial_band: alpha must lie in (0, 1); got {alpha!r}")
-    if not np.all(np.isfinite(n_trials) & (n_trials >= 0) & (n_trials == np.floor(n_trials))):
-        raise ValueError("bonferroni_binomial_band: trials must be whole numbers, zero or more")
+    whole = np.isfinite(n_trials) & (n_trials == np.floor(n_trials))
+    if not np.all(whole & (n_trials >= 0) & (n_trials < 2.0**53)):
+        raise ValueError(
+            "bonferroni_binomial_band: trials must be whole numbers from 0 to 2**53 - 1"
+        )
     if not np.all((p >= 0.0) & (p <= 1.0)):
         raise ValueError("bonferroni_binomial_band: each probability must lie in [0, 1]")
     if n_trials.size == 0:
         return np.zeros(n_trials.shape), np.zeros(n_trials.shape)
     cut = level / (2.0 * n_trials.size)
-    lower = np.asarray(stats.binom.ppf(cut, n_trials, p), dtype=np.float64)
-    upper = np.asarray(stats.binom.isf(cut, n_trials, p), dtype=np.float64)
+    # A cut that underflows to zero still lies above zero. No float lies between it and the least
+    # positive float, so the lower tail compares with that float and the upper tail with zero.
+    least_cut = max(cut, _LEAST_POSITIVE)
+    lower = _least_count(n_trials, lambda k: stats.binom.cdf(k, n_trials, p) >= least_cut)
+    upper = _least_count(n_trials, lambda k: stats.binom.sf(k, n_trials, p) <= cut)
     return lower, upper
 
 
