@@ -684,7 +684,8 @@ def _panel_qq_envelope(
         obs_grid = obs_qr
 
     n_grid = len(grid_idx)
-    theoretical = stats.norm.ppf((grid_idx + 0.375) / (effective_n + 0.25))
+    # Blom's positions (k - 3/8) / (n + 1/4) count ranks k from 1; grid_idx counts from 0.
+    theoretical = stats.norm.ppf((grid_idx + 0.625) / (effective_n + 0.25))
 
     # Simulate envelope
     envelope_ok = False
