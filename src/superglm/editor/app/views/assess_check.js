@@ -192,7 +192,8 @@ const levelNote = (body) => (body?.available && typeof body.level_note === "stri
 /**
  * A check's split line: the rows it reads, and on a held-out split whose band took the fitted
  * parameters as exact, the marker that says so and its sentence. With `compare`, the fit is
- * drawn beside the edit, and when only one of the two fell back the marker names it.
+ * drawn beside the edit; when only one of the two fell back the marker names it, and when both
+ * fell back for different reasons its sentence gives each.
  * @param {CheckPayload|null} payload @param {boolean} compare
  * @returns {{text: string, level: string|null, note: string|null}}
  */
@@ -200,10 +201,13 @@ export function splitLine(payload, compare) {
   const split = payload?.split;
   if (!payload || !split) return { text: "", level: null, note: null };
   const text = `${split.label}, ${countText(split.n_obs)} rows`;
-  const edited = levelNote(answered(payload));
+  // Only drawn models count: nothing is drawn when the edit has no answer.
+  const drawn = answered(payload);
+  if (drawn === null) return { text, level: null, note: null };
+  const edited = levelNote(drawn);
   const fitted = compare && payload.models.original?.available ? levelNote(payload.models.original) : undefined;
   // `fitted` is undefined when the fit is not drawn, and null when it is drawn and simulated.
-  const note = edited ?? fitted ?? null;
+  const note = edited && fitted && edited !== fitted ? `As edited: ${edited} As fitted: ${fitted}` : edited ?? fitted ?? null;
   if (note === null) return { text, level: null, note: null };
   // The model is named only when the fit is drawn and exactly one of the two fell back.
   const one = fitted !== undefined && (edited === null) !== (fitted === null);

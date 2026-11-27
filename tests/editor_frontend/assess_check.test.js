@@ -374,6 +374,30 @@ test("compared, the split line names the one model whose band took its parameter
   assert.match(html, new RegExp(`data-popover-body="${note}"`));
 });
 
+test("compared, the marker gives each drawn model's reason, and only drawn models count", () => {
+  const edited = "The band treats the fitted parameters as exact, because these rows could not be simulated.";
+  const fitted = "The band treats the fitted parameters as exact, because the fit could not be simulated.";
+  const payload = structuredClone(FIXTURE.edited.check_pit);
+  Object.assign(payload.models.edited, { level_source: "known", n_draws: 0, level_note: edited });
+  Object.assign(payload.models.original, { level_source: "known", n_draws: 0, level_note: fitted });
+  // Different reasons: both, each named.
+  assert.deepEqual(splitLine(payload, true),
+    { text: "Validation, 200 rows", level: "parameters taken as exact", note: `As edited: ${edited} As fitted: ${fitted}` });
+  // Without the fit drawn, only the edit's reason.
+  assert.equal(splitLine(payload, false).note, edited);
+  // The same reason: given once.
+  payload.models.original.level_note = edited;
+  assert.equal(splitLine(payload, true).note, edited);
+  // An unavailable edit draws nothing, so the fit's fallback is not disclosed either.
+  const off = structuredClone(payload);
+  off.models.edited = { available: false, reason: "Needs at least two rows.", flagged: false, outside: 0, cells: 0 };
+  assert.deepEqual(splitLine(off, true), { text: "Validation, 200 rows", level: null, note: null });
+  const dom = fakeFrame();
+  renderCheckView(dom.nodes, "check_pit", off, { ...VIEW, compare: true });
+  assert.equal(dom.nodes.split.innerHTML, "Validation, 200 rows");
+  assert.equal(dom.nodes.frame.innerHTML, '<p class="check-reason">Needs at least two rows.</p>');
+});
+
 /** Where the readout's text sits in the scene, by the fake's text metrics, and its lines. */
 function readoutBox(dom) {
   const group = dom.readout();
