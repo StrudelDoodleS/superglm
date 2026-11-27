@@ -399,8 +399,11 @@ def test_frequency_weights_read_as_repeated_rows(calm_frequency):
 def test_frequency_weights_and_repeated_rows_give_the_same_levels_and_flags(calm_frequency):
     """Each occurrence of a weighted row is simulated as a repeated row is.
 
-    Actual over expected is left out: its cells are equal-count over rows, so a weighted split
-    and its repeated rows are cut into different cells (Task 2's tables, unchanged here).
+    Actual over expected keeps the library's cells, the ones its card shows. A categorical
+    input's cells are its levels in both splits, and each level's replicate totals are the
+    same. The band table of the predicted Mean is left out: its equal-count cells are cut over
+    physical rows, so a weighted split and its repeated rows fall into different cells. Mutation
+    check: one response per weighted row instead of one per occurrence fails it.
     """
     weighted, duplicated = calm_frequency
     for report in ("check_qq", "check_pit", "check_calibration"):
@@ -409,6 +412,12 @@ def test_frequency_weights_and_repeated_rows_give_the_same_levels_and_flags(calm
         assert a["level_source"] == b["level_source"] == "simulated"
         assert a["local_level"] == pytest.approx(b["local_level"], rel=1e-9)
         assert (a["outside"], a["flagged"]) == (b["outside"], b["flagged"])
+    totals = [
+        checks._scored_replicates(case.lss, case.validation, inputs=["g"]).totals["g"]
+        for case in (weighted, duplicated)
+    ]
+    assert totals[0].shape == (99, len(GROUPS))
+    np.testing.assert_array_equal(*totals)
 
 
 _UNSIMULATED_ROWS = (
