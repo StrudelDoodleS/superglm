@@ -898,22 +898,23 @@ class EditorWidget:
             reference = self.session.reference_model
             compares_edit = reference is not self.session.model or bool(asked.edits)
             inputs = tuple(check_inputs(self.session.model, self.session.terms))
-        if not is_lss(asked.model):
-            # No check reads a SuperGLM: its body says so without a model or a split.
-            body = check_body(report, asked.model, dataset, inputs=inputs)
-            payload = check_report_payload(
-                report,
-                dataset=dataset,
-                compares_edit=compares_edit,
-                edited=body,
-                original=body if compares_edit else None,
-            )
-            return {
-                **payload,
-                "model_revision": revision,
-                "request_sequence": request_sequence,
-                "in_force": asked.token,
-            }
+            if not is_lss(asked.model):
+                # No check reads a SuperGLM: its body says so without a model or a split. It is
+                # built under the lock that captured the revision, so no edit can come between.
+                body = check_body(report, asked.model, dataset, inputs=inputs)
+                payload = check_report_payload(
+                    report,
+                    dataset=dataset,
+                    compares_edit=compares_edit,
+                    edited=body,
+                    original=body if compares_edit else None,
+                )
+                return {
+                    **payload,
+                    "model_revision": revision,
+                    "request_sequence": request_sequence,
+                    "in_force": asked.token,
+                }
         edited, source = self._current_model_for_evidence(statistics=False, expected=asked)
         if edited is None:
             return _superseded_payload(revision, request_sequence, source.token)

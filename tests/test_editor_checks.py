@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import json
+import threading
 import tracemalloc
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -1184,6 +1185,35 @@ def test_an_edit_while_the_check_is_drawn_supersedes_its_answer(calm_session, mo
     asked = InForce.of(calm_session).token
     answer = _ask(widget, "check_pit")
     assert answer["status"] == "superseded" and answer["in_force"] == asked
+
+
+def test_an_edit_while_a_superglm_check_is_answered_cannot_outlive_it(glm_session, monkeypatch):
+    """An edit tried, from another thread, while the body is built: either it waits for the
+    answer, or the answer is superseded. Mutation check: building the body after the lock is
+    released lets the edit in, and the answer names a model no longer in force."""
+    real = checks.check_body
+    widget = glm_session.widget()
+    term = next(iter(glm_session.terms))
+
+    def edit_elsewhere():
+        if widget._lock.acquire(blocking=False):
+            try:
+                glm_session.select_indices(term, [0, 1, 2])
+                glm_session.weighted_average(term)
+            finally:
+                widget._lock.release()
+
+    def edit_then_build(*a, **k):
+        editor = threading.Thread(target=edit_elsewhere)
+        editor.start()
+        editor.join()
+        return real(*a, **k)
+
+    monkeypatch.setattr(widget_module, "check_body", edit_then_build)
+    answer = _ask(widget, "check_qq")
+    if answer.get("status") != "superseded":
+        assert answer["in_force"] == InForce.of(glm_session).token
+        assert answer["model_revision"] == glm_session.model_revision
 
 
 def _with_covariance(lss, scale: float):
