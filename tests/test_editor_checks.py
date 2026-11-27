@@ -139,6 +139,23 @@ def prior_weighted() -> Case:
 
 
 @pytest.fixture(scope="module")
+def with_offset() -> Case:
+    """Gamma amounts whose Mean carries a log exposure the model reads as an offset column."""
+    rng = np.random.default_rng(SEED)
+    X, mean, cv = _rows(800, rng)
+    X["log_exposure"] = np.log(rng.uniform(0.5, 2.0, 800))
+    y = rng.gamma(1 / cv**2, mean * np.exp(X["log_exposure"].to_numpy()) * cv**2)
+    family = GammaLS()
+    spec = SuperLSS(
+        family,
+        family.mean(s("x", k=6), cat("g"), offset="log_exposure"),
+        family.scale(cat("g")),
+    )
+    lss = spec.fit(X.iloc[:600], y[:600], lambdas={"mean:x#wiggle": LAMBDA})
+    return Case(lss, _validation(X.iloc[600:].reset_index(drop=True), y[600:]))
+
+
+@pytest.fixture(scope="module")
 def zeros() -> Case:
     """Compound Poisson-gamma amounts, 16% zero: a family with an atom, randomised at zero."""
     rng = np.random.default_rng(SEED)
@@ -540,13 +557,14 @@ def test_the_training_rows_keep_the_known_parameter_bands(calm):
     assert ae["z"] == pytest.approx(stats.norm.isf(0.025 / ae["cells"]), rel=1e-12)
 
 
-@pytest.mark.parametrize("name", ["calm", "prior_weighted", "zeros"])
+@pytest.mark.parametrize("name", ["calm", "prior_weighted", "with_offset", "zeros"])
 def test_a_replicate_is_scored_as_the_split_is(name, request):
     """The statistics of one replicate are those its responses give as a split of their own.
 
     The replicate is the one that sets the Q-Q level, whose Q-Q statistic is exact; every
-    replicate's PIT statistic is checked too. Prior weights enter each law and each total, and
-    a response at the atom is randomised from the split's own stream. Mutation checks: scoring
+    replicate's PIT statistic is checked too. Prior weights enter each law and each total, an
+    offset each draw's parameters, and a response at the atom is randomised from the split's
+    own stream. Mutation checks: scoring
     each replicate under the draw it was simulated from, totals without the prior weights, and
     atoms randomised from another stream each fail it.
     """
@@ -571,6 +589,20 @@ def test_a_replicate_is_scored_as_the_split_is(name, request):
         pit = check_body("check_pit", case.lss, split, inputs=[], replicates=replicates)
         level = binomial_cell_level(pit["counts"], pit["n_rows"], 1 / 20)
         assert replicates.statistics["check_pit"][i] == level
+
+
+def test_the_replicates_follow_the_fitted_law_with_its_offset(with_offset):
+    """Over the replicates, the rows of high and of low exposure each average their fitted Mean.
+
+    Monte Carlo error is under 1% here. Mutation check: drawing the responses without the
+    offset leaves the low-exposure rows about 40% high and the high-exposure ones 30% low.
+    """
+    case = with_offset
+    responses = checks._replicate_responses(case.lss, case.validation)
+    predicted = case.lss.predict_parameters(case.validation.X)["mean"].to_numpy()
+    high = case.validation.X["log_exposure"].to_numpy() > 0
+    for rows in (high, ~high):
+        assert responses[:, rows].mean() / predicted[rows].mean() == pytest.approx(1.0, abs=0.05)
 
 
 _REFUSAL = (

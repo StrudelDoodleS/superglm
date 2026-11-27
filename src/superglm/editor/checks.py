@@ -537,7 +537,8 @@ class _NotSampled(Exception):  # noqa: N818 - the level falls back, not a fault
     """The split's replicates cannot be simulated, so its bands keep the known-parameter level."""
 
 
-@dataclass(frozen=True)
+# Compared and hashed by identity: a cache holds it as a value, keyed by what it was drawn from.
+@dataclass(frozen=True, eq=False)
 class NullReplicates:
     """One split's simulated null: each check's statistic on every one of ``n_draws`` replicates.
 
@@ -799,14 +800,12 @@ def _replicate_statistics(
         totals += _cell_totals(codes[rows], split.total_weights[rows] * responses, max(width, 1))
 
     read = transforms if split.read is None else transforms[:, split.read]
-    edges = np.linspace(0.0, 1.0, PIT_BINS + 1)
-    bins = np.clip(np.searchsorted(edges, read, side="right") - 1, 0, PIT_BINS - 1)
-    bins += PIT_BINS * np.arange(count)[:, None]
-    pit = np.bincount(bins.ravel(), minlength=count * PIT_BINS).reshape(count, PIT_BINS)
+    # Binned as ``pit_payload`` bins the split, one replicate at a time.
+    pit = np.stack([np.histogram(row, bins=PIT_BINS, range=(0.0, 1.0))[0] for row in read])
     trials = occurrences
     if randomised:
         # A family with an atom reads quantile calibration on the randomised transform.
-        exceeded = np.count_nonzero(read[:, :, None] > grid, axis=1)
+        exceeded = np.column_stack([np.count_nonzero(read > p, axis=1) for p in grid])
         trials = read.shape[1]
     read.sort(axis=1)
     resolve = max(1, _monte_carlo_rank(count, CHECK_ALPHA))
