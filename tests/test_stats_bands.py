@@ -9,7 +9,14 @@ import pytest
 from scipy import stats
 
 import superglm.stats.bands as bands
-from superglm.stats.bands import bonferroni_binomial_band, equal_local_levels_band
+from superglm.stats.bands import (
+    band_at_level,
+    binomial_cell_level,
+    bonferroni_binomial_band,
+    equal_local_levels_band,
+    monte_carlo_level,
+    order_statistic_level,
+)
 
 
 def _escape_rate(lower, upper, n, sims, seed):
@@ -211,3 +218,122 @@ def test_changing_a_returned_band_leaves_later_calls_intact():
     assert later.lower is not first.lower
     with pytest.raises(ValueError):
         later.upper.setflags(write=True)
+
+
+def test_a_band_at_a_given_level_is_the_beta_quantiles_at_that_level():
+    n, eta = 331, 0.003
+    band = band_at_level(n, eta, alpha=0.05)
+    i = np.arange(1, n + 1)
+    np.testing.assert_allclose(band.lower, stats.beta.ppf(eta / 2, i, n + 1 - i), rtol=1e-12)
+    np.testing.assert_allclose(band.upper, stats.beta.ppf(1 - eta / 2, i, n + 1 - i), rtol=1e-11)
+    np.testing.assert_allclose(band.median, stats.beta.ppf(0.5, i, n + 1 - i), rtol=1e-12)
+    assert (band.local_level, band.alpha) == (eta, 0.05)
+
+
+@pytest.mark.parametrize("n", [1, 5, 331])
+def test_a_band_at_the_known_level_is_the_equal_local_levels_band(n):
+    known = equal_local_levels_band(n)
+    band = band_at_level(n, known.local_level)
+    for name in ("lower", "upper", "median"):
+        np.testing.assert_array_equal(getattr(band, name), getattr(known, name))
+    assert band.local_level == known.local_level and band.alpha == known.alpha
+
+
+def _exact_order_statistic_level(u):
+    """Every point's two-sided Beta tail, read from SciPy's Beta law."""
+    n = len(u)
+    i = np.arange(1, n + 1)
+    tails = 2 * np.minimum(stats.beta.cdf(u, i, n + 1 - i), stats.beta.sf(u, i, n + 1 - i))
+    return float(tails.min()), int(tails.argmin())
+
+
+@pytest.mark.parametrize("n", [1, 7, 250, 3000])
+def test_the_order_statistic_level_is_the_least_tail_over_every_point(n):
+    for seed in range(3):
+        u = np.sort(np.random.default_rng(100 * n + seed).uniform(size=n))
+        assert order_statistic_level(u) == pytest.approx(
+            _exact_order_statistic_level(u)[0], rel=1e-12
+        )
+
+
+def _skewed_bump(n=2000, centre=1350, width=250, height=3.05):
+    """Sorted values that sit ``height`` standard deviations above each mean on a flat-topped bump.
+
+    Above the middle each order statistic's law is skewed left, so its upper tail is shorter
+    than a normal one: the least tail sits on the bump's far side, where ``|z|`` is a little
+    below the bump's top, and away from both ends.
+    """
+    i = np.arange(1, n + 1.0)
+    mean = i / (n + 1)
+    sd = np.sqrt(i * (n + 1 - i) / ((n + 1) ** 2 * (n + 2)))
+    z = height * np.exp(-0.5 * ((i - centre) / width) ** 4)
+    return mean + z * sd, np.abs(z)
+
+
+def test_the_order_statistic_level_finds_a_least_tail_that_no_normal_screen_ranks_first():
+    """Mutation check: a screen of the 64 lowest, the 64 highest and the 64 largest ``|z|``
+    in between misses this sample's least tail, and fails here.
+    """
+    u, absz = _skewed_bump()
+    assert np.all(np.diff(u) > 0)
+    level, where = _exact_order_statistic_level(u)
+    middle = np.arange(64, len(u) - 64)
+    largest = middle[np.argsort(-absz[middle])[:64]]
+    assert 64 <= where < len(u) - 64 and where not in largest
+    assert order_statistic_level(u) == pytest.approx(level, rel=1e-12)
+
+
+def test_the_batched_levels_are_exact_up_to_the_rank_they_resolve():
+    """The ``resolve`` smallest levels are exact; any other is at most its own level and at
+    least every exact one, so the ``resolve``-th smallest is exact."""
+    rng = np.random.default_rng(5)
+    u = np.sort(rng.uniform(size=(40, 600)) ** rng.uniform(0.9, 1.1, size=(40, 1)), axis=1)
+    exact = np.array([_exact_order_statistic_level(row)[0] for row in u])
+    levels = bands._order_statistic_levels(u, resolve=5)
+    order = np.argsort(exact)
+    np.testing.assert_allclose(levels[order[:5]], exact[order[:5]], rtol=1e-12)
+    assert np.all(levels <= exact * (1 + 1e-12)) and np.all(levels[order[5:]] >= exact[order[4]])
+
+
+def test_an_unsorted_sample_has_no_order_statistic_level():
+    with pytest.raises(ValueError, match="ascending"):
+        order_statistic_level([0.4, 0.2])
+
+
+def test_the_monte_carlo_level_is_barnards_rank():
+    """Barnard (1963): at 99 replicates and 5% the 5th smallest, or the 5th largest."""
+    values = np.random.default_rng(3).permutation(99).astype(np.float64)
+    assert monte_carlo_level(values, alpha=0.05) == 4.0
+    assert monte_carlo_level(values, alpha=0.05, larger_is_extreme=True) == 94.0
+    assert monte_carlo_level(values[:19], alpha=0.05) == np.min(values[:19])
+
+
+def test_too_few_replicates_have_no_monte_carlo_level():
+    with pytest.raises(ValueError, match="at least 19"):
+        monte_carlo_level(np.arange(18.0), alpha=0.05)
+
+
+@pytest.mark.parametrize("trials", [1, 2, 5, 12])
+@pytest.mark.parametrize("p", [0.05, 0.3, 0.5])
+def test_a_count_is_inside_the_band_at_a_cut_exactly_when_its_level_reaches_the_cut(trials, p):
+    """At ``cut=c`` the band holds every count whose two tails are each at least ``c``.
+
+    The cuts include every count's own level, where the two sides of the comparison are equal.
+    Mutation check: an upper bound decided by ``P(X > upper) <= c``, as the Bonferroni band's
+    is, puts a count whose upper tail equals the cut outside and fails it.
+    """
+    counts = np.arange(trials + 1)
+    levels = [binomial_cell_level([k], [trials], [p]) for k in counts]
+    for cut in [*levels, 1e-6, 0.01, 0.2]:
+        (lower,), (upper,) = bonferroni_binomial_band([trials], [p], cut=cut)
+        inside = (counts >= lower) & (counts <= upper)
+        np.testing.assert_array_equal(inside, np.asarray(levels) >= cut)
+
+
+def test_the_cell_level_is_the_least_one_sided_tail_over_cells():
+    counts, trials, p = [3, 0, 7], [10, 10, 10], [0.2, 0.2, 0.5]
+    tails = [
+        min(stats.binom.cdf(k, n, q), stats.binom.sf(k - 1, n, q))
+        for k, n, q in zip(counts, trials, p, strict=True)
+    ]
+    assert binomial_cell_level(counts, trials, p) == min(tails)

@@ -41,11 +41,33 @@ between cells, so the band holds for the multinomial bins of a histogram too.
 
 Both assume iid continuous values on the probability scale from a law whose
 parameters are known, and that is where their level holds. With parameters
-fitted to the same rows the level moves, by an amount and in a direction that
-depend on the estimator. For a normal Q-Q band at 5%, Weine et al. (section
-2.6, table 1) measure 0.11%, 0.35% and 1.11% at 100, 500 and 10,000 rows with
-the sample mean and standard deviation, and 9.6% to 10.4% with the median and
-the median absolute deviation.
+fitted to the same rows the fit absorbs part of the noise, so the bands are
+conservative (Durbin 1973, *Ann. Statist.* 1(2), 279-290): for a normal Q-Q
+band at 5%, Weine et al. (section 2.6, table 1) measure 0.11%, 0.35% and
+1.11% at 100, 500 and 10,000 rows with the sample mean and standard
+deviation. On rows held out from the fit the fitting noise is added to every
+row at once, so the bands are anti-conservative, by an amount set by the ratio
+of held-out to fitted rows rather than by either count (West 1996,
+*Econometrica* 64(5), 1067-1084).
+
+There the level is calibrated by simulation: replicate the held-out rows from
+the fit's posterior, score each replicate as the rows are scored, and read the
+level off the replicates' statistics by Barnard's Monte Carlo rule (Barnard
+1963, as Myllymaki, Mrkvicka, Grabarnik, Seijo and Hahn 2017, *JRSS B* 79(2),
+section 4, describe it): with ``B`` replicates and ``k = floor(alpha (B + 1))``,
+an observed statistic beyond the ``k``-th most extreme replicate has chance
+``k / (B + 1)`` under the null. This is the holdout predictive check of Moran,
+Blei and Ranganath (2024), *JRSS B*, also the single split predictive check of
+Li and Huggins (2024). Each band has one statistic for it:
+
+* ``order_statistic_level``, the least two-sided Beta tail over the order
+  statistics, which falls below ``eta`` exactly when the sample leaves the
+  equal-local-levels band at ``eta``; ``band_at_level`` draws that band;
+* ``binomial_cell_level``, the least one-sided binomial tail over the cells,
+  which falls below ``cut`` exactly when a count leaves
+  ``bonferroni_binomial_band(..., cut=cut)``;
+
+and ``monte_carlo_level`` reads the level from replicates of either.
 """
 
 from __future__ import annotations
@@ -168,14 +190,20 @@ def _local_level(n: int, alpha: float) -> float:
 @functools.lru_cache(maxsize=32)
 def _stored_band(points: int, level: float) -> tuple[bytes, bytes, bytes, float]:
     """The band's lower and upper bounds and medians as bytes, and its local level."""
+    eta = float(_local_level(points, level))
+    lower, upper = _bounds(points, eta)
+    return lower.tobytes(), upper.tobytes(), _stored_median(points), eta
+
+
+# Owned and keyed like ``_stored_band``: the medians depend on the number of points alone.
+@functools.lru_cache(maxsize=32)
+def _stored_median(points: int) -> bytes:
+    """The medians of ``Beta(i, points + 1 - i)``, ``i = 1..points``, as bytes."""
     import scipy.linalg
     from scipy import special
 
-    eta = float(_local_level(points, level))
-    lower, upper = _bounds(points, eta)
     i = np.arange(1, points + 1, dtype=np.float64)
-    median = special.betaincinv(i, points + 1 - i, 0.5)
-    return lower.tobytes(), upper.tobytes(), median.tobytes(), eta
+    return special.betaincinv(i, points + 1 - i, 0.5).tobytes()
 
 
 def _frozen(stored: bytes) -> NDArray[np.float64]:
@@ -216,6 +244,172 @@ def equal_local_levels_band(n: int, *, alpha: float = 0.05) -> UniformBand:
     )
 
 
+def band_at_level(n: int, local_level: float, *, alpha: float = 0.05) -> UniformBand:
+    """Return the equal-local-levels band for ``n`` order statistics at local level ``local_level``.
+
+    Each order statistic lies between the ``local_level / 2`` and ``1 - local_level / 2``
+    quantiles of ``Beta(i, n + 1 - i)``. ``equal_local_levels_band`` sets the local level from
+    ``n`` and ``alpha`` for a law with known parameters; this band takes it as given, as
+    ``monte_carlo_level`` reads it from replicates, and records ``alpha`` as the global level it
+    stands for. At ``equal_local_levels_band(n, alpha=alpha).local_level`` it is that band.
+
+    Raises
+    ------
+    ValueError
+        If ``n`` is below one, ``local_level`` lies outside ``[0, 1]``, or ``alpha`` outside
+        ``(0, 1)``.
+    """
+    points = operator.index(n)
+    if points < 1:
+        raise ValueError(f"band_at_level needs at least one point; got n={points}")
+    eta, level = float(local_level), float(alpha)
+    if not 0.0 <= eta <= 1.0:
+        raise ValueError(f"band_at_level: local_level must lie in [0, 1]; got {local_level!r}")
+    if not 0.0 < level < 1.0:
+        raise ValueError(f"band_at_level: alpha must lie in (0, 1); got {alpha!r}")
+    lower, upper = _bounds(points, eta)
+    lower.setflags(write=False)
+    upper.setflags(write=False)
+    return UniformBand(
+        lower=lower,
+        upper=upper,
+        median=_frozen(_stored_median(points)),
+        local_level=eta,
+        alpha=level,
+    )
+
+
+def _beta_tail_levels(u: NDArray[np.float64], i: NDArray[np.float64], n: int) -> NDArray:
+    """``2 min(I_u(i, n + 1 - i), 1 - I_u(i, n + 1 - i))``, each tail read from its own side."""
+    import scipy.linalg
+    from scipy import special
+
+    b = n + 1.0 - i
+    return 2.0 * np.minimum(special.betainc(i, b, u), special.betaincc(i, b, u))
+
+
+#: Order statistics per replicate whose tails an upper bound on its level reads.
+_SCREEN_POINTS = 8
+#: Replicates screened at once, so the standardised deviations stay a small block.
+_SCREEN_BLOCK = 16
+
+
+def _order_statistic_levels(u_sorted: NDArray[np.float64], *, resolve: int) -> NDArray:
+    """Each row's equal-local-levels statistic, exact for at least its ``resolve`` smallest.
+
+    ``u_sorted`` is a ``(replicates, n)`` block of rows sorted ascending. Two passes find the
+    ``resolve`` smallest levels without reading every point's Beta tail:
+
+    1. Each row's tail at its two end points and at its ``_SCREEN_POINTS`` largest deviations
+       ``|u_i - E U_(i)| / sd U_(i)`` bounds its level from above, so the ``resolve``-th
+       smallest of these bounds, ``t``, is at least the ``resolve``-th smallest level.
+    2. A point inside the band at local level ``2 t`` has each one-sided tail at least ``t``,
+       so a two-sided tail at least ``2 t``, since each Beta law's distribution function
+       increases in ``u``; that band's bounds are SciPy's Beta quantiles, whose tail is far
+       within a factor two of the one asked. So every point whose tail is at most ``t`` lies
+       outside that band, and reading the tail of every point outside it gives the exact level
+       of each row whose level is at most ``t``: at least ``resolve`` rows. A non-finite bound
+       counts as outside.
+
+    Every other row's level is above ``t`` and is returned as ``t``: at most its own level and
+    at least every exact one, which is all a rank up to ``resolve`` reads.
+    """
+    count, n = u_sorted.shape
+    i = np.arange(1, n + 1, dtype=np.float64)
+    if n <= 2 + _SCREEN_POINTS:
+        return np.min(_beta_tail_levels(u_sorted, i, n), axis=1)
+    mean = i / (n + 1.0)
+    sd = np.sqrt(i * (n + 1.0 - i) / ((n + 1.0) ** 2 * (n + 2.0)))
+    bounds = np.empty(count)
+    for start in range(0, count, _SCREEN_BLOCK):
+        block = u_sorted[start : start + _SCREEN_BLOCK]
+        deviation = np.abs(block - mean) / sd
+        largest = np.argpartition(-deviation, _SCREEN_POINTS - 1, axis=1)[:, :_SCREEN_POINTS]
+        ends = np.broadcast_to([0, n - 1], (len(block), 2))
+        points = np.concatenate([ends, largest], axis=1)
+        values = np.take_along_axis(block, points, axis=1)
+        bounds[start : start + len(block)] = np.min(_beta_tail_levels(values, i[points], n), axis=1)
+    target = float(np.partition(bounds, min(resolve, count) - 1)[min(resolve, count) - 1])
+    lower, upper = _bounds(n, min(1.0, 2.0 * target))
+    levels = np.full(count, target)
+    for start in range(0, count, _SCREEN_BLOCK):
+        block = u_sorted[start : start + _SCREEN_BLOCK]
+        rows, columns = np.nonzero(~((block >= lower) & (block <= upper)))
+        tails = _beta_tail_levels(block[rows, columns], i[columns], n)
+        least = np.full(len(block), np.inf)
+        np.minimum.at(least, rows, tails)
+        exact = least <= target
+        levels[start : start + len(block)][exact] = least[exact]
+    return levels
+
+
+def order_statistic_level(u_sorted: ArrayLike) -> float:
+    """Return the equal-local-levels statistic of ``n`` values sorted ascending.
+
+    It is ``min_i 2 min(I_u(i, n + 1 - i), 1 - I_u(i, n + 1 - i))`` with ``I`` the
+    regularised incomplete beta function: the least two-sided tail of any order statistic
+    under its ``Beta(i, n + 1 - i)`` law. A sample leaves ``band_at_level(n, eta)`` exactly
+    when this is below ``eta``, the decision Berk and Jones (1979) and Aldor-Noiman et al.
+    (2013) make point by point. It is exact: every point whose tail could be the least is read
+    (``_order_statistic_levels``).
+
+    Raises
+    ------
+    ValueError
+        If the values are not one or more finite numbers in ``[0, 1]`` sorted ascending.
+    """
+    values = np.asarray(u_sorted, dtype=np.float64)
+    if values.ndim != 1 or values.size < 1:
+        raise ValueError("order_statistic_level needs a one-dimensional sample of one or more")
+    if not np.all(np.isfinite(values) & (values >= 0.0) & (values <= 1.0)):
+        raise ValueError("order_statistic_level: each value must be a probability in [0, 1]")
+    if np.any(np.diff(values) < 0.0):
+        raise ValueError("order_statistic_level: the values must be sorted ascending")
+    return float(_order_statistic_levels(values[None, :], resolve=1)[0])
+
+
+def _monte_carlo_rank(replicates: int, alpha: float) -> int:
+    """Barnard's ``k = floor(alpha (B + 1))``; ``alpha (B + 1)`` one rounding below a whole
+    number still counts as that number."""
+    return math.floor(alpha * (replicates + 1) * (1.0 + 4.0 * 2.0**-53))
+
+
+def monte_carlo_level(
+    null_levels: ArrayLike, *, alpha: float, larger_is_extreme: bool = False
+) -> float:
+    """Return the level of a Monte Carlo test from ``B`` replicate statistics of its null.
+
+    With ``k = floor(alpha (B + 1))`` it is the ``k``-th smallest replicate statistic, or the
+    ``k``-th largest when ``larger_is_extreme``. An observed statistic exchangeable with the
+    replicates falls strictly beyond it (below, or above) with chance ``k / (B + 1)``, at most
+    ``alpha`` and exactly ``alpha`` when ``alpha (B + 1)`` is a whole number and the statistic
+    has no ties (Barnard 1963). At 99 replicates and 5% it is the 5th.
+
+    Raises
+    ------
+    ValueError
+        If the statistics are not a one-dimensional array without NaN, ``alpha`` lies outside
+        ``(0, 1)``, or there are too few replicates for any rank at ``alpha``.
+    """
+    values = np.asarray(null_levels, dtype=np.float64)
+    level = float(alpha)
+    if values.ndim != 1 or np.any(np.isnan(values)):
+        raise ValueError("monte_carlo_level needs a one-dimensional array of statistics")
+    if not 0.0 < level < 1.0:
+        raise ValueError(f"monte_carlo_level: alpha must lie in (0, 1); got {alpha!r}")
+    rank = _monte_carlo_rank(values.size, level)
+    if rank < 1:
+        least = max(1, math.ceil(1.0 / level) - 1)
+        while _monte_carlo_rank(least, level) < 1:
+            least += 1
+        raise ValueError(
+            f"monte_carlo_level at alpha={level!r} needs at least {least} replicates; "
+            f"got {values.size}"
+        )
+    ordered = np.sort(values)
+    return float(ordered[-rank] if larger_is_extreme else ordered[rank - 1])
+
+
 def _least_count(
     trials: NDArray[np.float64], holds: Callable[[NDArray[np.int64]], NDArray[np.bool_]]
 ) -> NDArray[np.float64]:
@@ -237,7 +431,11 @@ def _least_count(
 
 
 def bonferroni_binomial_band(
-    trials: ArrayLike, probability: ArrayLike, *, alpha: float = 0.05
+    trials: ArrayLike,
+    probability: ArrayLike,
+    *,
+    alpha: float = 0.05,
+    cut: float | None = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Return count bounds for ``m`` binomial cells that hold for all cells at once.
 
@@ -250,11 +448,18 @@ def bonferroni_binomial_band(
     last bit is decided in float64. ``trials`` and ``probability`` broadcast together, and the
     bounds take their shape.
 
+    A given ``cut``, such as ``monte_carlo_level`` reads from replicates of
+    ``binomial_cell_level``, replaces ``alpha / (2 m)``, and the band holds exactly the counts
+    whose level reaches it: ``P(X <= k) >= cut`` and ``P(X >= k) >= cut``. So ``upper`` is
+    then the least count with ``P(X > upper) < cut``, and a count leaves the band exactly when
+    its ``binomial_cell_level`` is below ``cut``.
+
     Raises
     ------
     ValueError
         If a count of trials is not a whole number from 0 to ``2**53 - 1``, a probability
-        lies outside ``[0, 1]``, or ``alpha`` is below ``1e-12`` or not below 1.
+        lies outside ``[0, 1]``, ``alpha`` is below ``1e-12`` or not below 1, or ``cut`` lies
+        outside ``[0, 1]``.
     """
     import scipy.spatial
     from scipy import stats
@@ -274,12 +479,71 @@ def bonferroni_binomial_band(
         )
     if not np.all((p >= 0.0) & (p <= 1.0)):
         raise ValueError("bonferroni_binomial_band: each probability must lie in [0, 1]")
+    if cut is not None and not 0.0 <= float(cut) <= 1.0:
+        raise ValueError(f"bonferroni_binomial_band: cut must lie in [0, 1]; got {cut!r}")
     if n_trials.size == 0:
         return np.zeros(n_trials.shape), np.zeros(n_trials.shape)
-    cut = level / (2.0 * n_trials.size)
-    lower = _least_count(n_trials, lambda k: stats.binom.cdf(k, n_trials, p) >= cut)
-    upper = _least_count(n_trials, lambda k: stats.binom.sf(k, n_trials, p) <= cut)
+    if cut is None:
+        tail = level / (2.0 * n_trials.size)
+        lower = _least_count(n_trials, lambda k: stats.binom.cdf(k, n_trials, p) >= tail)
+        upper = _least_count(n_trials, lambda k: stats.binom.sf(k, n_trials, p) <= tail)
+        return lower, upper
+    given = float(cut)
+    lower = _least_count(n_trials, lambda k: stats.binom.cdf(k, n_trials, p) >= given)
+    # ``P(X > k) < cut`` holds at ``trials`` for any positive cut; at cut 0 every count is in.
+    upper = _least_count(
+        n_trials, lambda k: (stats.binom.sf(k, n_trials, p) < given) | (k >= n_trials)
+    )
     return lower, upper
 
 
-__all__ = ["UniformBand", "bonferroni_binomial_band", "equal_local_levels_band"]
+def _binomial_cell_levels(
+    counts: ArrayLike, trials: ArrayLike, probability: ArrayLike
+) -> NDArray[np.float64]:
+    """``min(P(X <= k), P(X >= k))`` of every count, its least over the last axis."""
+    import scipy.spatial
+    from scipy import stats
+
+    k = np.asarray(counts, dtype=np.float64)
+    tails = np.minimum(
+        stats.binom.cdf(k, trials, probability), stats.binom.sf(k - 1.0, trials, probability)
+    )
+    return np.min(tails, axis=-1)
+
+
+def binomial_cell_level(counts: ArrayLike, trials: ArrayLike, probability: ArrayLike) -> float:
+    """Return the least one-sided binomial tail of ``m`` cell counts.
+
+    Cell ``k``'s count is read against ``Binomial(trials[k], probability[k])`` by the lesser of
+    ``P(X <= count)`` and ``P(X >= count)``; the statistic is the least over cells. A count
+    leaves ``bonferroni_binomial_band(trials, probability, cut=c)`` exactly when its level is
+    below ``c``, and with ``c = alpha / (2 m)`` that is the Bonferroni band's level.
+
+    Raises
+    ------
+    ValueError
+        If there is no cell, or a count is not a whole number from 0 to its trials.
+    """
+    k, n_trials, p = np.broadcast_arrays(
+        np.asarray(counts, dtype=np.float64),
+        np.asarray(trials, dtype=np.float64),
+        np.asarray(probability, dtype=np.float64),
+    )
+    if k.size < 1:
+        raise ValueError("binomial_cell_level needs at least one cell")
+    if not np.all(np.isfinite(k) & (k == np.floor(k)) & (k >= 0.0) & (k <= n_trials)):
+        raise ValueError(
+            "binomial_cell_level: each count must be a whole number from 0 to its trials"
+        )
+    return float(np.min(_binomial_cell_levels(k.ravel(), n_trials.ravel(), p.ravel())))
+
+
+__all__ = [
+    "UniformBand",
+    "band_at_level",
+    "binomial_cell_level",
+    "bonferroni_binomial_band",
+    "equal_local_levels_band",
+    "monte_carlo_level",
+    "order_statistic_level",
+]
