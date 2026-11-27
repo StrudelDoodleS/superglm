@@ -356,7 +356,8 @@ const evidenceTiming = createEvidenceTimingTracker({
 const JOB_REPORTS = Object.freeze(["cv", "final", "diagnose"]);
 
 // A re-read of the session asked for by another view of it: once for a burst.
-const rereadSession = coalesce(() => actions.refreshFromPythonWhenIdle());
+// It resolves to whether the re-read succeeded.
+const rereadSession = coalesce(async () => (await actions.refreshFromPythonWhenIdle()).ok);
 
 // The windows of one editor tell each other when the session moved, and when a
 // job started or ended (views/window_sync.js). A notebook cell has no second window.
@@ -377,19 +378,14 @@ const cvTab = createCVTab({
   frame: reportFrame,
   client: editorClient,
   onJobSettled: async (kind, job) => {
-    // An end another window told of was handled when its message came.
-    const notice = { id: job.job_id, phase: "settled" };
-    if (!peer || peer.isNews(notice)) {
-      await actions.settleJob(kind, JOB_REPORTS);
-      peer?.tell(notice);
-    }
+    const settle = () => actions.settleJob(kind, JOB_REPORTS);
+    // An end another window told of, and whose re-read succeeded, is not settled twice.
+    await (peer ? peer.sawJob({ id: job.job_id, phase: "settled" }, settle) : settle());
     renderPill();
   },
   onJobChange: () => {
     for (const job of Object.values(cvTab.jobs())) {
-      if (job?.status !== "running") continue;
-      const notice = { id: job.job_id, phase: "started" };
-      if (peer?.isNews(notice)) peer.tell(notice);
+      if (job?.status === "running") void peer?.sawJob({ id: job.job_id, phase: "started" });
     }
     renderPill();
   },

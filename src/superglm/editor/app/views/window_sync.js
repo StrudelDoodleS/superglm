@@ -127,73 +127,102 @@ export function createWindowSync({ name, onMessage, Channel }) {
 
 /**
  * Run `run` once for a burst of asks: an ask while it runs runs it once more
- * after, however many came.
- * @param {() => Promise<unknown>} run
- * @returns {() => Promise<void>}
+ * after, however many came. Each ask resolves to the result of the run that
+ * covers it, the one that started after it was made.
+ * @template T
+ * @param {() => Promise<T>} run
+ * @returns {() => Promise<T>}
  */
 export function coalesce(run) {
-  let running = false;
-  let again = false;
-  return async () => {
-    if (running) {
-      again = true;
-      return;
+  /** @type {Promise<T>|null} */
+  let running = null;
+  /** @type {Promise<T>|null} */
+  let queued = null;
+  /** @returns {Promise<T>} */
+  function ask() {
+    if (running === null) {
+      const current = Promise.resolve().then(run);
+      running = current;
+      current.then(() => { running = null; }, () => { running = null; });
+      return current;
     }
-    running = true;
-    try {
-      do {
-        again = false;
-        await run();
-      } while (again);
-    } finally {
-      running = false;
+    if (queued === null) {
+      queued = running.then(() => undefined, () => undefined).then(() => {
+        queued = null;
+        return ask();
+      });
     }
-  };
+    return queued;
+  }
+  return ask;
 }
+
+/** @param {JobNotice} notice */
+const noticeId = (notice) => `${notice.phase}:${notice.id}`;
 
 /**
  * One window's part in following the session with the others.
  *
  * A window re-reads when another's key differs from its own, or when it hears
- * news: a job notice it has not handled, or a page's hello. News also lapses
- * the reports a job changes. Each job's start and end is handled once per
- * window, whether its own polling or a message brought it: `isNews` says
- * whether a notice is new here, and marks it handled. Two windows that agree
- * send nothing back, so one change costs each window one re-read.
+ * news: a job notice it has not had yet, or a page's hello. News also lapses
+ * the reports a job changes. A job's start or end that a peer's notice brought
+ * is not handled again when this window's own polling sees it, unless the
+ * re-read that notice asked for failed: then the window settles it itself.
+ * Two windows that agree send nothing back, so a change costs each window a
+ * bounded number of re-reads and the windows go quiet.
  * @param {object} options
  * @param {string} options.name
  * @param {SyncChannelConstructor|undefined} options.Channel
  * @param {() => string} options.key this window's session key now
  * @param {() => unknown} options.onJobNews lapse the reports a job changes
- * @param {() => unknown} options.reread re-read the session
+ * @param {() => Promise<boolean>} options.reread re-read the session; whether it succeeded
  */
 export function createSessionPeer({ name, Channel, key, onJobNews, reread }) {
-  /** @type {Set<string>} */
-  const handled = new Set();
-  /** @param {JobNotice} notice */
-  function isNews(notice) {
-    const id = `${notice.phase}:${notice.id}`;
-    if (handled.has(id)) return false;
-    handled.add(id);
-    return true;
-  }
+  /** Each phase this window has had, with whether its handling succeeded. @type {Map<string, Promise<boolean>>} */
+  const handled = new Map();
+  /** @returns {Promise<boolean>} */
+  const refresh = () => Promise.resolve().then(reread).then(Boolean, () => false);
   const sync = createWindowSync({
     name,
     Channel,
     onMessage: (message) => {
-      const news = message.hello === true || (message.job !== undefined && isNews(message.job));
-      if (news) onJobNews();
-      if (news || message.key !== key()) void reread();
+      const notice = message.job;
+      const fresh = notice !== undefined && !handled.has(noticeId(notice));
+      if (message.hello === true || fresh) {
+        onJobNews();
+        const refreshed = refresh();
+        if (notice && fresh) handled.set(noticeId(notice), refreshed);
+      } else if (message.key !== key()) {
+        void refresh();
+      }
     },
   });
   /** @param {{job?: JobNotice, hello?: true}} extra */
   const post = (extra) => sync.announce({ type: "superglm.changed", key: key(), ...extra });
+  /** @param {JobNotice} [job] */
+  function tell(job) {
+    post(job ? { job } : {});
+  }
   return Object.freeze({
-    isNews,
-    /** Tell the others this window's key, with a notice it has just handled. @param {JobNotice} [job] */
-    tell(job) {
-      post(job ? { job } : {});
+    /**
+     * This window's own polling saw a job start or end: `settle` handles it here,
+     * then the others are told. A phase a peer's notice brought, and whose
+     * re-read succeeded, is neither settled nor told again.
+     * @param {JobNotice} notice
+     * @param {() => unknown} [settle]
+     * @returns {Promise<void>}
+     */
+    async sawJob(notice, settle) {
+      const id = noticeId(notice);
+      const earlier = handled.get(id);
+      if (earlier && (await earlier)) return;
+      const done = Promise.resolve().then(settle).then(() => true, () => false);
+      handled.set(id, done);
+      await done;
+      if (!earlier) tell(notice);
     },
+    /** Tell the others this window's key. */
+    tell,
     /** A page that has just loaded may have missed a job's end: every other window re-reads once. */
     hello() {
       post({ hello: true });
