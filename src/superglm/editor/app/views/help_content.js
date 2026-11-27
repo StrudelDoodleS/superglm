@@ -378,6 +378,7 @@ export const HELP_SECTIONS = Object.freeze([
     items: Object.freeze([
       "Assess holds every report on the model you are editing. It opens on an overview, one card per report with its headline number; click a card, or a name in the list, to open it large.",
       "Smoothing search was called Diagnose.",
+      "Below 1086 pixels wide the list shows its icons only; hover over or focus one for its name.",
     ]),
   }),
   Object.freeze({

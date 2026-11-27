@@ -230,3 +230,31 @@ def test_a_card_pressed_while_a_report_lands_still_opens_its_report(assess_page)
         for route in held[1:]:
             route.continue_()
         wait_for_report(page, "final")
+
+
+def test_the_list_keeps_its_names_at_1180_px(assess_page):
+    with assess_page(viewport=(1180, 720)) as (page, _session):
+        page.locator("#assessTab").click()
+        label = page.locator('[data-assess-entry="cv"] .assess-row-label')
+        assert label.is_visible() and label.bounding_box()["width"] > 40
+        assert page.evaluate(
+            "document.querySelector('#assessView').scrollWidth <= document.querySelector('#assessView').clientWidth"
+        )
+
+
+def test_below_1086_px_the_list_is_icons_with_names_in_popovers(assess_page):
+    with assess_page(viewport=(1000, 720)) as (page, _session):
+        page.locator("#assessTab").click()
+        nav = page.get_by_role("navigation", name="Assess")
+        assert nav.bounding_box()["width"] <= 40
+        assert nav.get_by_role("button", name="Smoothing search").is_visible()
+        nav.get_by_role("button", name="Smoothing search").hover()
+        page.locator("#uiPopover [data-popover-heading]", has_text="Smoothing search").wait_for()
+        assert page.evaluate(
+            "document.querySelector('#assessView').scrollWidth <= document.querySelector('#assessView').clientWidth"
+        )
+        open_report(page, "cv")
+        wait_for_report(page, "cv")
+        assert page.evaluate(
+            "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+        )

@@ -155,3 +155,41 @@
   color: var(--muted);
   font-size: var(--font-size-sm);
 }
+
+/* Below 1086 px, the width main.js calls narrow, the list keeps its icons only.
+   Names and group titles are clipped, not removed, so each row keeps its
+   accessible name and its hover popover still names it; a hairline stands in
+   for each group's title. */
+@media (max-width: 1085px) {
+  .assess-view {
+    grid-template-columns: 40px minmax(0, 1fr);
+  }
+
+  .assess-list {
+    padding: 8px 4px;
+  }
+
+  .assess-row {
+    position: relative;
+    grid-template-columns: auto;
+    justify-content: center;
+    padding: 6px 0;
+  }
+
+  .assess-row-label,
+  .assess-group-title {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .assess-group {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+  }
+}
