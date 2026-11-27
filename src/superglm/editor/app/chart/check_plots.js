@@ -323,12 +323,16 @@ function pitScene(editedBody, originalBody, box) {
 /** @param {AETable} table @param {number} i */
 const aeGroup = (table, i) => (table.levels ? String(table.levels[i]) : `band ${i + 1}`);
 
-// A readout names a group by at most this many characters, the last of them an ellipsis, so it
-// is a few lines at most and fits the smallest frame; the panel's label keeps the whole name.
+// A readout names a group by at most this many characters (code points, so none is split), the
+// last of them an ellipsis, so it is a few lines at most and fits the smallest frame; the panel's
+// label keeps the whole name.
 const READOUT_NAME = 40;
 
 /** @param {string} name @returns {string} */
-const readoutName = (name) => (name.length > READOUT_NAME ? `${name.slice(0, READOUT_NAME - 1)}…` : name);
+const readoutName = (name) => {
+  const chars = Array.from(name);
+  return chars.length > READOUT_NAME ? `${chars.slice(0, READOUT_NAME - 1).join("")}…` : name;
+};
 
 /** @param {AETable} table @param {number} i */
 const aeDrawn = (table, i) => [table.ratio[i], table.lower[i], table.upper[i]].every(Number.isFinite);

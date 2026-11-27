@@ -399,6 +399,26 @@ test("compared, the marker gives each drawn model's reason, and only drawn model
   assert.equal(dom.nodes.frame.innerHTML, '<p class="check-reason">Needs at least two rows.</p>');
 });
 
+test("compared, a fitted body that draws nothing is not named in the split line", () => {
+  const note = "The band treats the fitted parameters as exact, because the fit could not be simulated.";
+  const payload = structuredClone(FIXTURE.edited.check_ae);
+  Object.assign(payload.models.original, { level_source: "known", n_draws: 0, level_note: note });
+  const dom = fakeFrame();
+  // Drawn, the fit's fallback is named.
+  renderCheckView(dom.nodes, "check_ae", payload, { ...VIEW, compare: true });
+  assert.match(dom.nodes.split.innerHTML, />parameters taken as exact \(as fitted\)<\/span>$/);
+  // With no finite interval the fit draws nothing, so there is no fitted series to mark.
+  for (const table of payload.models.original.tables) table.lower = table.lower.map(() => null);
+  const scene = renderCheckView(dom.nodes, "check_ae", payload, { ...VIEW, compare: true });
+  assert.ok(!scene.layers.some((l) => l.role === "original"));
+  assert.equal(dom.nodes.legend.hidden, true);
+  assert.doesNotMatch(dom.nodes.split.innerHTML, /as fitted|check-level/);
+  // The edit's own fallback is still given, naming no model.
+  Object.assign(payload.models.edited, { level_source: "known", n_draws: 0, level_note: note });
+  renderCheckView(dom.nodes, "check_ae", payload, { ...VIEW, compare: true });
+  assert.match(dom.nodes.split.innerHTML, />parameters taken as exact<\/span>$/);
+});
+
 /** Where the readout's text sits in the scene, by the fake's text metrics, and its lines. */
 function readoutBox(dom) {
   const group = dom.readout();
@@ -450,6 +470,23 @@ test("a readout too long for the frame breaks between its values and stays insid
   assert.equal(dom.readoutText(), mark.text);
   assert.ok(box.left >= 0 && box.right <= width, `${box.left} to ${box.right}`);
   assert.ok(box.top >= 0 && box.bottom <= scene.height, `${box.top} to ${box.bottom}`);
+});
+
+test("a readout counts a group name by character and never splits one", () => {
+  const whole = `${"q".repeat(38)}😀A`;
+  assert.equal(Array.from(whole).length, 40);
+  const longer = `${"q".repeat(38)}😀AB`;
+  assert.equal(Array.from(longer).length, 41);
+  for (const [name, shown] of [[whole, whole], [longer, `${"q".repeat(38)}😀…`]]) {
+    const dom = fakeFrame();
+    const scene = renderCheckView(dom.nodes, "check_ae", namedGroup(name), VIEW);
+    const mark = scene.marks.find((m) => m.text.startsWith(`g ${"q".repeat(38)}`));
+    assert.ok(mark, "no readout names the group");
+    assert.ok(mark.text.startsWith(`g ${shown} · `), mark.text);
+    assert.equal(Array.from(shown).length, 40);
+    // No character is cut in half: the text holds no lone surrogate.
+    assert.ok(mark.text.isWellFormed(), "the readout splits a character");
+  }
 });
 
 test("a group name over 40 characters is shortened in the readout, which keeps every value and fits", () => {

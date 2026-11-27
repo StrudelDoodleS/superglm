@@ -191,13 +191,13 @@ const levelNote = (body) => (body?.available && typeof body.level_note === "stri
 
 /**
  * A check's split line: the rows it reads, and on a held-out split whose band took the fitted
- * parameters as exact, the marker that says so and its sentence. With `compare`, the fit is
- * drawn beside the edit; when only one of the two fell back the marker names it, and when both
- * fell back for different reasons its sentence gives each.
- * @param {CheckPayload|null} payload @param {boolean} compare
+ * parameters as exact, the marker that says so and its sentence. When the scene draws a fitted
+ * series beside the edit and only one of the two fell back, the marker names it, and when both
+ * fell back for different reasons its sentence gives each. A fit that draws nothing does not count.
+ * @param {CheckPayload|null} payload @param {boolean} fitDrawn whether the scene draws the fit
  * @returns {{text: string, level: string|null, note: string|null}}
  */
-export function splitLine(payload, compare) {
+export function splitLine(payload, fitDrawn) {
   const split = payload?.split;
   if (!payload || !split) return { text: "", level: null, note: null };
   const text = `${split.label}, ${countText(split.n_obs)} rows`;
@@ -205,7 +205,7 @@ export function splitLine(payload, compare) {
   const drawn = answered(payload);
   if (drawn === null) return { text, level: null, note: null };
   const edited = levelNote(drawn);
-  const fitted = compare && payload.models.original?.available ? levelNote(payload.models.original) : undefined;
+  const fitted = fitDrawn && payload.models.original?.available ? levelNote(payload.models.original) : undefined;
   // `fitted` is undefined when the fit is not drawn, and null when it is drawn and simulated.
   const note = edited && fitted && edited !== fitted ? `As edited: ${edited} As fitted: ${fitted}` : edited ?? fitted ?? null;
   if (note === null) return { text, level: null, note: null };
@@ -226,20 +226,23 @@ export function splitLine(payload, compare) {
 export function renderCheckView(nodes, report, payload, { compare, width, height }) {
   const label = assessEntry(report)?.label ?? "";
   nodes.title.textContent = label;
-  const line = splitLine(payload, compare);
+  const scene = payload === null || answered(payload) === null ? null
+    : checkScene(report, payload, { width, height }, { compare });
+  // As the legend does, the split line counts the fit only when the scene draws a fitted series.
+  const fitDrawn = scene !== null && scene.layers.some((layer) => layer.role === "original");
+  const line = splitLine(payload, fitDrawn);
   nodes.split.innerHTML = escapeHTML(line.text) + (line.level === null || line.note === null ? ""
     : ` · <span class="check-level" tabindex="0" data-popover-title="${LEVEL_TITLE}"`
       + ` data-popover-body="${escapeHTML(line.note)}">${line.level}</span>`);
   const { frame } = nodes;
-  if (payload === null || answered(payload) === null) {
+  if (payload === null || scene === null) {
     nodes.legend.hidden = true;
     for (const name of ["role", "tabindex", "aria-label"]) frame.removeAttribute(name);
     const reason = payload === null ? null : (payload.available ? payload.models.edited.reason : payload.reason);
     frame.innerHTML = reason ? `<p class="check-reason">${escapeHTML(reason)}</p>` : "";
     return null;
   }
-  const scene = checkScene(report, payload, { width, height }, { compare });
-  nodes.legend.hidden = !scene.layers.some((layer) => layer.role === "original");
+  nodes.legend.hidden = !fitDrawn;
   frame.setAttribute("role", "img");
   frame.setAttribute("tabindex", "0");
   frame.setAttribute("aria-label", label);
