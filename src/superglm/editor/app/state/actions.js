@@ -7,6 +7,8 @@ import {
   commitStructuralTransition,
   completeEvidence,
   failEvidence,
+  JOB_REPORTS,
+  jobResultsKey,
   lapseReports as lapseReportEvidence,
   normalizeSelectionIndices,
   patchView as patchViewState,
@@ -489,14 +491,18 @@ export function createEditorActions({
       return { ok: false, error: new Error("Python returned an editor state this page cannot read.") };
     }
     const snapshot = /** @type {EditorSnapshot} */ (candidate);
-    // What Python holds beside the model, a job's result, can have moved: every report lapses,
-    // unless the snapshot is older than one already held and so not taken.
+    // A new model or waiting list lapses its reports (commitRemote). What Python holds beside
+    // the model, a job's result, lapses the job reports only where the snapshot shows it moved,
+    // so a re-read of an unchanged session keeps every report. An older snapshot is not taken.
     let taken = false;
     store.update((state) => {
       const committed = commitRemote(state, snapshot);
       taken = committed.remote.snapshot === snapshot;
+      const jobsMoved = taken &&
+        jobResultsKey(state.remote.snapshot) !== jobResultsKey(snapshot);
       return withNotice(
-        withLatestView(taken ? lapseReportEvidence(committed) : committed, made), snapshot
+        withLatestView(jobsMoved ? lapseReportEvidence(committed, JOB_REPORTS) : committed, made),
+        snapshot
       );
     });
     void Promise.resolve(scheduleVisibleEvidence(snapshot.model_revision, { immediate: true }))
@@ -870,18 +876,19 @@ export function createEditorActions({
   }
 
   /**
-   * A background job finished, and `reports` show what it changed. A Final fit re-reads
-   * Python; a re-read the page took has lapsed every report and asked for the open one, so
-   * that is the one invalidation. A Run CV, or a re-read that failed, was skipped or was
-   * refused, lapses `reports` here and asks for the open one.
+   * A background job finished, and `reports` show what it changed. The page re-reads Python,
+   * so its snapshot holds the job's result as the other windows' do; a re-read the page took
+   * has lapsed the job reports where their result moved and asked for the open one, so that
+   * is the one invalidation. A re-read that failed, was skipped or was refused lapses
+   * `reports` here and asks for the open one.
    *
-   * @param {string} kind the job's kind, `cv` or `final_fit`
+   * @param {string} _kind the job's kind, `cv` or `final_fit`
    * @param {readonly ReportName[]} reports
    * @returns {Promise<void>}
    */
-  async function settleJob(kind, reports) {
-    const reread = kind === "final_fit" ? await refreshFromPythonWhenIdle() : null;
-    if (reread?.ok && reread.taken) return;
+  async function settleJob(_kind, reports) {
+    const reread = await refreshFromPythonWhenIdle();
+    if (reread.ok && reread.taken) return;
     lapseReports(reports);
     const open = selectVisibleEvidencePanels(store.getState()).filter(isReportName);
     scheduleReports(open, { immediate: true });

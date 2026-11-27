@@ -267,7 +267,8 @@ def _is_state_read(request) -> bool:
 def test_open_in_new_window_shows_the_view_and_follows_edits(assess_page, choose_feature):
     """A second window opens on the report shown and follows an edit made in the first.
 
-    The second window's hello, once it has loaded, makes the first re-read once. Moving
+    The second window's hello, once it has loaded, makes the first re-read once, and on
+    an unchanged session that keeps the first window's warm reports. Moving
     between entries tells the second window nothing. After an edit the second window
     re-reads the session, and the first, already agreeing, re-reads nothing: the
     windows agree after one round.
@@ -275,7 +276,7 @@ def test_open_in_new_window_shows_the_view_and_follows_edits(assess_page, choose
     with assess_page() as (page, _session):
         open_report(page, "validation")
         wait_for_report(page, "validation")
-        with page.expect_request(_is_state_read), page.expect_popup() as opened:
+        with page.expect_response(_is_state_read), page.expect_popup() as opened:
             page.locator("#reportPanel [data-assess-window]").click()
         popup = opened.value
         assert "assess=validation" in popup.url and "token=" in popup.url
@@ -288,13 +289,22 @@ def test_open_in_new_window_shows_the_view_and_follows_edits(assess_page, choose
         popup.locator("#assessTab").focus()
         popup.keyboard.press("ArrowLeft")
         assert_report_open(popup, "validation")
-        reads, main_reads = [], []
+        reads, main_reads, main_reports = [], [], []
         popup.on("request", lambda request: _is_state_read(request) and reads.append(request))
         page.on("request", lambda request: _is_state_read(request) and main_reads.append(request))
+        page.on(
+            "request",
+            lambda request: (
+                urlsplit(request.url).path == "/report"
+                and main_reports.append(request.post_data_json.get("report"))
+            ),
+        )
         for name in ("cv", "validation", "cv"):  # switching entries tells nobody anything
             open_report(page, name)
             wait_for_report(page, name)
         assert reads == []
+        # The overview asked for every report, and the hello's re-read kept them: none is asked.
+        assert main_reports == []
         page.locator("#editorTab").click()
         choose_feature(page, "age")
         page.locator('button[data-op="select_all"]').click()

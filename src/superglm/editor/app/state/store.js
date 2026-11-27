@@ -250,6 +250,29 @@ export function waitingListChanged(previous, next) {
 }
 
 /**
+ * The reports a background job changes: Cross-validation, Final fit and Smoothing search.
+ * @type {readonly ReportName[]}
+ */
+export const JOB_REPORTS = Object.freeze(["cv", "final", "diagnose"]);
+
+/**
+ * What the job reports read beside the model, as a snapshot shows it: the jobs running, the
+ * Final fit's state, and how many job results Python has published. A finished Run CV shows
+ * only in the last, so a page that missed its end still sees this move.
+ * @param {EditorSnapshot|null} snapshot
+ * @returns {string}
+ */
+export function jobResultsKey(snapshot) {
+  if (!snapshot) return "";
+  return [
+    (snapshot.jobs_running ?? []).map((job) => job.job_id).join(),
+    snapshot.final_fit?.available ?? "",
+    snapshot.final_fit?.stale ?? "",
+    snapshot.results_generation ?? "",
+  ].join("|");
+}
+
+/**
  * Lapse the reports `names`, every report by default: what they show may have moved
  * though the model revision did not (a finished job, a waiting change undone).
  *

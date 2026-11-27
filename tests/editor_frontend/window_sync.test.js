@@ -6,6 +6,13 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 
 import { REPORT_NAMES } from "../../src/superglm/editor/app/api/contracts.js";
+import { createEditorActions } from "../../src/superglm/editor/app/state/actions.js";
+import { selectReportNeedsAsk } from "../../src/superglm/editor/app/state/selectors.js";
+import {
+  JOB_REPORTS,
+  createEditorStore,
+  createInitialEditorState,
+} from "../../src/superglm/editor/app/state/store.js";
 import { CONTROL_HELP, HELP_SECTIONS } from "../../src/superglm/editor/app/views/help_content.js";
 import {
   assessWindowUrl,
@@ -78,7 +85,7 @@ test("the session key moves with the model, the waiting list and jobs, not a sel
   assert.equal(sessionKey({ ...SNAPSHOT, selection: { age: [1, 2] }, state_generation: 9 }), base);
   for (const changed of [{ model_revision: 1 }, { in_force: "x" }, { pending: [{ id: "p1" }] },
     { jobs_running: [{ job_id: "j" }] }, { final_fit: { available: true, stale: false } },
-    { final_fit: { available: false, stale: true } }]) {
+    { final_fit: { available: false, stale: true } }, { results_generation: 1 }]) {
     assert.notEqual(sessionKey({ ...SNAPSHOT, ...changed }), base);
   }
   assert.notEqual(sessionKey(null), base);
@@ -426,17 +433,114 @@ test("a window whose re-read for a peer's notice failed settles the job when its
   assert.deepEqual(popup.count(), { reads: 0, lapses: 1, asks: ["cv"] });
 });
 
-test("a page's hello makes every other window lapse its job reports and re-read once", async () => {
+test("a page's hello makes every other window re-read once, which alone decides what lapses", async () => {
   const world = editorWorld();
   const open = world.editorWindow();
   await world.load(open);
   open.count();
   const loaded = world.editorWindow();
   await world.load(loaded);
-  assert.deepEqual(open.count(), { reads: 1, lapses: 1, asks: [] });
+  assert.deepEqual(open.count(), { reads: 1, lapses: 0, asks: [] });
   assert.deepEqual(loaded.count(), { reads: 1, lapses: 0, asks: [] });  // its own first snapshot
   assert.equal(world.posted.filter((message) => message.hello).length, 2);
   assert.equal(world.posted.length, 2);
+});
+
+// The main window as main.js wires it: its store and actions, its peer, and a scheduler
+// that asks for the open report. Python answers at once and counts what it is asked.
+function warmMainWindow() {
+  const { Channel } = fakeChannelPair();
+  const python = { results: 0, reads: 0, reports: [] };
+  const state = () => ({
+    model_revision: 0, in_force: "m0", pending: [], jobs_running: [],
+    final_fit: { available: false, stale: false }, results_generation: python.results,
+    selected_term: "age",
+    terms: {
+      age: {
+        kind: "spline", term_type: "spline", x: [1], y: [1], original_y: [1], previous_y: null,
+        levels: null, n_points: 1, controls: null, group_display: null, impact: {},
+        shape: { available: true, reason: null, ranges: [], support: null, specials: [] }
+      }
+    },
+    selection: { age: [0] }, undo_redo: { undo: null, redo: null }, timeline: [{ kind: "marker" }],
+    in_force_is_original: true
+  });
+  const store = createEditorStore(createInitialEditorState(state()));
+  const open = () => store.getState().view.activeView;
+  let actions;
+  actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async (path, body) => {
+        assert.equal(path, "/report");
+        python.reports.push(body.report);
+        return { report: body.report, model_revision: 0, in_force: "m0", request_sequence: body.request_sequence };
+      },
+      getState: async () => {
+        python.reads += 1;
+        return state();
+      }
+    },
+    scheduleVisibleEvidence: (_revision, options) => actions.scheduleReports(
+      [open()].filter((name) => !options?.onlyStale || selectReportNeedsAsk(store.getState(), name)),
+      options
+    )
+  });
+  const peer = createSessionPeer({
+    name: "editor",
+    Channel,
+    key: () => sessionKey(store.getState().remote.snapshot),
+    onJobNews: () => actions.lapseReports(JOB_REPORTS),
+    reread: coalesce(async () => (await actions.refreshFromPythonWhenIdle()).ok)
+  });
+  const tick = async () => {
+    for (let i = 0; i < 20; i += 1) await new Promise((resolve) => { setImmediate(resolve); });
+  };
+  // Open a report as a tab switch does: ask for it if this page does not hold it.
+  const show = async (name) => {
+    actions.patchView({ activeView: name });
+    if (selectReportNeedsAsk(store.getState(), name)) actions.scheduleReports([name], { immediate: true });
+    await tick();
+  };
+  const popup = createSessionPeer({
+    name: "editor", Channel, key: () => sessionKey(state()), onJobNews: () => {}, reread: async () => true
+  });
+  return { python, store, peer, popup, show, tick };
+}
+
+test("a popup's hello on an unchanged session keeps the main window's warm reports", async () => {
+  const main = warmMainWindow();
+  await main.show("cv");
+  await main.show("validation");
+  assert.deepEqual(main.python.reports, ["cv", "validation"]);
+
+  main.popup.hello();
+  await main.tick();
+  assert.equal(main.python.reads, 1);
+  await main.show("cv");
+  await main.show("validation");
+
+  assert.deepEqual(main.python.reports, ["cv", "validation"]);
+  for (const name of ["cv", "validation"]) {
+    assert.equal(main.store.getState().request.evidence[name].status, "current");
+  }
+});
+
+test("a popup's hello after a Run CV no window saw end asks for Cross-validation again, not Validation", async () => {
+  const main = warmMainWindow();
+  await main.show("cv");
+  await main.show("validation");
+  // A Run CV started from a window that closed before it heard the start ends unseen:
+  // no window lists it running, and only the results Python has published move.
+  main.python.results += 1;
+
+  main.popup.hello();
+  await main.tick();
+  await main.show("cv");
+  await main.show("validation");
+
+  assert.deepEqual(main.python.reports, ["cv", "validation", "cv"]);
+  assert.equal(main.store.getState().request.evidence.cv.status, "current");
 });
 
 test("Help names the second window and says why a notebook cell does not offer it", () => {

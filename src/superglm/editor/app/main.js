@@ -37,6 +37,7 @@ import {
   selectWaitingTerms
 } from "./state/selectors.js";
 import {
+  JOB_REPORTS,
   createEditorStore,
   createInitialEditorState,
   patchView as patchViewState,
@@ -350,10 +351,6 @@ const actions = createEditorActions({
 const evidenceTiming = createEvidenceTimingTracker({
   onComplete: () => renderTimingReadout()
 });
-
-// The reports a finished Run CV or Final fit changes: Cross-validation, Final
-// fit and Smoothing search.
-const JOB_REPORTS = Object.freeze(["cv", "final", "diagnose"]);
 
 // A re-read of the session asked for by another view of it: once for a burst.
 // It resolves to whether the re-read succeeded.

@@ -843,6 +843,7 @@ test("selectors expose confirmed state defaults and per-term display overrides",
 test("state modules expose only their requested public symbols", () => {
   assert.deepEqual(Object.keys(storeModule).sort(), [
     "EVIDENCE",
+    "JOB_REPORTS",
     "beginEvidence",
     "commitLocalView",
     "commitRemote",
@@ -851,6 +852,7 @@ test("state modules expose only their requested public symbols", () => {
     "createEditorStore",
     "createInitialEditorState",
     "failEvidence",
+    "jobResultsKey",
     "lapseReports",
     "moveEvidence",
     "normalizeSelectionIndices",

@@ -1,6 +1,7 @@
 // @ts-check
 
 import { isReportName } from "../api/contracts.js";
+import { jobResultsKey } from "../state/store.js";
 
 /** @typedef {import('../api/contracts.js').EditorSnapshot} EditorSnapshot */
 /** @typedef {import('../api/contracts.js').ReportName} ReportName */
@@ -61,8 +62,9 @@ export function syncChannelName(href) {
 
 /**
  * What two windows must agree on to show the same session: the model and the
- * one in force, what waits for Refit, the jobs running and the Final fit. A
- * selection is not in it, so moving through the Editor tells nobody anything.
+ * one in force, what waits for Refit, and what the job reports read (the jobs
+ * running, the Final fit, the job results published). A selection is not in
+ * it, so moving through the Editor tells nobody anything.
  * @param {EditorSnapshot|null} snapshot
  * @returns {string}
  */
@@ -72,9 +74,7 @@ export function sessionKey(snapshot) {
     snapshot.model_revision,
     snapshot.in_force ?? "",
     (snapshot.pending ?? []).map((step) => step.id).join(),
-    (snapshot.jobs_running ?? []).map((job) => job.job_id).join(),
-    snapshot.final_fit?.available ?? "",
-    snapshot.final_fit?.stale ?? "",
+    jobResultsKey(snapshot),
   ].join("|");
 }
 
@@ -186,8 +186,9 @@ const noticeId = (notice) => `${notice.phase}:${notice.id}`;
  * One window's part in following the session with the others.
  *
  * A window re-reads when another's key differs from its own, or when it hears
- * news: a job notice it has not had yet, or a page's hello. News also lapses
- * the reports a job changes. A job's start or end that a peer's notice brought
+ * news: a job notice it has not had yet, or a page's hello. A job notice also
+ * lapses the reports a job changes; after a hello the re-read alone decides,
+ * lapsing them only where what they read moved. A job's start or end that a peer's notice brought
  * is not handled again when this window's own polling sees it, unless the
  * re-read that notice asked for failed: then the window settles it itself.
  * Two windows that agree send nothing back, so a change costs each window a
@@ -210,11 +211,10 @@ export function createSessionPeer({ name, Channel, key, onJobNews, reread }) {
     onMessage: (message) => {
       const notice = message.job;
       const fresh = notice !== undefined && !handled.has(noticeId(notice));
-      if (message.hello === true || fresh) {
+      if (fresh) {
         onJobNews();
-        const refreshed = refresh();
-        if (notice && fresh) handled.set(noticeId(notice), refreshed);
-      } else if (message.key !== key()) {
+        handled.set(noticeId(notice), refresh());
+      } else if (message.hello === true || message.key !== key()) {
         void refresh();
       }
     },
@@ -245,7 +245,10 @@ export function createSessionPeer({ name, Channel, key, onJobNews, reread }) {
     },
     /** Tell the others this window's key. */
     tell,
-    /** A page that has just loaded may have missed a job's end: every other window re-reads once. */
+    /**
+     * A page that has just loaded may have missed a job's end: every other window re-reads
+     * once, and a job result published meanwhile moves its key.
+     */
     hello() {
       post({ hello: true });
     },

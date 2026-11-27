@@ -1757,13 +1757,21 @@ test("a Final fit re-read that is taken asks for the open report once, though th
 });
 
 test("a Run CV that settles lapses its reports and asks for the open one", async () => {
-  const { sent, client, answer } = heldReportClient(async () => snapshot(0));
+  // The re-read shows the job's published result.
+  const { sent, client, answer } = heldReportClient(async () => ({ ...snapshot(0), results_generation: 1 }));
   const retry = { path: "/report", payload: { report: "cv" } };
   let state = patchViewState(createInitialEditorState(snapshot(0)), { activeView: "cv" });
   state = completeEvidence(beginEvidence(state, "cv", 0, 1, retry), "cv", 0, 1, { report: "cv" });
   state = { ...state, request: { ...state.request, nextSequence: 2 } };
   const store = createEditorStore(state);
-  const actions = createEditorActions({ store, client });
+  /** @type {ReturnType<typeof createEditorActions>} */
+  let actions;
+  actions = createEditorActions({
+    store,
+    client,
+    // The page's scheduler: the open report is Cross-validation.
+    scheduleVisibleEvidence: (_revision, options) => actions.scheduleReports(["cv"], options)
+  });
 
   const settling = actions.settleJob("cv", ["cv", "final", "diagnose"]);
   await settled();
@@ -1773,23 +1781,31 @@ test("a Run CV that settles lapses its reports and asks for the open one", async
   assert.equal(store.getState().request.evidence.cv.status, "current");
 });
 
-test("Refresh from Python lapses every report the page holds", async () => {
-  const retry = { path: "/report", payload: { report: "validation" } };
-  let state = beginEvidence(createInitialEditorState(snapshot(3)), "validation", 3, 1, retry);
-  state = completeEvidence(state, "validation", 3, 1, { report: "validation" });
+test("Refresh from Python lapses the job reports only when a job's result moved", async () => {
+  let state = createInitialEditorState({ ...snapshot(3), results_generation: 4 });
+  for (const [sequence, report] of ["validation", "cv"].entries()) {
+    const retry = { path: "/report", payload: { report } };
+    state = beginEvidence(state, report, 3, sequence + 1, retry);
+    state = completeEvidence(state, report, 3, sequence + 1, { report });
+  }
+  const read = [{ ...snapshot(3), results_generation: 4 }, { ...snapshot(3), results_generation: 5 }];
   const store = createEditorStore(state);
   const actions = createEditorActions({
     store,
     client: {
       postJSON: async () => { throw new Error("refresh must not post"); },
-      getState: async () => snapshot(3)
+      getState: async () => read.shift()
     }
   });
-  assert.equal(store.getState().request.evidence.validation.status, "current");
+  /** @returns {string[]} */
+  const statuses = () => ["validation", "cv"].map((name) => store.getState().request.evidence[name].status);
 
+  // The session is as this page holds it: every report stays.
   await actions.refreshFromPython();
-
-  assert.equal(store.getState().request.evidence.validation.status, "stale");
+  assert.deepEqual(statuses(), ["current", "current"]);
+  // A job published a result meanwhile: its reports lapse, and Validation stays.
+  await actions.refreshFromPython();
+  assert.deepEqual(statuses(), ["current", "stale"]);
 });
 
 test("refreshFromPython is skipped while a mutation is running", async () => {

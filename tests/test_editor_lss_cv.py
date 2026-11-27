@@ -510,6 +510,21 @@ def test_the_widget_runs_cv_and_final_fit_as_background_jobs(nb_cv):
         widget.close()
 
 
+def test_each_published_job_result_moves_the_state_a_reconnecting_page_compares(nb_cv):
+    """A finished job lists in no running job, so the state counts the results it holds."""
+    widget = open_case(nb_case(), cv=nb_cv).widget()
+    try:
+        opened = widget._state()["results_generation"]
+        assert widget._state()["results_generation"] == opened
+        assert _finished(widget, "cv")["status"] == "done"
+        after_cv = widget._state()["results_generation"]
+        assert after_cv > opened
+        assert _finished(widget, "final_fit")["status"] == "done"
+        assert widget._state()["results_generation"] > after_cv
+    finally:
+        widget.close()
+
+
 def test_offsets_are_taken_by_rows_whatever_their_shape():
     rows = np.array([2, 0])
     assert _take_offset(None, rows) is None
