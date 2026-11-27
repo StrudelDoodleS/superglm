@@ -756,3 +756,28 @@ def test_mutation_single_rows_without_their_gram_miss_the_dense_gradient(monkeyp
     dense, compact = both(p, nb, rho)
     with pytest.raises(AssertionError):
         assert_same_criterion(p, compact, dense, condition(p, nb, rho, dense.fit))
+
+
+def test_single_rows_from_tables_scale_a_gram_whose_weights_overflow_in_their_sum():
+    """Prior weights of 1e152: each row's squared score is finite and their sum is not.
+
+    The cross term's Gram is taken over a power of two and given back through the two
+    inverses, so the criterion and its gradient are the dense rows'.
+    """
+    rng = np.random.default_rng(3)
+    n = 40_000
+    x = rng.integers(0, 50, n) / 50
+    y = np.sin(6 * x) + rng.normal(size=n)
+    weights = np.full(n, 1e152)
+    model = SuperGLM(
+        features={"x": Spline(kind="ps", n_knots=4)},
+        family="gaussian",
+        selection_penalty=0,
+        spline_penalty=1.0,
+    )
+    model.fit(pd.DataFrame({"x": x}), y, sample_weight=weights)
+    p = problem_of(model, y, weights, None)
+    nb, rho = single_rows(n), np.zeros(len(p.names))
+    dense, compact = both(p, nb, rho)
+    assert np.isfinite(compact.value) and np.all(np.isfinite(compact.gradient))
+    assert_same_criterion(p, compact, dense, condition(p, nb, rho, dense.fit))

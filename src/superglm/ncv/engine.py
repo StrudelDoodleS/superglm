@@ -1603,7 +1603,10 @@ class _Trial:
         One product with the design and one of its weighted Grams (``CentredRows.gram``),
         the solver's centred system.  ``a b`` is ``l' D'`` over the squared margin, and
         the held-out step moves the mean away from the response, so the two scores share a
-        sign and ``D`` is nonnegative; a negative entry is taken in a Gram of its own.
+        sign and ``D`` is nonnegative; a negative entry is taken in a Gram of its own.  ``D``
+        is a squared score, so it can overflow in a sum where ``M`` does not: the Gram takes
+        ``D`` over a power of two that brings its largest entry into ``[1/2, 1)``, and the
+        two inverses each give back half of that power, all of it exact.
         """
         values, product, served = self._lean_q, self._lean_d, self._lean_on
         if values is None or product is None or served is None:
@@ -1613,11 +1616,18 @@ class _Trial:
         if not whole:
             values, product = values[rows], product[rows]
         self.q += design.rmatvec(values)
-        gram = design.gram(np.maximum(product, 0.0))
-        if np.any(product < 0.0):
-            gram = gram - design.gram(np.maximum(-product, 0.0))
-        self.cross += self.apply_inverse(self.apply_inverse(gram).T)
         self.work.rows_streamed += 2 * len(rows)
+        largest = float(np.max(np.abs(product), initial=0.0))
+        if largest == 0.0:
+            return
+        power = int(np.frexp(largest)[1])
+        weight = np.ldexp(product, -power)
+        gram = design.gram(np.maximum(weight, 0.0)) if np.any(weight > 0.0) else 0.0
+        if np.any(weight < 0.0):
+            gram = gram - design.gram(np.maximum(-weight, 0.0))
+        half = power // 2
+        left = np.ldexp(self.apply_inverse(gram), half)
+        self.cross += np.ldexp(self.apply_inverse(left.T), power - half)
 
     def rho_gradient(self) -> NDArray[np.float64]:
         """``dV / d rho`` from ``q`` and ``M``, after every neighbourhood has added to them."""
