@@ -8,6 +8,11 @@ import typing as _typing
 from superglm._lazy import attach
 
 if _typing.TYPE_CHECKING:
+    from superglm.stats.bands import (
+        UniformBand,
+        bonferroni_binomial_band,
+        equal_local_levels_band,
+    )
     from superglm.stats.davies import psum_chisq, satterthwaite
     from superglm.stats.model_tests import (
         DispersionTestResult,
@@ -25,6 +30,11 @@ if _typing.TYPE_CHECKING:
 # imports none of its modules, so a thread that imports one of them by path while another thread
 # runs this body never waits on a sibling that thread holds.
 _LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
+    "superglm.stats.bands": (
+        "UniformBand",
+        "bonferroni_binomial_band",
+        "equal_local_levels_band",
+    ),
     "superglm.stats.davies": ("psum_chisq", "satterthwaite"),
     "superglm.stats.model_tests": (
         "DispersionTestResult",
@@ -44,9 +54,12 @@ __getattr__, __dir__ = attach(__name__, __path__, _LAZY_EXPORTS)
 __all__ = [
     "DispersionTestResult",
     "ScoreTestZIResult",
+    "UniformBand",
     "VuongTestResult",
     "ZeroInflationResult",
+    "bonferroni_binomial_band",
     "dispersion_test",
+    "equal_local_levels_band",
     "psum_chisq",
     "satterthwaite",
     "score_test_zi",
