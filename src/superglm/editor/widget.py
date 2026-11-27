@@ -7,6 +7,7 @@ avoids custom Jupyter widget modules, which are often unavailable in VS Code.
 from __future__ import annotations
 
 import atexit
+import hashlib
 import html
 import io
 import logging
@@ -72,6 +73,7 @@ from superglm.editor.lss.availability import (
 )
 from superglm.editor.lss.panel import NOT_SUPERLSS, distribution_panel_payload
 from superglm.editor.lss.risk import risk_payload, risk_row
+from superglm.editor.lss.view import LSSModelView
 from superglm.editor.metrics import metric_comparison_payload, metrics_payload
 from superglm.editor.native_dialogs import open_directory_path
 from superglm.editor.notebook import NotebookTransport, notebook_view_class
@@ -256,8 +258,8 @@ class EditorWidget:
         self._evidence = EvidenceCoordinator(f"editor-{id(self):x}")
         # The checks' evidence, read and written only by check jobs, which the coordinator runs
         # one at a time. Each entry keeps the split it was read on, compared by identity, and
-        # its model's signature and inputs: the fitted model's body of each check on a split,
-        # and one simulation each for the fitted and the edited model on a split.
+        # its model's ``_check_signature`` and inputs: the fitted model's body of each check on
+        # a split, and one simulation each for the fitted and the edited model on a split.
         self._original_checks: dict[tuple[str, str], tuple[tuple[Any, ...], Any, dict]] = {}
         self._check_replicates: dict[
             tuple[str, str], tuple[tuple[Any, ...], Any, NullReplicates]
@@ -917,7 +919,7 @@ class EditorWidget:
             return _superseded_payload(revision, request_sequence, source.token)
 
         def compute_bodies() -> dict[str, Any]:
-            fitted = model_metric_signature(reference)
+            fitted = _check_signature(reference)
             replicates = self._check_replicates_for(edited, dataset, inputs, fitted=fitted)
             bodies = {
                 "edited": check_body(report, edited, dataset, inputs=inputs, replicates=replicates),
@@ -954,7 +956,7 @@ class EditorWidget:
     ) -> NullReplicates:
         """``model``'s one simulation on ``dataset``, shared by its four checks; ``fitted`` is the
         fitted model's signature. Run only inside a check job."""
-        key = (model_metric_signature(model), inputs)
+        key = (_check_signature(model), inputs)
         for held, held_dataset, replicates in self._check_replicates.values():
             if held == key and held_dataset is dataset:
                 return replicates
@@ -1687,6 +1689,16 @@ def _superseded_payload(
         "request_sequence": request_sequence,
         "in_force": in_force,
     }
+
+
+def _check_signature(model) -> tuple[Any, ...]:
+    """What a SuperLSS's checks read from its fit: its scoring signature and a digest of the
+    covariance the posterior draws read. A hand edit keeps the fit's covariance; a refit in
+    place may keep the coefficients and move the covariance."""
+    lss = model.lss if isinstance(model, LSSModelView) else model
+    covariance = np.ascontiguousarray(lss._require_fitted().inference.covariance, np.float64)
+    digest = hashlib.blake2b(covariance.tobytes(), digest_size=16).hexdigest()
+    return (model_metric_signature(model), covariance.shape, digest)
 
 
 _NOTEBOOK_FALLBACK = (

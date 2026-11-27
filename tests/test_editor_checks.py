@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import json
 import tracemalloc
@@ -1183,6 +1184,44 @@ def test_an_edit_while_the_check_is_drawn_supersedes_its_answer(calm_session, mo
     asked = InForce.of(calm_session).token
     answer = _ask(widget, "check_pit")
     assert answer["status"] == "superseded" and answer["in_force"] == asked
+
+
+def _with_covariance(lss, scale: float):
+    """``lss``'s fit with its coefficients and ``scale`` times its covariance."""
+    fitted = lss._require_fitted()
+    state = fitted.fit_state
+    covariance = scale * state.inference.covariance
+    state = dataclasses.replace(
+        state,
+        inference=dataclasses.replace(state.inference, covariance=covariance),
+        result=dataclasses.replace(state.result, covariance=covariance),
+    )
+    return dataclasses.replace(fitted, _fit_state=state)
+
+
+def test_a_refit_that_moves_only_the_covariance_is_drawn_again(calm):
+    """Both caches warm, then the fit replaced in place by one with the same coefficients and
+    another covariance: each check answers as a fresh widget does. Mutation check: keyed by the
+    scoring signature alone, the caches serve the old covariance's levels."""
+    lss = copy.deepcopy(calm.lss)
+    session = _session(calm._replace(lss=lss))
+    try:
+        widget = session.widget()
+        for report in CHECK_REPORTS:
+            _ask(widget, report)
+        _average(session, 6)
+        before = {report: _ask(widget, report) for report in CHECK_REPORTS}
+        lss._model = _with_covariance(lss, 9.0)
+        coefficients = lss._require_fitted().coefficients
+        assert np.array_equal(coefficients, calm.lss._require_fitted().coefficients)
+        fresh = session.widget()
+        for report in CHECK_REPORTS:
+            answer = _ask(widget, report)
+            assert answer == _ask(fresh, report)
+            assert answer["compares_edit"] is True
+        assert answer["models"]["original"] != before[report]["models"]["original"]
+    finally:
+        _close_widgets(session)
 
 
 def test_a_training_only_session_keeps_the_known_parameter_bands(calm):
