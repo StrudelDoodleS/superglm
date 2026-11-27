@@ -74,7 +74,7 @@ import { createRiskController } from "./views/risk_controller.js";
 import { defaultRiskLine, renderRiskPanel, riskPlotsHost } from "./views/risk_panel.js";
 import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
 import { bindAssessList, renderAssessList } from "./views/assess_list.js";
-import { bindOverview, overviewGroups, overviewMarkup } from "./views/assess_overview.js";
+import { bindOverview, drawOverview, overviewGroups } from "./views/assess_overview.js";
 import {
   placeTermViewToggle,
   renderContextBar,
@@ -1221,13 +1221,8 @@ function renderAppView(activeView) {
   renderAssessList(assessRows, activeView);
 }
 
-// A redraw keeps keyboard focus on the card that had it.
 function renderOverview() {
-  const active = document.activeElement;
-  const card = active instanceof HTMLElement && assessCards.contains(active) ? active.dataset.card : undefined;
-  const focusVisible = card !== undefined && active.matches(":focus-visible");
-  assessCards.innerHTML = overviewMarkup(overviewGroups(store.getState().request.evidence));
-  if (card !== undefined) assessCards.querySelector(`[data-card="${card}"]`)?.focus({ focusVisible });
+  drawOverview(assessCards, overviewGroups(store.getState().request.evidence));
 }
 
 function renderChartWorkspace() {

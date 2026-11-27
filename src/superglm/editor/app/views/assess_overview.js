@@ -21,7 +21,7 @@ import { verdictParts } from "./diagnose_tab.js";
 /** @typedef {import('../state/assess.js').AssessEntry} AssessEntry */
 /**
  * The parts of a validation report a card reads.
- * @typedef {{name?: string, n_obs?: number, available?: boolean,
+ * @typedef {{name?: string, n_obs?: number, available?: boolean, error?: string,
  *   metrics?: {edited?: Record<string, number|null>, delta?: Record<string, number|null>}}} SplitScores
  */
 /**
@@ -34,6 +34,7 @@ const MISSING = "—";
 
 /**
  * The report's first score on the validation split, else on the first split it scored.
+ * A validation split the model could not score shows the report's reason instead.
  * @param {ValidationPayload} payload
  * @returns {CardFace}
  */
@@ -45,6 +46,7 @@ export function validationCard(payload) {
   const split = splits.find((candidate) => candidate.name === "validation")
     ?? splits.find((candidate) => candidate.available !== false && candidate.metrics);
   if (!payload.available || !split || metric === undefined) return { value: MISSING, note };
+  if (split.available === false) return { value: MISSING, note: split.error || note };
   const value = `${labels[metric] ?? metric} ${metricText(metric, split.metrics?.edited?.[metric])}`;
   if (split.name !== "validation") return { value, note };
   const delta = payload.compares_edit ? ` · Δ ${deltaText(metric, split.metrics?.delta?.[metric])}` : "";
@@ -164,6 +166,29 @@ export function overviewMarkup(groups) {
     `<h3 class="assess-section-title">${escapeHTML(group.name)}</h3>` +
     `<div class="assess-card-grid">${group.cards.map(cardMarkup).join("")}</div>` +
     "</section>").join("");
+}
+
+/**
+ * Draw the cards into `root`: built once, then each card's value, note and freshness
+ * written in place, so a card being pressed or holding focus stays the same element
+ * while another report lands.
+ * @param {HTMLElement} root
+ * @param {CardGroup[]} groups
+ */
+export function drawOverview(root, groups) {
+  if (!root.querySelector("[data-card]")) {
+    root.innerHTML = overviewMarkup(groups);
+    return;
+  }
+  for (const card of groups.flatMap((group) => group.cards)) {
+    const node = root.querySelector(`[data-card="${card.id}"]`);
+    if (!(node instanceof HTMLElement)) continue;
+    node.dataset.freshness = card.freshness;
+    const value = node.querySelector(".assess-card-value");
+    const note = node.querySelector(".assess-card-note");
+    if (value) value.textContent = card.value;
+    if (note) note.textContent = card.note;
+  }
 }
 
 /**

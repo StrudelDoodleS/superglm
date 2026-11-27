@@ -38,6 +38,8 @@ const GLM_TRAIN_ONLY = {
   splits: [{ name: "train", label: "Train", n_obs: 800, metrics: { edited: { deviance: 512.3, aic: 1604.5 } } }]
 };
 const NO_DATA = "No retained fit data is available for metrics.";
+// A split's refusal, as lss_split_reason words it and split_metrics_payload sends it in "error".
+const NO_QUOTE = "The Validation split cannot be scored with its weights: the model's family has no likelihood for weights like these. Pass the split without weights to score it.";
 const LSS_CV = {
   available: true, report: "cv", note: "",
   header: { supplied: true, n_folds: 5, splitter: "KFold", n_rows: 1342 },
@@ -115,6 +117,14 @@ test("Validation reads the report's first score on the validation split", () => 
     { value: "Deviance 512.3", note: TRAIN_ONLY_NOTE });
   assert.deepEqual(validationCard({ available: false, splits: [], metric_labels: {}, note: NO_DATA }),
     { value: "—", note: NO_DATA });
+});
+
+test("a Validation split the model could not score shows the report's reason, with no change", () => {
+  const refusedSplit = { name: "validation", label: "Validation", n_obs: 331, source: "validation", available: false, error: NO_QUOTE };
+  assert.deepEqual(validationCard({ ...LSS_VALIDATION, splits: [LSS_TRAIN, refusedSplit] }),
+    { value: "—", note: NO_QUOTE });
+  assert.deepEqual(validationCard({ ...LSS_VALIDATION, compares_edit: true, splits: [LSS_TRAIN, refusedSplit] }),
+    { value: "—", note: NO_QUOTE });
 });
 
 test("Cross-validation reads the newest result's first score", () => {

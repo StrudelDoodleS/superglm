@@ -212,3 +212,21 @@ def test_a_card_keeps_keyboard_focus_when_a_report_lands(assess_page):
             held[count - 1].continue_()
         page.locator('#assessCards [data-card="diagnose"][data-freshness="current"]').wait_for()
         assert page.evaluate("document.activeElement?.dataset.card") == "cv"
+
+
+def test_a_card_pressed_while_a_report_lands_still_opens_its_report(assess_page):
+    """A report landing between pointer-down and pointer-up leaves the pressed card in place."""
+    with assess_page() as (page, _session):
+        held = hold_requests(page, "**/report")
+        page.locator("#assessTab").click()
+        held.wait(1)
+        page.locator('#assessCards [data-card="final"]').hover()
+        page.mouse.down()
+        held[0].continue_()
+        page.locator('#assessCards [data-card="validation"][data-freshness="current"]').wait_for()
+        page.mouse.up()
+        page.locator('#reportPanel[data-report="final"]').wait_for(state="visible", timeout=5000)
+        page.unroute("**/report")
+        for route in held[1:]:
+            route.continue_()
+        wait_for_report(page, "final")
