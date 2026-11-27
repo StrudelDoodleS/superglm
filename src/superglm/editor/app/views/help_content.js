@@ -192,6 +192,10 @@ export const CONTROL_HELP = Object.freeze({
     title: "Snap selected values",
     body: "Set selected relativities to their highest or lowest selected value.",
   }),
+  new_window: Object.freeze({
+    title: "Open in new window",
+    body: "Show this view in a second browser window, for another monitor. It follows every change made here.",
+  }),
 });
 
 /**
@@ -379,6 +383,8 @@ export const HELP_SECTIONS = Object.freeze([
       "Assess holds every report on the model you are editing. It opens on an overview, one card per report with its headline number; click a card, or a name in the list, to open it large.",
       "Smoothing search was called Diagnose.",
       "Below 1086 pixels wide the list shows its icons only; hover over or focus one for its name.",
+      `${CONTROL_HELP.new_window.title}: ${CONTROL_HELP.new_window.body}`,
+      "Inside a notebook cell it is not offered: the page reaches Python through the notebook, which a second window cannot.",
     ]),
   }),
   Object.freeze({

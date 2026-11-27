@@ -19,10 +19,12 @@ const NOTHING_WAITING =
  * @param {()=>unknown} options.onRevert
  * @param {()=>unknown} options.onRefresh
  * @param {()=>unknown} options.onRefit
+ * @param {boolean} [options.shortcuts] R, Ctrl/Cmd+Z and Ctrl+Y on the page; a window
+ *   that cannot edit leaves them to the browser
  */
 export function bindAppBar({
   root, undoButton, redoButton, revertButton, refreshButton, refitButton,
-  onView, onUndo, onRedo, onRevert, onRefresh, onRefit,
+  onView, onUndo, onRedo, onRevert, onRefresh, onRefit, shortcuts = true,
 }) {
   const allTabs = Array.from(root.querySelectorAll('[role="tab"]')).filter(
     (tab) => tab instanceof HTMLButtonElement,
@@ -86,7 +88,7 @@ export function bindAppBar({
   revertButton.addEventListener("click", onRevert);
   refreshButton.addEventListener("click", onRefresh);
   refitButton.addEventListener("click", onRefit);
-  document.addEventListener("keydown", onDocumentKeyDown);
+  if (shortcuts) document.addEventListener("keydown", onDocumentKeyDown);
 
   return Object.freeze({
     destroy() {

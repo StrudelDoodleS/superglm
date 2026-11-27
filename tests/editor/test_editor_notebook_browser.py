@@ -434,3 +434,13 @@ def test_a_plain_wheel_over_an_outputs_chart_leaves_the_notebook_scrolling(
         chart.locator("path.edited").first.wait_for()
         assert chart.evaluate(wheel, False) is False
         assert chart.evaluate(wheel, True) is True
+
+
+def test_assess_offers_no_second_window_in_a_notebook_cell(
+    chromium_browser, curve_session, monkeypatch
+):
+    with _notebook_editor(chromium_browser, curve_session, monkeypatch) as (_page, frame, _w, _v):
+        frame.locator("#assessTab").click()
+        frame.locator("#assessOverview").wait_for()
+        assert frame.locator("[data-assess-window]").count() == 2
+        assert frame.locator("[data-assess-window]:visible").count() == 0

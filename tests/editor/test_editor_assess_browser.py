@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from urllib.parse import urlsplit
 
 import pytest
-from tests.editor._editor_waits import hold_requests
+from tests.editor._editor_waits import hold_requests, wait_for_editor_idle
 from tests.editor.assess_table import (
     assert_report_open,
     bare_glm_session,
@@ -258,3 +258,44 @@ def test_below_1086_px_the_list_is_icons_with_names_in_popovers(assess_page):
         assert page.evaluate(
             "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
         )
+
+
+def _is_state_read(request) -> bool:
+    return urlsplit(request.url).path == "/state"
+
+
+def test_open_in_new_window_shows_the_view_and_follows_edits(assess_page, choose_feature):
+    """A second window opens on the report shown and follows an edit made in the first.
+
+    Moving between entries tells the second window nothing. After an edit the second
+    window re-reads the session, and the first, already agreeing, re-reads nothing:
+    the windows agree after one round.
+    """
+    with assess_page() as (page, _session):
+        open_report(page, "validation")
+        wait_for_report(page, "validation")
+        with page.expect_popup() as opened:
+            page.locator("#reportPanel [data-assess-window]").click()
+        popup = opened.value
+        assert "assess=validation" in popup.url and "token=" in popup.url
+        wait_for_report(popup, "validation")
+        assert_report_open(popup, "validation")
+        assert popup.title() == "Assess · SuperGLM Editor"
+        assert popup.locator("#editorTab").is_hidden() and popup.locator("#undoAction").is_hidden()
+        assert popup.locator("[data-assess-window]:visible").count() == 0
+        reads, main_reads = [], []
+        popup.on("request", lambda request: _is_state_read(request) and reads.append(request))
+        page.on("request", lambda request: _is_state_read(request) and main_reads.append(request))
+        for name in ("cv", "validation", "cv"):  # switching entries tells nobody anything
+            open_report(page, name)
+            wait_for_report(page, name)
+        assert reads == []
+        page.locator("#editorTab").click()
+        choose_feature(page, "age")
+        page.locator('button[data-op="select_all"]').click()
+        page.get_by_role("button", name="Increase selection").click()
+        wait_for_editor_idle(page)
+        popup.get_by_role("table", name="Split metrics").get_by_text("Δ").first.wait_for()
+        wait_for_report(popup, "validation")
+        assert 1 <= len(reads) <= 2
+        assert main_reads == []

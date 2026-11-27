@@ -142,6 +142,25 @@ import {
   renderTermViewToggle
 } from "./views/rating_table.js";
 import { bindToolRail, renderToolRail } from "./views/tool_rail.js";
+import {
+  assessWindowUrl,
+  coalesce,
+  createWindowSync,
+  readAssessWindow,
+  sessionKey,
+  startedJobs,
+  syncChannelName
+} from "./views/window_sync.js";
+
+// Inside a notebook cell the page reaches Python over widget messages.
+const notebookHost = globalThis.superglmEditorHost?.kind === "notebook";
+// A second window, opened from Assess, shows Assess alone on the view its address names.
+const assessWindowView = notebookHost ? null : readAssessWindow(window.location.search);
+const assessWindow = assessWindowView !== null;
+if (assessWindow) {
+  document.documentElement.dataset.window = "assess";
+  document.title = "Assess · SuperGLM Editor";
+}
 
 const appBar = document.getElementById("appBar");
 const undoAction = document.getElementById("undoAction");
@@ -333,6 +352,33 @@ const evidenceTiming = createEvidenceTimingTracker({
 // fit and Smoothing search.
 const JOB_REPORTS = Object.freeze(["cv", "final", "diagnose"]);
 
+// A re-read of the session asked for by another view of it: once for a burst.
+const rereadSession = coalesce(() => actions.refreshFromPythonWhenIdle());
+
+// The windows of one editor tell each other when the session moved, or a job
+// they watch started or ended; a window re-reads only when it differs, so two
+// windows agree after one round. A notebook cell has no second window.
+const windowSync = notebookHost ? null : createWindowSync({
+  name: syncChannelName(window.location.href),
+  Channel: globalThis.BroadcastChannel,
+  onMessage: ({ key, job }) => {
+    if (job) actions.lapseReports(JOB_REPORTS);
+    if (job || key !== sessionKey(store.getState().remote.snapshot)) void rereadSession();
+  }
+});
+// The jobs the other windows know of: those this window announced, and those
+// the session listed, which every window reads for itself.
+const jobsKnown = new Set();
+
+/** @param {boolean} job */
+function announce(job) {
+  windowSync?.announce({
+    type: "superglm.changed",
+    key: sessionKey(store.getState().remote.snapshot),
+    job
+  });
+}
+
 // The Cross-validation tab draws into the report frame, which the other
 // reports share, so it draws a job's progress only while it is the open view.
 // A finished Run CV or Final fit changes the tab, and a Final fit also what
@@ -343,9 +389,13 @@ const cvTab = createCVTab({
   client: editorClient,
   onJobSettled: async (kind) => {
     await actions.settleJob(kind, JOB_REPORTS);
+    announce(true);
     renderPill();
   },
-  onJobChange: () => renderPill(),
+  onJobChange: () => {
+    if (startedJobs(cvTab.jobs(), jobsKnown).length > 0) announce(true);
+    renderPill();
+  },
   onDiagnose: (fitId) => {
     diagnoseTab.select(fitId);
     void showView("diagnose");
@@ -397,7 +447,8 @@ bindAppBar({
   onRedo: redo,
   onRevert: () => runStructuralRefit(revertTransition()),
   onRefresh: refreshFromPython,
-  onRefit: refitPending
+  onRefit: refitPending,
+  shortcuts: !assessWindow
 });
 // The DAY / NIGHT switch keeps "Follow the browser" equal to the theme key.
 mountThemeSwitch({
@@ -813,29 +864,10 @@ if (
 }
 // Inside a notebook cell the kernel runs on another machine, so its file
 // manager would open there: the dialog saves to a kernel path and stops.
-const notebookHost = globalThis.superglmEditorHost?.kind === "notebook";
 if (notebookHost && exportOpenDirectory instanceof HTMLElement) exportOpenDirectory.hidden = true;
 // One editor can show in several notebook outputs. When another output
 // changes the session, this one re-reads it, once for a burst of changes.
-if (notebookHost) {
-  let refreshing = false;
-  let again = false;
-  globalThis.superglmEditorHost.onRemoteChange = async () => {
-    if (refreshing) {
-      again = true;
-      return;
-    }
-    refreshing = true;
-    try {
-      do {
-        again = false;
-        await actions.refreshFromPythonWhenIdle();
-      } while (again);
-    } finally {
-      refreshing = false;
-    }
-  };
-}
+if (notebookHost) globalThis.superglmEditorHost.onRemoteChange = rereadSession;
 bindExportDialog({
   client: editorClient,
   nodes: {
@@ -1199,7 +1231,7 @@ function formatMilliseconds(value) {
 
 // The one writer of the view on screen.
 async function showView(view) {
-  const activeView = openableView(view, { assessWindow: false });
+  const activeView = openableView(view, { assessWindow });
   actions.patchView({ activeView });
   if (activeView === "editor") {
     scheduleVisibleEvidenceCatchUp();
@@ -2572,6 +2604,20 @@ bindFeatureList(featureListNodes, {
 renderFeatureListState();
 
 bindAssessList(assessRows, { onOpen: showView });
+// Open in new window shows the open Assess view in one second window; a click
+// again moves that window to the view now open. A notebook cell cannot offer
+// it, and the second window does not offer it again.
+for (const button of document.querySelectorAll("[data-assess-window]")) {
+  button.hidden = notebookHost || assessWindow;
+  button.addEventListener("click", () => {
+    const view = store.getState().view.activeView;
+    window.open(
+      assessWindowUrl(window.location.href, tabOf(view) === "assess" ? view : "assess"),
+      `superglm-assess-${window.location.port}`,
+      "popup,width=1280,height=860"
+    );
+  });
+}
 // A card opens its report, and focus goes to the report's entry in the list.
 bindOverview(assessCards, {
   onOpen: (id) => {
@@ -2783,7 +2829,10 @@ jobPill?.addEventListener("click", () => {
 store.subscribe(
   (state) => state.remote.snapshot?.jobs_running ?? [],
   (jobs) => {
-    for (const job of jobs) cvTab.watch(job);
+    for (const job of jobs) {
+      jobsKnown.add(job.job_id);
+      cvTab.watch(job);
+    }
   },
   (left, right) => left.map((job) => job.job_id).join() === right.map((job) => job.job_id).join()
 );
@@ -2898,7 +2947,14 @@ for (const input of summaryLevelDisplayInputs) {
   input.checked = input.value === selectSummaryLevelDisplay(store.getState());
 }
 
+// Tell this editor's other windows whenever the session here moves.
+store.subscribe((state) => sessionKey(state.remote.snapshot), () => announce(false));
+
+// An Assess window asks for its view's reports, which wait for the first
+// snapshot, and never for the Editor's metrics and summary.
+if (assessWindow) void showView(assessWindowView);
 loadState().then(async () => {
+  if (assessWindow) return;
   await refreshMetricsView();
   await refreshSummaryView();
 }).catch((error) => {

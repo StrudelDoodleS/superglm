@@ -731,7 +731,14 @@
             <h2 id="assessOverviewTitle">Is this model any good?</h2>
             <p class="assess-overview-lede">Every report on the model you are editing, one number each. Click one to open it large.</p>
           </div>
-          <div class="assess-tools"></div>
+          <div class="assess-tools">
+            <button class="icon-button" type="button" data-assess-window
+              aria-label="Open in new window" data-help-control="new_window">
+              <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M14 4h6v6M20 4l-8 8M18 14v5H5V6h5"></path>
+              </svg>
+            </button>
+          </div>
         </div>
         <div id="assessCards" class="assess-cards"></div>
       </section>
@@ -745,7 +752,14 @@
               <button id="reportRetry" class="evidence-retry" type="button" hidden>Retry</button>
             </div>
           </div>
-          <div class="report-tools"></div>
+          <div class="report-tools">
+            <button class="icon-button" type="button" data-assess-window
+              aria-label="Open in new window" data-help-control="new_window">
+              <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M14 4h6v6M20 4l-8 8M18 14v5H5V6h5"></path>
+              </svg>
+            </button>
+          </div>
         </div>
         <div id="reportFrame" class="report-frame" aria-busy="true"
           data-freshness="idle"></div>

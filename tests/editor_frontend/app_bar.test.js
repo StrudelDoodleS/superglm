@@ -414,3 +414,31 @@ test("Refit stays disabled with its reason when the model cannot be refitted her
   assert.equal(buttons.refitButton.dataset.popoverBody, reason);
   assert.equal(buttons.refitCount.textContent, "2");
 });
+
+test("an app bar without shortcuts leaves Ctrl+Z and R alone", (t) => {
+  const documentHub = installDocument(t);
+  const calls = [];
+  const binding = bindAppBar({
+    root: new FakeElement("nav"),
+    undoButton: new FakeButton(),
+    redoButton: new FakeButton(),
+    revertButton: new FakeButton(),
+    refreshButton: new FakeButton(),
+    refitButton: new FakeButton(),
+    shortcuts: false,
+    onView: () => {},
+    onUndo: () => calls.push("undo"),
+    onRedo: () => calls.push("redo"),
+    onRevert: () => {},
+    onRefresh: () => {},
+    onRefit: () => calls.push("refit"),
+  });
+  const pressed = [
+    documentHub.emit("keydown", { key: "z", ctrlKey: true }),
+    documentHub.emit("keydown", { key: "y", ctrlKey: true }),
+    documentHub.emit("keydown", { key: "r" }),
+  ];
+  assert.deepEqual(calls, []);
+  assert.deepEqual(pressed.map((event) => event.defaultPrevented), [false, false, false]);
+  binding.destroy();
+});
