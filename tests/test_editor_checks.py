@@ -564,6 +564,30 @@ def test_a_total_the_rows_refuse_leaves_the_other_checks_simulated(calm_frequenc
         )
 
 
+def test_a_level_that_cannot_be_formed_keeps_that_check_alone_at_the_known_level(calm, monkeypatch):
+    """An undefined replicate statistic of actual over expected, forced: one NaN among its 99.
+
+    Each check's level is selected on its own, so actual over expected keeps the known level
+    and says why, and the Q-Q plot, the PIT histogram and quantile calibration are simulated.
+    Mutation check: selecting every level in one step raises the refusal out of all four bodies.
+    """
+    library = checks._ae_statistics
+
+    def undefined(*args, **kwargs):
+        values = np.array(library(*args, **kwargs), dtype=np.float64)
+        values[0] = np.nan
+        return values
+
+    monkeypatch.setattr(checks, "_ae_statistics", undefined)
+    replicates = null_replicates(calm.lss, calm.validation, inputs=["x", "g"])
+    assert (replicates.n_draws, replicates.levels["check_ae"]) == (99, None)
+    for report in CHECK_REPORTS:
+        body = check_body(report, calm.lss, calm.validation, inputs=["x", "g"])
+        assert (body["level_source"], body["n_draws"], body["level_note"]) == (
+            ("known", 0, _UNSIMULATED_ROWS) if report == "check_ae" else ("simulated", 99, None)
+        )
+
+
 def test_a_large_split_sends_at_most_800_points_and_flags_on_all():
     z = np.random.default_rng(1).standard_normal(30_000) * 1.02
     body = qq_from_residuals(z)

@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import math
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -552,11 +553,12 @@ class NullReplicates:
     per-cell cuts, and actual over expected's ``z``. Each is one float, exactly the statistic of
     the replicate at that rank. A check maps to ``None`` when it has no level: it is
     unavailable on its own (actual over expected without a finite variance, or with tables the
-    rows refuse), or nothing was simulated.
+    rows refuse), its replicate statistics give no finite level, or nothing was simulated.
 
     ``note`` is the page's sentence for each check that keeps the known-parameter level on this
     split for want of a replicate: the fit's uncertainty could not be sampled, or these rows
-    could not be simulated. It is ``None`` when every check that answers was simulated, when the
+    could not be simulated (for every check, for the checks a capped split's sample does not
+    reach, or for a check whose level could not be formed). It is ``None`` when every check that answers was simulated, when the
     known level is the right one (the rows the model was fitted on), or when no check can
     answer. Nothing simulated leaves ``n_draws`` 0.
     """
@@ -809,20 +811,34 @@ class _Scores(NamedTuple):
     counts: NDArray[np.int64]
     totals: dict[str, NDArray[np.float64]]
 
-    def levels(self) -> dict[str, float | None]:
-        """Each check's level by Barnard's rule at ``CHECK_ALPHA``, Q-Q's read exactly."""
-        levels = {
-            "check_qq": _monte_carlo_order_statistic_level(self.transforms, alpha=CHECK_ALPHA)
+    def levels(self) -> tuple[dict[str, float | None], bool]:
+        """Each check's level by Barnard's rule at ``CHECK_ALPHA``, Q-Q's read exactly, and
+        whether some check's level could not be formed.
+
+        Each level is selected on its own: a check whose replicate statistics give no finite
+        level (one undefined, too few replicates) has none, and the others keep theirs.
+        """
+        selections = {
+            "check_qq": functools.partial(
+                _monte_carlo_order_statistic_level, self.transforms, alpha=CHECK_ALPHA
+            )
         }
         for report, values in self.statistics.items():
-            # Actual over expected's statistic is large when extreme, the others small.
-            larger = report == "check_ae"
-            levels[report] = (
-                None
-                if values is None
-                else monte_carlo_level(values, alpha=CHECK_ALPHA, larger_is_extreme=larger)
-            )
-        return levels
+            if values is not None:
+                # Actual over expected's statistic is large when extreme, the others small.
+                selections[report] = functools.partial(
+                    monte_carlo_level,
+                    values,
+                    alpha=CHECK_ALPHA,
+                    larger_is_extreme=report == "check_ae",
+                )
+        levels: dict[str, float | None] = dict.fromkeys(self.statistics)
+        for report, select in selections.items():
+            with contextlib.suppress(ValueError):
+                level = select()
+                levels[report] = level if math.isfinite(level) else None
+        refused = any(levels.get(report) is None for report in selections)
+        return levels, refused
 
 
 def _scores(
@@ -966,11 +982,12 @@ def null_replicates(
         return nothing
     except _NotSampled as unsampled:
         return NullReplicates(levels={}, n_draws=0, seed=int(seed), note=unsampled.note)
+    levels, refused = scores.levels()
     return NullReplicates(
-        levels=scores.levels(),
+        levels=levels,
         n_draws=count,
         seed=int(seed),
-        note=None if split.complete else _UNSIMULATED_ROWS,
+        note=_UNSIMULATED_ROWS if refused or not split.complete else None,
     )
 
 
