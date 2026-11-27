@@ -1,8 +1,10 @@
 // @ts-nocheck
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
+import { CHECK_REPORTS } from "../../src/superglm/editor/app/api/contracts.js";
 import { createInitialEditorState } from "../../src/superglm/editor/app/state/store.js";
 import {
   cvCard,
@@ -220,4 +222,60 @@ test("the card's markup carries its marker, clipped unless it is shown", () => {
   const markup = overviewMarkup(overviewGroups({ ...evidence, validation: failed, cv: updating }));
   assert.match(markup, /data-card="validation"[^]*?<span class="assess-card-marker" data-shown="true">Earlier result<\/span><span class="assess-card-note">Update failed\. offline<\/span>/);
   assert.match(markup, /data-card="cv"[^]*?<span class="assess-card-marker" data-shown="false">Earlier result, updating<\/span>/);
+});
+
+const FIXTURE = JSON.parse(readFileSync(new URL("./fixtures/assess_checks.json", import.meta.url)));
+
+/** The page's evidence with every check of `reports` current, the reports still loading. */
+function evidenceFrom(reports) {
+  const evidence = createInitialEditorState(snapshot(0)).request.evidence;
+  const checks = Object.fromEntries(CHECK_REPORTS.map((name) =>
+    [name, { ...evidence[name], status: "current", payload: reports[name] }]));
+  return { ...evidence, ...checks };
+}
+
+test("the overview shows a check group only for checks the model offers", () => {
+  const evidence = evidenceFrom(FIXTURE.calm);  // every report current
+  assert.deepEqual(overviewGroups(evidence, { offered: [], compare: false }).map((g) => g.name), ["Reports"]);
+  const groups = overviewGroups(evidence, { offered: [...CHECK_REPORTS], compare: false });
+  assert.deepEqual(groups.map((g) => g.name), ["Reports", "Distribution", "Calibration"]);
+  assert.ok(groups[1].cards.every((card) => card.thumbnail.startsWith("<svg")));
+  // The cards are titled as the list names them, a check outside the offer has none.
+  assert.deepEqual(groups.slice(1).flatMap((g) => g.cards.map((card) => card.title)),
+    ["Q-Q plot", "PIT histogram", "Actual over expected", "Quantile calibration"]);
+  const one = overviewGroups(evidence, { offered: ["check_ae"], compare: false });
+  assert.deepEqual(one.map((g) => [g.name, g.cards.map((card) => card.id)]),
+    [["Reports", ["validation", "cv", "final", "diagnose"]], ["Calibration", ["check_ae"]]]);
+  assert.ok(groups[0].cards.every((card) => card.thumbnail === "" && card.flagged === false));
+});
+
+test("a flagged card is marked, and its thumbnail adds the fit only when compared", () => {
+  const wrong = overviewGroups(evidenceFrom(FIXTURE.wrong), { offered: [...CHECK_REPORTS], compare: false });
+  const cards = wrong.flatMap((g) => g.cards);
+  assert.deepEqual(cards.filter((card) => card.flagged).map((card) => card.id),
+    CHECK_REPORTS.filter((name) => FIXTURE.wrong[name].models.edited.flagged).sort((a, b) =>
+      cards.findIndex((c) => c.id === a) - cards.findIndex((c) => c.id === b)));
+  const markup = overviewMarkup(wrong);
+  assert.match(markup, /data-card="check_qq"[^>]*data-flagged="true"/);
+  assert.match(markup, /data-card="validation"[^>]*data-flagged="false"/);
+  assert.match(markup, /data-card="check_qq"[^]*?<span class="assess-card-plot" aria-hidden="true"><svg class="check-plot"/);
+  const edited = evidenceFrom(FIXTURE.edited);
+  const thumb = (compare) => overviewGroups(edited, { offered: [...CHECK_REPORTS], compare })
+    .flatMap((g) => g.cards).filter((card) => card.thumbnail);
+  assert.ok(thumb(false).every((card) => !card.thumbnail.includes("check-original")));
+  assert.ok(thumb(true).every((card) => card.thumbnail.includes('class="check-original"')));
+});
+
+test("a check card waits, says it failed, and keeps an earlier result as a report card does", () => {
+  const evidence = evidenceFrom(FIXTURE.wrong);
+  const card = (state) => overviewGroups({ ...evidence, check_pit: { ...evidence.check_pit, ...state } },
+    { offered: ["check_pit"], compare: false })[1].cards[0];
+  const loading = card({ status: "updating", payload: null });
+  assert.deepEqual([loading.value, loading.note, loading.flagged], ["—", "Loading check...", false]);
+  assert.ok(loading.thumbnail.startsWith("<svg") && !loading.thumbnail.includes("<path"));
+  assert.deepEqual([card({ status: "error", payload: null, error: "boom" }).note], ["Check unavailable."]);
+  const failed = card({ status: "stale", error: "offline" });
+  assert.deepEqual([failed.note, failed.marker, failed.markerShown, failed.flagged],
+    ["Update failed. offline", "Earlier result", true, true]);
+  assert.equal(card({ status: "updating" }).marker, "Earlier result, updating");
 });

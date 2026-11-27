@@ -1,29 +1,32 @@
 // @ts-check
 
-import { isReportName, isReportView } from "../api/contracts.js";
+import { isCheckReport, isReportName, isReportView } from "../api/contracts.js";
 import { escapeHTML } from "../format.js";
 import { countText, deltaText, metricColumns, metricText } from "../reports.js";
 import { ASSESS_GROUPS } from "../state/assess.js";
+import { checkFace, checkPayload, checkThumbnail } from "./assess_check.js";
 import { cvSourceLine, meanSpreadText } from "./cv_tab.js";
 import { verdictParts } from "./diagnose_tab.js";
 
 /** @typedef {import('../api/contracts.js').ReportName} ReportName */
 /** @typedef {import('../api/contracts.js').ReportView} ReportView */
+/** @typedef {import('../api/contracts.js').CheckReport} CheckReport */
 /** @typedef {import('../api/contracts.js').EvidenceStatus} EvidenceStatus */
 /** @typedef {import('../api/contracts.js').EvidenceState} EvidenceState */
 /**
  * One overview card: its report, the report's name, the headline number, the
  * line under it, and the state of the evidence the number comes from. A number
  * from an earlier report carries a `marker` saying so, in words: shown where the
- * update failed, and read only by a screen reader while it is asked again.
+ * update failed, and read only by a screen reader while it is asked again. A check's
+ * card adds its thumbnail's markup (empty for a report) and whether it is flagged.
  * @typedef {{id: ReportName, title: string, value: string, note: string, freshness: EvidenceStatus,
- *   marker: string, markerShown: boolean}} CardModel
+ *   marker: string, markerShown: boolean, thumbnail: string, flagged: boolean}} CardModel
  */
 /** @typedef {{name: string, cards: CardModel[]}} CardGroup */
 /** @typedef {import('../api/contracts.js').CVReportPayload} CVReportPayload */
 /** @typedef {import('./diagnose_tab.js').DiagnosePayload} DiagnosePayload */
 /** @typedef {import('../state/assess.js').AssessEntry} AssessEntry */
-/** An entry with a card: a report view's. @typedef {AssessEntry & {id: ReportView}} CardEntry */
+/** What the overview draws: the checks the model offers, and whether to draw the fit beside an edit. @typedef {{offered: readonly CheckReport[], compare: boolean}} OverviewOptions */
 /**
  * The parts of a validation report a card reads.
  * @typedef {{name?: string, n_obs?: number, available?: boolean, error?: string,
@@ -33,10 +36,15 @@ import { verdictParts } from "./diagnose_tab.js";
  * @typedef {{available: boolean, note?: string, metric_labels?: Record<string, string>,
  *   compares_edit?: boolean, splits?: SplitScores[]}} ValidationPayload
  */
-/** A card's headline number and the line under it. @typedef {{value: string, note: string}} CardFace */
+/** A card's headline number, the line under it and its flag. @typedef {{value: string, note: string, flagged?: boolean}} CardFace */
 
 const MISSING = "—";
 const EARLIER = "Earlier result";
+/** @type {OverviewOptions} */
+const NO_CHECKS = Object.freeze({ offered: Object.freeze([]), compare: false });
+/** The thumbnail each check card's plot holds now, so a redraw writes only one that moved. */
+/** @type {WeakMap<Element, string>} */
+const DRAWN_PLOTS = new WeakMap();
 
 /**
  * The report's first score on the validation split, else on the first split it scored.
@@ -134,20 +142,31 @@ function cardFace(id, payload) {
 }
 
 /**
- * An entry's card. Final fit reads the cv report, whose `final_fit` says whether one ran.
- * @param {Readonly<CardEntry>} entry @param {Record<ReportName, EvidenceState>} evidence
+ * An entry's card. Final fit reads the cv report, whose `final_fit` says whether one ran; a
+ * check reads its own payload and draws its thumbnail.
+ * @param {Readonly<AssessEntry>} entry @param {Record<ReportName, EvidenceState>} evidence
+ * @param {boolean} compare
  * @returns {CardModel}
  */
-function overviewCard(entry, evidence) {
-  const { status, payload, error } = evidence[entry.id === "final" ? "cv" : entry.id];
-  const card = { id: entry.id, title: entry.label, freshness: status, marker: "", markerShown: false };
-  if (payload === null) {
+function overviewCard(entry, evidence, compare) {
+  const { id } = entry;
+  const { status, payload, error } = evidence[id === "final" ? "cv" : id];
+  const card = { id, title: entry.label, freshness: status, marker: "", markerShown: false, thumbnail: "", flagged: false };
+  /** @type {CardFace} */
+  let face;
+  if (isCheckReport(id)) {
+    const check = checkPayload(evidence[id]);
+    card.thumbnail = checkThumbnail(id, check, compare);
+    face = checkFace(id, check, status);
+    if (check === null) return { ...card, ...face };
+  } else if (payload === null) {
     return { ...card, value: MISSING, note: status === "error" ? "Report unavailable." : "Loading report..." };
+  } else {
+    face = cardFace(/** @type {ReportView} */ (id), payload);
   }
-  const face = cardFace(entry.id, payload);
   // A failed update keeps the earlier report on screen, as the report does, and says why.
   if (error) {
-    return { ...card, value: face.value, note: `Update failed. ${error}`, marker: EARLIER, markerShown: true };
+    return { ...card, ...face, note: `Update failed. ${error}`, marker: EARLIER, markerShown: true };
   }
   if (status === "updating") return { ...card, ...face, marker: `${EARLIER}, updating` };
   if (status === "stale") return { ...card, ...face, marker: `${EARLIER}, may be out of date` };
@@ -155,35 +174,31 @@ function overviewCard(entry, evidence) {
 }
 
 /**
- * Whether `entry` has a card: a report view does, a check has none yet.
- * @param {AssessEntry} entry @returns {entry is CardEntry}
+ * The entries of `group` with a card: every report view, and each check the model offers.
+ * @param {Readonly<{entries: readonly AssessEntry[]}>} group @param {readonly CheckReport[]} offered
+ * @returns {AssessEntry[]}
  */
-function hasCard(entry) {
-  return isReportView(entry.id);
+function carded(group, offered) {
+  return group.entries.filter((entry) => isReportView(entry.id) || (isCheckReport(entry.id) && offered.includes(entry.id)));
 }
 
 /**
- * The entries of `group` that have a card.
- * @param {Readonly<{entries: readonly AssessEntry[]}>} group
- * @returns {CardEntry[]}
- */
-function carded(group) {
-  return group.entries.filter(hasCard);
-}
-
-/**
- * A card per Assess report, in list order.
+ * A card per Assess report, in list order; a check's when the model offers it.
  * @param {Record<ReportName, EvidenceState>} evidence
+ * @param {OverviewOptions} [options]
  * @returns {CardModel[]}
  */
-export function overviewCards(evidence) {
-  return ASSESS_GROUPS.flatMap((group) => carded(group).map((entry) => overviewCard(entry, evidence)));
+export function overviewCards(evidence, { offered, compare } = NO_CHECKS) {
+  return ASSESS_GROUPS.flatMap((group) => carded(group, offered).map((entry) => overviewCard(entry, evidence, compare)));
 }
 
 /** @param {CardModel} card */
 function cardMarkup(card) {
-  return `<button class="assess-card" type="button" data-card="${card.id}" data-freshness="${card.freshness}">` +
-    `<span class="assess-card-title">${escapeHTML(card.title)}</span>` +
+  const plot = card.thumbnail ? `<span class="assess-card-plot" aria-hidden="true">${card.thumbnail}</span>` : "";
+  return `<button class="assess-card" type="button" data-card="${card.id}" data-freshness="${card.freshness}"` +
+    ` data-flagged="${card.flagged}">` +
+    `<span class="assess-card-title"><span class="assess-flag" aria-hidden="true"></span>${escapeHTML(card.title)}</span>` +
+    plot +
     `<span class="assess-card-value">${escapeHTML(card.value)}</span>` +
     `<span class="assess-card-marker" data-shown="${card.markerShown}">${escapeHTML(card.marker)}</span>` +
     `<span class="assess-card-note">${escapeHTML(card.note)}</span></button>`;
@@ -203,21 +218,30 @@ export function overviewMarkup(groups) {
 }
 
 /**
- * Draw the cards into `root`: built once, then each card's value, marker, note and
- * freshness written in place, so a card being pressed or holding focus stays the same element
- * while another report lands.
+ * Draw the cards into `root`: built when the set of cards changes, else each card's value,
+ * marker, note, freshness, flag and thumbnail written in place, so a card being pressed or
+ * holding focus stays the same element while another report lands.
  * @param {HTMLElement} root
  * @param {CardGroup[]} groups
  */
 export function drawOverview(root, groups) {
-  if (!root.querySelector("[data-card]")) {
+  const cards = groups.flatMap((group) => group.cards);
+  const drawn = Array.from(root.querySelectorAll("[data-card]"), (node) => node instanceof HTMLElement ? node.dataset.card : "");
+  if (drawn.join() !== cards.map((card) => card.id).join()) {
     root.innerHTML = overviewMarkup(groups);
+    for (const plot of root.querySelectorAll(".assess-card-plot")) DRAWN_PLOTS.set(plot, plot.innerHTML);
     return;
   }
-  for (const card of groups.flatMap((group) => group.cards)) {
+  for (const card of cards) {
     const node = root.querySelector(`[data-card="${card.id}"]`);
     if (!(node instanceof HTMLElement)) continue;
     node.dataset.freshness = card.freshness;
+    node.dataset.flagged = String(card.flagged);
+    const plot = node.querySelector(".assess-card-plot");
+    if (plot && DRAWN_PLOTS.get(plot) !== card.thumbnail) {
+      plot.innerHTML = card.thumbnail;
+      DRAWN_PLOTS.set(plot, card.thumbnail);
+    }
     const value = node.querySelector(".assess-card-value");
     const marker = node.querySelector(".assess-card-marker");
     const note = node.querySelector(".assess-card-note");
@@ -231,14 +255,15 @@ export function drawOverview(root, groups) {
 }
 
 /**
- * The cards under their group headings.
+ * The cards under their group headings; a group with no card the model offers is left out.
  * @param {Record<ReportName, EvidenceState>} evidence
+ * @param {OverviewOptions} [options]
  * @returns {CardGroup[]}
  */
-export function overviewGroups(evidence) {
+export function overviewGroups(evidence, { offered, compare } = NO_CHECKS) {
   return ASSESS_GROUPS.map((group) => ({
     name: group.name,
-    cards: carded(group).map((entry) => overviewCard(entry, evidence)),
+    cards: carded(group, offered).map((entry) => overviewCard(entry, evidence, compare)),
   })).filter((group) => group.cards.length > 0);
 }
 

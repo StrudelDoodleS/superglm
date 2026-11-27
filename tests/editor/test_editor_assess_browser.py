@@ -111,14 +111,17 @@ def test_the_top_bar_is_editor_and_assess_and_assess_opens_on_its_overview(asses
         assert tabs.all_inner_texts() == ["Editor", "Assess"]
         page.locator("#assessTab").click()
         assert page.locator("#assessOverviewTitle").inner_text() == "Overview"
-        assert page.locator("#assessList [data-assess-entry]").all_inner_texts() == [
+        # A bare GLM offers no checks: their rows and groups are hidden.
+        assert page.locator("#assessList [data-assess-entry]:visible").all_inner_texts() == [
             "Overview",
             "Validation",
             "Cross-validation",
             "Final fit",
             "Smoothing search",
         ]
-        assert page.locator("#assessList .assess-group-title").all_inner_texts() == ["Reports"]
+        assert page.locator("#assessList .assess-group-title:visible").all_inner_texts() == [
+            "Reports"
+        ]
         assert page.locator("#assessCards .assess-card-title").all_inner_texts() == [
             "Validation",
             "Cross-validation",

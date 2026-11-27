@@ -33,7 +33,7 @@
   display: grid;
   width: 100%;
   height: auto;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   column-gap: 8px;
   padding: 5px 8px;
@@ -60,6 +60,25 @@
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* A check that left its band: an orange dot after its name in the list, before its
+   title on its card. Orange marks nothing else in Assess. */
+.assess-flag {
+  display: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--orange);
+}
+
+[data-flagged="true"] .assess-flag {
+  display: inline-block;
+}
+
+.assess-card-title .assess-flag {
+  margin-right: 6px;
+  vertical-align: 1px;
 }
 
 /* One of the overview and a report shows at a time. The report panel keeps
@@ -98,6 +117,12 @@
   font-weight: 600;
 }
 
+/* Each group of cards under its heading, a clear step apart. */
+.assess-cards {
+  display: grid;
+  gap: 16px;
+}
+
 .assess-section-title {
   margin: 0 0 6px;
   font-size: var(--font-size-md);
@@ -106,7 +131,7 @@
 
 .assess-card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(186px, 1fr));
   gap: 10px;
 }
 
@@ -140,6 +165,23 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* A check's thumbnail, on the list's ground. */
+.assess-card-plot {
+  display: block;
+  width: 160px;
+  height: 62px;
+  border-radius: var(--radius-md);
+  background: var(--surface-subtle);
+}
+
+.assess-card-plot svg {
+  display: block;
+}
+
+.assess-card[data-flagged="true"] .assess-card-value {
+  color: var(--orange-text);
+}
+
 /* A number from an earlier model, or one being asked again, reads as not current. */
 .assess-card[data-freshness="updating"] .assess-card-value,
 .assess-card[data-freshness="stale"] .assess-card-value {
@@ -165,6 +207,158 @@
   overflow: hidden;
   clip-path: inset(50%);
   white-space: nowrap;
+}
+
+/* The check plots, a path per role: the edit in blue, the fit in grey, the band in pale
+   blue, and orange for what left it alone. The fit is painted first, hollow and with a
+   wider stroke, so where the two coincide a grey ring stays in sight round the blue dot. */
+.check-plot {
+  overflow: visible;
+}
+
+.check-grid {
+  fill: none;
+  stroke: var(--grid);
+  stroke-width: 1;
+}
+
+.check-weight {
+  fill: var(--yellow);
+  fill-opacity: 0.35;
+  stroke: none;
+}
+
+.check-band {
+  fill: var(--blue-band);
+  stroke: color-mix(in srgb, var(--blue) 45%, transparent);
+  stroke-width: 1;
+}
+
+.check-reference {
+  fill: none;
+  stroke: var(--zero);
+  stroke-width: 1.2;
+  stroke-dasharray: 4 3;
+}
+
+.check-original {
+  fill: none;
+  stroke: var(--grey);
+  stroke-width: 3;
+}
+
+.check-interval {
+  fill: none;
+  stroke: var(--blue);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+
+.check-edited {
+  fill: var(--ridge-fill);
+  stroke: var(--blue);
+  stroke-width: 1;
+}
+
+.check-outside {
+  fill: var(--orange-soft);
+  stroke: var(--orange);
+  stroke-width: 1.2;
+}
+
+.check-tick {
+  fill: var(--muted);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.check-title {
+  fill: var(--text);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.check-readout[hidden] {
+  display: none;
+}
+
+/* A thumbnail's strokes are thinner, the fit's still wider than the edit's. */
+.assess-card-plot :is(.check-edited, .check-band, .check-reference) {
+  stroke-width: 0.7;
+}
+
+.assess-card-plot :is(.check-outside, .check-interval) {
+  stroke-width: 0.9;
+}
+
+.assess-card-plot .check-original {
+  stroke-width: 2;
+}
+
+/* Compare with the fit: a switch with its name beside it, off and muted until there is an
+   edit to compare. */
+.assess-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.assess-compare,
+.assess-compare:hover,
+.assess-compare:active {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text);
+  font-size: var(--font-size-sm);
+}
+
+.assess-compare:hover {
+  background: var(--surface-subtle);
+}
+
+.assess-compare[aria-disabled="true"] {
+  cursor: not-allowed;
+  color: var(--muted);
+}
+
+.assess-compare[aria-disabled="true"]:hover {
+  background: transparent;
+}
+
+.assess-compare-track {
+  position: relative;
+  flex: none;
+  width: 28px;
+  height: 16px;
+  border-radius: var(--radius-pill);
+  background: var(--border-strong);
+}
+
+.assess-compare-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--surface);
+  transition: left 120ms ease;
+}
+
+.assess-compare[aria-checked="true"] .assess-compare-track {
+  background: var(--blue);
+}
+
+.assess-compare[aria-checked="true"] .assess-compare-track::after {
+  left: 14px;
+}
+
+.assess-compare[aria-disabled="true"] .assess-compare-track {
+  opacity: 0.45;
 }
 
 /* Open in new window sits at the end of the overview's and each report's header.
@@ -207,6 +401,12 @@
     grid-template-columns: auto;
     justify-content: center;
     padding: 6px 0;
+  }
+
+  .assess-row .assess-flag {
+    position: absolute;
+    top: 3px;
+    right: 5px;
   }
 
   .assess-row-label,

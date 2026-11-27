@@ -20,7 +20,7 @@ import { renderMetricGrid } from "./metrics.js";
 import { renderReport } from "./reports.js";
 import { shapeButtonState, shapeRangeForSelection } from "./shapes.js";
 import { createEditorActions } from "./state/actions.js";
-import { OVERVIEW_REPORTS, assessEntry, openableView, tabOf } from "./state/assess.js";
+import { assessEntry, openableView, overviewReports, tabOf } from "./state/assess.js";
 import {
   selectActiveTermName,
   selectCurrentSelection,
@@ -28,6 +28,7 @@ import {
   selectEvidenceNeedsRefresh,
   selectGroupDisplayMode,
   selectModelRevision,
+  selectOfferedChecks,
   selectPendingSteps,
   selectRenderableTerm,
   selectReportNeedsAsk,
@@ -76,6 +77,7 @@ import { defaultRiskLine, renderRiskPanel, riskPlotsHost } from "./views/risk_pa
 import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
 import { bindAssessList, renderAssessList } from "./views/assess_list.js";
 import { bindOverview, drawOverview, overviewGroups } from "./views/assess_overview.js";
+import { compareSwitch, flaggedChecks, renderCompareSwitch } from "./views/assess_check.js";
 import {
   placeTermViewToggle,
   renderContextBar,
@@ -189,6 +191,7 @@ const assessView = document.getElementById("assessView");
 const assessRows = document.getElementById("assessRows");
 const assessOverview = document.getElementById("assessOverview");
 const assessCards = document.getElementById("assessCards");
+const overviewCompare = document.getElementById("overviewCompare");
 const reportPanel = document.getElementById("reportPanel");
 const reportTitle = document.getElementById("reportTitle");
 const reportStatus = document.getElementById("reportStatus");
@@ -1246,11 +1249,22 @@ function renderAppView(activeView) {
   assessView.dataset.view = activeView;
   // Cross-validation and Smoothing search lay the panel out their own way (cv.css).
   reportPanel.dataset.report = activeView;
-  renderAssessList(assessRows, activeView);
+  renderAssessList(assessRows, activeView, assessListChecks(store.getState()));
+}
+
+// The checks the model offers, and those of them flagged, as the Assess list shows them.
+function assessListChecks(state) {
+  const offered = selectOfferedChecks(state);
+  return { offered, flagged: flaggedChecks(state.request.evidence, offered) };
 }
 
 function renderOverview() {
-  drawOverview(assessCards, overviewGroups(store.getState().request.evidence));
+  const state = store.getState();
+  const offered = selectOfferedChecks(state);
+  const evidence = state.request.evidence;
+  const compare = compareSwitch(evidence, offered, state.view.compareOriginal);
+  renderCompareSwitch(overviewCompare, compare, offered.length > 0);
+  drawOverview(assessCards, overviewGroups(evidence, { offered, compare: compare.checked }));
 }
 
 function renderChartWorkspace() {
@@ -2621,7 +2635,12 @@ bindOverview(assessCards, {
     assessRows.querySelector(`[data-assess-entry="${id}"]`)?.focus();
   }
 });
-renderAssessList(assessRows, store.getState().view.activeView);
+// Compare with the fit draws the fitted model beside the edit; it asks Python for nothing.
+overviewCompare.addEventListener("click", () => {
+  if (overviewCompare.getAttribute("aria-disabled") === "true") return;
+  actions.patchView({ compareOriginal: !store.getState().view.compareOriginal });
+});
+renderAssessList(assessRows, store.getState().view.activeView, assessListChecks(store.getState()));
 renderOverview();
 
 bindSummarySearch(summarySearch, (query) => {
@@ -2923,11 +2942,21 @@ store.subscribe(
   },
   (next, previous) => next.evidence === previous.evidence
 );
-// The cards redraw when the evidence of a report they read moves.
+// The cards redraw when the evidence of a report or offered check they read moves, the offer
+// changes, or Compare with the fit is turned.
 store.subscribe(
-  (state) => OVERVIEW_REPORTS.map((name) => state.request.evidence[name]),
+  (state) => [
+    state.view.compareOriginal,
+    selectOfferedChecks(state).join(),
+    ...overviewReports(selectOfferedChecks(state)).map((name) => state.request.evidence[name])
+  ],
   renderOverview,
-  (next, previous) => next.every((evidence, index) => evidence === previous[index])
+  (next, previous) => next.length === previous.length && next.every((item, index) => item === previous[index])
+);
+// The list hides the checks the model does not offer and flags those that left their band.
+store.subscribe(
+  (state) => JSON.stringify(assessListChecks(state)),
+  () => renderAssessList(assessRows, store.getState().view.activeView, assessListChecks(store.getState()))
 );
 for (const name of REPORT_NAMES) {
   store.subscribe(
