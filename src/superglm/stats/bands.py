@@ -474,6 +474,25 @@ def _least_count(
     return low.astype(np.float64)
 
 
+def _binomial_law(
+    caller: str, trials: ArrayLike, probability: ArrayLike
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """``trials`` and ``probability`` broadcast together as float64, once they name binomial laws.
+
+    Raises ``ValueError``, naming ``caller``, if a count of trials is not a whole number from 0
+    to ``2**53 - 1`` or a probability lies outside ``[0, 1]``.
+    """
+    n_trials, p = np.broadcast_arrays(
+        np.asarray(trials, dtype=np.float64), np.asarray(probability, dtype=np.float64)
+    )
+    whole = np.isfinite(n_trials) & (n_trials == np.floor(n_trials))
+    if not np.all(whole & (n_trials >= 0) & (n_trials < 2.0**53)):
+        raise ValueError(f"{caller}: trials must be whole numbers from 0 to 2**53 - 1")
+    if not np.all((p >= 0.0) & (p <= 1.0)):
+        raise ValueError(f"{caller}: each probability must lie in [0, 1]")
+    return n_trials, p
+
+
 def bonferroni_binomial_band(
     trials: ArrayLike,
     probability: ArrayLike,
@@ -508,21 +527,12 @@ def bonferroni_binomial_band(
     import scipy.spatial
     from scipy import stats
 
-    n_trials, p = np.broadcast_arrays(
-        np.asarray(trials, dtype=np.float64), np.asarray(probability, dtype=np.float64)
-    )
     level = float(alpha)
     if not _LEAST_ALPHA <= level < 1.0:
         raise ValueError(
             f"bonferroni_binomial_band: alpha must be at least 1e-12 and below 1; got {alpha!r}"
         )
-    whole = np.isfinite(n_trials) & (n_trials == np.floor(n_trials))
-    if not np.all(whole & (n_trials >= 0) & (n_trials < 2.0**53)):
-        raise ValueError(
-            "bonferroni_binomial_band: trials must be whole numbers from 0 to 2**53 - 1"
-        )
-    if not np.all((p >= 0.0) & (p <= 1.0)):
-        raise ValueError("bonferroni_binomial_band: each probability must lie in [0, 1]")
+    n_trials, p = _binomial_law("bonferroni_binomial_band", trials, probability)
     if cut is not None and not 0.0 <= float(cut) <= 1.0:
         raise ValueError(f"bonferroni_binomial_band: cut must lie in [0, 1]; got {cut!r}")
     if n_trials.size == 0:
@@ -566,13 +576,12 @@ def binomial_cell_level(counts: ArrayLike, trials: ArrayLike, probability: Array
     Raises
     ------
     ValueError
-        If there is no cell, or a count is not a whole number from 0 to its trials.
+        If there is no cell, a count of trials or a probability is one
+        ``bonferroni_binomial_band`` refuses, or a count is not a whole number from 0 to its
+        trials.
     """
-    k, n_trials, p = np.broadcast_arrays(
-        np.asarray(counts, dtype=np.float64),
-        np.asarray(trials, dtype=np.float64),
-        np.asarray(probability, dtype=np.float64),
-    )
+    n_trials, p = _binomial_law("binomial_cell_level", trials, probability)
+    k, n_trials, p = np.broadcast_arrays(np.asarray(counts, dtype=np.float64), n_trials, p)
     if k.size < 1:
         raise ValueError("binomial_cell_level needs at least one cell")
     if not np.all(np.isfinite(k) & (k == np.floor(k)) & (k >= 0.0) & (k <= n_trials)):

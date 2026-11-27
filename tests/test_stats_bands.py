@@ -414,3 +414,16 @@ def test_the_cell_level_is_the_least_one_sided_tail_over_cells():
         for k, n, q in zip(counts, trials, p, strict=True)
     ]
     assert binomial_cell_level(counts, trials, p) == min(tails)
+
+
+@pytest.mark.parametrize(("trials", "probability"), [(2.5, 0.3), (3, 1.1)])
+def test_the_cell_level_refuses_the_laws_the_band_refuses(trials, probability):
+    """Fractional trials and a probability above 1 have no binomial law, so no level.
+
+    Each refusal names the function called, and says the same after the name.
+    """
+    with pytest.raises(ValueError, match="^bonferroni_binomial_band: ") as band:
+        bonferroni_binomial_band(trials, probability)
+    with pytest.raises(ValueError, match="^binomial_cell_level: ") as cell:
+        binomial_cell_level(1, trials, probability)
+    assert str(cell.value).split(": ", 1)[1] == str(band.value).split(": ", 1)[1]
