@@ -853,6 +853,7 @@ test("state modules expose only their requested public symbols", () => {
     "createInitialEditorState",
     "failEvidence",
     "jobResultsKey",
+    "jobResultsMoved",
     "lapseReports",
     "moveEvidence",
     "normalizeSelectionIndices",

@@ -7,8 +7,7 @@ import {
   commitStructuralTransition,
   completeEvidence,
   failEvidence,
-  JOB_REPORTS,
-  jobResultsKey,
+  jobResultsMoved,
   lapseReports as lapseReportEvidence,
   normalizeSelectionIndices,
   patchView as patchViewState,
@@ -491,19 +490,14 @@ export function createEditorActions({
       return { ok: false, error: new Error("Python returned an editor state this page cannot read.") };
     }
     const snapshot = /** @type {EditorSnapshot} */ (candidate);
-    // A new model or waiting list lapses its reports (commitRemote). What Python holds beside
-    // the model, a job's result, lapses the job reports only where the snapshot shows it moved,
-    // so a re-read of an unchanged session keeps every report. An older snapshot is not taken.
+    // commitRemote lapses what moved: a new model or waiting list its reports, a job result the
+    // job reports. A re-read of an unchanged session keeps every report. An older snapshot is
+    // not taken.
     let taken = false;
     store.update((state) => {
       const committed = commitRemote(state, snapshot);
       taken = committed.remote.snapshot === snapshot;
-      const jobsMoved = taken &&
-        jobResultsKey(state.remote.snapshot) !== jobResultsKey(snapshot);
-      return withNotice(
-        withLatestView(jobsMoved ? lapseReportEvidence(committed, JOB_REPORTS) : committed, made),
-        snapshot
-      );
+      return withNotice(withLatestView(committed, made), snapshot);
     });
     void Promise.resolve(scheduleVisibleEvidence(snapshot.model_revision, { immediate: true }))
       .catch(() => {});
@@ -585,9 +579,11 @@ export function createEditorActions({
     try {
       if (snapshot.model_revision !== previousRevision) {
         void Promise.resolve(scheduleVisibleEvidence(snapshot.model_revision)).catch(() => {});
-      } else if (waitingListChanged(previousSnapshot, snapshot)) {
-        // Undo or Redo of a waiting change: the model is as it was, but a
-        // report showing the waiting list went stale (commitRemote).
+      } else if (
+        waitingListChanged(previousSnapshot, snapshot) || jobResultsMoved(previousSnapshot, snapshot)
+      ) {
+        // Undo or Redo of a waiting change, or a job's result this answer brings: the model is
+        // as it was, but a report showing what moved went stale (commitRemote).
         void Promise.resolve(
           scheduleVisibleEvidence(snapshot.model_revision, { immediate: true, onlyStale: true })
         ).catch(() => {});
@@ -692,9 +688,13 @@ export function createEditorActions({
           immediate: true,
           summaryCommitted: true
         })).catch(() => {});
-      } else if (waitingListChanged(previousSnapshot, envelope.state)) {
-        // A staged change leaves the model as it was, but a report showing the waiting list
-        // went stale (commitRemote), and a request in flight for it was dropped: ask again.
+      } else if (
+        waitingListChanged(previousSnapshot, envelope.state) ||
+        jobResultsMoved(previousSnapshot, envelope.state)
+      ) {
+        // A staged change leaves the model as it was, but a report showing the waiting list, or a
+        // job's result the answer brings, went stale (commitRemote), and a request in flight for
+        // it was dropped: ask again.
         void Promise.resolve(scheduleVisibleEvidence(envelope.state.model_revision, {
           immediate: true,
           onlyStale: true
@@ -877,9 +877,9 @@ export function createEditorActions({
 
   /**
    * A background job finished, and `reports` show what it changed. The page re-reads Python,
-   * so its snapshot holds the job's result as the other windows' do; a re-read the page took
-   * has lapsed the job reports where their result moved and asked for the open one, so that
-   * is the one invalidation. A re-read that failed, was skipped or was refused lapses
+   * so its snapshot holds the job's result as the other windows' do. Whichever snapshot first
+   * brought that result, this re-read's or an earlier answer's, lapsed the job reports as it
+   * was committed (commitRemote), so a re-read the page took needs no other invalidation. A re-read that failed, was skipped or was refused lapses
    * `reports` here and asks for the open one.
    *
    * @param {string} _kind the job's kind, `cv` or `final_fit`

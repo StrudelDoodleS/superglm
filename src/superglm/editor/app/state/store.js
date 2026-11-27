@@ -273,6 +273,15 @@ export function jobResultsKey(snapshot) {
 }
 
 /**
+ * Whether the job reports' part of the snapshot moved between two snapshots: a job result
+ * published, a job started or ended, or the Final fit's state changed.
+ * @param {EditorSnapshot|null} previous @param {EditorSnapshot} next
+ */
+export function jobResultsMoved(previous, next) {
+  return previous !== null && jobResultsKey(previous) !== jobResultsKey(next);
+}
+
+/**
  * Lapse the reports `names`, every report by default: what they show may have moved
  * though the model revision did not (a finished job, a waiting change undone).
  *
@@ -309,11 +318,15 @@ export function commitRemote(state, snapshot) {
     return clearRemotePreviews(state);
   }
   const previousRevision = state.remote.snapshot?.model_revision;
-  const request = previousRevision !== undefined && previousRevision !== snapshot.model_revision
+  const modelRequest = previousRevision !== undefined && previousRevision !== snapshot.model_revision
     ? invalidatePriorEvidence(state, snapshot.model_revision)
     : waitingListChanged(state.remote.snapshot, snapshot)
       ? lapseReports(state).request
       : state.request;
+  // Whatever response carries it, a snapshot whose job results moved lapses the job reports.
+  const request = jobResultsMoved(state.remote.snapshot, snapshot)
+    ? lapseReports({ ...state, request: modelRequest }, JOB_REPORTS).request
+    : modelRequest;
   const selectionAnchor = anchorFollowingItsLevel(
     state.view.selectionAnchor, state.remote.snapshot, snapshot
   );

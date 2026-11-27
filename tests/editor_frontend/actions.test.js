@@ -2014,6 +2014,54 @@ test("a refused structural request shows Python's fixed sentence, not an uncerta
   assert.equal(store.getState().remote.snapshot?.model_revision, 4);
 });
 
+test("a Run CV result a note's answer brings first is asked for, never left at the old score", async () => {
+  // Python's state and its Cross-validation score, which a finished Run CV moves.
+  const python = { results: 0, score: 10 };
+  const state = () => ({ ...snapshot(0), results_generation: python.results });
+  /** @type {string[]} */
+  const sent = [];
+  const store = createEditorStore(patchViewState(createInitialEditorState(state()), { activeView: "cv" }));
+  /** @type {ReturnType<typeof createEditorActions>} */
+  let actions;
+  actions = createEditorActions({
+    store,
+    client: {
+      /** @param {string} path @param {Record<string, unknown>} body */
+      postJSON: async (path, body) => {
+        sent.push(path === "/report" ? String(body.report) : path);
+        if (path === "/note") return { ok: true, state: state() };
+        return { report: "cv", model_revision: 0, request_sequence: body.request_sequence, score: python.score };
+      },
+      getState: async () => state()
+    },
+    // The page's scheduler: the open report is Cross-validation.
+    scheduleVisibleEvidence: (_revision, options) => actions.scheduleReports(
+      ["cv"].filter((panel) => !options?.onlyStale || selectReportNeedsAsk(store.getState(), panel)),
+      options
+    )
+  });
+  const cv = () => store.getState().request.evidence.cv;
+  actions.scheduleReports(["cv"], { immediate: true });
+  await settled();
+  assert.deepEqual([cv().status, cv().payload.score], ["current", 10]);
+
+  // Run CV publishes, and a note's answer carries the new state before the poll sees the end.
+  python.results += 1;
+  python.score = 20;
+  const noted = await actions.executeStateMutation({
+    name: "note", path: "/note", payload: { id: "a1b2c3d", note: "Thin exposure" }
+  });
+  assert.equal(noted.ok, true);
+  await settled();
+  await actions.settleJob("cv", ["cv", "final", "diagnose"]);
+  await settled();
+  await actions.refreshFromPython();
+  await settled();
+
+  assert.deepEqual([cv().status, cv().payload.score], ["current", 20]);
+  assert.deepEqual(sent, ["cv", "/note", "cv"]);
+});
+
 test("a note's answer, the state wrapped as {ok, state}, commits the state it carries", async () => {
   const noted = snapshot(3);
   noted.timeline = [
