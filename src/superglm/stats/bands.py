@@ -88,7 +88,7 @@ _CORRECTION = {0.01: 1.591, 0.05: 1.3, 0.1: 1.1}
 _ASYMPTOTIC_FROM = 250
 #: The exact search stops once ``eta`` is known to this relative tolerance.
 _SEARCH_RTOL = 1e-9
-#: The least global level ``bonferroni_binomial_band`` accepts.
+#: The least global level ``bonferroni_binomial_band`` and ``monte_carlo_level`` accept.
 _LEAST_ALPHA = 1e-12
 
 
@@ -415,20 +415,22 @@ def monte_carlo_level(
     ``k``-th largest when ``larger_is_extreme``. An observed statistic exchangeable with the
     replicates falls strictly beyond it (below, or above) with chance ``k / (B + 1)``, at most
     ``alpha`` and exactly ``alpha`` when ``alpha (B + 1)`` is a whole number and the statistic
-    has no ties (Barnard 1963). At 99 replicates and 5% it is the 5th.
+    has no ties (Barnard 1963). At 99 replicates and 5% it is the 5th. ``alpha`` lies in
+    ``[1e-12, 0.5]``: from the least level ``bonferroni_binomial_band`` takes to one half, so
+    the rank is at most ``(B + 1) / 2`` and names a replicate.
 
     Raises
     ------
     ValueError
         If the statistics are not a one-dimensional array without NaN, ``alpha`` lies outside
-        ``(0, 1)``, or there are too few replicates for any rank at ``alpha``.
+        ``[1e-12, 0.5]``, or there are too few replicates for any rank at ``alpha``.
     """
     values = np.asarray(null_levels, dtype=np.float64)
     level = float(alpha)
     if values.ndim != 1 or np.any(np.isnan(values)):
         raise ValueError("monte_carlo_level needs a one-dimensional array of statistics")
-    if not 0.0 < level < 1.0:
-        raise ValueError(f"monte_carlo_level: alpha must lie in (0, 1); got {alpha!r}")
+    if not _LEAST_ALPHA <= level <= 0.5:
+        raise ValueError(f"monte_carlo_level: alpha must lie in [1e-12, 0.5]; got {alpha!r}")
     rank = _monte_carlo_rank(values.size, level)
     if rank < 1:
         least = max(1, math.ceil(1.0 / level) - 1)

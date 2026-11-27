@@ -354,6 +354,26 @@ def test_too_few_replicates_have_no_monte_carlo_level():
         monte_carlo_level(np.arange(18.0), alpha=0.05)
 
 
+def test_the_monte_carlo_level_reads_both_ends_of_its_alpha_range():
+    """At 0.5 the rank is the 50th of 99; at 1e-12 it needs about 10**12 replicates."""
+    values = np.random.default_rng(3).permutation(99).astype(np.float64)
+    assert monte_carlo_level(values, alpha=0.5) == 49.0
+    assert monte_carlo_level(values, alpha=0.5, larger_is_extreme=True) == 49.0
+    with pytest.raises(ValueError, match="needs at least 999999999999 replicates; got 99"):
+        monte_carlo_level(values, alpha=1e-12)
+
+
+@pytest.mark.parametrize(
+    "alpha",
+    [np.nextafter(1e-12, 0.0), np.nextafter(0.5, 1.0), 5e-324, np.nextafter(1.0, 0.0), np.nan],
+)
+def test_an_alpha_outside_its_range_has_no_monte_carlo_level(alpha):
+    """Mutation check: without the range, the float below 1 reads past the last replicate and
+    the least subnormal overflows the replicate count it reports."""
+    with pytest.raises(ValueError, match=r"alpha must lie in \[1e-12, 0\.5\]"):
+        monte_carlo_level(np.arange(99.0), alpha=alpha)
+
+
 @pytest.mark.parametrize("trials", [1, 2, 5, 12])
 @pytest.mark.parametrize("p", [0.05, 0.3, 0.5])
 def test_a_count_is_inside_the_band_at_a_cut_exactly_when_its_level_reaches_the_cut(trials, p):
