@@ -112,6 +112,33 @@ def _many_inputs_session():
     )
 
 
+_LONG_GROUP = (
+    "a group whose name runs on for long enough that the readout of its ratio, its interval "
+    "and its rows cannot sit on one line of the plot, however wide the window the editor is "
+    "opened in happens to be"
+)
+
+
+def _long_name_session():
+    """A Gamma fit whose input ``g`` has a group with a long name, so its A/E readout is wider
+    than the plot."""
+    rng = np.random.default_rng(SEED)
+    n = 600
+    X = pd.DataFrame(
+        {"x": rng.uniform(0.0, 1.0, n), "g": rng.choice(np.array(["a", "b", _LONG_GROUP]), n)}
+    )
+    mean = np.exp(1.0 + 0.5 * np.sin(2.0 * np.pi * X["x"].to_numpy()))
+    y = rng.gamma(4.0, mean / 4.0)
+    family = GammaLS()
+    spec = SuperLSS(family, family.mean(s("x", k=6), cat("g")), family.scale(cat("g")))
+    lss = spec.fit(X.iloc[:400], y[:400], lambdas={"mean:x#wiggle": LAMBDA})
+    return EditorSession.from_model(
+        lss,
+        train_data=(X.iloc[:400], y[:400]),
+        validation_data=(X.iloc[400:].reset_index(drop=True), y[400:]),
+    )
+
+
 def _wrong_session():
     """Log-normal amounts under a Gamma fit, read on 1,000 validation rows: three checks flag."""
     return _session(_wrong_case())
@@ -342,9 +369,14 @@ def test_compare_adds_the_fit_to_each_thumbnail_without_asking_python(checks_pag
 
 
 def _open_check(page, name: str) -> None:
-    """Open check ``name`` from the Assess list and wait until it is drawn current."""
+    """Open check ``name`` from the Assess list and wait until it is drawn current. Opening
+    Assess shows the overview, which asks every check; they are let land first, so no answer
+    to the overview arrives during the test."""
     if page.locator("#assessView").is_hidden():
         page.locator("#assessTab").click()
+        page.locator("#assessView").wait_for(state="visible")
+        if page.locator("#assessOverview").is_visible():
+            _wait_for_checks(page)
     page.locator(f'#assessList [data-assess-entry="{name}"]').click()
     page.locator(f'#checkPanel[data-report="{name}"]').wait_for(state="visible")
     page.locator('#checkFrame[data-freshness="current"] svg.check-plot').wait_for(state="attached")
@@ -366,6 +398,29 @@ def _nearest(marks: list[dict], x: float, y: float) -> dict:
 
 def _readout(page):
     return page.locator("#checkFrame .check-readout")
+
+
+def _hover_mark(page, mark: dict, marks: list[dict]) -> None:
+    """Move the pointer onto ``mark`` and wait for the readout of the point nearest it."""
+    box = page.locator("#checkFrame svg.check-plot").bounding_box()
+    page.mouse.move(box["x"] + mark["x"], box["y"] + mark["y"])
+    page.wait_for_function(
+        "text => document.querySelector('#checkFrame .check-readout text')?.textContent === text",
+        arg=_nearest(marks, mark["x"], mark["y"])["text"],
+    )
+
+
+def _assert_readout_in_view(page) -> None:
+    """The readout's text lies inside the part of the frame on screen, scroll included."""
+    text, view = page.evaluate(
+        """() => { const frame = document.getElementById("checkFrame");
+          const text = frame.querySelector(".check-readout text").getBoundingClientRect();
+          const box = frame.getBoundingClientRect();
+          return [[text.left, text.top, text.right, text.bottom],
+            [box.left, box.top, box.left + frame.clientWidth, box.top + frame.clientHeight]]; }"""
+    )
+    assert view[0] <= text[0] and text[2] <= view[2], (text, view)
+    assert view[1] <= text[1] and text[3] <= view[3], (text, view)
 
 
 def test_opening_a_check_draws_its_title_split_and_points(checks_page):
@@ -528,17 +583,27 @@ def test_a_tall_check_scrolls_and_hover_reads_through_the_scroll(chromium_browse
             marks = page.evaluate(_MARKS_FROM_REPORT, ["check_ae", False])
             frame.evaluate("frame => { frame.scrollTop = frame.scrollHeight; }")
             assert frame.evaluate("frame => frame.scrollTop") > 0
-            lowest = max(marks, key=lambda mark: mark["y"])
-            box = page.locator("#checkFrame svg.check-plot").bounding_box()
-            page.mouse.move(box["x"] + lowest["x"], box["y"] + lowest["y"])
-            page.wait_for_function(
-                "text => document.querySelector('#checkFrame .check-readout text')?.textContent === text",
-                arg=_nearest(marks, lowest["x"], lowest["y"])["text"],
-            )
+            _hover_mark(page, max(marks, key=lambda mark: mark["y"]), marks)
+            _assert_readout_in_view(page)
         finally:
             page.close()
     finally:
         widget.close()
+
+
+def test_a_long_readout_stays_inside_the_frame(checks_page):
+    """A group's readout too wide for the plot breaks into lines inside the frame, every value
+    kept; the rightmost point's readout turns to its left."""
+    with checks_page(_long_name_session) as page:
+        _open_check(page, "check_ae")
+        marks = page.evaluate(_MARKS_FROM_REPORT, ["check_ae", False])
+        long = next(mark for mark in marks if _LONG_GROUP in mark["text"])
+        rightmost = max(marks, key=lambda mark: mark["x"])
+        for mark in (long, rightmost):
+            _hover_mark(page, mark, marks)
+            _assert_readout_in_view(page)
+        _hover_mark(page, long, marks)
+        assert page.locator("#checkFrame .check-readout text tspan").count() > 1
 
 
 def test_a_resize_redraws_the_check_without_a_request(checks_page):

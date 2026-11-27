@@ -172,9 +172,17 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 // and the model it names when only one of the two drawn fell back.
 const LEVEL_TEXT = "parameters taken as exact";
 const LEVEL_TITLE = "Parameters taken as exact";
-// The readout's text sits this far from its point, and below it when the point is this near the top.
+// The readout's text sits this far beside its point and this far above or below it, its lines
+// this far apart, and this far inside the frame's visible edge. It breaks between its values.
 const READOUT_GAP = 10;
-const READOUT_TOP_ROOM = 30;
+const READOUT_RISE = 8;
+const READOUT_LINE = 16;
+const READOUT_EDGE = 4;
+const READOUT_BREAK = " · ";
+// Where the page cannot measure text: a character's width and the first line's ascent, at the
+// readout's 12 px.
+const READOUT_CHAR = 7;
+const READOUT_ASCENT = 10;
 /** @type {Readonly<Record<string, number>>} */
 const KEY_STEPS = Object.freeze({ ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 });
 
@@ -252,6 +260,54 @@ function readoutText(group) {
 }
 
 /**
+ * `text` in lines of at most `perLine` characters, each broken after a `READOUT_BREAK`, or within
+ * a value longer than a line; the lines join back to `text`.
+ * @param {string} text @param {number} perLine @returns {string[]}
+ */
+function readoutLines(text, perLine) {
+  const values = text.split(READOUT_BREAK).map((value, i, all) => (i < all.length - 1 ? value + READOUT_BREAK : value));
+  const pieces = values.flatMap((value) => Array.from({ length: Math.max(1, Math.ceil(value.length / perLine)) },
+    (_, j) => value.slice(j * perLine, (j + 1) * perLine)));
+  /** @type {string[]} */
+  const lines = [];
+  for (const piece of pieces) {
+    const last = lines.length - 1;
+    if (last >= 0 && (lines[last] + piece).trimEnd().length <= perLine) lines[last] += piece;
+    else lines.push(piece);
+  }
+  return lines;
+}
+
+/**
+ * Write `lines` into the readout's text at its origin, and return the box they take there. One
+ * line is the text's own; more are tspans.
+ * @param {SVGTextElement|Element} label @param {string[]} lines @param {number} charWidth
+ * @returns {{x: number, y: number, width: number, height: number}}
+ */
+function layoutReadout(label, lines, charWidth) {
+  label.setAttribute("x", "0");
+  label.setAttribute("y", "0");
+  if (lines.length === 1) {
+    label.textContent = lines[0];
+  } else {
+    label.textContent = "";
+    for (const [i, line] of lines.entries()) {
+      const span = label.ownerDocument.createElementNS(SVG_NS, "tspan");
+      span.setAttribute("x", "0");
+      span.setAttribute("dy", String(i === 0 ? 0 : READOUT_LINE));
+      span.textContent = line;
+      label.append(span);
+    }
+  }
+  const box = "getBBox" in label && typeof label.getBBox === "function" ? label.getBBox() : null;
+  if (box && box.width > 0) return box;
+  return { x: 0, y: -READOUT_ASCENT, width: Math.max(...lines.map((line) => line.length)) * charWidth, height: lines.length * READOUT_LINE };
+}
+
+/** @param {number} value @param {number} lo @param {number} hi */
+const clamp = (value, lo, hi) => Math.max(lo, Math.min(hi, value));
+
+/**
  * Read out the point nearest the pointer on the check in `frame`, and step through the points
  * with the arrow keys while the frame has focus. A pointer move waits for the next frame, and
  * writes only the readout group: its transform, its text and whether it is hidden.
@@ -276,6 +332,28 @@ export function bindCheckHover(frame, getScene) {
     if (group && !group.hasAttribute("hidden")) group.setAttribute("hidden", "");
   }
 
+  // The part of the scene the frame shows, in the scene's px, scroll included.
+  /** @param {Scene} scene @returns {{left: number, top: number, right: number, bottom: number}} */
+  function visible(scene) {
+    const svg = frame.querySelector("svg");
+    const box = svg?.getBoundingClientRect();
+    if (!box || !(box.width > 0 && box.height > 0)) return { left: 0, top: 0, right: scene.width, bottom: scene.height };
+    const view = frame.getBoundingClientRect();
+    const kx = scene.width / box.width;
+    const ky = scene.height / box.height;
+    const left = (view.left - box.left) * kx;
+    const top = (view.top - box.top) * ky;
+    return {
+      left: Math.max(0, left),
+      top: Math.max(0, top),
+      right: Math.min(scene.width, left + frame.clientWidth * kx),
+      bottom: Math.min(scene.height, top + frame.clientHeight * ky),
+    };
+  }
+
+  // The readout's text goes beside its point on the side with room, above it unless the visible
+  // top is too near, and when no side has room it is centred over the point, broken into lines
+  // that fit; it is clamped inside the visible part of the frame.
   /** @param {Scene} scene @param {number} index */
   function show(scene, index) {
     const group = readout();
@@ -285,14 +363,35 @@ export function bindCheckHover(frame, getScene) {
     shownIn = scene;
     const mark = scene.marks[index];
     const label = readoutText(group);
-    const left = mark.x > scene.width / 2;
-    const below = mark.y < READOUT_TOP_ROOM;
-    group.setAttribute("transform", `translate(${Math.round(mark.x * 10) / 10} ${Math.round(mark.y * 10) / 10})`);
-    label.setAttribute("x", String(left ? -READOUT_GAP : READOUT_GAP));
-    label.setAttribute("y", String(below ? READOUT_GAP + 8 : -READOUT_GAP));
-    label.setAttribute("text-anchor", left ? "end" : "start");
-    label.textContent = mark.text;
+    // Shown before it is measured: hidden text has no length.
     if (group.hasAttribute("hidden")) group.removeAttribute("hidden");
+    group.setAttribute("transform", `translate(${Math.round(mark.x * 10) / 10} ${Math.round(mark.y * 10) / 10})`);
+    const view = visible(scene);
+    const room = view.right - view.left - 2 * READOUT_EDGE;
+    label.textContent = mark.text;
+    const measured = "getComputedTextLength" in label && typeof label.getComputedTextLength === "function"
+      ? label.getComputedTextLength() : 0;
+    const charWidth = measured > 0 ? measured / Math.max(1, mark.text.length) : READOUT_CHAR;
+    let lines = [mark.text];
+    let box = layoutReadout(label, lines, charWidth);
+    // Two tries: the first from the mean character width, the second from the lines it drew.
+    for (let tries = 0; tries < 2 && box.width > room && room > 0; tries++) {
+      const longest = Math.max(...lines.map((line) => line.length));
+      lines = readoutLines(mark.text, Math.max(1, Math.floor((longest * room) / box.width)));
+      box = layoutReadout(label, lines, charWidth);
+    }
+    const lo = { x: view.left + READOUT_EDGE, y: view.top + READOUT_EDGE };
+    const hi = { x: view.right - READOUT_EDGE - box.width, y: view.bottom - READOUT_EDGE - box.height };
+    const right = mark.x + READOUT_GAP;
+    const left = mark.x - READOUT_GAP - box.width;
+    const x = right <= hi.x ? right : left >= lo.x ? left : clamp(mark.x - box.width / 2, lo.x, hi.x);
+    const above = mark.y - READOUT_RISE - box.height;
+    const y = clamp(above >= lo.y ? above : mark.y + READOUT_RISE, lo.y, hi.y);
+    // The text's own x and y place its box's top left corner at (x, y).
+    const at = { x: Math.round((x - box.x - mark.x) * 10) / 10, y: Math.round((y - box.y - mark.y) * 10) / 10 };
+    label.setAttribute("x", String(at.x));
+    label.setAttribute("y", String(at.y));
+    for (const span of label.children) span.setAttribute("x", String(at.x));
   }
 
   // The pointer in the scene's px: the svg's box moves with the frame's scroll.
@@ -340,8 +439,9 @@ export function bindCheckHover(frame, getScene) {
     const index = event.key === "Home" ? 0 : event.key === "End" ? last
       : from < 0 ? (step > 0 ? 0 : last) : Math.max(0, Math.min(last, from + step));
     pointer = null;
-    show(scene, index);
+    // Scrolled first, so the readout is placed in the part of the frame then in view.
     reveal(scene, scene.marks[index]);
+    show(scene, index);
   }
 
   frame.addEventListener("pointermove", onPointerMove);

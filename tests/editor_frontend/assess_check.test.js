@@ -129,6 +129,12 @@ test("after Undo, Compare is off while the checks still hold the edited model's 
   assert.equal(compareSwitch(kept, CHECK_REPORTS, true, null).live, false);
 });
 
+const CHAR_PX = 7;
+const LINE_PX = 16;
+const ASCENT_PX = 12;
+/** A text node's lines: its tspans, or its own text. */
+const textLines = (node) => (node.children.length ? node.children.map((child) => child.textContent) : [node.text]);
+
 // The large view and its hover, on a minimal element tree that records every attribute, text and
 // markup write, so a test can say which nodes a gesture touched.
 class FakeNode {
@@ -182,6 +188,12 @@ class FakeNode {
     return null;
   }
   getBoundingClientRect() { return this.rect; }
+  // Text is 7 px a character, its lines 16 px apart with the first baseline 12 px down.
+  getComputedTextLength() { return this.textContent.length * CHAR_PX; }
+  getBBox() {
+    const lines = textLines(this);
+    return { x: 0, y: -ASCENT_PX, width: Math.max(...lines.map((line) => line.length)) * CHAR_PX, height: lines.length * LINE_PX };
+  }
   addEventListener(type, listener) { this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]); }
   removeEventListener(type, listener) { this.listeners.set(type, (this.listeners.get(type) ?? []).filter((l) => l !== listener)); }
   dispatch(type, event = {}) {
@@ -360,4 +372,70 @@ test("compared, the split line names the one model whose band took its parameter
   const html = dom.nodes.split.innerHTML;
   assert.match(html, />parameters taken as exact \(as fitted\)<\/span>$/);
   assert.match(html, new RegExp(`data-popover-body="${note}"`));
+});
+
+/** Where the readout's text sits in the scene, by the fake's text metrics, and its lines. */
+function readoutBox(dom) {
+  const group = dom.readout();
+  const [tx, ty] = group.getAttribute("transform").match(/-?[\d.]+/g).map(Number);
+  const text = group.querySelector("text");
+  const lines = textLines(text);
+  const left = tx + Number(text.getAttribute("x"));
+  const top = ty + Number(text.getAttribute("y")) - ASCENT_PX;
+  for (const line of text.children) assert.equal(line.getAttribute("x"), text.getAttribute("x"));
+  return { left, right: left + Math.max(...lines.map((line) => line.length)) * CHAR_PX, top, bottom: top + lines.length * LINE_PX, lines };
+}
+
+/** The wrong fit's A/E check with group `c` of `g` renamed `name`. */
+function namedGroup(name) {
+  const payload = structuredClone(FIXTURE.wrong.check_ae);
+  const table = payload.models.edited.tables.find((t) => t.covariate === "g");
+  table.levels = table.levels.map((level) => (level === "c" ? name : level));
+  return payload;
+}
+
+test("a readout keeps to the side of its point with room, inside the frame", () => {
+  const dom = fakeFrame();
+  const scene = renderCheckView(dom.nodes, "check_ae", namedGroup("a longer group name"), VIEW);
+  bindCheckHover(dom.nodes.frame, () => scene);
+  for (const index of [0, scene.marks.length - 1]) {
+    const mark = scene.marks[index];
+    dom.pointerMove(mark.x, mark.y); dom.flushFrame();
+    const box = readoutBox(dom);
+    assert.deepEqual(box.lines, [mark.text]);
+    assert.ok(box.left >= 0 && box.right <= VIEW.width, `${box.left} to ${box.right}`);
+    // Beside the point, not over it.
+    assert.ok(box.left > mark.x || box.right < mark.x, `${mark.x}: ${box.left} to ${box.right}`);
+  }
+});
+
+test("a readout too long for the frame breaks between its values and stays inside", () => {
+  const name = "a group whose name runs on for long enough that its readout cannot fit on one line of the plot";
+  const dom = fakeFrame();
+  const scene = renderCheckView(dom.nodes, "check_ae", namedGroup(name), VIEW);
+  bindCheckHover(dom.nodes.frame, () => scene);
+  const mark = scene.marks.find((m) => m.text.includes(name));
+  assert.ok(mark.text.length * CHAR_PX > VIEW.width, "the readout fits on one line");
+  dom.pointerMove(mark.x, mark.y); dom.flushFrame();
+  const box = readoutBox(dom);
+  assert.ok(box.lines.length > 1);
+  assert.equal(box.lines.join(""), mark.text);
+  assert.equal(dom.readoutText(), mark.text);
+  assert.ok(box.left >= 0 && box.right <= VIEW.width, `${box.left} to ${box.right}`);
+  assert.ok(box.top >= 0 && box.bottom <= scene.height, `${box.top} to ${box.bottom}`);
+});
+
+test("a readout stays inside the frame's visible part when it is scrolled", () => {
+  const dom = fakeFrame({ height: 200 });
+  const scene = renderCheckView(dom.nodes, "check_ae", FIXTURE.wrong.check_ae, { ...VIEW, height: 200 });
+  bindCheckHover(dom.nodes.frame, () => scene);
+  // Scrolled 80 px down, the frame shows the scene from 80 to 280 px.
+  dom.nodes.frame.querySelector("svg").rect.top = -80;
+  // The highest point in view, too near the visible top for its readout to sit above it.
+  const mark = scene.marks.filter((m) => m.y >= 80 && m.y < 95).sort((a, b) => a.y - b.y)[0];
+  assert.ok(mark, "no point sits just inside the visible top");
+  dom.pointerMove(mark.x, mark.y - 80); dom.flushFrame();
+  assert.equal(dom.readoutText(), mark.text);
+  const box = readoutBox(dom);
+  assert.ok(box.top >= 80 && box.bottom <= 280, `${box.top} to ${box.bottom}`);
 });
