@@ -1303,11 +1303,13 @@ def _assess_checks_fixture(calm: Case, wrong: Case) -> dict[str, Any]:
     """The four check payloads the editor's Assess graphs draw, by case.
 
     ``calm`` and ``wrong`` read the validation split (simulated levels); ``edited`` is the calm
-    fit after a weighted average over ``mean:x``'s first six points, with the fitted model
-    beside it; ``train`` is the calm fit on the rows it was fitted on (known levels).
+    fit with ``mean:x``'s curve scaled by half about its mean, an edit every check can see, with
+    the fitted model beside it; ``train`` is the calm fit on the rows it was fitted on (known
+    levels).
     """
     edited = _session(calm)
-    _average(edited, 6)
+    curve = edited.terms["mean:x"].edited_log_effect
+    edited.set_values("mean:x", np.arange(curve.size), curve.mean() + 0.5 * (curve - curve.mean()))
     train = {
         report: check_report_payload(
             report,
@@ -1354,6 +1356,27 @@ def test_the_assess_checks_fixture_is_current(calm, wrong):
         "known",
     }
     _assert_close_json(stored, fresh)
+    # The edit shows on all four checks, so the compare overlay has two series to tell apart.
+    edited, fitted = (
+        {report: body["models"][side] for report, body in fresh["edited"].items()}
+        for side in ("edited", "original")
+    )
+    assert edited["check_pit"]["counts"] != fitted["check_pit"]["counts"]
+    ratios = [
+        abs(a - b)
+        for ours, theirs in zip(
+            edited["check_ae"]["tables"], fitted["check_ae"]["tables"], strict=True
+        )
+        for a, b in zip(ours["ratio"], theirs["ratio"], strict=False)
+        if a is not None and b is not None
+    ]
+    assert max(ratios) >= 0.05
+    observed = zip(edited["check_qq"]["observed"], fitted["check_qq"]["observed"], strict=True)
+    assert max(abs(a - b) for a, b in observed) >= 0.05
+    shares = (
+        body["check_calibration"]["quantiles"]["realised_exceedance"] for body in (edited, fitted)
+    )
+    assert next(shares) != next(shares)
 
 
 if __name__ == "__main__":
