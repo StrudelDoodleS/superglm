@@ -1623,7 +1623,13 @@ def test_a_piecewise_display_survives_a_pickle_and_a_replacement(record) -> None
         shown, x = _display_errors(inference)
         results = (
             pickle.loads(pickle.dumps(inference)),
-            dataclasses.replace(inference, alpha=0.1),
+            dataclasses.replace(
+                inference,
+                x=inference.x.copy(),
+                log_relativity=inference.log_relativity.copy(),
+                knot_covariance=inference.knot_covariance.copy(),
+                alpha=0.1,
+            ),
         )
         for result in results:
             np.testing.assert_array_equal(_display_errors(result)[0], shown, err_msg=centering)
@@ -1636,6 +1642,40 @@ def test_a_piecewise_display_survives_a_pickle_and_a_replacement(record) -> None
     for centering, (shown, results) in kept.items():
         for result in results:
             np.testing.assert_array_equal(_display_errors(result)[0], shown, err_msg=centering)
+
+
+@pytest.mark.parametrize("field", ["x", "log_relativity", "knot_covariance"])
+def test_an_edited_piecewise_result_drops_the_original_fit_rule(field) -> None:
+    """Edits must not recover an interval with the old fit's knot rule (#771 review)."""
+    from copy import deepcopy
+    from dataclasses import replace
+
+    model, _ = _midpoint_fit()
+    inference = model.term_inference("x")
+    edits = {
+        "x": np.array([0.0, 80 / 199, 120 / 199, 1.0]),
+        "log_relativity": inference.log_relativity + 1.0,
+        "knot_covariance": np.full_like(inference.knot_covariance, np.nan),
+    }
+    edited_in_place = deepcopy(inference)
+    getattr(edited_in_place, field)[...] = edits[field]
+    for result in (replace(inference, **{field: edits[field]}), edited_in_place):
+        errors, grid = _display_errors(result)
+        shown = (
+            np.zeros(grid.size, dtype=bool) if field == "knot_covariance" else np.isin(grid, [0, 1])
+        )
+        np.testing.assert_array_equal(np.isfinite(errors), shown)
+
+
+def test_piecewise_result_exports_only_published_uncertainty() -> None:
+    """Generic dataclass export keeps the masked covariance and no private fit rule."""
+    from dataclasses import asdict
+
+    model, _ = _midpoint_fit()
+    inference = model.term_inference("x")
+    exported = asdict(inference)
+    assert "_knot_combinations" not in exported
+    np.testing.assert_array_equal(exported["knot_covariance"], inference.knot_covariance)
 
 
 def _drop_rank_record(model) -> None:

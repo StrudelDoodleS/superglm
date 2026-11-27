@@ -579,6 +579,7 @@ class _TermReport:
         if inference.knot_covariance is not None and inference.se_log_relativity is not None:
             errors, knot_cov, combinations = withhold_undetermined_knots(
                 self.spec,
+                np.asarray(inference.log_relativity),
                 inference.se_log_relativity,
                 inference.knot_covariance,
                 self.determines,

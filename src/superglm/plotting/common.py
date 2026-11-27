@@ -191,7 +191,8 @@ def piecewise_display_term(ti, n_points: int = 200):
         return ti
 
     grid = np.unique(np.concatenate([knots, np.linspace(knots[0], knots[-1], n_points)]))
-    log_rel = np.interp(grid, knots, np.asarray(ti.log_relativity, dtype=np.float64))
+    knot_log_rel = np.asarray(ti.log_relativity, dtype=np.float64)
+    log_rel = np.interp(grid, knots, knot_log_rel)
     se = ci_lo = ci_hi = None
     if has_band:
         V = np.asarray(ti.knot_covariance, dtype=np.float64)
@@ -202,7 +203,7 @@ def piecewise_display_term(ti, n_points: int = 200):
         # any was blanked, at the points the fit determines (``KnotCombinations``), while
         # that is the covariance it publishes.
         combinations = getattr(ti, "_knot_combinations", None)
-        if combinations is not None and not combinations.describes(V):
+        if combinations is not None and not combinations.describes(knots, knot_log_rel, V):
             combinations = None
         U = V if combinations is None else combinations.covariance
         variance = (

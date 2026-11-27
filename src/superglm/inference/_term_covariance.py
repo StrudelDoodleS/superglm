@@ -530,22 +530,34 @@ class KnotCombinations:
     determines: Determinacy
     columns: NDArray
     rows: NDArray
+    knots: NDArray
+    log_relativity: NDArray
+    blank: NDArray
 
     def determined(self, weights: NDArray) -> NDArray:
         """Which rows of ``weights``, each weighing the knot values, the fit determines."""
         return _determined_rows(self.determines, self.columns, weights @ self.rows)
 
-    def describes(self, knot_covariance: NDArray) -> bool:
-        """Whether ``knot_covariance`` is this covariance wherever it is not blank."""
-        published = np.asarray(knot_covariance, dtype=np.float64)
-        if published.shape != self.covariance.shape:
-            return False
-        shown = ~np.isnan(published)
-        return bool(np.array_equal(published[shown], self.covariance[shown]))
+    def describes(self, knots: NDArray, log_relativity: NDArray, knot_covariance: NDArray) -> bool:
+        """Whether the displayed knots, estimates and masked covariance match this fit."""
+        return (
+            np.array_equal(knots, self.knots, equal_nan=True)
+            and np.array_equal(log_relativity, self.log_relativity, equal_nan=True)
+            and np.array_equal(
+                knot_covariance, np.where(self.blank, np.nan, self.covariance), equal_nan=True
+            )
+        )
 
 
 def withhold_undetermined_knots(
-    spec, se: NDArray, knot_covariance: NDArray, determines, columns: NDArray, *, center: bool
+    spec,
+    log_relativity: NDArray,
+    se: NDArray,
+    knot_covariance: NDArray,
+    determines,
+    columns: NDArray,
+    *,
+    center: bool,
 ) -> tuple[NDArray, NDArray, KnotCombinations | None]:
     """``se`` and ``knot_covariance`` of a Piecewise term with each knot value ``determines``
     leaves open blank (``withhold_undetermined`` on ``knot_map``, centred with ``center``),
@@ -572,7 +584,15 @@ def withhold_undetermined_knots(
     combinations = None
     if rule is not None:
         mask = np.array(determines.coefficient_estimable, dtype=bool)
-        combinations = KnotCombinations(knot_covariance, Determinacy(mask, rule), columns, rows)
+        combinations = KnotCombinations(
+            knot_covariance,
+            Determinacy(mask, rule),
+            columns,
+            rows,
+            spec._knots.copy(),
+            log_relativity.copy(),
+            blank,
+        )
     return np.where(shown, se, np.nan), covariance, combinations
 
 
