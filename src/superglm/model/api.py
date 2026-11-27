@@ -1488,7 +1488,7 @@ class SuperGLM:
               ``stagnated_fits``, ``pirls_iterations``, ``factorisations``,
               ``small_factorisations``, ``stacks``, ``stacked``, ``solves``,
               ``rows_read``, ``rows_multiplied``, ``rows_streamed``,
-              ``kept_fits``).
+              ``resolved_by_factor``, ``kept_fits``).
 
         Raises
         ------

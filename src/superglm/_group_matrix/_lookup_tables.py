@@ -30,7 +30,9 @@ c_lo``.  The Gram centres every table before its product (``A_t - c_t``; a
 zero row centres to ``-c_t``); an accumulated pair reads a raw window of a term
 with a zero row, since its row side is centred about the weighted mean
 (``A_t' m_t = 0``).  The leverage reads such a term raw with its centre ``z`` as
-constants, as the support route does (``reml/_leverage_rows.py``).  Dense
+constants, as the support route does (``reml/_leverage_rows.py``), or, read
+centred, centres that table as well, so that ``z = 0`` in the leverage's bound
+below (the NCV engine's single rows, ``ncv/rows.py``).  Dense
 columns are centred about the pair used everywhere: the Gram about the rounded
 anchor with Bjorck's two-pass correction (``centered_system.two_pass_centred_gram``),
 the leverage and ``X_c' v`` as ``(x - c) - c_lo``.
@@ -454,20 +456,26 @@ def _build_plan(dm) -> LookupPlan | None:
     )
 
 
-def _choose_pairs(terms: list[_Term], codes: NDArray) -> tuple[NDArray, NDArray]:
+def _choose_pairs(
+    terms: list[_Term] | tuple, codes: NDArray, centred: bool = False
+) -> tuple[NDArray, NDArray]:
     """Per term pair, a full table or an accumulation (Li & Wood 2020's choice, as a cost model).
 
     A table costs one access a row plus ``m_t p_t p_u + m_t p_u m_u`` to form;
     an accumulation the window of the other term's row a row plus ``m_t p_t
     p_u``.  Tables are taken while their cells stay under ``_CELL_CAP`` each
     and a quarter of ``max_memory`` in all.  The choice moves cost only: both
-    forms are inside the module's bounds.
+    forms are inside the module's bounds.  ``centred`` prices a raw-read term's window at
+    its table's whole width, as a centred read (:func:`_read_tables`) reads it.
     """
     from superglm._parallel import resolve_max_memory
 
     n = codes.shape[1]
     avg_window = []
     for t, term in enumerate(terms):
+        if centred and term.raw_read:
+            avg_window.append(float(term.raw.shape[1]))
+            continue
         counts = np.bincount(codes[t], minlength=term.raw.shape[0]).astype(np.float64)
         avg_window.append(float(counts @ (term.hi - term.lo)) / max(n, 1))
     budget = resolve_max_memory() // 4
@@ -496,16 +504,19 @@ def _choose_pairs(terms: list[_Term], codes: NDArray) -> tuple[NDArray, NDArray]
     )
 
 
-def _read_tables(plan: LookupPlan, centre: NDArray) -> tuple[list[NDArray], NDArray]:
+def _read_tables(
+    plan: LookupPlan, centre: NDArray, centred: bool = False
+) -> tuple[list[NDArray], NDArray]:
     """Each term's table as the passes read it, and the centre ``z`` of the raw-read terms.
 
     A raw-read term keeps its raw table (its centre goes to ``z``); every other
-    term is centred, ``raw - (c - offset)``.
+    term is centred, ``raw - (c - offset)``.  ``centred`` centres every term,
+    a raw-read one as ``raw - c`` (its zero row to ``-c``), and ``z`` is zero.
     """
     zero = np.zeros(plan.p, dtype=np.float64)
     tables = []
     for term in plan.terms:
-        if term.raw_read:
+        if term.raw_read and not centred:
             zero[term.columns] = centre[term.columns]
             tables.append(term.raw)
         else:
@@ -968,10 +979,19 @@ def _flat(parts: list) -> NDArray:
     return np.ascontiguousarray(np.concatenate(parts)) if parts else np.zeros(1)
 
 
-def _leverage_tables(plan: LookupPlan, V: NDArray, centre: NDArray) -> _LeverageTables:
-    """Every table of the leverage gather for the inverse ``V`` (coefficient space only)."""
+def _leverage_tables(
+    plan: LookupPlan, V: NDArray, centre: NDArray, centred: bool = False
+) -> _LeverageTables:
+    """Every table of the leverage gather for the inverse ``V`` (coefficient space only).
+
+    ``centred`` reads every table centred (:func:`_read_tables`), each row's window its
+    table's whole width.
+    """
     terms = plan.terms
-    tables, zero = _read_tables(plan, centre)
+    tables, zero = _read_tables(plan, centre, centred)
+    tab_pairs, acc_pairs = plan.tab_pairs, plan.acc_pairs
+    if centred and any(term.raw_read for term in terms):
+        tab_pairs, acc_pairs = _choose_pairs(terms, plan.codes, centred=True)
     Vz = V @ zero
     e_parts = []
     for term, A in zip(terms, tables, strict=True):
@@ -984,7 +1004,7 @@ def _leverage_tables(plan: LookupPlan, V: NDArray, centre: NDArray) -> _Leverage
         e -= 2.0 * _rows_times(term, A, Vz[term.columns][:, None])[:, 0]
         e_parts.append(e)
     tab_rows, G_parts, offset = [], [], 0
-    for a, b in plan.tab_pairs:
+    for a, b in tab_pairs:
         A, B = tables[a], tables[b]
         Vab = V[np.ix_(terms[a].columns, terms[b].columns)]
         G = _pair_table(terms[a], A, terms[b], B, 2.0 * Vab)
@@ -992,7 +1012,7 @@ def _leverage_tables(plan: LookupPlan, V: NDArray, centre: NDArray) -> _Leverage
         G_parts.append(G.ravel())
         offset += G.size
     acc_rows, Q_parts, offset = [], [], 0
-    for x, y in plan.acc_pairs:
+    for x, y in acc_pairs:
         Q = _rows_times(terms[x], tables[x], 2.0 * V[np.ix_(terms[x].columns, terms[y].columns)])
         acc_rows.append((x, y, offset, tables[y].shape[1]))
         Q_parts.append(Q.ravel())
@@ -1008,6 +1028,12 @@ def _leverage_tables(plan: LookupPlan, V: NDArray, centre: NDArray) -> _Leverage
         Vdd[np.diag_indices(n_d)] = np.diag(V)[dense]
     rows = np.array([A.shape[0] for A in tables], dtype=np.int64)
     sizes = np.array([A.size for A in tables], dtype=np.int64)
+    spans = [(term.lo, term.hi) for term in terms]
+    if centred:
+        spans = [
+            (np.zeros_like(term.lo), np.full_like(term.hi, A.shape[1]))
+            for term, A in zip(terms, tables, strict=True)
+        ]
     return _LeverageTables(
         h0=float(zero @ Vz),
         e=_flat(e_parts),
@@ -1018,8 +1044,8 @@ def _leverage_tables(plan: LookupPlan, V: NDArray, centre: NDArray) -> _Leverage
         Q=_flat(Q_parts),
         A=_flat([np.ascontiguousarray(A).ravel() for A in tables]),
         A_off=np.cumsum(np.r_[0, sizes])[:-1],
-        lo=_flat([term.lo for term in terms]).astype(np.int32),
-        hi=_flat([term.hi for term in terms]).astype(np.int32),
+        lo=_flat([lo for lo, _ in spans]).astype(np.int32),
+        hi=_flat([hi for _, hi in spans]).astype(np.int32),
         w_off=np.cumsum(np.r_[0, rows])[:-1],
         F=_flat(F_parts),
         f_off=np.cumsum(np.r_[0, rows * n_d])[:-1],
@@ -1186,15 +1212,21 @@ def table_leverages(
     centre_hi: NDArray,
     centre_lo: NDArray | None,
     active: NDArray,
+    centred: bool = False,
 ) -> NDArray:
     """``h_r = x_r' inverse x_r`` for the active rows (``0`` elsewhere), read back from the tables.
 
-    Rows run in fixed blocks of ``_BLOCK_ROWS`` on ``pool_workers`` threads
+    ``centred`` reads every table centred before its product, a categorical as ``e_k - c``
+    and its base level as ``-c`` (:func:`_read_tables`): each table entry is then a
+    centred entry of the row, rounded once, and no product is formed at a column's own
+    size.  Rows run in fixed blocks of ``_BLOCK_ROWS`` on ``pool_workers`` threads
     (BLAS held at one thread meanwhile); the result is bitwise the serial one.
     """
     # ``centre_lo`` is nonzero on dense columns only, which no table reads.
     centre = np.asarray(centre_hi, dtype=np.float64)
-    tables = _leverage_tables(plan, np.ascontiguousarray(inverse, dtype=np.float64), centre)
+    tables = _leverage_tables(
+        plan, np.ascontiguousarray(inverse, dtype=np.float64), centre, centred
+    )
     active = np.ascontiguousarray(active, dtype=np.bool_)
     out = np.empty(plan.n, dtype=np.float64)
 
@@ -1230,6 +1262,35 @@ def table_leverages(
         8 * _BLOCK_ROWS * (2 + int(plan.dense_columns.size)),
     )
     return out
+
+
+def table_row_bound(
+    plan: LookupPlan, scale: NDArray, centre_hi: NDArray, centre_lo: NDArray | None
+) -> float:
+    """At least the largest ``sum_j m_rj scale_j`` over the design's rows, for nonnegative ``scale``.
+
+    ``m_rj`` bounds every value a row's entry passes through when it is centred, from its
+    table or as a dense row: ``|raw| + |offset| + |c|`` on a term's columns (the design's
+    entry is ``raw + offset``), and the centred value ``|(x - c) - c_lo|`` on a dense
+    column, which both centre alike.  The sum of each term's and the dense columns' own
+    largest rows.
+    """
+    centre = np.abs(np.asarray(centre_hi, dtype=np.float64))
+    total = 0.0
+    for term in plan.terms:
+        part = scale[term.columns]
+        total += float(np.max(np.abs(term.raw) @ part, initial=0.0))
+        total += float((np.abs(term.offset) + centre[term.columns]) @ part)
+    if plan.dense_columns.size:
+        part = scale[plan.dense_columns]
+        largest = 0.0
+        for start in range(0, plan.n, _BLOCK_ROWS):
+            block = _dense_block(
+                plan, start, min(start + _BLOCK_ROWS, plan.n), centre_hi, centre_lo
+            )
+            largest = max(largest, float(np.max(np.abs(block) @ part, initial=0.0)))
+        total += largest
+    return total
 
 
 @njit(cache=True)

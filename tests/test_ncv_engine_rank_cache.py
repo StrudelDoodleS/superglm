@@ -827,15 +827,21 @@ def test_inverse_within_its_error_does_not_hide_an_unidentified_deletion(size, r
 
 
 @pytest.mark.parametrize("route", [None, "woodbury"], ids=["cost-rule", "alone"])
-def test_unresolved_margin_with_a_sound_leave_out_hessian_is_factored(route):
-    """A margin the inverse does not resolve is decided by the leave-out Hessian's own factorisation.
+@pytest.mark.parametrize("size", [1, 2], ids=["rows", "pairs"])
+def test_unresolved_margin_with_a_sound_leave_out_hessian_keeps_no_rows(size, route):
+    """A margin the inverse does not resolve, with a sound leave-out Hessian: no pass over the kept rows.
 
-    That Hessian is sound here, so row 0 costs one factorisation and no pass over the rows
-    it keeps, and its prediction is their least-squares fit as closely as a Gram gives it.
+    Row 0's column is its own, a strong direction of the full Hessian, so through that
+    Hessian's Cholesky factor its margin of 3e-7 is known to 1e-13 and row 0 alone is solved
+    by the scalar form.  Paired with row 1 it has no such route, and the pair's leave-out
+    Hessian, sound here, is decided by its own factorisation.  Each prediction is the
+    least-squares fit of the rows its neighbourhood keeps, as closely as a Gram gives it.
     """
     design = lone_column()
-    nb = single_rows(design.problem.n)
+    nb = blocks(design.problem.n, size)
     got = evaluate(design.problem, nb, np.zeros(0), gradient=False, route=route)
     assert got.feasible
     assert_kept_rows_fits(design, nb, got)
-    assert (got.work.factorisations, got.work.kept_fits) == (1, 0)
+    alone = int(size == 1)
+    assert (got.work.factorisations, got.work.kept_fits) == (1 - alone, 0)
+    assert got.work.resolved_by_factor == alone

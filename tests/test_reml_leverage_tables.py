@@ -157,6 +157,37 @@ def test_table_gradient_matches_the_derivative_grams_within_rounding(monkeypatch
     assert np.max(gradient_bound) < 1e-6 * np.max(np.abs(gradient))
 
 
+def test_table_row_bound_reads_the_dense_rows_of_every_block(monkeypatch):
+    """The bound's largest dense row, row 966 of 1,500, counts whichever block holds it.
+
+    At 61-row blocks it lies in the sixteenth; the bound equals the one read in a single
+    block and the reference formed here from the materialised centred rows, to the rounding
+    of a sum of nonnegative terms (BLAS may order a product's sums differently by shape).
+    """
+    model = _poisson_model(1.0e3)
+    centre_hi, centre_lo = _centre(model)
+    dm = model._dm
+    plan = leverage_tables.lookup_plan(dm)
+    assert plan is not None and plan.dense_columns.size == 1
+    scale = np.linspace(0.5, 2.0, dm.p)
+    dense = plan.dense_columns
+    centred = (dm.toarray() - centre_hi) - centre_lo
+    row_sums = np.abs(centred[:, dense]) @ scale[dense]
+    assert int(np.argmax(row_sums)) > 61
+    terms = sum(
+        float(np.max(np.abs(term.raw) @ scale[term.columns], initial=0.0))
+        + float((np.abs(term.offset) + np.abs(centre_hi[term.columns])) @ scale[term.columns])
+        for term in plan.terms
+    )
+    # Sums of nonnegative terms, each rounded within gamma_(p + 2) of its own magnitude.
+    within = 2 * _gamma(dm.p + len(plan.terms) + 2)
+    whole = leverage_tables.table_row_bound(plan, scale, centre_hi, centre_lo)
+    monkeypatch.setattr(leverage_tables, "_BLOCK_ROWS", 61)
+    chunked = leverage_tables.table_row_bound(plan, scale, centre_hi, centre_lo)
+    assert chunked == pytest.approx(whole, rel=within)
+    assert whole == pytest.approx(terms + float(np.max(row_sums)), rel=within)
+
+
 def test_table_leverages_are_bitwise_identical_for_any_worker_count(monkeypatch):
     """Fixed row blocks, one fixed order per row: the pooled result is the serial one, bit for bit."""
     monkeypatch.setattr(leverage_tables, "_BLOCK_ROWS", 64)
