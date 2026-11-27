@@ -18,6 +18,7 @@ from superglm import (
     Spline,
     SuperGLM,
     SuperLSS,
+    TweedieLSS,
     cat,
     s,
     ti,
@@ -25,6 +26,7 @@ from superglm import (
 from superglm.distributional.kernels.generalized_pareto import (
     GeneralizedParetoInitializationWarning,
 )
+from superglm.distributional.posterior import PosteriorDraws, posterior_parameters
 from superglm.editor import checks
 from superglm.editor.checks import (
     CHECK_REPORTS,
@@ -32,12 +34,21 @@ from superglm.editor.checks import (
     check_body,
     check_inputs,
     check_report_payload,
+    null_replicates,
     offered_checks,
     qq_from_residuals,
 )
 from superglm.editor.evaluation import EvaluationDataset
 from superglm.model.base import NoPredictedMeanError
-from superglm.stats import UniformBand, equal_local_levels_band
+from superglm.stats import (
+    UniformBand,
+    band_at_level,
+    binomial_cell_level,
+    bonferroni_binomial_band,
+    equal_local_levels_band,
+    monte_carlo_level,
+    order_statistic_level,
+)
 
 SEED = 20261127
 #: ``.fit`` holds each smooth's penalty fixed, so each smooth names its own.
@@ -49,6 +60,7 @@ CV = {"a": 0.4, "b": 0.6, "c": 0.8}
 class Case(NamedTuple):
     lss: Any
     validation: EvaluationDataset
+    train: EvaluationDataset | None = None
 
 
 def _rows(n: int, rng: np.random.Generator) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
@@ -73,7 +85,10 @@ def _fitted_case(y_of, *, n_validation: int = 200, **kwargs) -> Case:
     X, mean, cv = _rows(600 + n_validation, rng)
     y = y_of(rng, mean, cv)
     lss = _gamma_spec(**kwargs).fit(X.iloc[:600], y[:600], lambdas={"mean:x#wiggle": LAMBDA})
-    return Case(lss, _validation(X.iloc[600:].reset_index(drop=True), y[600:]))
+    train = EvaluationDataset(
+        name="train", label="Train", X=X.iloc[:600], y=y[:600], source="retained_fit_data"
+    )
+    return Case(lss, _validation(X.iloc[600:].reset_index(drop=True), y[600:]), train)
 
 
 @pytest.fixture(scope="module")
@@ -106,6 +121,35 @@ def heavy_gpd() -> Case:
         lss = SuperLSS(family, family.scale(s("x", k=5)), family.shape()).fit(
             X.iloc[:400], y[:400], lambdas={"scale:x#wiggle": LAMBDA}
         )
+    return Case(lss, _validation(X.iloc[400:].reset_index(drop=True), y[400:]))
+
+
+@pytest.fixture(scope="module")
+def prior_weighted() -> Case:
+    """Gamma amounts whose prior weight divides each row's squared CV."""
+    rng = np.random.default_rng(SEED)
+    X, mean, cv = _rows(800, rng)
+    w = rng.uniform(0.5, 3.0, 800)
+    y = rng.gamma(w / cv**2, mean * cv**2 / w)
+    lss = _gamma_spec().fit(
+        X.iloc[:600], y[:600], sample_weight=w[:600], lambdas={"mean:x#wiggle": LAMBDA}
+    )
+    held = X.iloc[600:].reset_index(drop=True)
+    return Case(lss, _validation(held, y[600:], sample_weight=w[600:]))
+
+
+@pytest.fixture(scope="module")
+def zeros() -> Case:
+    """Compound Poisson-gamma amounts, 16% zero: a family with an atom, randomised at zero."""
+    rng = np.random.default_rng(SEED)
+    X, mean, _ = _rows(600, rng)
+    events = rng.poisson(1.2 * np.sqrt(mean))
+    y = np.zeros(600)
+    y[events > 0] = rng.gamma(events[events > 0], np.sqrt(mean[events > 0]) / 1.2)
+    family = TweedieLSS()
+    lss = SuperLSS(family, family.mu(s("x", k=5), cat("g")), family.phi(), family.p()).fit(
+        X.iloc[:400], y[:400], lambdas={"mean:x#wiggle": LAMBDA}
+    )
     return Case(lss, _validation(X.iloc[400:].reset_index(drop=True), y[400:]))
 
 
@@ -145,7 +189,7 @@ def test_the_qq_body_is_the_sorted_residuals_against_the_simultaneous_band(calm)
     u, _, _ = _reference_u(calm.lss, calm.validation.X, calm.validation.y)
     z = np.sort(special.ndtri(u))
     n = len(z)
-    band = equal_local_levels_band(n)
+    band = band_at_level(n, body["local_level"])
     k = np.asarray(body["index"])
     scale = np.max(np.abs(z))
     np.testing.assert_allclose(body["observed"], z[k], rtol=0, atol=64 * 2.0**-53 * scale)
@@ -161,8 +205,10 @@ def test_the_pit_body_counts_each_bin_against_the_band_for_all_twenty(calm):
     body = check_body("check_pit", calm.lss, calm.validation, inputs=[])
     u, _, _ = _reference_u(calm.lss, calm.validation.X, calm.validation.y)
     assert body["counts"] == np.histogram(u, bins=20, range=(0, 1))[0].tolist()
-    lo, hi = stats.binom.ppf([0.025 / 20, 1 - 0.025 / 20], len(u), 1 / 20)
+    (lo,), (hi,) = bonferroni_binomial_band([len(u)], [1 / 20], cut=body["local_level"])
     assert (body["band_lower"], body["band_upper"]) == (lo, hi)
+    counts = np.asarray(body["counts"])
+    assert body["outside"] == int(np.sum((counts < lo) | (counts > hi)))
 
 
 def test_the_calibration_body_reads_each_quantile_against_its_binomial_band(calm):
@@ -172,10 +218,10 @@ def test_the_calibration_body_reads_each_quantile_against_its_binomial_band(calm
     for i, p in enumerate(QUANTILE_GRID):
         share = np.mean(y > stats.gamma.ppf(p, a=1 / cv**2, scale=mean * cv**2))
         assert body["quantiles"]["realised_exceedance"][i] == pytest.approx(share, abs=1e-12)
-    cut = 0.05 / (2 * len(QUANTILE_GRID))  # Bonferroni over the 11 levels
     q = 1 - np.asarray(QUANTILE_GRID)
-    np.testing.assert_array_equal(body["band_lower"], stats.binom.ppf(cut, n, q) / n)
-    np.testing.assert_array_equal(body["band_upper"], stats.binom.ppf(1 - cut, n, q) / n)
+    lower, upper = bonferroni_binomial_band(np.full(len(q), n), q, cut=body["local_level"])
+    np.testing.assert_array_equal(body["band_lower"], lower / n)
+    np.testing.assert_array_equal(body["band_upper"], upper / n)
     shares = np.asarray(body["quantiles"]["realised_exceedance"])
     assert body["outside"] == int(
         np.sum((shares < body["band_lower"]) | (shares > body["band_upper"]))
@@ -201,7 +247,6 @@ def test_the_ae_body_sums_to_the_split_and_reads_its_interval_from_the_gamma_law
         assert se == pytest.approx(
             np.sqrt(np.sum((mean[rows] * cv[rows]) ** 2)) / mean[rows].sum(), rel=1e-9
         )
-    assert body["z"] == pytest.approx(stats.norm.isf(0.025 / body["cells"]), rel=1e-12)
 
 
 @pytest.mark.parametrize("name", ["calm", "wrong"])
@@ -246,6 +291,7 @@ def test_a_band_that_lets_everything_in_flags_nothing(wrong, monkeypatch):
 
     assert check_body("check_qq", wrong.lss, wrong.validation, inputs=[])["flagged"]
     monkeypatch.setattr(checks, "equal_local_levels_band", open_band)
+    monkeypatch.setattr(checks, "band_at_level", lambda n, local_level, alpha=0.05: open_band(n))
     body = check_body("check_qq", wrong.lss, wrong.validation, inputs=[])
     assert not body["flagged"]
     # The open band's edges are infinite on the normal scale, and JSON has no infinity.
@@ -264,10 +310,14 @@ def test_a_law_without_finite_variance_has_no_ae_interval(heavy_gpd):
         "reason": "The predicted distribution has no finite variance at these parameters, "
         "so actual over expected has no interval.",
     }
-    assert all(
-        check_body(r, heavy_gpd.lss, heavy_gpd.validation, inputs=["x"])["available"]
-        for r in ("check_qq", "check_pit", "check_calibration")
-    )
+    replicates = null_replicates(heavy_gpd.lss, heavy_gpd.validation, inputs=["x"])
+    assert replicates.statistics["check_ae"] is None
+    for report in ("check_qq", "check_pit", "check_calibration"):
+        body = check_body(
+            report, heavy_gpd.lss, heavy_gpd.validation, inputs=["x"], replicates=replicates
+        )
+        assert body["available"] and body["level_source"] == "simulated"
+        assert body["n_draws"] == 99 and len(replicates.statistics[report]) == 99
 
 
 def test_an_error_that_is_not_about_variance_still_raises(calm, monkeypatch):
@@ -286,6 +336,7 @@ def test_a_split_of_five_rows_draws_every_check(calm):
         calm.validation, X=calm.validation.X.iloc[:5], y=calm.validation.y[:5]
     )
     bodies = {r: check_body(r, calm.lss, five, inputs=["x", "g"]) for r in CHECK_REPORTS}
+    assert all(body["level_source"] == "simulated" for body in bodies.values())
     assert bodies["check_qq"]["n"] == 5 and sum(bodies["check_pit"]["counts"]) == 5
     assert all(len(t["ratio"]) <= 5 for t in bodies["check_ae"]["tables"])
     json.dumps(bodies, allow_nan=False)
@@ -300,6 +351,21 @@ def test_frequency_weights_read_as_repeated_rows(calm_frequency):
     qq_a = check_body("check_qq", weighted.lss, weighted.validation, inputs=[])
     qq_b = check_body("check_qq", duplicated.lss, duplicated.validation, inputs=[])
     assert qq_a["n"] == qq_b["n"] == int(np.sum(weighted.validation.sample_weight))
+
+
+def test_frequency_weights_and_repeated_rows_give_the_same_levels_and_flags(calm_frequency):
+    """Each occurrence of a weighted row is simulated as a repeated row is.
+
+    Actual over expected is left out: its cells are equal-count over rows, so a weighted split
+    and its repeated rows are cut into different cells (Task 2's tables, unchanged here).
+    """
+    weighted, duplicated = calm_frequency
+    for report in ("check_qq", "check_pit", "check_calibration"):
+        a = check_body(report, weighted.lss, weighted.validation, inputs=[])
+        b = check_body(report, duplicated.lss, duplicated.validation, inputs=[])
+        assert a["level_source"] == b["level_source"] == "simulated"
+        assert a["local_level"] == pytest.approx(b["local_level"], rel=1e-9)
+        assert (a["outside"], a["flagged"]) == (b["outside"], b["flagged"])
 
 
 def test_a_large_split_sends_at_most_800_points_and_flags_on_all():
@@ -399,3 +465,192 @@ def test_the_report_payload_carries_both_bodies(calm):
         "compares_edit": False,
         "models": {"edited": edited, "original": None},
     }
+
+
+def _ae_statistic(body: dict[str, Any]) -> float:
+    """The largest ``|ratio - 1| / ratio_se`` over every cell of every table of an A/E body."""
+    ratio = np.concatenate([np.asarray(t["ratio"], dtype=np.float64) for t in body["tables"]])
+    se = np.concatenate([np.asarray(t["ratio_se"], dtype=np.float64) for t in body["tables"]])
+    cells = np.isfinite(se) & (se > 0)
+    return float(np.max(np.abs(ratio[cells] - 1.0) / se[cells]))
+
+
+def _statistics(bodies: dict[str, dict[str, Any]]) -> dict[str, float]:
+    """Each check's statistic, read from its body alone."""
+    qq, pit, cal = bodies["check_qq"], bodies["check_pit"], bodies["check_calibration"]
+    assert qq["index"] == list(range(qq["n"]))  # a small split sends every point
+    trials = np.rint(cal["quantiles"]["weight"])
+    exceeded = np.rint(np.asarray(cal["quantiles"]["realised_exceedance"]) * trials)
+    return {
+        "check_qq": order_statistic_level(special.ndtr(qq["observed"])),
+        "check_pit": binomial_cell_level(pit["counts"], pit["n_rows"], 1 / 20),
+        "check_calibration": binomial_cell_level(exceeded, trials, 1 - np.asarray(QUANTILE_GRID)),
+        "check_ae": _ae_statistic(bodies["check_ae"]),
+    }
+
+
+def test_a_held_out_split_reads_each_level_from_99_replicates(calm):
+    """Barnard's rule at 99 replicates: the 5th smallest level, or the 5th largest ``|z|``."""
+    replicates = null_replicates(calm.lss, calm.validation, inputs=["x", "g"])
+    assert (replicates.n_draws, replicates.seed, replicates.note) == (99, 42, None)
+    bodies = {
+        r: check_body(r, calm.lss, calm.validation, inputs=["x", "g"], replicates=replicates)
+        for r in CHECK_REPORTS
+    }
+    for report, body in bodies.items():
+        assert (body["level_source"], body["n_draws"], body["level_note"]) == (
+            "simulated",
+            99,
+            None,
+        )
+        assert body == check_body(report, calm.lss, calm.validation, inputs=["x", "g"])
+    qq = bodies["check_qq"]
+    eta = monte_carlo_level(replicates.statistics["check_qq"], alpha=0.05)
+    assert qq["local_level"] == eta
+    band = band_at_level(qq["n"], eta)
+    k = np.asarray(qq["index"])
+    np.testing.assert_array_equal(qq["band_lower"], special.ndtri(band.lower[k]))
+    np.testing.assert_array_equal(qq["band_upper"], special.ndtri(band.upper[k]))
+    for report in ("check_pit", "check_calibration"):
+        level = monte_carlo_level(replicates.statistics[report], alpha=0.05)
+        assert bodies[report]["local_level"] == level
+    ae = bodies["check_ae"]
+    assert ae["z"] == np.sort(replicates.statistics["check_ae"])[-5]
+    for table in ae["tables"]:
+        ratio, se = np.asarray(table["ratio"]), np.asarray(table["ratio_se"])
+        np.testing.assert_array_equal(table["lower"], ratio - ae["z"] * se)
+        np.testing.assert_array_equal(table["upper"], ratio + ae["z"] * se)
+
+
+def test_the_training_rows_keep_the_known_parameter_bands(calm):
+    bodies = {r: check_body(r, calm.lss, calm.train, inputs=["x", "g"]) for r in CHECK_REPORTS}
+    for body in bodies.values():
+        assert (body["level_source"], body["n_draws"], body["level_note"]) == ("known", 0, None)
+    n = calm.train.n_obs
+    assert bodies["check_qq"]["local_level"] == equal_local_levels_band(n).local_level
+    pit = bodies["check_pit"]
+    lo, hi = stats.binom.ppf([0.025 / 20, 1 - 0.025 / 20], n, 1 / 20)
+    assert (pit["band_lower"], pit["band_upper"], pit["local_level"]) == (lo, hi, 0.05 / 40)
+    cal = bodies["check_calibration"]
+    q = 1 - np.asarray(QUANTILE_GRID)
+    lower, _ = bonferroni_binomial_band(np.full(len(q), n), q, alpha=0.05)
+    np.testing.assert_array_equal(cal["band_lower"], lower / n)
+    assert cal["local_level"] == 0.05 / 22
+    ae = bodies["check_ae"]
+    assert ae["z"] == pytest.approx(stats.norm.isf(0.025 / ae["cells"]), rel=1e-12)
+
+
+@pytest.mark.parametrize("name", ["calm", "prior_weighted", "zeros"])
+def test_a_replicate_is_scored_as_the_split_is(name, request):
+    """The statistics of one replicate are those its responses give as a split of their own.
+
+    The replicate is the one that sets the Q-Q level, whose Q-Q statistic is exact; every
+    replicate's PIT statistic is checked too. Prior weights enter each law and each total, and
+    a response at the atom is randomised from the split's own stream. Mutation checks: scoring
+    each replicate under the draw it was simulated from, totals without the prior weights, and
+    atoms randomised from another stream each fail it.
+    """
+    case = request.getfixturevalue(name)
+    replicates = null_replicates(case.lss, case.validation, inputs=["x", "g"])
+    responses = checks._replicate_responses(case.lss, case.validation)
+    assert responses.shape == (99, case.validation.n_obs)
+    j = int(np.argsort(replicates.statistics["check_qq"])[4])
+    copy = dataclasses.replace(case.validation, y=responses[j])
+    bodies = {
+        r: check_body(r, case.lss, copy, inputs=["x", "g"], replicates=replicates)
+        for r in CHECK_REPORTS
+    }
+    observed = _statistics(bodies)
+    for report in ("check_pit", "check_calibration"):
+        assert replicates.statistics[report][j] == observed[report]
+    for report in ("check_qq", "check_ae"):
+        assert replicates.statistics[report][j] == pytest.approx(observed[report], rel=1e-9)
+    # The PIT histogram reads every transform, so every replicate's is its own split's.
+    for i, y in enumerate(responses):
+        split = dataclasses.replace(case.validation, y=y)
+        pit = check_body("check_pit", case.lss, split, inputs=[], replicates=replicates)
+        level = binomial_cell_level(pit["counts"], pit["n_rows"], 1 / 20)
+        assert replicates.statistics["check_pit"][i] == level
+
+
+_REFUSAL = (
+    "the posterior covariance is not positive semidefinite at arithmetic resolution; "
+    "its square root reconstruction is unresolved"
+)
+
+
+def test_a_refused_draw_falls_back_to_the_known_parameter_band(calm, monkeypatch):
+    """Mutation check: without the fallback the refusal raises out of every body."""
+
+    def refuse(*args, **kwargs):
+        raise ValueError(_REFUSAL)
+
+    monkeypatch.setattr(checks, "posterior_draws", refuse)
+    replicates = null_replicates(calm.lss, calm.validation, inputs=["x", "g"])
+    assert replicates.n_draws == 0 and all(v is None for v in replicates.statistics.values())
+    for report in CHECK_REPORTS:
+        body = check_body(report, calm.lss, calm.validation, inputs=["x", "g"])
+        assert (body["level_source"], body["n_draws"]) == ("known", 0)
+        assert body["level_note"] == (
+            "The band treats the fitted parameters as exact, because the fit's uncertainty "
+            "could not be sampled."
+        )
+        json.dumps(body, allow_nan=False)
+    qq = check_body("check_qq", calm.lss, calm.validation, inputs=[])
+    assert qq["local_level"] == equal_local_levels_band(calm.validation.n_obs).local_level
+
+
+#: Held-out rows of the calibration check: twice CALM's 600 fitted rows, so the fitting noise
+#: is large against the split's own and the known-parameter bands flag a correct model often.
+_HELD_OUT = 1_200
+#: Independent held-out splits, each with its own replicates.
+_SPLITS = 40
+#: Replicates per split: Barnard's rule at 5% is exact at 19 (the smallest) as at 99.
+_DRAWS = 19
+
+
+def _posterior_splits(case: Case) -> tuple[pd.DataFrame, list[np.ndarray]]:
+    """``_SPLITS`` response vectors on one set of new rows, each from its own coefficient draw.
+
+    The coefficients are drawn with NumPy from ``N(beta_hat, V)`` and the responses from
+    ``scipy.stats.gamma``: the holdout predictive check's own null, built without its sampler.
+    """
+    fitted = case.lss._require_fitted()
+    rng = np.random.default_rng(SEED + 1)
+    X, _, _ = _rows(_HELD_OUT, rng)
+    values, vectors = np.linalg.eigh(fitted.inference.covariance)
+    root = vectors * np.sqrt(np.clip(values, 0.0, None))
+    beta = fitted.prediction_coefficients + rng.standard_normal((_SPLITS, len(values))) @ root.T
+    draws = PosteriorDraws(
+        coefficients=beta,
+        covariance_kind="fixed",
+        seed=0,
+        coefficient_names=tuple(fitted.layout.coefficient_names),
+    )
+    theta = np.concatenate(
+        [block for _, block in posterior_parameters(fitted, X, draws, name_levels=False)], axis=1
+    )
+    mean, cv = theta[..., 0], theta[..., 1]
+    y = stats.gamma.rvs(a=1 / cv**2, scale=mean * cv**2, random_state=rng)
+    return X, list(y)
+
+
+def test_a_correct_model_is_flagged_at_its_level_on_a_held_out_split(calm):
+    """Over independent splits each check flags about 5% of the time.
+
+    Each split's responses come from a fresh posterior draw, so its rows and the replicates
+    share one law, and each flag holds its level exactly: the count of flags is
+    ``Binomial(40, 0.05)`` or, for the discrete PIT and quantile statistics, a little below.
+    The limits hold 99.8% of that law. Mutation check: replicates simulated at the fitted
+    coefficients alone, as the known-parameter bands assume, flag more than the limit allows.
+    """
+    X, responses = _posterior_splits(calm)
+    flags = {report: 0 for report in CHECK_REPORTS}
+    for seed, y in enumerate(responses):
+        split = _validation(X, y)
+        replicates = null_replicates(calm.lss, split, inputs=["x", "g"], n_draws=_DRAWS, seed=seed)
+        for report in CHECK_REPORTS:
+            body = check_body(report, calm.lss, split, inputs=["x", "g"], replicates=replicates)
+            flags[report] += body["flagged"]
+    low, high = stats.binom.ppf([0.001, 0.999], _SPLITS, 0.05)
+    assert all(low <= count <= high for count in flags.values()), (flags, low, high)
