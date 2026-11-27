@@ -300,6 +300,22 @@ def _direct_levels(rows):
     return np.array([_exact_order_statistic_level(row)[0] for row in rows])
 
 
+@pytest.mark.parametrize("replicates", [19, 99])
+def test_the_monte_carlo_level_of_order_statistics_is_the_direct_level_at_barnards_rank(
+    replicates,
+):
+    """Each row one replicate: the level is Barnard's rank of the direct levels, to the bit.
+
+    Mutation check: a screen that resolves only the least level reads the 5th of 99 from a
+    floor and fails it.
+    """
+    rng = np.random.default_rng(7)
+    spread = rng.uniform(0.9, 1.1, size=(replicates, 1))
+    u = np.sort(rng.uniform(size=(replicates, 300)) ** spread, axis=1)
+    level = bands._monte_carlo_order_statistic_level(u, alpha=0.05)
+    assert level == monte_carlo_level(_direct_levels(u), alpha=0.05)
+
+
 @pytest.mark.parametrize(("n", "ratio"), [(12, 10.0), (20, 20.0)])
 def test_a_least_tail_beside_a_band_edge_float64_cannot_place_is_read(n, ratio):
     """Next to 1 the band's edge rounds onto a sample value whose tail is far below the target.

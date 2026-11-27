@@ -304,9 +304,7 @@ def _edge_levels(
 _SCREEN_POINTS = 8
 #: Replicates screened at once, so the standardised deviations stay a small block.
 _SCREEN_BLOCK = 16
-#: The band at local level ``2 t`` leaves a factor two between its edges' level and the target
-#: ``t``. An edge is trusted when SciPy's level at it keeps this much of the factor, which
-#: leaves the rest for SciPy's evaluation error at the values between the edges.
+#: Trust an edge whose level is at least this times the target: half the factor two, in logs.
 _EDGE_MARGIN = math.sqrt(2.0)
 #: The least positive normal float64. Below it SciPy's tails carry an absolute error.
 _LEAST_NORMAL = float(np.finfo(np.float64).tiny)
@@ -442,6 +440,18 @@ def monte_carlo_level(
         )
     ordered = np.sort(values)
     return float(ordered[-rank] if larger_is_extreme else ordered[rank - 1])
+
+
+def _monte_carlo_order_statistic_level(u_sorted: NDArray[np.float64], *, alpha: float) -> float:
+    """``monte_carlo_level`` of the equal-local-levels statistics of a ``(replicates, n)`` block,
+    each row one replicate's values sorted ascending.
+
+    It is exact: ``_order_statistic_levels`` resolves the rank Barnard's rule reads, and each
+    row it leaves at a floor stands above every resolved one.
+    """
+    rank = _monte_carlo_rank(len(u_sorted), alpha)
+    levels = _order_statistic_levels(u_sorted, resolve=max(rank, 1))
+    return monte_carlo_level(levels, alpha=alpha)
 
 
 def _least_count(
