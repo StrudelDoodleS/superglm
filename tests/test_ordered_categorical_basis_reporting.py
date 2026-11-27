@@ -1667,8 +1667,9 @@ def test_an_edited_piecewise_result_drops_the_original_fit_rule(field) -> None:
         np.testing.assert_array_equal(np.isfinite(errors), shown)
 
 
+@pytest.mark.pins_behaviour
 def test_piecewise_result_exports_only_published_uncertainty() -> None:
-    """Generic dataclass export keeps the masked covariance and no private fit rule."""
+    """Keep the existing export contract: public covariance and no private fit rule."""
     from dataclasses import asdict
 
     model, _ = _midpoint_fit()
