@@ -1,8 +1,9 @@
-"""What the editor's Assess tab shows, read from the page, for each kind of book.
+"""What the editor's Assess tab shows, read from the page, for each kind of model.
 
 Run ``uv run python -m tests.editor.assess_table`` to print one Markdown row per
-book: the top bar, the Assess list, the overview cards, each report's heading,
-and where Open in new window is offered. It reads whatever page the head
+model: the top bar, the Assess list, the overview cards, the check groups and the
+check cards with their value, note and flag, each report's heading, and where
+Open in new window is offered. It reads whatever page the head
 serves, so on a page without Assess the Assess columns read "—".
 
 The session builders and the ``open_report`` / ``wait_for_report`` /
@@ -27,7 +28,9 @@ from superglm.editor import EditorSession
 
 MISSING = "—"
 REPORTS = ("validation", "cv", "final", "diagnose")
-COLUMNS = ("top bar", "list", "cards", "reports", "new window")
+COLUMNS = ("top bar", "list", "cards", "check groups", "check cards", "reports", "new window")
+REPORTS_GROUP = "Reports"
+CHECK_PREFIX = "check_"
 _STATUS_CHARS = 60
 # The evidence states a report settles in; "idle", "loading" and "updating" are on the way.
 _SETTLED = ", ".join(
@@ -202,10 +205,11 @@ def _label(locator) -> str:
     return f"{locator.get_attribute('aria-label') or '?'} (icon)"
 
 
-def _read_list(root) -> str:
+def _list_groups(root) -> list[tuple[str, list[str]]] | None:
+    """The list as shown: (heading, entries) per group, the Overview under ""; None without a list."""
     if not _present(root, "#assessList"):
-        return MISSING
-    # "Overview; **Reports**: Validation, Cross-validation": a shown heading starts a group.
+        return None
+    # A shown heading starts a group.
     # Entries and headings the page does not show (display, visibility, ``hidden``, a hidden
     # ancestor: no box) are skipped, and so is a heading that shows no text.
     groups: list[tuple[str, list[str]]] = [("", [])]
@@ -217,10 +221,30 @@ def _read_list(root) -> str:
         if item.get_attribute("data-assess-entry") is not None:
             groups[-1][1].append(_label(item))
         elif heading := _text(item):
-            groups.append((f"**{heading}**: ", []))
+            groups.append((heading, []))
+    return [(heading, entries) for heading, entries in groups if heading or entries]
+
+
+def _join_groups(groups: list[tuple[str, list[str]]]) -> str:
+    """ "Overview; **Reports**: Validation, Cross-validation"."""
     return "; ".join(
-        (heading + ", ".join(entries)).strip() for heading, entries in groups if heading or entries
+        ((f"**{heading}**: " if heading else "") + ", ".join(entries)).strip()
+        for heading, entries in groups
     )
+
+
+def _read_list(groups: list[tuple[str, list[str]]] | None) -> str:
+    return MISSING if groups is None else _join_groups(groups)
+
+
+def _read_check_groups(groups: list[tuple[str, list[str]]] | None) -> str:
+    """The shown groups after Reports, "None" when the list shows no check."""
+    if groups is None:
+        return MISSING
+    checks = [
+        (heading, entries) for heading, entries in groups if heading not in ("", REPORTS_GROUP)
+    ]
+    return _join_groups(checks) if checks else "None"
 
 
 _CARDS_TIMEOUT_MS = 5000
@@ -237,14 +261,15 @@ def _show_overview(root) -> None:
     )
 
 
-def _read_cards(root) -> str:
+def _settled_cards(root):
+    """The overview's cards once none is still loading, or None when it shows none."""
     if not _present(root, "#assessCards"):
-        return MISSING
+        return None
     cards = root.locator("#assessCards [data-card]")
     try:
         cards.first.wait_for(state="visible", timeout=_CARDS_TIMEOUT_MS)
     except PlaywrightTimeoutError:
-        return MISSING
+        return None
     # Cards carry their evidence state once they have one; wait out the loading ones.
     root.locator(
         ", ".join(
@@ -252,13 +277,42 @@ def _read_cards(root) -> str:
             for status in ("idle", "loading", "updating")
         )
     ).first.wait_for(state="detached")
+    return cards.all()
+
+
+def _is_check(card) -> bool:
+    return (card.get_attribute("data-card") or "").startswith(CHECK_PREFIX)
+
+
+def _read_cards(cards) -> str:
+    """The report cards: "**title**: value / note"."""
+    if cards is None:
+        return MISSING
     read = []
-    for card in cards.all():
+    for card in cards:
+        if _is_check(card):
+            continue
         title = _text(card.locator(".assess-card-title"))
         value = _text(card.locator(".assess-card-value"))
         note = _text(card.locator(".assess-card-note"))
         read.append(f"**{title}**: {value} / {note}")
     return "; ".join(read)
+
+
+def _read_check_cards(cards) -> str:
+    """The check cards: "**title**: value / note / flagged or calm", "None" when there are none."""
+    if cards is None:
+        return MISSING
+    read = []
+    for card in cards:
+        if not _is_check(card):
+            continue
+        title = _text(card.locator(".assess-card-title"))
+        value = _text(card.locator(".assess-card-value"))
+        note = _text(card.locator(".assess-card-note"))
+        flag = "flagged" if card.get_attribute("data-flagged") == "true" else "calm"
+        read.append(f"**{title}**: {value} / {note} / {flag}")
+    return "; ".join(read) or "None"
 
 
 def _window_button_shown(root) -> bool:
@@ -277,8 +331,14 @@ def read_page(page_or_frame) -> dict[str, str]:
     if _present(root, "#assessTab"):
         # The list and cards are read as shown, so open the overview first.
         _show_overview(root)
-    listed = _read_list(root)
-    cards = _read_cards(root)
+    groups = _list_groups(root)
+    shown_cards = _settled_cards(root)
+    read = {
+        "list": _read_list(groups),
+        "cards": _read_cards(shown_cards),
+        "check groups": _read_check_groups(groups),
+        "check cards": _read_check_cards(shown_cards),
+    }
     has_window_button = _present(root, "[data-assess-window]")
     window_shown = []
     if has_window_button and _present(root, "#assessOverview"):
@@ -294,8 +354,7 @@ def read_page(page_or_frame) -> dict[str, str]:
             window_shown.append((name, _window_button_shown(root)))
     return {
         "top bar": top_bar,
-        "list": listed,
-        "cards": cards,
+        **read,
         "reports": " | ".join(reports),
         "new window": _window_column(has_window_button, window_shown),
     }
@@ -345,7 +404,7 @@ _WIDE = {"width": 1278, "height": 860}
 
 
 def _rows(bundles: list[str]):
-    """(book, how to read it) for every row of the table, in order."""
+    """(model, how to read it) for every row of the table, in order."""
     for builder, book in (
         (poisson_cv_session, "Poisson GLM, validation, 3-fold `cv=` (fit_reml)"),
         (binomial_cv_session, "Binomial GLM, validation, 3-fold `cv=` (fit_reml)"),
@@ -353,10 +412,10 @@ def _rows(bundles: list[str]):
         (bare_glm_session, "Poisson GLM opened with no data and no `cv=`"),
     ):
         yield book, functools.partial(_read_served, session=builder(), viewport=_WIDE)
-    yield "Notebook mode, the Poisson book", _read_notebook
+    yield "Notebook mode, the Poisson model", _read_notebook
     for width in (1180, 1000):
         yield (
-            f"Poisson book, window {width} × 720",
+            f"Poisson model, window {width} × 720",
             functools.partial(
                 _read_served,
                 session=poisson_cv_session(),
@@ -375,7 +434,16 @@ def _cell(value: str) -> str:
 
 
 def _table(rows: list[tuple[str, dict[str, str] | str]]) -> str:
-    header = ["Book", "Top bar", "Assess list", "Overview cards", "Each report", "New window"]
+    header = [
+        "Model",
+        "Top bar",
+        "Assess list",
+        "Overview cards",
+        "Check groups",
+        "Check cards: value / note / flag",
+        "Each report",
+        "New window",
+    ]
     lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
     for book, read in rows:
         if isinstance(read, str):
