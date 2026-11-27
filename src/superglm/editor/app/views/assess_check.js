@@ -322,10 +322,11 @@ export function bindCheckHover(frame, getScene) {
   /** @type {{x: number, y: number}|null} */
   let pointer = null;
   let pending = 0;
-  // The point read out, and the scene it belongs to.
+  // The point read out, the scene it belongs to, and the frame's scroll when it was placed.
   let current = -1;
   /** @type {Scene|null} */
   let shownIn = null;
+  let placedAt = "";
 
   const readout = () => frame.querySelector(".check-readout");
 
@@ -362,9 +363,11 @@ export function bindCheckHover(frame, getScene) {
   function show(scene, index) {
     const group = readout();
     if (!group || index < 0) return;
-    if (index === current && scene === shownIn && !group.hasAttribute("hidden")) return;
+    const scroll = `${frame.scrollLeft} ${frame.scrollTop}`;
+    if (index === current && scene === shownIn && scroll === placedAt && !group.hasAttribute("hidden")) return;
     current = index;
     shownIn = scene;
+    placedAt = scroll;
     const mark = scene.marks[index];
     const label = readoutText(group);
     // Shown before it is measured: hidden text has no length.

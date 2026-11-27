@@ -463,3 +463,21 @@ test("a readout stays inside the frame's visible part when it is scrolled", () =
   const box = readoutBox(dom);
   assert.ok(box.top >= 80 && box.bottom <= 280, `${box.top} to ${box.bottom}`);
 });
+
+test("a readout is placed again on the same point after the frame scrolls", () => {
+  const dom = fakeFrame({ height: 200 });
+  const scene = renderCheckView(dom.nodes, "check_ae", FIXTURE.wrong.check_ae, { ...VIEW, height: 200 });
+  bindCheckHover(dom.nodes.frame, () => scene);
+  const mark = scene.marks.filter((m) => m.y >= 80 && m.y < 95).sort((a, b) => a.y - b.y)[0];
+  assert.ok(mark, "no point sits just inside the visible top");
+  // Unscrolled, the readout sits above the point.
+  dom.pointerMove(mark.x, mark.y); dom.flushFrame();
+  assert.ok(readoutBox(dom).bottom <= mark.y);
+  // Scrolled 80 px down, the same point is read out inside the part now in view.
+  dom.nodes.frame.scrollTop = 80;
+  dom.nodes.frame.querySelector("svg").rect.top = -80;
+  dom.pointerMove(mark.x, mark.y - 80); dom.flushFrame();
+  assert.equal(dom.readoutText(), mark.text);
+  const box = readoutBox(dom);
+  assert.ok(box.top >= 80 && box.bottom <= 280, `${box.top} to ${box.bottom}`);
+});
