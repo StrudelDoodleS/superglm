@@ -7,18 +7,20 @@ import {
   commitStructuralTransition,
   completeEvidence,
   failEvidence,
+  lapseReports as lapseReportEvidence,
   normalizeSelectionIndices,
   patchView as patchViewState,
   waitingListChanged
 } from "./store.js";
 import { isHeld, moveMutation } from "./mutation.js";
-import { selectModelRevision } from "./selectors.js";
+import { selectModelRevision, selectReportNeedsAsk } from "./selectors.js";
 
 /** @typedef {import('../api/contracts.js').ActionResult} ActionResult */
 /** @typedef {import('../api/contracts.js').EditorSnapshot} EditorSnapshot */
 /** @typedef {import('../api/contracts.js').EditorState} EditorState */
 /** @typedef {import('../api/contracts.js').EvidencePanel} EvidencePanel */
 /** @typedef {import('../api/contracts.js').MutationDescriptor} MutationDescriptor */
+/** @typedef {import('../api/contracts.js').ReportName} ReportName */
 /** @typedef {import('./mutation.js').MutationEvent} MutationEvent */
 /** @typedef {import('../api/contracts.js').SummaryPayload} SummaryPayload */
 /** @typedef {import('../api/contracts.js').StructuralActionResult} StructuralActionResult */
@@ -195,6 +197,12 @@ export function createEditorActions({
   clearTimer = globalThis.clearTimeout.bind(globalThis)
 }) {
   const evidenceTimers = new Map();
+  // Reports wait here in the order asked, and Python answers them one at a time.
+  /** @type {Set<ReportName>} */
+  const reportQueue = new Set();
+  /** @type {any} */
+  let reportTimer = null;
+  let reportsDraining = false;
 
   /** @returns {boolean} whether a change is running and the next must wait for it */
   const held = () => isHeld(store.getState().request);
@@ -468,7 +476,10 @@ export function createEditorActions({
       return { ok: false, error: new Error("Python returned an editor state this page cannot read.") };
     }
     const snapshot = /** @type {EditorSnapshot} */ (candidate);
-    store.update((state) => withNotice(withLatestView(commitRemote(state, snapshot), made), snapshot));
+    // What Python holds beside the model, a job's result, can have moved: every report lapses.
+    store.update((state) => withNotice(
+      withLatestView(lapseReportEvidence(commitRemote(state, snapshot)), made), snapshot
+    ));
     void Promise.resolve(scheduleVisibleEvidence(snapshot.model_revision, { immediate: true }))
       .catch(() => {});
     return { ok: true, snapshot };
@@ -768,6 +779,51 @@ export function createEditorActions({
     evidenceTimers.set(panel, setTimer(invoke, EVIDENCE_DEBOUNCE_MS));
   }
 
+  /** Ask each queued report in turn, skipping one the page already holds by its turn. */
+  async function drainReports() {
+    if (reportsDraining) return;
+    reportsDraining = true;
+    try {
+      while (reportQueue.size > 0) {
+        const [panel] = reportQueue;
+        reportQueue.delete(panel);
+        if (!selectReportNeedsAsk(store.getState(), panel)) continue;
+        await refreshEvidence(panel, "/report", { report: panel });
+      }
+    } finally {
+      reportsDraining = false;
+    }
+  }
+
+  /**
+   * Queue reports to ask of Python, after one shared debounce unless `immediate`. A report
+   * already queued keeps its place, and one queued while others are asked waits its turn.
+   *
+   * @param {readonly ReportName[]} panels
+   * @param {{immediate?:boolean}} [options]
+   */
+  function scheduleReports(panels, { immediate = false } = {}) {
+    for (const panel of panels) reportQueue.add(panel);
+    if (reportTimer !== null) {
+      clearTimer(reportTimer);
+      reportTimer = null;
+    }
+    const start = () => {
+      reportTimer = null;
+      void drainReports();
+    };
+    if (immediate) {
+      start();
+      return;
+    }
+    reportTimer = setTimer(start, EVIDENCE_DEBOUNCE_MS);
+  }
+
+  /** @param {readonly ReportName[]} [names] every report by default @returns {void} */
+  function lapseReports(names) {
+    store.update((state) => lapseReportEvidence(state, names));
+  }
+
   /** @returns {Promise<ActionResult>} */
   function retryMutation() {
     const retry = store.getState().request.recovery?.retry;
@@ -812,6 +868,8 @@ export function createEditorActions({
     holdEditor,
     refreshEvidence,
     schedulePanelEvidence,
+    scheduleReports,
+    lapseReports,
     retryMutation,
     retryEvidence,
     dismissRecovery,

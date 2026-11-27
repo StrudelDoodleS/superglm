@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createEmptyEvidenceState } from "../../src/superglm/editor/app/api/contracts.js";
+import {
+  EVIDENCE_PANELS,
+  REPORT_NAMES,
+  createEmptyEvidenceState
+} from "../../src/superglm/editor/app/api/contracts.js";
 import * as selectors from "../../src/superglm/editor/app/state/selectors.js";
 import * as storeModule from "../../src/superglm/editor/app/state/store.js";
 
@@ -18,6 +22,7 @@ const {
   createEditorStore,
   createInitialEditorState,
   failEvidence,
+  lapseReports,
   moveEvidence,
   normalizeSelectionIndices,
   patchView,
@@ -36,6 +41,7 @@ const {
   selectMutation,
   selectPendingSteps,
   selectRenderableTerm,
+  selectReportNeedsAsk,
   selectSummaryLevelDisplay,
   selectSnapshot,
   selectWaitingTerms
@@ -436,7 +442,7 @@ test("an evidence answer or failure about another request, model or revision mov
 
 test("a new model revision marks every prior evidence panel stale", () => {
   let state = createInitialEditorState(snapshot(2));
-  const panels = /** @type {EvidencePanel[]} */ (["metrics", "summary", "report"]);
+  const panels = EVIDENCE_PANELS;
   for (const [sequence, panel] of panels.entries()) {
     state = beginEvidence(state, panel, 2, sequence + 1, {
       path: `/${panel}`,
@@ -454,11 +460,11 @@ test("a new model revision marks every prior evidence panel stale", () => {
   }
 });
 
-test("a change to the waiting list at one revision marks only the report stale", () => {
+test("a change to the waiting list at one revision marks only the reports stale", () => {
   // Undo or Redo of a waiting change keeps the revision; the Cross-validation
   // report shows the waiting list (its chip, Run CV's reason), so it goes stale.
   let state = createInitialEditorState(snapshot(2));
-  const panels = /** @type {EvidencePanel[]} */ (["metrics", "summary", "report"]);
+  const panels = EVIDENCE_PANELS;
   for (const [sequence, panel] of panels.entries()) {
     state = beginEvidence(state, panel, 2, sequence + 1, { path: `/${panel}`, payload: {} });
     state = completeEvidence(state, panel, 2, sequence + 1, { panel });
@@ -470,8 +476,10 @@ test("a change to the waiting list at one revision marks only the report stale",
 
   const committed = commitRemote(state, waiting);
 
-  assert.equal(committed.request.evidence.report.status, "stale");
-  assert.equal(selectEvidenceNeedsRefresh(committed, "report"), true);
+  for (const name of REPORT_NAMES) {
+    assert.equal(committed.request.evidence[name].status, "stale");
+    assert.equal(selectEvidenceNeedsRefresh(committed, name), true);
+  }
   for (const panel of /** @type {EvidencePanel[]} */ (["metrics", "summary"])) {
     assert.equal(committed.request.evidence[panel].status, "current");
   }
@@ -480,7 +488,54 @@ test("a change to the waiting list at one revision marks only the report stale",
     { ...committed, request: { ...committed.request, evidence: state.request.evidence } },
     { ...waiting }
   );
-  assert.equal(again.request.evidence.report.status, "current");
+  assert.deepEqual(REPORT_NAMES.map((name) => again.request.evidence[name].status),
+    ["current", "current", "current", "current"]);
+});
+
+const RETRY = { path: "/report", payload: {} };
+
+/**
+ * @param {EditorState} state
+ * @param {import('../../src/superglm/editor/app/api/contracts.js').ReportName} name
+ * @param {number} revision @param {number} sequence
+ */
+function answered(state, name, revision, sequence) {
+  const asked = beginEvidence(state, name, revision, sequence, RETRY);
+  return completeEvidence(asked, name, revision, sequence, { report: name });
+}
+
+test("each report keeps its own evidence, and a new revision lapses each", () => {
+  let state = createInitialEditorState(snapshot(0));
+  assert.deepEqual(Object.keys(state.request.evidence), [...EVIDENCE_PANELS]);
+  state = answered(answered(state, "cv", 0, 1), "validation", 0, 2);
+  assert.equal(/** @type {{report:string}} */ (state.request.evidence.cv.payload).report, "cv");
+  assert.equal(
+    /** @type {{report:string}} */ (state.request.evidence.validation.payload).report,
+    "validation"
+  );
+  const next = commitRemote(state, snapshot(1));
+  assert.deepEqual(REPORT_NAMES.map((name) => next.request.evidence[name].status),
+    ["stale", "stale", "idle", "idle"]);
+});
+
+test("a finished job lapses Cross-validation, Final fit and Smoothing search", () => {
+  let state = createInitialEditorState(snapshot(0));
+  REPORT_NAMES.forEach((name, i) => { state = answered(state, name, 0, i + 1); });
+  const lapsed = lapseReports(state, ["cv", "final", "diagnose"]);
+  assert.deepEqual(REPORT_NAMES.map((name) => lapsed.request.evidence[name].status),
+    ["current", "stale", "stale", "stale"]);
+  assert.equal(lapseReports(state, []), state);
+});
+
+test("a report that failed at this revision is asked again when shown", () => {
+  let state = createInitialEditorState(snapshot(0));
+  assert.equal(selectReportNeedsAsk(state, "final"), true);
+  state = answered(state, "validation", 0, 1);
+  assert.equal(selectReportNeedsAsk(state, "validation"), false);
+  state = failEvidence(beginEvidence(state, "final", 0, 2, RETRY), "final", 0, 2, "superseded");
+  assert.equal(state.request.evidence.final.status, "error");
+  assert.equal(selectReportNeedsAsk(state, "final"), true);
+  assert.equal(selectEvidenceNeedsRefresh(state, "final"), false);
 });
 
 test("visible evidence selectors catch editor panels up after returning from reports", () => {
@@ -499,7 +554,7 @@ test("visible evidence selectors catch editor panels up after returning from rep
   assert.deepEqual(selectVisibleEvidencePanels(state), ["metrics", "summary"]);
 
   state = patchView(state, { activeView: "validation" });
-  assert.deepEqual(selectVisibleEvidencePanels(state), ["report"]);
+  assert.deepEqual(selectVisibleEvidencePanels(state), ["validation"]);
 
   state = patchView(state, { activeView: "editor", inspectorPane: "help" });
   assert.deepEqual(selectVisibleEvidencePanels(state), ["metrics"]);
@@ -534,10 +589,8 @@ test("missing selections use one stable immutable empty value", () => {
 
 test("initial evidence panel states are independent objects", () => {
   const state = createInitialEditorState(snapshot());
-  const { metrics, summary, report } = state.request.evidence;
-  assert.notStrictEqual(metrics, summary);
-  assert.notStrictEqual(metrics, report);
-  assert.notStrictEqual(summary, report);
+  const panels = EVIDENCE_PANELS.map((panel) => state.request.evidence[panel]);
+  assert.equal(new Set(panels).size, EVIDENCE_PANELS.length);
 });
 
 test("view patches are immutable and leave prior state untouched", () => {
@@ -787,6 +840,7 @@ test("state modules expose only their requested public symbols", () => {
     "createEditorStore",
     "createInitialEditorState",
     "failEvidence",
+    "lapseReports",
     "moveEvidence",
     "normalizeSelectionIndices",
     "patchView",
@@ -805,6 +859,7 @@ test("state modules expose only their requested public symbols", () => {
     "selectMutation",
     "selectPendingSteps",
     "selectRenderableTerm",
+    "selectReportNeedsAsk",
     "selectSnapshot",
     "selectSummaryLevelDisplay",
     "selectVisibleEvidencePanels",
@@ -843,5 +898,5 @@ test("an evidence panel whose tool the session does not offer is never requested
   assert.deepEqual(selectVisibleEvidencePanels(state), []);
   const onlySummary = createInitialEditorState({ ...offered, unavailable: { summary: "No summary here." } });
   assert.deepEqual(selectVisibleEvidencePanels(onlySummary), ["metrics"]);
-  assert.deepEqual(selectVisibleEvidencePanels(patchView(state, { activeView: "validation" })), ["report"]);
+  assert.deepEqual(selectVisibleEvidencePanels(patchView(state, { activeView: "validation" })), ["validation"]);
 });

@@ -1,5 +1,6 @@
 import { canShowContributions, showsRelativity } from "./chart/display.js";
 import { EditorAPIError, editorClient } from "./api/client.js";
+import { REPORT_NAMES, isReportName } from "./api/contracts.js";
 import {
   bindPointLens,
   bindPointTooltip,
@@ -28,6 +29,7 @@ import {
   selectModelRevision,
   selectPendingSteps,
   selectRenderableTerm,
+  selectReportNeedsAsk,
   selectSnapshot,
   selectSummaryLevelDisplay,
   selectVisibleEvidencePanels,
@@ -320,6 +322,10 @@ const evidenceTiming = createEvidenceTimingTracker({
   onComplete: () => renderTimingReadout()
 });
 
+// The reports a finished Run CV or Final fit changes: Cross-validation, Final
+// fit and Smoothing search.
+const JOB_REPORTS = Object.freeze(["cv", "final", "diagnose"]);
+
 // The Cross-validation tab draws into the report frame, which the other
 // reports share, so it draws a job's progress only while it is the open view.
 // A finished Run CV or Final fit changes the tab, and a Final fit also what
@@ -333,7 +339,8 @@ const cvTab = createCVTab({
       await actions.refreshFromPythonWhenIdle();
     }
     renderPill();
-    await refreshActiveReport();
+    actions.lapseReports(JOB_REPORTS);
+    refreshVisibleReports();
   },
   onJobChange: () => renderPill(),
   onDiagnose: (fitId) => {
@@ -939,11 +946,11 @@ async function refreshSummaryView() {
   await actions.refreshEvidence("summary", "/summary", summaryRequestPayload());
 }
 
-async function refreshActiveReport() {
-  const activeView = store.getState().view.activeView;
-  // The Explain tab is drawn in the browser from its own request, not from a report.
-  if (activeView === "editor" || activeView === "risk") return;
-  await actions.refreshEvidence("report", "/report", { report: activeView });
+// A report the page holds for this model is drawn again from the page; one it
+// lacks, or holds lapsed or failed, is asked of Python.
+function refreshVisibleReports() {
+  const reports = selectVisibleEvidencePanels(store.getState()).filter(isReportName);
+  actions.scheduleReports(reports, { immediate: true });
 }
 
 function scheduleVisibleEvidence(
@@ -953,16 +960,14 @@ function scheduleVisibleEvidence(
   const state = store.getState();
   if (state.remote.snapshot?.model_revision !== revision) return;
   if (!onlyStale) resetSummarySourceAfterInvalidatingEdit();
+  const reports = [];
   for (const panel of selectVisibleEvidencePanels(state, { summaryCommitted })) {
+    if (isReportName(panel)) {
+      if (!onlyStale || selectReportNeedsAsk(state, panel)) reports.push(panel);
+      continue;
+    }
     if (onlyStale && !selectEvidenceNeedsRefresh(state, panel)) continue;
-    if (panel === "report") {
-      actions.schedulePanelEvidence(
-        panel,
-        "/report",
-        { report: state.view.activeView },
-        { immediate }
-      );
-    } else if (panel === "metrics") {
+    if (panel === "metrics") {
       actions.schedulePanelEvidence(
         panel,
         "/metrics",
@@ -978,6 +983,7 @@ function scheduleVisibleEvidence(
       );
     }
   }
+  if (reports.length > 0) actions.scheduleReports(reports, { immediate });
 }
 
 function scheduleVisibleEvidenceCatchUp() {
@@ -1195,7 +1201,7 @@ async function showView(view) {
     scheduleVisibleEvidenceCatchUp();
     return;
   }
-  await refreshActiveReport();
+  refreshVisibleReports();
 }
 
 function renderAppView(activeView) {
@@ -1833,7 +1839,8 @@ function renderActiveViewState({ ready, activeView }) {
   if (!ready) return;
   renderAppView(activeView);
   renderPill();
-  renderReportEvidence(store.getState().request.evidence.report, activeView);
+  const evidence = openReportEvidence(store.getState());
+  if (evidence) renderReportEvidence(evidence, activeView);
 }
 
 function renderSnapshotRevision(revision) {
@@ -1997,6 +2004,12 @@ const REPORT_TITLES = Object.freeze({
   final: "Final Fit Report",
   diagnose: "Diagnose"
 });
+
+// The evidence of the report on screen, or null on a view that is not a report.
+function openReportEvidence(state) {
+  const activeView = state.view.activeView;
+  return isReportName(activeView) ? state.request.evidence[activeView] : null;
+}
 
 function renderReportEvidence(evidence, activeView) {
   const busy = evidence.status === "updating";
@@ -2668,14 +2681,17 @@ if (summaryRetry) {
   summaryRetry.addEventListener("click", () => { void actions.retryEvidence("summary"); });
 }
 if (reportRetry) {
-  reportRetry.addEventListener("click", () => { void actions.retryEvidence("report"); });
+  reportRetry.addEventListener("click", () => {
+    const activeView = store.getState().view.activeView;
+    if (isReportName(activeView)) void actions.retryEvidence(activeView);
+  });
 }
 summarySource.addEventListener("change", refreshSummaryView);
 refitOffset.addEventListener("click", async () => {
   const payload = await runOffsetRefit(summaryNodes(), refreshMetricsView);
   if (payload) {
     await actions.initialize();
-    await refreshActiveReport();
+    refreshVisibleReports();
   }
 });
 if (reprofileTweedie) {
@@ -2838,13 +2854,21 @@ store.subscribe(
     evidenceTiming.observe("metrics", evidence, previous);
   }
 );
+// A change of view draws its report in renderActiveViewState; this draws the open
+// report's evidence as it moves.
 store.subscribe(
-  (state) => state.request.evidence.report,
-  (evidence, previous) => {
-    renderReportEvidence(evidence, store.getState().view.activeView);
-    evidenceTiming.observe("report", evidence, previous);
-  }
+  (state) => ({ activeView: state.view.activeView, evidence: openReportEvidence(state) }),
+  ({ activeView, evidence }, previous) => {
+    if (evidence && activeView === previous.activeView) renderReportEvidence(evidence, activeView);
+  },
+  (next, previous) => next.evidence === previous.evidence
 );
+for (const name of REPORT_NAMES) {
+  store.subscribe(
+    (state) => state.request.evidence[name],
+    (evidence, previous) => evidenceTiming.observe(name, evidence, previous)
+  );
+}
 
 for (const input of summaryLevelDisplayInputs) {
   input.checked = input.value === selectSummaryLevelDisplay(store.getState());

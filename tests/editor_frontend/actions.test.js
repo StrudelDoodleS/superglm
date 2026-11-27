@@ -1141,7 +1141,7 @@ test("evidence asked for before an edit and its undo lands as current", async ()
     }
   });
 
-  const pending = actions.refreshEvidence("report", "/report", { report: "validation" });
+  const pending = actions.refreshEvidence("validation", "/report", { report: "validation" });
   store.update((state) => commitRemote(state, snapshotOf(4, "fit-b")));
   store.update((state) => commitRemote(state, snapshotOf(5, "fit-a")));
   pendingEvidence.resolve({
@@ -1150,7 +1150,7 @@ test("evidence asked for before an edit and its undo lands as current", async ()
 
   assert.equal(await pending, true);
   assert.equal(requests[0].in_force, "fit-a");
-  const report = store.getState().request.evidence.report;
+  const report = store.getState().request.evidence.validation;
   assert.equal(report.status, "current");
   assert.equal(report.revision, 5);
   assert.equal(/** @type {{value:string}} */ (report.payload).value, "validation");
@@ -1260,7 +1260,7 @@ test("a failure about the model an undo put back is dropped, not shown", async (
   });
 
   // The server checked while the edit was in force; the undo commits before its answer.
-  const pending = actions.refreshEvidence("report", "/report", { report: "validation" });
+  const pending = actions.refreshEvidence("validation", "/report", { report: "validation" });
   store.update((state) => commitRemote(state, snapshotOf(4, "fit-b")));
   store.update((state) => commitRemote(state, snapshotOf(5, "fit-a")));
   pendingEvidence.resolve({
@@ -1268,7 +1268,7 @@ test("a failure about the model an undo put back is dropped, not shown", async (
   });
 
   assert.equal(await pending, false);
-  const report = store.getState().request.evidence.report;
+  const report = store.getState().request.evidence.validation;
   assert.deepEqual([report.status, report.error], ["stale", null]);
 });
 
@@ -1494,7 +1494,7 @@ test("dismiss and missing retries are deterministic", async () => {
   if (missingMutation.ok) assert.fail("missing retry unexpectedly succeeded");
   assert.equal(missingMutation.skipped, true);
   assert.match(missingMutation.error.message, /No failed/);
-  assert.equal(await actions.retryEvidence("report"), false);
+  assert.equal(await actions.retryEvidence("validation"), false);
 
   await actions.executeStateMutation({ name: "shift", path: "/op", payload: {} });
   assert.equal(store.getState().request.mutation.status, "error");
@@ -1519,6 +1519,7 @@ test("action module exposes only the controller factory, paint helper, and exact
     "executeStructuralMutation",
     "holdEditor",
     "initialize",
+    "lapseReports",
     "patchView",
     "refreshEvidence",
     "refreshFromPython",
@@ -1526,6 +1527,7 @@ test("action module exposes only the controller factory, paint helper, and exact
     "retryEvidence",
     "retryMutation",
     "schedulePanelEvidence",
+    "scheduleReports",
     "setActiveTerm",
     "setSelection",
     "showNotice"
@@ -1555,6 +1557,64 @@ test("refreshFromPython commits an equal-revision snapshot and re-requests visib
   assert.strictEqual(store.getState().remote.snapshot, refreshed);
   assert.deepEqual(selectCurrentSelection(store.getState()), []);
   assert.deepEqual(scheduled, [[3, { immediate: true }]]);
+});
+
+test("reports are asked one at a time, in the order given", async () => {
+  /** @type {string[]} */
+  const sent = [];
+  /** @type {{body:Record<string, unknown>, reply:ReturnType<typeof deferred>}[]} */
+  const held = [];
+  const store = createEditorStore(createInitialEditorState(snapshot(0)));
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: (path, body) => {
+        assert.equal(path, "/report");
+        sent.push(String(body.report));
+        const reply = deferred();
+        held.push({ body, reply });
+        return reply.promise;
+      },
+      getState: async () => snapshot(0)
+    }
+  });
+  /** @param {number} i */
+  const answer = async (i) => {
+    const { body, reply } = held[i];
+    reply.resolve({
+      report: body.report, model_revision: 0, request_sequence: body.request_sequence
+    });
+    await settled();
+  };
+
+  actions.scheduleReports(["validation", "cv", "diagnose"], { immediate: true });
+  assert.deepEqual(sent, ["validation"]);
+  await answer(0);
+  assert.deepEqual(sent, ["validation", "cv"]);
+  actions.scheduleReports(["cv", "final"], { immediate: true });
+  await answer(1);
+  assert.deepEqual(sent, ["validation", "cv", "diagnose"]);
+  await answer(2);
+  assert.deepEqual(sent, ["validation", "cv", "diagnose", "final"]);
+});
+
+test("Refresh from Python lapses every report the page holds", async () => {
+  const retry = { path: "/report", payload: { report: "validation" } };
+  let state = beginEvidence(createInitialEditorState(snapshot(3)), "validation", 3, 1, retry);
+  state = completeEvidence(state, "validation", 3, 1, { report: "validation" });
+  const store = createEditorStore(state);
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async () => { throw new Error("refresh must not post"); },
+      getState: async () => snapshot(3)
+    }
+  });
+  assert.equal(store.getState().request.evidence.validation.status, "current");
+
+  await actions.refreshFromPython();
+
+  assert.equal(store.getState().request.evidence.validation.status, "stale");
 });
 
 test("refreshFromPython is skipped while a mutation is running", async () => {

@@ -1,7 +1,10 @@
 // @ts-check
+import { isReportName } from "../api/contracts.js";
+
 /** @typedef {import('../api/contracts.js').EditorState} EditorState */
 /** @typedef {import('../api/contracts.js').EvidencePanel} EvidencePanel */
 /** @typedef {import('../api/contracts.js').EvidenceState} EvidenceState */
+/** @typedef {import('../api/contracts.js').ReportName} ReportName */
 
 /** @type {number[]} */
 const EMPTY_SELECTION = [];
@@ -91,6 +94,20 @@ export function selectEvidenceNeedsRefresh(state, panel) {
 }
 
 /**
+ * Whether report `panel`, once shown, must be asked of Python: the page holds no answer
+ * for this model, or the one it holds lapsed or failed. A failure is asked again here,
+ * where `selectEvidenceNeedsRefresh` leaves it for Retry.
+ *
+ * @param {EditorState} state @param {ReportName} panel
+ */
+export function selectReportNeedsAsk(state, panel) {
+  const revision = state.remote.snapshot?.model_revision;
+  if (revision === undefined) return false;
+  const { revision: held, status } = state.request.evidence[panel];
+  return held !== revision || status === "idle" || status === "stale" || status === "error";
+}
+
+/**
  * Return only evidence panels currently presented to the user.
  *
  * @param {EditorState} state
@@ -98,9 +115,9 @@ export function selectEvidenceNeedsRefresh(state, panel) {
  * @returns {EvidencePanel[]}
  */
 export function selectVisibleEvidencePanels(state, { summaryCommitted = false } = {}) {
-  // The Explain tab asks for its own risks and shows no evidence panel.
-  if (state.view.activeView === "risk") return [];
-  if (state.view.activeView !== "editor") return ["report"];
+  const view = state.view.activeView;
+  // A report shows its own evidence; the Explain tab asks for its own risks and shows none.
+  if (view !== "editor") return isReportName(view) ? [view] : [];
   // A panel whose tool the session does not offer is never requested.
   const off = state.remote.snapshot?.unavailable ?? {};
   const panels = /** @type {EvidencePanel[]} */ (off.metrics ? [] : ["metrics"]);

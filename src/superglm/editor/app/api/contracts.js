@@ -5,7 +5,8 @@
 /** @typedef {'chart'|'table'} TermView */
 /** @typedef {'idle'|'running'|'error'} MutationStatus */
 /** @typedef {'idle'|'updating'|'current'|'stale'|'error'} EvidenceStatus */
-/** @typedef {'metrics'|'summary'|'report'} EvidencePanel */
+/** @typedef {'validation'|'cv'|'final'|'diagnose'} ReportName */
+/** @typedef {'metrics'|'summary'|ReportName} EvidencePanel */
 /** @typedef {'expanded'|'grouped'} SummaryLevelDisplay */
 /**
  * @typedef {Object} SummaryPayload
@@ -697,9 +698,19 @@
  * {ok:false, skipped?:boolean, error:Error}} StructuralActionResult
  */
 
-export const EVIDENCE_PANELS = Object.freeze(
-  /** @type {const} */ (["metrics", "summary", "report"])
+/** The reports, each with its own evidence, in the order the page lists them. */
+export const REPORT_NAMES = Object.freeze(
+  /** @type {const} */ (["validation", "cv", "final", "diagnose"])
 );
+
+export const EVIDENCE_PANELS = Object.freeze(
+  /** @type {const} */ (["metrics", "summary", ...REPORT_NAMES])
+);
+
+/** @param {unknown} value @returns {value is ReportName} */
+export function isReportName(value) {
+  return typeof value === "string" && /** @type {readonly string[]} */ (REPORT_NAMES).includes(value);
+}
 
 /** @returns {EvidenceState} */
 export function createEmptyEvidenceState() {

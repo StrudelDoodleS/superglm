@@ -1,5 +1,5 @@
 // @ts-check
-import { createEmptyEvidenceState } from "../api/contracts.js";
+import { EVIDENCE_PANELS, REPORT_NAMES, createEmptyEvidenceState } from "../api/contracts.js";
 import { defineMachine } from "./machine.js";
 import { createRiskProfiles } from "./risk.js";
 import { selectActiveTermName } from "./selectors.js";
@@ -9,6 +9,7 @@ import { selectActiveTermName } from "./selectors.js";
 /** @typedef {import('../api/contracts.js').EvidencePanel} EvidencePanel */
 /** @typedef {import('../api/contracts.js').EvidenceState} EvidenceState */
 /** @typedef {import('../api/contracts.js').EvidenceStatus} EvidenceStatus */
+/** @typedef {import('../api/contracts.js').ReportName} ReportName */
 /** @typedef {import('../api/contracts.js').StructuralTransitionEnvelope} StructuralTransitionEnvelope */
 /** @typedef {import('../api/contracts.js').TermPayload} TermPayload */
 
@@ -39,11 +40,9 @@ export function createInitialEditorState(snapshot = null) {
     },
     request: {
       mutation: { status: "idle", operation: null, error: null },
-      evidence: {
-        metrics: createEmptyEvidenceState(),
-        summary: createEmptyEvidenceState(),
-        report: createEmptyEvidenceState()
-      },
+      evidence: /** @type {Record<EvidencePanel, EvidenceState>} */ (Object.fromEntries(
+        EVIDENCE_PANELS.map((panel) => [panel, createEmptyEvidenceState()])
+      )),
       recovery: null,
       nextSequence: 1
     }
@@ -227,7 +226,7 @@ function clearRemotePreviews(state) {
 function invalidatePriorEvidence(state, revision) {
   const evidence = { ...state.request.evidence };
   let changed = false;
-  for (const panel of /** @type {EvidencePanel[]} */ (["metrics", "summary", "report"])) {
+  for (const panel of EVIDENCE_PANELS) {
     const current = evidence[panel];
     evidence[panel] = moveEvidence(current, { type: "lapse", revision }, state.remote.snapshot);
     changed ||= evidence[panel] !== current;
@@ -250,12 +249,15 @@ export function waitingListChanged(previous, next) {
   return previous !== null && ids(previous) !== ids(next);
 }
 
-/** @param {EditorState} state */
-function invalidateReportEvidence(state) {
-  const current = state.request.evidence.report;
-  const report = moveEvidence(current, { type: "lapse" }, state.remote.snapshot);
-  if (report === current) return state.request;
-  return { ...state.request, evidence: { ...state.request.evidence, report } };
+/**
+ * Lapse the reports `names`, every report by default: what they show may have moved
+ * though the model revision did not (a finished job, a waiting change undone).
+ *
+ * @param {EditorState} state @param {readonly ReportName[]} [names]
+ * @returns {EditorState} `state` itself where no report moves
+ */
+export function lapseReports(state, names = REPORT_NAMES) {
+  return names.reduce((next, name) => movePanel(next, name, { type: "lapse" }), state);
 }
 
 /**
@@ -287,7 +289,7 @@ export function commitRemote(state, snapshot) {
   const request = previousRevision !== undefined && previousRevision !== snapshot.model_revision
     ? invalidatePriorEvidence(state, snapshot.model_revision)
     : waitingListChanged(state.remote.snapshot, snapshot)
-      ? invalidateReportEvidence(state)
+      ? lapseReports(state).request
       : state.request;
   const selectionAnchor = anchorFollowingItsLevel(
     state.view.selectionAnchor, state.remote.snapshot, snapshot

@@ -529,7 +529,8 @@ def test_editor_browser_report_error_clears_mismatched_report(browser_editor_wid
             final_html = page.locator("#reportFrame").inner_html()
             assert final_html == ""
             assert page.locator("#reportTitle").text_content() == "Final Fit Report"
-            assert page.locator("#reportFreshness").get_attribute("data-freshness") == "stale"
+            # Final fit keeps its own evidence, so there is no other report's copy to keep.
+            assert page.locator("#reportFreshness").get_attribute("data-freshness") == "error"
             assert "final unavailable" not in page.locator("#reportFreshness").inner_text()
         finally:
             browser.close()
