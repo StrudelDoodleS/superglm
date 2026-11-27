@@ -1105,7 +1105,9 @@ def test_a_held_cap_evidence_follows_the_sign_of_its_step(monkeypatch) -> None:
 _GROUP, _SPREAD = "location:g#wiggle", "scale:h#wiggle"
 
 
-def _coupled_fit(**kwargs):
+def _coupled_fit(
+    *, reml_tol=1.0e-8, inner_tol=1.0e-10, practical_reml=False, outer="efs", **kwargs
+):
     """Group effects that only a correct noise level reveals.
 
     Twelve groups of ten rows have effects of spread 0.5 under noise 0.3, and
@@ -1131,13 +1133,69 @@ def _coupled_fit(**kwargs):
         pd.DataFrame({"g": g, "h": h}),
         y,
         max_lambda=1.0e3,
-        reml_tol=1.0e-8,
-        inner_tol=1.0e-10,
-        practical_reml=False,
-        outer="efs",
+        reml_tol=reml_tol,
+        inner_tol=inner_tol,
+        practical_reml=practical_reml,
+        outer=outer,
         **kwargs,
     )
     return model, model._require_fitted().smoothing
+
+
+def test_a_stalled_finish_keeps_the_plateau_earned_after_a_rejection(monkeypatch) -> None:
+    """An accepted round after a face release supersedes an earlier rejected round.
+
+    Force only the first Fellner–Schall rejection beside a held cap. The first
+    finish reaches stationarity on the face, the face recheck releases it, and
+    accepted rounds earn an interior plateau. The second finish uses up its
+    Newton budget. Keeping the first rejection's verdict reports
+    ``objective_rejected`` instead of accepting that plateau.
+    """
+    from superglm.distributional.smoothing import loop
+
+    no_worse = loop._SmoothingSearch._no_worse
+    rejected_at = None
+
+    def refuse_first_round_at_a_cap(search, trial):
+        nonlocal rejected_at
+        if rejected_at is None and search.cap_held:
+            rejected_at = len(search.history)
+        return len(search.history) != rejected_at and no_worse(search, trial)
+
+    endgame = loop._SmoothingSearch._endgame_at
+    finishes = []
+
+    def record_finish(search, state, budget):
+        result = endgame(search, state, budget)
+        finishes.append(result.kind)
+        return result
+
+    monkeypatch.setattr(loop._SmoothingSearch, "_no_worse", refuse_first_round_at_a_cap)
+    monkeypatch.setattr(loop._SmoothingSearch, "_endgame_at", record_finish)
+    max_log_step = 0.62
+    _, smoothing = _coupled_fit(
+        lambdas={_GROUP: 200.0, _SPREAD: 303.2653298563167 * math.exp(max_log_step)},
+        max_log_step=max_log_step,
+        max_reml_iter=90,
+        reml_tol=1.0e-7,
+        inner_tol=1.0e-9,
+        practical_reml=True,
+        outer="efs+finish",
+    )
+
+    assert rejected_at is not None
+    history = smoothing.history
+    rejected = history[rejected_at]
+    assert (rejected.stage, rejected.accepted) == ("efs", False)
+    assert finishes == ["stationary", "max_iterations"]
+    (released_at,) = (
+        i for i, row in enumerate(history) if row.deactivated_face_components == (_GROUP,)
+    )
+    assert released_at > rejected_at
+    assert history[released_at + 1 :]
+    assert all(row.stage == "efs" and row.accepted for row in history[released_at + 1 :])
+    assert smoothing.objective < rejected.objective_before
+    assert (smoothing.converged, smoothing.convergence_reason) == (True, "practical_plateau")
 
 
 @pytest.mark.parametrize("promotion", ["refused by force", "the search's own"])
