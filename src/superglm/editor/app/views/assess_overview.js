@@ -2,7 +2,10 @@
 
 import { isReportName } from "../api/contracts.js";
 import { escapeHTML } from "../format.js";
+import { countText, deltaText, metricColumns, metricText } from "../reports.js";
 import { ASSESS_GROUPS } from "../state/assess.js";
+import { cvSourceLine, meanSpreadText } from "./cv_tab.js";
+import { verdictParts } from "./diagnose_tab.js";
 
 /** @typedef {import('../api/contracts.js').ReportName} ReportName */
 /** @typedef {import('../api/contracts.js').EvidenceStatus} EvidenceStatus */
@@ -13,6 +16,129 @@ import { ASSESS_GROUPS } from "../state/assess.js";
  * @typedef {{id: ReportName, title: string, value: string, note: string, freshness: EvidenceStatus}} CardModel
  */
 /** @typedef {{name: string, cards: CardModel[]}} CardGroup */
+/** @typedef {import('../api/contracts.js').CVReportPayload} CVReportPayload */
+/** @typedef {import('./diagnose_tab.js').DiagnosePayload} DiagnosePayload */
+/** @typedef {import('../state/assess.js').AssessEntry} AssessEntry */
+/**
+ * The parts of a validation report a card reads.
+ * @typedef {{name?: string, n_obs?: number, available?: boolean,
+ *   metrics?: {edited?: Record<string, number|null>, delta?: Record<string, number|null>}}} SplitScores
+ */
+/**
+ * @typedef {{available: boolean, note?: string, metric_labels?: Record<string, string>,
+ *   compares_edit?: boolean, splits?: SplitScores[]}} ValidationPayload
+ */
+/** A card's headline number and the line under it. @typedef {{value: string, note: string}} CardFace */
+
+const MISSING = "—";
+
+/**
+ * The report's first score on the validation split, else on the first split it scored.
+ * @param {ValidationPayload} payload
+ * @returns {CardFace}
+ */
+export function validationCard(payload) {
+  const note = payload.note ?? "";
+  const labels = payload.metric_labels ?? {};
+  const splits = payload.splits ?? [];
+  const metric = metricColumns(labels, splits)[0];
+  const split = splits.find((candidate) => candidate.name === "validation")
+    ?? splits.find((candidate) => candidate.available !== false && candidate.metrics);
+  if (!payload.available || !split || metric === undefined) return { value: MISSING, note };
+  const value = `${labels[metric] ?? metric} ${metricText(metric, split.metrics?.edited?.[metric])}`;
+  if (split.name !== "validation") return { value, note };
+  const delta = payload.compares_edit ? ` · Δ ${deltaText(metric, split.metrics?.delta?.[metric])}` : "";
+  return { value, note: `Validation, ${countText(split.n_obs)} rows${delta}` };
+}
+
+/**
+ * The newest cross-validation result's first score, its mean and spread across the folds.
+ * @param {CVReportPayload} payload
+ * @returns {CardFace}
+ */
+export function cvCard(payload) {
+  const run = payload.results.at(-1);
+  const metric = payload.metrics[0];
+  if (!run || !metric) return { value: MISSING, note: cvSourceLine(payload) };
+  return {
+    value: `${metric.label} ${meanSpreadText(run.mean[metric.name], run.std[metric.name])}`,
+    note: `${run.stale ? `${run.label}, earlier model` : run.label} · ${run.folds.length} folds`,
+  };
+}
+
+/**
+ * The rows a final fit refitted on, or that none has run: never a verdict on the refit.
+ * @param {CVReportPayload} cvPayload
+ * @returns {CardFace}
+ */
+export function finalCard(cvPayload) {
+  const final = cvPayload.final_fit;
+  if (final.done) {
+    return {
+      value: `${countText(final.n_rows)} rows`,
+      note: final.stale ? "The model changed after the final fit." : "Refitted on train and validation rows.",
+    };
+  }
+  return { value: "Not run", note: final.reason ?? "Run Final fit on all rows from Cross-validation." };
+}
+
+/**
+ * How many fits' smoothing searches converged; a lone fit, or fits with no search, say
+ * their own status.
+ * @param {DiagnosePayload} payload
+ * @returns {CardFace}
+ */
+export function smoothingCard(payload) {
+  const { fits } = payload;
+  const n = fits.length;
+  const failed = fits.filter((fit) => fit.status === "not_converged").length;
+  const converged = fits.filter((fit) => fit.status === "converged" || fit.status === "loose").length;
+  let value = MISSING;
+  if (n === 1 || (n > 0 && failed + converged === 0)) value = verdictParts(fits[0].verdict).status;
+  else if (failed > 0) value = `${failed} of ${n} fits did not converge`;
+  else if (n > 0) value = `${converged} of ${n} fits converged`;
+  return { value, note: payload.note };
+}
+
+/**
+ * The face of card `id` from the payload of the report it reads.
+ * @param {ReportName} id @param {unknown} payload
+ * @returns {CardFace}
+ */
+function cardFace(id, payload) {
+  switch (id) {
+    case "validation":
+      return validationCard(/** @type {ValidationPayload} */ (payload));
+    case "cv":
+      return cvCard(/** @type {CVReportPayload} */ (payload));
+    case "final":
+      return finalCard(/** @type {CVReportPayload} */ (payload));
+    case "diagnose":
+      return smoothingCard(/** @type {DiagnosePayload} */ (payload));
+  }
+}
+
+/**
+ * An entry's card. Final fit reads the cv report, whose `final_fit` says whether one ran.
+ * @param {Readonly<AssessEntry>} entry @param {Record<ReportName, EvidenceState>} evidence
+ * @returns {CardModel}
+ */
+function overviewCard(entry, evidence) {
+  const { status, payload } = evidence[entry.id === "final" ? "cv" : entry.id];
+  const face = payload !== null
+    ? cardFace(entry.id, payload)
+    : { value: MISSING, note: status === "error" ? "Report unavailable." : "Loading report..." };
+  return { id: entry.id, title: entry.label, ...face, freshness: status };
+}
+
+/**
+ * A card per Assess entry, in list order.
+ * @param {Record<ReportName, EvidenceState>} evidence
+ * @returns {CardModel[]}
+ */
+export function overviewCards(evidence) {
+  return ASSESS_GROUPS.flatMap((group) => group.entries.map((entry) => overviewCard(entry, evidence)));
+}
 
 /** @param {CardModel} card */
 function cardMarkup(card) {
@@ -36,21 +162,14 @@ export function overviewMarkup(groups) {
 }
 
 /**
- * A card per Assess entry, in list order. Each names its report and says what
- * the report holds; its value stays empty here.
+ * The cards under their group headings.
  * @param {Record<ReportName, EvidenceState>} evidence
  * @returns {CardGroup[]}
  */
 export function overviewGroups(evidence) {
   return ASSESS_GROUPS.map((group) => ({
     name: group.name,
-    cards: group.entries.map((entry) => ({
-      id: entry.id,
-      title: entry.label,
-      value: "",
-      note: entry.hint,
-      freshness: evidence[entry.id].status,
-    })),
+    cards: group.entries.map((entry) => overviewCard(entry, evidence)),
   }));
 }
 

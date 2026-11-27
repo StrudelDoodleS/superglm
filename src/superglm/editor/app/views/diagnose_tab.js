@@ -146,7 +146,7 @@ function fitLink(fit) {
  * The verdict sentence split into its status (the first sentence) and what follows.
  * @param {string} verdict
  */
-function verdictParts(verdict) {
+export function verdictParts(verdict) {
   const end = verdict.indexOf(". ");
   return end < 0 ? { status: verdict, rest: "" } : { status: verdict.slice(0, end + 1), rest: verdict.slice(end + 2) };
 }

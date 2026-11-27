@@ -145,8 +145,10 @@
   font-variant-numeric: tabular-nums;
 }
 
-.assess-card-value:empty {
-  display: none;
+/* A number from an earlier model, or one being asked again, reads as not current. */
+.assess-card[data-freshness="updating"] .assess-card-value,
+.assess-card[data-freshness="stale"] .assess-card-value {
+  color: var(--muted);
 }
 
 .assess-card-note {

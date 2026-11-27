@@ -564,6 +564,9 @@ test("visible evidence selectors catch editor panels up after returning from rep
   state = patchView(state, { activeView: "validation" });
   assert.deepEqual(selectVisibleEvidencePanels(state), ["validation"]);
 
+  // The overview's cards read the validation, cv and diagnose reports; Final fit reads cv's.
+  assert.deepEqual(selectVisibleEvidencePanels(patchView(state, { activeView: "assess" })), ["validation", "cv", "diagnose"]);
+
   state = patchView(state, { activeView: "editor", inspectorPane: "help" });
   assert.deepEqual(selectVisibleEvidencePanels(state), ["metrics"]);
 });

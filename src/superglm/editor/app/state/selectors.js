@@ -1,5 +1,6 @@
 // @ts-check
 import { isReportName } from "../api/contracts.js";
+import { OVERVIEW_REPORTS } from "./assess.js";
 
 /** @typedef {import('../api/contracts.js').EditorState} EditorState */
 /** @typedef {import('../api/contracts.js').EvidencePanel} EvidencePanel */
@@ -116,7 +117,9 @@ export function selectReportNeedsAsk(state, panel) {
  */
 export function selectVisibleEvidencePanels(state, { summaryCommitted = false } = {}) {
   const view = state.view.activeView;
-  // A report shows its own evidence; the Explain tab asks for its own risks and shows none.
+  // A report shows its own evidence, the overview the reports its cards read; the Explain
+  // tab asks for its own risks and shows none.
+  if (view === "assess") return [...OVERVIEW_REPORTS];
   if (view !== "editor") return isReportName(view) ? [view] : [];
   // A panel whose tool the session does not offer is never requested.
   const off = state.remote.snapshot?.unavailable ?? {};

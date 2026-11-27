@@ -20,7 +20,7 @@ import { renderMetricGrid } from "./metrics.js";
 import { renderReport } from "./reports.js";
 import { shapeButtonState, shapeRangeForSelection } from "./shapes.js";
 import { createEditorActions } from "./state/actions.js";
-import { assessEntry, openableView, tabOf } from "./state/assess.js";
+import { OVERVIEW_REPORTS, assessEntry, openableView, tabOf } from "./state/assess.js";
 import {
   selectActiveTermName,
   selectCurrentSelection,
@@ -1221,8 +1221,13 @@ function renderAppView(activeView) {
   renderAssessList(assessRows, activeView);
 }
 
+// A redraw keeps keyboard focus on the card that had it.
 function renderOverview() {
+  const active = document.activeElement;
+  const card = active instanceof HTMLElement && assessCards.contains(active) ? active.dataset.card : undefined;
+  const focusVisible = card !== undefined && active.matches(":focus-visible");
   assessCards.innerHTML = overviewMarkup(overviewGroups(store.getState().request.evidence));
+  if (card !== undefined) assessCards.querySelector(`[data-card="${card}"]`)?.focus({ focusVisible });
 }
 
 function renderChartWorkspace() {
@@ -2881,9 +2886,11 @@ store.subscribe(
   },
   (next, previous) => next.evidence === previous.evidence
 );
+// The cards redraw when the evidence of a report they read moves.
 store.subscribe(
-  (state) => REPORT_NAMES.map((name) => state.request.evidence[name].status).join(),
-  renderOverview
+  (state) => OVERVIEW_REPORTS.map((name) => state.request.evidence[name]),
+  renderOverview,
+  (next, previous) => next.every((evidence, index) => evidence === previous[index])
 );
 for (const name of REPORT_NAMES) {
   store.subscribe(

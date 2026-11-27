@@ -12,6 +12,12 @@ import { isReportName } from "../api/contracts.js";
 /** @typedef {{id: "assess", label: string, hint: string, icon: string}} OverviewEntry */
 /** @typedef {{key: string, name: string, entries: readonly AssessEntry[]}} AssessGroup */
 
+/**
+ * The reports the overview's cards read: the Final fit card reads the cv report's `final_fit`.
+ * @type {readonly ReportName[]}
+ */
+export const OVERVIEW_REPORTS = Object.freeze(/** @type {ReportName[]} */ (["validation", "cv", "diagnose"]));
+
 /** @type {Readonly<OverviewEntry>} */
 export const OVERVIEW_ENTRY = Object.freeze({
   id: /** @type {"assess"} */ ("assess"),

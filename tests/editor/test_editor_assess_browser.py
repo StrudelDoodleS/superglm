@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from urllib.parse import urlsplit
 
 import pytest
+from tests.editor._editor_waits import hold_requests
 from tests.editor.assess_table import (
     assert_report_open,
     bare_glm_session,
@@ -164,3 +165,50 @@ def test_a_card_click_moves_focus_to_the_list_without_a_popover(assess_page):
         assert page.evaluate("document.activeElement?.dataset.assessEntry") == "final"
         popover.wait_for(state="visible")
         assert popover.locator("[data-popover-heading]").inner_text() == "Final fit"
+
+
+def test_each_card_shows_the_number_its_report_shows(assess_page):
+    with assess_page() as (page, _session):
+        page.locator("#assessTab").click()
+        page.locator('#assessCards [data-card="diagnose"][data-freshness="current"]').wait_for()
+        cards = {
+            c.get_attribute("data-card"): c.locator(".assess-card-value").inner_text()
+            for c in page.locator("#assessCards [data-card]").all()
+        }
+        open_report(page, "validation")
+        wait_for_report(page, "validation")
+        row = page.get_by_role("table", name="Split metrics").locator("tr", has_text="Validation")
+        assert (
+            cards["validation"]
+            == "Deviance " + row.locator("td").nth(1).inner_text().split(" Δ")[0].strip()
+        )
+        open_report(page, "cv")
+        wait_for_report(page, "cv")
+        first = page.locator("#reportFrame .cv-card").first
+        assert cards["cv"].startswith(
+            "Mean deviance " + first.locator(".cv-card-value strong").first.inner_text()
+        )
+        assert cards["final"] == "Not run"
+        assert cards["diagnose"].endswith("fits converged") or cards["diagnose"].endswith(
+            "did not converge"
+        )
+
+
+def test_a_card_keeps_keyboard_focus_when_a_report_lands(assess_page):
+    """The cards are drawn again as each report lands; the card that had focus keeps it."""
+    with assess_page() as (page, _session):
+        held = hold_requests(page, "**/report")
+        page.locator("#assessTab").click()
+        held.wait(1)
+        page.locator('#assessCards [data-card="cv"]').evaluate(
+            "card => card.focus({focusVisible: true})"
+        )
+        held[0].continue_()
+        page.locator('#assessCards [data-card="validation"][data-freshness="current"]').wait_for()
+        assert page.evaluate("document.activeElement?.dataset.card") == "cv"
+        assert page.evaluate("document.activeElement.matches(':focus-visible')")
+        for count in (2, 3):
+            held.wait(count)
+            held[count - 1].continue_()
+        page.locator('#assessCards [data-card="diagnose"][data-freshness="current"]').wait_for()
+        assert page.evaluate("document.activeElement?.dataset.card") == "cv"
