@@ -18,21 +18,17 @@ Unlike a Kolmogorov-Smirnov band it is as sensitive in the tails as in the
 middle. The local level depends on ``n`` and ``alpha`` only:
 
 * one point is tested at the global level, ``eta = alpha``;
-* from 2 to 99 points, ``eta`` is calibrated by simulation, the procedure of
-  Aldor-Noiman et al. (calibration for simultaneity: Buja and Rolke,
-  *Calibration for simultaneity*, Wharton technical report). Each of 4,000
-  uniform samples gives the smallest two-sided local level at which it leaves
-  the band, and ``eta`` is the ``alpha``-quantile of those levels;
-* from 100 points, the asymptotic local level of Gontscharuk and Finner
+* from 2 to 249 points, ``eta`` is found by searching for the local level whose
+  exact global level is ``alpha`` (Weine et al., section 2.3). The global level
+  of a band comes from the recursion of their appendix A, so the band's level is
+  ``alpha`` to a relative ``1e-8``;
+* from 250 points, the asymptotic local level of Gontscharuk and Finner
   (2017), *Communications in Statistics - Theory and Methods* 46(5),
   2332-2342, with its second-order correction, at the constants Weine et al.
   (section 2.4) checked: 1.591, 1.3 and 1.1 at ``alpha`` = 0.01, 0.05 and
-  0.1. Those are the levels the band accepts.
-
-The global level is ``alpha`` up to the error of each rule. At ``alpha = 0.05``
-the calibration's Monte Carlo standard error is about 7% of ``alpha`` (16% at
-0.01), and the asymptotic level runs about 5% of ``alpha`` high at 100 points
-(10% at 0.01), within 1% by 500 points (3% at 0.01).
+  0.1. Those are the levels the band accepts. Its global level runs about 1.6% of
+  ``alpha`` high at 250 points (4.5% at 0.01) and falls toward ``alpha`` as
+  ``n`` grows.
 
 ``bonferroni_binomial_band`` bounds the counts of ``m`` cells, each
 ``Binomial(trials, probability)``, by the ``alpha / (2 m)`` and
@@ -59,11 +55,11 @@ from numpy.typing import ArrayLike, NDArray
 
 #: The global levels whose large-sample correction constant ``c`` is published.
 _CORRECTION = {0.01: 1.591, 0.05: 1.3, 0.1: 1.1}
-#: From this many points on, the local level is the asymptotic approximation.
-_ASYMPTOTIC_FROM = 100
-#: Uniform samples drawn to calibrate the local level below ``_ASYMPTOTIC_FROM`` points.
-_CALIBRATION_SAMPLES = 4000
-_CALIBRATION_SEED = 20131119
+#: From this many points on, the local level is the asymptotic approximation: below it the
+#: exact search's first call costs at most about 0.2 s on one core, and its cost grows faster than n.
+_ASYMPTOTIC_FROM = 250
+#: The exact search stops once ``eta`` is known to this relative tolerance.
+_SEARCH_RTOL = 1e-9
 
 
 @dataclass(frozen=True)
@@ -83,6 +79,54 @@ class UniformBand:
     alpha: float
 
 
+def _bounds(n: int, eta: float) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """The ``eta / 2`` and ``1 - eta / 2`` quantiles of ``Beta(i, n + 1 - i)``, ``i = 1..n``."""
+    from scipy import special
+
+    i = np.arange(1, n + 1, dtype=np.float64)
+    return special.betaincinv(i, n + 1 - i, eta / 2.0), special.betainccinv(i, n + 1 - i, eta / 2.0)
+
+
+def _global_level(lower: NDArray[np.float64], upper: NDArray[np.float64]) -> float:
+    """The chance that some order statistic of ``n`` iid uniforms leaves ``(lower_i, upper_i)``.
+
+    Weine et al. (2023), appendix A. With ``N(t)`` the count of values at or below ``t``, the
+    ``i``-th order statistic lies above ``lower_i`` when ``N(lower_i) <= i - 1`` and below
+    ``upper_i`` when ``N(upper_i) >= i``. Given ``N(s) = m`` the other ``n - m`` values are iid
+    uniform on ``(s, 1)``, so at the next bound ``t`` the count is ``m`` plus a
+    ``Binomial(n - m, (t - s) / (1 - s))``. Walking the ``2 n`` bounds in order carries the law of
+    ``N`` over the counts between ``#{upper_i <= t}`` and ``#{lower_i < t}``: a count outside
+    breaks a bound already passed or, since ``N`` only grows, one still ahead.
+    """
+    from scipy import special
+
+    n = lower.size
+    t = np.sort(np.concatenate([lower, upper]))
+    least = np.searchsorted(upper, t, side="right")
+    most = np.searchsorted(lower, t, side="left")
+    if np.any(least > most):
+        return 1.0
+    log_factorial = special.gammaln(np.arange(n + 1, dtype=np.float64) + 1.0)
+    law, first, s = np.ones(1), 0, 0.0
+    for k in range(2 * n):
+        q = min(1.0, (t[k] - s) / (1.0 - s))
+        m = np.arange(first, first + law.size)[:, None]
+        j = np.arange(least[k], most[k] + 1)[None, :]
+        step = j - m
+        reachable = step >= 0
+        step = np.where(reachable, step, 0)
+        log_pmf = (
+            log_factorial[n - m]
+            - log_factorial[step]
+            - log_factorial[n - j]
+            + special.xlogy(step, q)
+            + special.xlog1py(n - j, -q)
+        )
+        law = law @ np.where(reachable, np.exp(log_pmf), 0.0)
+        first, s = int(least[k]), float(t[k])
+    return 1.0 - float(law.sum())
+
+
 def _local_level(n: int, alpha: float) -> float:
     """The two-sided level ``eta`` at which each of ``n`` order statistics is tested."""
     if n == 1:
@@ -92,14 +136,19 @@ def _local_level(n: int, alpha: float) -> float:
         loglog_n = math.log(log_n)
         leading = -math.log1p(-alpha) / (2.0 * loglog_n * log_n)
         return leading * (1.0 - _CORRECTION[alpha] * math.log(loglog_n) / loglog_n)
-    from scipy import special
+    from scipy import optimize
 
-    rng = np.random.default_rng(np.random.SeedSequence([n, _CALIBRATION_SEED]))
-    u = np.sort(rng.uniform(size=(_CALIBRATION_SAMPLES, n)), axis=1)
-    i = np.arange(1, n + 1, dtype=np.float64)
-    tail = np.minimum(special.betainc(i, n + 1 - i, u), special.betaincc(i, n + 1 - i, u))
-    escape_level = 2.0 * tail.min(axis=1)
-    return float(np.quantile(escape_level, alpha))
+    # The global level rises with eta, from at most alpha at the Bonferroni level alpha / n to at
+    # least alpha at alpha, where the first order statistic alone leaves with chance alpha.
+    return float(
+        optimize.brentq(
+            lambda eta: _global_level(*_bounds(n, eta)) - alpha,
+            alpha / n,
+            alpha,
+            xtol=1e-3 * _SEARCH_RTOL * alpha / n,
+            rtol=_SEARCH_RTOL,
+        )
+    )
 
 
 def _readonly(values: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -136,12 +185,12 @@ def equal_local_levels_band(n: int, *, alpha: float = 0.05) -> UniformBand:
             f"large-sample local level is published; got alpha={alpha!r}"
         )
     eta = float(_local_level(points, level))
+    lower, upper = _bounds(points, eta)
     i = np.arange(1, points + 1, dtype=np.float64)
-    j = points + 1 - i
     return UniformBand(
-        lower=_readonly(special.betaincinv(i, j, eta / 2.0)),
-        upper=_readonly(special.betainccinv(i, j, eta / 2.0)),
-        median=_readonly(special.betaincinv(i, j, 0.5)),
+        lower=_readonly(lower),
+        upper=_readonly(upper),
+        median=_readonly(special.betaincinv(i, points + 1 - i, 0.5)),
         local_level=eta,
         alpha=level,
     )

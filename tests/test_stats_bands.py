@@ -33,6 +33,49 @@ def test_a_pointwise_local_level_breaks_the_global_level(monkeypatch):
     bands.equal_local_levels_band.cache_clear()
 
 
+def _steck_inside(lower, upper):
+    """``P(lower_i < U_(i) < upper_i for every i)`` for ``n`` iid uniforms, in mpmath.
+
+    Steck (1971), *Ann. Math. Statist.* 42(1), 1-11, as Theorem I of Pitman (1972), *Bull.
+    Austral. Math. Soc.* 7, 227-232, states it: ``n! det[(v_i - u_j)_+^(j-i+1) / (j-i+1)!]``,
+    entries with ``i > j + 1`` zero. That matrix is upper Hessenberg with ones below the
+    diagonal, so its leading minors satisfy ``D_k = sum_i (-1)^(k-i) m_ik D_(i-1)``. The
+    alternating sum cancels, so it runs at 60 digits, which agree with 120 to 1e-34 at n = 249.
+    """
+    mpmath = pytest.importorskip("mpmath")
+    with mpmath.workdps(60):
+        u = [mpmath.mpf(float(x)) for x in lower]
+        v = [mpmath.mpf(float(x)) for x in upper]
+        n = len(u)
+        factorial = [mpmath.factorial(k) for k in range(n + 1)]
+        minors = [mpmath.mpf(1)]
+        for k in range(n):
+            total = mpmath.mpf(0)
+            for i in range(k + 1):
+                gap = v[i] - u[k]
+                if gap > 0:
+                    term = gap ** (k - i + 1) / factorial[k - i + 1] * minors[i]
+                    total += term if (k - i) % 2 == 0 else -term
+            minors.append(total)
+        return float(factorial[n] * minors[n])
+
+
+@pytest.mark.parametrize("alpha", [0.05, 0.01])
+@pytest.mark.parametrize("n", [2, 5, 20, 99, 249])
+def test_the_searched_local_level_gives_exactly_the_global_level(n, alpha):
+    """Below the asymptotic cutover the band's global level is alpha, by an independent formula.
+
+    The search stops with ``eta`` known to a relative 1e-9, the global level moves less than
+    ``eta`` does, and the recursion behind it rounds to about 1e-13 per point, so the level is
+    within 1e-8 of alpha relative; 1e-7 leaves room. Mutation checks: a search stopped at a
+    relative 1e-3, or a recursion that skips the last bound, fails it, as does the Monte Carlo
+    calibration this search replaced (4.65% at n = 2).
+    """
+    band = equal_local_levels_band(n, alpha=alpha)
+    level = 1.0 - _steck_inside(band.lower, band.upper)
+    assert abs(level - alpha) <= 1e-7 * alpha
+
+
 def test_each_bound_is_its_order_statistics_beta_quantile():
     n = 331
     band = equal_local_levels_band(n)
