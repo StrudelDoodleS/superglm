@@ -551,8 +551,8 @@ class NullReplicates:
     at ``CHECK_ALPHA`` over its replicate statistics: Q-Q's local level, the PIT and quantile
     per-cell cuts, and actual over expected's ``z``. Each is one float, exactly the statistic of
     the replicate at that rank. A check maps to ``None`` when it has no level: it is
-    unavailable on its own (actual over expected without a finite variance), or nothing was
-    simulated.
+    unavailable on its own (actual over expected without a finite variance, or with tables the
+    rows refuse), or nothing was simulated.
 
     ``note`` is the page's sentence for each check that keeps the known-parameter level on this
     split for want of a replicate: the fit's uncertainty could not be sampled, or these rows
@@ -837,14 +837,14 @@ def _scores(
     keeps each replicate's transforms, its exceedance counts of the predicted quantiles and its
     actual-over-expected cell totals; Q-Q and PIT then read the transforms of the occurrences
     they read. Quantile calibration of the response and actual over expected read every
-    occurrence, so they have no statistic unless the split's are all simulated.
+    occurrence, so they have no statistic unless the split's are all simulated, and ``tables``
+    are empty unless they are.
     """
     occurrences = len(split.rows)
     randomised = isinstance(split.fitted.family, AtomFamily)
     randomise = _atom_randomiser(split, count) if randomised else None
     grid = np.asarray(QUANTILE_GRID)
     thresholds = _quantile_thresholds(split) if split.complete and not randomised else None
-    tables = tables if split.complete else []
     starts = np.cumsum([0] + [table.check.expected.size for table in tables])
     codes = np.column_stack(
         [table.codes + start for table, start in zip(tables, starts[:-1], strict=True)]
@@ -902,9 +902,12 @@ def _replicates(
     y = np.asarray(dataset.y, dtype=np.float64).ravel()
     split = _split(fitted, dataset)
     tables: list[_AETable] = []
-    if _unsupported("check_ae", fitted.family) is None:
-        # Without a finite variance actual over expected has no statistic; the rest do.
-        with contextlib.suppress(CheckUnavailable):
+    # Actual over expected reads every occurrence, so its tables are built only when every one
+    # is simulated. Its preparation stands alone: tables the rows refuse, or a law without a
+    # finite variance, leave it without a statistic and the other checks simulated, and its
+    # own body meets the same refusal on the same rows.
+    if split.complete and _unsupported("check_ae", fitted.family) is None:
+        with contextlib.suppress(CheckUnavailable, ValueError):
             tables = _ae_tables(fitted, dataset, y, inputs)
     if responses is None:
         draws = _draws(fitted, n_draws, seed)

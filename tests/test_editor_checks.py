@@ -504,6 +504,66 @@ def test_a_split_beyond_the_occurrence_cap_draws_the_sample_the_checks_read(calm
     assert scored.counts[0].tolist() == pit["counts"]
 
 
+def test_a_split_beyond_the_cap_whose_total_overflows_still_simulates_qq_and_pit(
+    calm_frequency, monkeypatch
+):
+    """The review's probe: among 104 million occurrences one response of 1e305 on 750,000 of
+    them overflows actual over expected's weighted total.
+
+    Beyond the cap actual over expected keeps the known level, so the replicates build none of
+    its tables, and the Q-Q plot and the PIT histogram are simulated. Mutation check: building
+    the tables before the cap is tested builds them for the replicates to discard.
+    """
+    weighted, _ = calm_frequency
+    counts = weighted.validation.sample_weight * 250_000
+    y = np.array(weighted.validation.y, dtype=np.float64)
+    y[np.flatnonzero(counts == 750_000)[0]] = 1e305
+    split = dataclasses.replace(weighted.validation, y=y, sample_weight=counts)
+    assert np.sum(counts) == 104_000_000
+    built = []
+    library = checks.actual_expected_check
+
+    def counted(*args, **kwargs):
+        built.append(kwargs["name"])
+        return library(*args, **kwargs)
+
+    monkeypatch.setattr(checks, "actual_expected_check", counted)
+    replicates = null_replicates(weighted.lss, split, inputs=["x", "g"], n_draws=19)
+    assert built == []
+    for report in ("check_qq", "check_pit"):
+        body = check_body(report, weighted.lss, split, inputs=["x", "g"], replicates=replicates)
+        assert (body["level_source"], body["n_draws"], body["level_note"]) == (
+            "simulated",
+            19,
+            None,
+        )
+
+
+@pytest.mark.filterwarnings("ignore:overflow encountered:RuntimeWarning")
+def test_a_total_the_rows_refuse_leaves_the_other_checks_simulated(calm_frequency):
+    """One response of 1e306 on 1,000 occurrences overflows actual over expected's weighted
+    total on a split whose occurrences are all simulated.
+
+    That check's replicate preparation stands alone: it has no level, and the Q-Q plot, the PIT
+    histogram and quantile calibration are simulated. Mutation check: letting the refusal out
+    of the preparation raises it out of all three bodies.
+    """
+    weighted, _ = calm_frequency
+    counts = np.array(weighted.validation.sample_weight, dtype=np.float64)
+    y = np.array(weighted.validation.y, dtype=np.float64)
+    counts[0], y[0] = 1_000.0, 1e306
+    split = dataclasses.replace(weighted.validation, y=y, sample_weight=counts)
+    replicates = null_replicates(weighted.lss, split, inputs=["x", "g"])
+    assert (replicates.n_draws, replicates.note, replicates.levels["check_ae"]) == (99, None, None)
+    for report in ("check_qq", "check_pit", "check_calibration"):
+        body = check_body(report, weighted.lss, split, inputs=["x", "g"], replicates=replicates)
+        assert (body["level_source"], body["n_draws"], body["level_note"]) == (
+            "simulated",
+            99,
+            None,
+        )
+
+
 def test_a_large_split_sends_at_most_800_points_and_flags_on_all():
     z = np.random.default_rng(1).standard_normal(30_000) * 1.02
     body = qq_from_residuals(z)
