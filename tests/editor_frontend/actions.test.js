@@ -1732,6 +1732,39 @@ test("Retry of a check waits its turn behind the check in flight", async () => {
   assert.equal(await retried, true);
 });
 
+test("a check asked by refreshEvidence or schedulePanelEvidence waits its turn behind the check in flight", async () => {
+  const { sent, client, answer } = heldReportClient(async () => snapshot(0));
+  let inFlight = 0;
+  let most = 0;
+  const counted = {
+    ...client,
+    /** @param {string} path @param {Record<string, unknown>} body */
+    postJSON: (path, body) => {
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      return client.postJSON(path, body).finally(() => { inFlight -= 1; });
+    }
+  };
+  const store = createEditorStore(createInitialEditorState(snapshot(0)));
+  const actions = createEditorActions({ store, client: counted });
+
+  actions.scheduleReports(["check_pit"], { immediate: true });
+  const refreshed = actions.refreshEvidence("check_qq", "/report", { report: "check_qq" });
+  actions.schedulePanelEvidence("check_ae", "/report", { report: "check_ae" }, { immediate: true });
+  assert.deepEqual(sent, ["check_pit"]);
+  await answer(0, 0);
+  assert.deepEqual(sent, ["check_pit", "check_qq"]);
+  await answer(1, 0);
+  assert.equal(await refreshed, true);
+  assert.deepEqual(sent, ["check_pit", "check_qq", "check_ae"]);
+  await answer(2, 0);
+
+  assert.equal(most, 1);
+  for (const name of /** @type {const} */ (["check_pit", "check_qq", "check_ae"])) {
+    assert.equal(store.getState().request.evidence[name].status, "current");
+  }
+});
+
 test("an older snapshot from Refresh from Python leaves the newer model's reports alone", async () => {
   const older = { ...snapshot(3), state_generation: 1 };
   const newer = { ...snapshot(4), state_generation: 2 };

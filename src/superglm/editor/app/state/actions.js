@@ -14,7 +14,7 @@ import {
   waitingListChanged
 } from "./store.js";
 import { isHeld, moveMutation } from "./mutation.js";
-import { isReportName } from "../api/contracts.js";
+import { isCheckReport, isReportName } from "../api/contracts.js";
 import {
   selectModelRevision,
   selectReportNeedsAsk,
@@ -215,8 +215,8 @@ export function createEditorActions({
   /** @type {any} */
   let reportTimer = null;
   let reportsDraining = false;
-  /** @type {Map<ReportName, ((current:boolean)=>void)[]>} */
-  const reportRetries = new Map();
+  /** Who waits for each queued report's turn to end. @type {Map<ReportName, ((current:boolean)=>void)[]>} */
+  const reportWaiters = new Map();
   /** The session key each report was last asked at. @type {Map<ReportName, string>} */
   const reportAskedAt = new Map();
 
@@ -697,14 +697,27 @@ export function createEditorActions({
 
   /**
    * Refresh one evidence panel. Returns true only when the latest success is accepted.
-   * Errors and stale responses resolve false and never throw.
+   * Errors and stale responses resolve false and never throw. A check takes its turn in the
+   * report queue, asked as `/report` names it, so Python answers one check at a time.
    *
    * @param {EvidencePanel} panel
    * @param {string} path
    * @param {Record<string, unknown>} payload
    * @returns {Promise<boolean>}
    */
-  async function refreshEvidence(panel, path, payload) {
+  function refreshEvidence(panel, path, payload) {
+    return isCheckReport(panel) ? queueReport(panel) : askEvidence(panel, path, payload);
+  }
+
+  /**
+   * Send one evidence request now and settle its answer; every panel's request ends here.
+   *
+   * @param {EvidencePanel} panel
+   * @param {string} path
+   * @param {Record<string, unknown>} payload
+   * @returns {Promise<boolean>}
+   */
+  async function askEvidence(panel, path, payload) {
     const requestPayload = snapshotPayload(payload);
     let revision = -1;
     /** @type {string|null} */
@@ -778,7 +791,8 @@ export function createEditorActions({
   }
 
   /**
-   * Debounce cacheable evidence independently for each panel.
+   * Debounce cacheable evidence independently for each panel. A check joins the report queue
+   * after its shared debounce instead.
    *
    * @param {EvidencePanel} panel
    * @param {string} path
@@ -786,6 +800,10 @@ export function createEditorActions({
    * @param {{immediate?:boolean}} [options]
    */
   function schedulePanelEvidence(panel, path, payload, { immediate = false } = {}) {
+    if (isCheckReport(panel)) {
+      scheduleReports([panel], { immediate });
+      return;
+    }
     const requestPayload = snapshotPayload(payload);
     if (evidenceTimers.has(panel)) {
       clearTimer(evidenceTimers.get(panel));
@@ -793,7 +811,7 @@ export function createEditorActions({
     }
     const invoke = () => {
       evidenceTimers.delete(panel);
-      void refreshEvidence(panel, path, requestPayload);
+      void askEvidence(panel, path, requestPayload);
     };
     if (immediate) {
       invoke();
@@ -815,9 +833,9 @@ export function createEditorActions({
         reportQueue.delete(panel);
         if (selectReportNeedsAsk(store.getState(), panel)) {
           reportAskedAt.set(panel, sessionKey(store.getState().remote.snapshot));
-          await refreshEvidence(panel, "/report", { report: panel });
+          await askEvidence(panel, "/report", { report: panel });
         }
-        settleReportRetries(panel);
+        settleReportWaiters(panel);
       }
     } finally {
       reportsDraining = false;
@@ -825,13 +843,13 @@ export function createEditorActions({
   }
 
   /**
-   * Answer each Retry of `panel` once its turn is over: whether it is now current.
+   * Answer each caller waiting on `panel` once its turn is over: whether it is now current.
    * @param {ReportName} panel
    */
-  function settleReportRetries(panel) {
-    const waiting = reportRetries.get(panel);
+  function settleReportWaiters(panel) {
+    const waiting = reportWaiters.get(panel);
     if (!waiting) return;
-    reportRetries.delete(panel);
+    reportWaiters.delete(panel);
     const current = store.getState().request.evidence[panel].status === "current";
     for (const resolve of waiting) resolve(current);
   }
@@ -858,6 +876,17 @@ export function createEditorActions({
       return;
     }
     reportTimer = setTimer(start, EVIDENCE_DEBOUNCE_MS);
+  }
+
+  /**
+   * Queue `panel` at once and answer, when its turn is over, whether it is current.
+   * @param {ReportName} panel @returns {Promise<boolean>}
+   */
+  function queueReport(panel) {
+    return new Promise((resolve) => {
+      reportWaiters.set(panel, [...(reportWaiters.get(panel) ?? []), resolve]);
+      scheduleReports([panel], { immediate: true });
+    });
   }
 
   /** @param {readonly ReportName[]} [names] every report by default @returns {void} */
@@ -935,11 +964,7 @@ export function createEditorActions({
   function retryEvidence(panel) {
     const retry = store.getState().request.evidence[panel].retry;
     if (!retry) return Promise.resolve(false);
-    if (!isReportName(panel)) return refreshEvidence(panel, retry.path, retry.payload);
-    return new Promise((resolve) => {
-      reportRetries.set(panel, [...(reportRetries.get(panel) ?? []), resolve]);
-      scheduleReports([panel], { immediate: true });
-    });
+    return isReportName(panel) ? queueReport(panel) : askEvidence(panel, retry.path, retry.payload);
   }
 
   /** @returns {void} */
