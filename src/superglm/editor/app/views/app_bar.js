@@ -54,6 +54,8 @@ export function bindAppBar({
       : event.key === "End"
         ? tabs.length - 1
         : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+    // A key that lands on the tab it left, the only one shown, changes nothing.
+    if (tabs[next] === event.target) return;
     tabs[next].focus();
     onView(tabs[next].dataset.view || "editor");
   }

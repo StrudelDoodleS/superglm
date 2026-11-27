@@ -172,6 +172,12 @@
   display: none;
 }
 
+/* It watches jobs and does not run them: Cross-validation keeps each job's
+   progress and results there, without Run CV, Final fit or Cancel. */
+:root[data-window="assess"] :is(.cv-actions, .cv-cancel) {
+  display: none;
+}
+
 /* Below 1086 px, the width main.js calls narrow, the list keeps its icons only.
    Names and group titles are clipped, not removed, so each row keeps its
    accessible name and its hover popover still names it; a hairline stands in

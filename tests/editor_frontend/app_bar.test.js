@@ -442,3 +442,31 @@ test("an app bar without shortcuts leaves Ctrl+Z and R alone", (t) => {
   assert.deepEqual(pressed.map((event) => event.defaultPrevented), [false, false, false]);
   binding.destroy();
 });
+
+test("with one tab shown, the arrow keys stay where they are", (t) => {
+  installDocument(t);
+  const tab = (view, hidden = false) => {
+    const button = new FakeButton();
+    Object.assign(button.dataset, { view });
+    button.hidden = hidden;
+    button.focus = () => {};
+    return button;
+  };
+  const tabs = [tab("editor", true), tab("assess")];
+  const root = new FakeElement("nav");
+  root.querySelectorAll = () => tabs;
+  const views = [];
+  const binding = bindAppBar({
+    root,
+    undoButton: new FakeButton(),
+    redoButton: new FakeButton(),
+    revertButton: new FakeButton(),
+    refreshButton: new FakeButton(),
+    refitButton: new FakeButton(),
+    onView: (view) => views.push(view),
+    onUndo: () => {}, onRedo: () => {}, onRevert: () => {}, onRefresh: () => {}, onRefit: () => {},
+  });
+  for (const key of ["ArrowLeft", "ArrowRight", "Home", "End"]) root.emit("keydown", { key, target: tabs[1] });
+  assert.deepEqual(views, []);
+  binding.destroy();
+});

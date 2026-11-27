@@ -6,9 +6,13 @@ import { isReportName } from "../api/contracts.js";
 /** @typedef {import('../api/contracts.js').ReportName} ReportName */
 /** @typedef {'assess'|ReportName} AssessView */
 /**
- * What a window tells the editor's other windows: its session key, and whether a job
- * it watches started or ended.
- * @typedef {{type: "superglm.changed", key: string, job: boolean}} WindowMessage
+ * A job's start or end, as one window tells the others of it.
+ * @typedef {{id: string, phase: "started"|"settled"}} JobNotice
+ */
+/**
+ * What a window tells the editor's other windows: its session key, with a job
+ * notice, or `hello` from a page that has just loaded.
+ * @typedef {{type: "superglm.changed", key: string, job?: JobNotice, hello?: true}} WindowMessage
  */
 /**
  * @typedef {object} SyncChannel
@@ -74,13 +78,21 @@ export function sessionKey(snapshot) {
   ].join("|");
 }
 
+/** @param {unknown} value @returns {value is JobNotice} */
+function isJobNotice(value) {
+  if (!value || typeof value !== "object") return false;
+  const notice = /** @type {Record<string, unknown>} */ (value);
+  return typeof notice.id === "string" && (notice.phase === "started" || notice.phase === "settled");
+}
+
 /** @param {unknown} data @returns {data is WindowMessage} */
 function isWindowMessage(data) {
   if (!data || typeof data !== "object") return false;
   const message = /** @type {Record<string, unknown>} */ (data);
   return message.type === "superglm.changed"
     && typeof message.key === "string"
-    && typeof message.job === "boolean";
+    && (message.job === undefined || isJobNotice(message.job))
+    && (message.hello === undefined || message.hello === true);
 }
 
 /**
@@ -140,16 +152,52 @@ export function coalesce(run) {
 }
 
 /**
- * The ids of running jobs not in `known`, which are added to it: the jobs that
- * started since the last look.
- * @param {Readonly<Record<string, {job_id: string, status: string}|null>>} jobs
- * @param {Set<string>} known
- * @returns {string[]}
+ * One window's part in following the session with the others.
+ *
+ * A window re-reads when another's key differs from its own, or when it hears
+ * news: a job notice it has not handled, or a page's hello. News also lapses
+ * the reports a job changes. Each job's start and end is handled once per
+ * window, whether its own polling or a message brought it: `isNews` says
+ * whether a notice is new here, and marks it handled. Two windows that agree
+ * send nothing back, so one change costs each window one re-read.
+ * @param {object} options
+ * @param {string} options.name
+ * @param {SyncChannelConstructor|undefined} options.Channel
+ * @param {() => string} options.key this window's session key now
+ * @param {() => unknown} options.onJobNews lapse the reports a job changes
+ * @param {() => unknown} options.reread re-read the session
  */
-export function startedJobs(jobs, known) {
-  const started = Object.values(jobs).flatMap(
-    (job) => (job && job.status === "running" && !known.has(job.job_id) ? [job.job_id] : []),
-  );
-  for (const id of started) known.add(id);
-  return started;
+export function createSessionPeer({ name, Channel, key, onJobNews, reread }) {
+  /** @type {Set<string>} */
+  const handled = new Set();
+  /** @param {JobNotice} notice */
+  function isNews(notice) {
+    const id = `${notice.phase}:${notice.id}`;
+    if (handled.has(id)) return false;
+    handled.add(id);
+    return true;
+  }
+  const sync = createWindowSync({
+    name,
+    Channel,
+    onMessage: (message) => {
+      const news = message.hello === true || (message.job !== undefined && isNews(message.job));
+      if (news) onJobNews();
+      if (news || message.key !== key()) void reread();
+    },
+  });
+  /** @param {{job?: JobNotice, hello?: true}} extra */
+  const post = (extra) => sync.announce({ type: "superglm.changed", key: key(), ...extra });
+  return Object.freeze({
+    isNews,
+    /** Tell the others this window's key, with a notice it has just handled. @param {JobNotice} [job] */
+    tell(job) {
+      post(job ? { job } : {});
+    },
+    /** A page that has just loaded may have missed a job's end: every other window re-reads once. */
+    hello() {
+      post({ hello: true });
+    },
+    close: sync.close,
+  });
 }

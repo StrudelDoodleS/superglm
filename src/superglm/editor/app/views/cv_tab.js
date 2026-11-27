@@ -998,6 +998,8 @@ export function cvTabMarkup(payload, state) {
  * @param {(fitId:string)=>unknown} [options.onDiagnose] a slow fold's mark was clicked
  * @param {(ms:number)=>Promise<void>} [options.pause]
  * @param {()=>boolean} [options.isShown]
+ * @param {boolean} [options.watchOnly] a window that only watches: it shows jobs and
+ *   their results, and starts or cancels none
  */
 export function createCVTab({
   frame,
@@ -1006,7 +1008,8 @@ export function createCVTab({
   onJobChange = () => {},
   onDiagnose = () => {},
   pause = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
-  isShown = () => true
+  isShown = () => true,
+  watchOnly = false
 }) {
   /** @type {CVReportPayload|null} */
   let payload = null;
@@ -1105,7 +1108,7 @@ export function createCVTab({
    * @param {JobKind} kind
    */
   async function start(kind) {
-    if (state.jobs[kind]?.status === "running" || starting.has(kind)) return;
+    if (watchOnly || state.jobs[kind]?.status === "running" || starting.has(kind)) return;
     starting.add(kind);
     state.errors[kind] = "";
     let job;
@@ -1130,7 +1133,7 @@ export function createCVTab({
   /** @param {JobKind} kind */
   async function cancel(kind) {
     const job = state.jobs[kind];
-    if (job?.status !== "running") return;
+    if (watchOnly || job?.status !== "running") return;
     try {
       await client.jobCancel(job.job_id);
       state.jobs[kind] = { ...job, cancel_requested: true };

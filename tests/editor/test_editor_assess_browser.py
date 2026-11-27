@@ -267,14 +267,15 @@ def _is_state_read(request) -> bool:
 def test_open_in_new_window_shows_the_view_and_follows_edits(assess_page, choose_feature):
     """A second window opens on the report shown and follows an edit made in the first.
 
-    Moving between entries tells the second window nothing. After an edit the second
-    window re-reads the session, and the first, already agreeing, re-reads nothing:
-    the windows agree after one round.
+    The second window's hello, once it has loaded, makes the first re-read once. Moving
+    between entries tells the second window nothing. After an edit the second window
+    re-reads the session, and the first, already agreeing, re-reads nothing: the
+    windows agree after one round.
     """
     with assess_page() as (page, _session):
         open_report(page, "validation")
         wait_for_report(page, "validation")
-        with page.expect_popup() as opened:
+        with page.expect_request(_is_state_read), page.expect_popup() as opened:
             page.locator("#reportPanel [data-assess-window]").click()
         popup = opened.value
         assert "assess=validation" in popup.url and "token=" in popup.url
@@ -283,6 +284,10 @@ def test_open_in_new_window_shows_the_view_and_follows_edits(assess_page, choose
         assert popup.title() == "Assess · SuperGLM Editor"
         assert popup.locator("#editorTab").is_hidden() and popup.locator("#undoAction").is_hidden()
         assert popup.locator("[data-assess-window]:visible").count() == 0
+        # The only tab is Assess, so an arrow key stays on the report open.
+        popup.locator("#assessTab").focus()
+        popup.keyboard.press("ArrowLeft")
+        assert_report_open(popup, "validation")
         reads, main_reads = [], []
         popup.on("request", lambda request: _is_state_read(request) and reads.append(request))
         page.on("request", lambda request: _is_state_read(request) and main_reads.append(request))
@@ -299,3 +304,77 @@ def test_open_in_new_window_shows_the_view_and_follows_edits(assess_page, choose
         wait_for_report(popup, "validation")
         assert 1 <= len(reads) <= 2
         assert main_reads == []
+
+
+def _with_a_running_cv_job(route) -> None:
+    """Answer the cv report as Python would while a Run CV runs."""
+    if route.request.post_data_json.get("report") != "cv":
+        route.fallback()
+        return
+    response = route.fetch()
+    payload = response.json()
+    running = {"job_id": "cv-held", "kind": "cv", "status": "running", "progress": []}
+
+    def mark(node) -> bool:
+        if isinstance(node, dict):
+            if isinstance(node.get("jobs"), dict) and "cv" in node["jobs"]:
+                node["jobs"]["cv"] = running
+                return True
+            return any(mark(value) for value in node.values())
+        return isinstance(node, list) and any(mark(value) for value in node)
+
+    assert mark(payload)
+    route.fulfill(response=response, json=payload)
+
+
+def test_the_second_window_follows_a_job_and_starts_or_cancels_none(assess_page):
+    """Jobs start in the main window only; the second shows their progress without controls.
+
+    A click that reaches the hidden controls, as a script's would, sends nothing either.
+    """
+    with assess_page() as (page, _session):
+        open_report(page, "validation")
+        wait_for_report(page, "validation")
+        with page.expect_popup() as opened:
+            page.locator("#reportPanel [data-assess-window]").click()
+        popup = opened.value
+        wait_for_report(popup, "validation")
+        hold_requests(popup, "**/job_status")
+        popup.route("**/report", _with_a_running_cv_job)
+        sent = []
+        popup.on(
+            "request",
+            lambda request: (
+                urlsplit(request.url).path in ("/job_start", "/job_cancel")
+                and sent.append(urlsplit(request.url).path)
+            ),
+        )
+        open_report(popup, "cv")
+        frame = popup.locator("#reportFrame")
+        frame.locator('.cv-job[data-cv-job="cv"][data-status="running"]').wait_for()
+        assert frame.locator("[data-cv-start], [data-cv-cancel]").count() == 3
+        for name in ("Run CV on current model", "Final fit on all rows", "Cancel"):
+            assert frame.get_by_role("button", name=name).count() == 0
+        frame.locator('[data-cv-start="final_fit"]').dispatch_event("click")
+        frame.locator('[data-cv-cancel="cv"]').dispatch_event("click")
+        # A request after the clicks, answered by the interception probe's route.
+        popup.evaluate("() => fetch('/__intercepting__').then((reply) => reply.status)")
+        assert sent == []
+
+
+def test_the_second_window_hides_the_editor_before_its_script_runs(assess_page, chromium_browser):
+    with assess_page() as (page, _session):
+        early = chromium_browser.new_page()
+        held = []
+        early.route("**/assets/main.js", lambda route: held.append(route))
+        try:
+            early.goto(page.url + "&assess=cv", wait_until="commit")
+            early.wait_for_function(
+                """() => document.getElementById("editorView")
+                  && document.querySelector('link[href="/assets/styles/assess.css"]')?.sheet"""
+            )
+            assert early.title() == "SuperGLM Editor"  # main.js has not run
+            assert early.locator("#editorTab").is_hidden()
+            assert early.locator("#editorView").is_hidden()
+        finally:
+            early.close()

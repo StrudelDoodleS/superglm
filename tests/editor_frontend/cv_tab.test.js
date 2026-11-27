@@ -1014,3 +1014,29 @@ test("an added-effect term in small units keeps its digits on the axis and in th
   assert.ok([...ticks.keys()].some((label) => Number(label) !== 0), [...ticks.keys()].join(","));
   assert.match(markup, /Fold 1 · B: 3\.00e-7/);
 });
+
+test("a tab that only watches starts and cancels nothing, and still follows a job", async () => {
+  const calls = [];
+  const frame = fakeFrame();
+  const running = { job_id: "cv-1", kind: "cv", status: "running", progress: [], result: null };
+  const tab = createCVTab({
+    frame,
+    client: {
+      async jobStart(kind) { calls.push(["start", kind]); return running; },
+      async jobStatus(jobId) { calls.push(["status", jobId]); return { ...running, status: "done" }; },
+      async jobCancel(jobId) { calls.push(["cancel", jobId]); }
+    },
+    onJobSettled: () => {},
+    pause: async () => {},
+    watchOnly: true
+  });
+  tab.render(cvPayload());
+  await tab.start("cv");
+  await tab.start("final_fit");
+  assert.deepEqual(calls, []);
+  tab.watch(running);
+  await tab.cancel("cv");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, [["status", "cv-1"]]);
+  assert.match(frame.innerHTML, /Run CV finished\./);
+});

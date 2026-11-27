@@ -16,6 +16,17 @@
     document.documentElement.dataset.theme = dark ? "dark" : "light";
   }
 </script>
+<script>
+  // A second window, opened from Assess, holds Assess alone: the rest is hidden
+  // before the first paint. These are the views readAssessWindow
+  // (views/window_sync.js) takes.
+  {
+    const ASSESS_WINDOW_VIEWS = ["assess", "validation", "cv", "final", "diagnose"];
+    if (ASSESS_WINDOW_VIEWS.includes(new URLSearchParams(location.search).get("assess"))) {
+      document.documentElement.dataset.window = "assess";
+    }
+  }
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bangers&family=Source+Sans+3:wght@400;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
