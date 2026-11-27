@@ -178,14 +178,15 @@
   display: block;
 }
 
-.assess-card[data-flagged="true"] .assess-card-value {
-  color: var(--orange-text);
-}
-
 /* A number from an earlier model, or one being asked again, reads as not current. */
 .assess-card[data-freshness="updating"] .assess-card-value,
 .assess-card[data-freshness="stale"] .assess-card-value {
   color: var(--muted);
+}
+
+/* A flag outranks freshness: a kept result that failed its check is still orange. */
+.assess-card[data-flagged="true"] .assess-card-value {
+  color: var(--orange-text);
 }
 
 .assess-card-note,

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import itertools
 from contextlib import contextmanager
 from urllib.parse import urlsplit
 
 import pytest
-from tests.editor._editor_waits import hold_requests
+from tests.editor._editor_waits import hold_requests, wait_for_editor_idle
 from tests.editor.assess_table import bare_glm_session
 from tests.test_editor_checks import _session, _wrong_case
 
@@ -145,6 +146,50 @@ def test_a_flagged_check_is_orange_on_its_card_and_in_the_list(checks_page):
                     "node => getComputedStyle(node).backgroundColor"
                 )
                 assert dot == orange
+
+
+def test_a_flagged_check_stays_orange_while_its_earlier_result_is_kept(checks_page, choose_feature):
+    """An edit keeps each check's earlier number on its card while it is asked again, and
+    after the update fails; a flagged one keeps its flag and its orange through both."""
+    with checks_page() as page:
+        _open_overview(page)
+        _wait_for_checks(page)
+        orange_text = page.evaluate(_TOKEN_COLOUR, "--orange-text")
+        flagged = ("check_qq", "check_pit", "check_calibration")
+        held = hold_requests(page, "**/report")
+        page.locator("#editorTab").click()
+        choose_feature(page, "mean:x")
+        page.locator('button[data-op="select_all"]').click()
+        page.get_by_role("button", name="Increase selection").click()
+        wait_for_editor_idle(page)
+        _open_overview(page)
+        # The reports are asked one at a time: let them through up to the first flagged check.
+        for asked in itertools.count(1):
+            held.wait(asked)
+            asking = held[-1].request.post_data_json["report"]
+            if asking in flagged:
+                break
+            held[-1].continue_()
+
+        def assert_kept_and_orange(name: str, shown: str) -> None:
+            card = page.locator(f'#assessCards [data-card="{name}"]')
+            page.locator(f'#assessCards [data-card="{name}"]{shown}').wait_for()
+            assert card.get_attribute("data-flagged") == "true"
+            assert card.locator(".assess-flag").is_visible()
+            colour = card.locator(".assess-card-value").evaluate(
+                "node => getComputedStyle(node).color"
+            )
+            assert colour == orange_text
+
+        # The check asked again is updating; the two behind it wait, their numbers out of date.
+        for name in flagged:
+            freshness = "updating" if name == asking else "stale"
+            assert_kept_and_orange(name, f'[data-freshness="{freshness}"]')
+        page.unroute("**/report")
+        page.route("**/report", lambda route: route.abort())
+        held[-1].abort()
+        for name in flagged:
+            assert_kept_and_orange(name, ':has(.assess-card-note:text-matches("^Update failed"))')
 
 
 def test_a_superglm_session_shows_no_check_groups(checks_page):
