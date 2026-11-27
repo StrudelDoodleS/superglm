@@ -19,6 +19,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from sklearn.model_selection import KFold
 
 from superglm import Categorical, Spline, SuperGLM, cross_validate
@@ -162,14 +163,41 @@ def assert_report_open(page, name: str) -> None:
     assert page.locator(f'[data-assess-entry="{name}"][aria-current="true"]').count() == 1
 
 
+# The text a reader sees: text nodes whose element and ancestors up to ``root`` render a
+# box larger than a pixel, unclipped and not hidden. ``innerText`` cannot say this: it keeps
+# text that is clipped away (a screen-reader label), and under a hidden ancestor it returns
+# text CSS would suppress.
+_SHOWN_TEXT = """(root) => {
+  const shown = (element) => {
+    for (let node = element; node; node = node === root ? null : node.parentElement) {
+      const style = getComputedStyle(node);
+      const box = node.getBoundingClientRect();
+      if (style.display === "none" || style.visibility === "hidden") return false;
+      if (box.width <= 1 || box.height <= 1) return false;
+      if ((style.clip && style.clip !== "auto") || style.clipPath !== "none") return false;
+    }
+    return true;
+  };
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const parts = [];
+  for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+    if (text.data.trim() && shown(text.parentElement)) parts.push(text.data);
+  }
+  return parts.join(" ");
+}"""
+
+
 def _text(locator) -> str:
-    return " ".join(locator.inner_text().split())
+    """The text ``locator``'s first match shows, or "—" when there is no such element."""
+    if locator.count() == 0:
+        return MISSING
+    return " ".join(locator.first.evaluate(_SHOWN_TEXT).split())
 
 
 def _label(locator) -> str:
     """The visible name, or the accessible one marked "(icon)" where only an icon shows."""
     shown = _text(locator)
-    if shown:
+    if shown not in ("", MISSING):
         return shown
     return f"{locator.get_attribute('aria-label') or '?'} (icon)"
 
@@ -177,15 +205,25 @@ def _label(locator) -> str:
 def _read_list(root) -> str:
     if not _present(root, "#assessList"):
         return MISSING
-    parts: list[str] = []
+    # "Overview; **Reports**: Validation, Cross-validation": a heading starts a group.
+    groups: list[list[str]] = [[]]
     for item in root.locator(
         "#assessList .assess-group-title, #assessList [data-assess-entry]"
     ).all():
         if item.get_attribute("data-assess-entry") is None:
-            parts.append(f"**{_text(item)}**:")
+            groups.append([f"**{_text(item)}**:"])
         else:
-            parts.append(_label(item))
-    return " ".join(parts).replace(" **", "; **")
+            groups[-1].append(_label(item))
+    return "; ".join(
+        " ".join(group[:1] + [", ".join(group[1:])])
+        if group[0].startswith("**")
+        else ", ".join(group)
+        for group in groups
+        if group
+    )
+
+
+_CARDS_TIMEOUT_MS = 5000
 
 
 def _show_overview(root) -> None:
@@ -193,22 +231,27 @@ def _show_overview(root) -> None:
         root.locator("#assessTab").click()
     if _present(root, '[data-assess-entry="assess"]'):
         root.locator('[data-assess-entry="assess"]').click()
-    root.locator("#assessOverview").wait_for(state="visible")
+    # Shown, not "visible": an overview with nothing in it yet has no box.
+    root.locator("#assessView:not([hidden]) #assessOverview:not([hidden])").wait_for(
+        state="attached"
+    )
 
 
 def _read_cards(root) -> str:
     if not _present(root, "#assessCards"):
         return MISSING
-    _show_overview(root)
     cards = root.locator("#assessCards [data-card]")
-    cards.first.wait_for(state="visible")
+    try:
+        cards.first.wait_for(state="visible", timeout=_CARDS_TIMEOUT_MS)
+    except PlaywrightTimeoutError:
+        return MISSING
     # Cards carry their evidence state once they have one; wait out the loading ones.
-    for card in cards.all():
-        if card.get_attribute("data-freshness") is not None:
-            card.locator(
-                "xpath=self::*[not(@data-freshness='loading') and not(@data-freshness='idle')"
-                " and not(@data-freshness='updating')]"
-            ).wait_for(state="attached")
+    root.locator(
+        ", ".join(
+            f'#assessCards [data-card][data-freshness="{status}"]'
+            for status in ("idle", "loading", "updating")
+        )
+    ).first.wait_for(state="detached")
     read = []
     for card in cards.all():
         title = _text(card.locator(".assess-card-title"))
@@ -231,6 +274,9 @@ def read_page(page_or_frame) -> dict[str, str]:
     root = page_or_frame
     tabs = root.locator(".app-tabs .app-tab:visible").all()
     top_bar = " · ".join(_label(tab) for tab in tabs) or MISSING
+    if _present(root, "#assessTab"):
+        # The list and cards are read as shown, so open the overview first.
+        _show_overview(root)
     listed = _read_list(root)
     cards = _read_cards(root)
     has_window_button = _present(root, "[data-assess-window]")
