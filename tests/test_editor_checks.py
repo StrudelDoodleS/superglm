@@ -807,6 +807,21 @@ def test_a_held_out_split_reads_each_level_from_99_replicates(calm):
         np.testing.assert_array_equal(table["upper"], ratio + ae["z"] * se)
 
 
+def test_a_supplied_training_split_keeps_the_known_parameter_bands(calm):
+    """The session stores a user's ``train_data`` as a supplied split named ``"train"``.
+
+    Those are the rows the model was fitted on, so they keep the known-parameter bands and
+    nothing is simulated for them. Mutation check: deciding by the split's ``source`` instead
+    simulates 99 replicates on them.
+    """
+    train = _session(calm)._evaluation_data["train"]
+    assert (train.name, train.source) == ("train", "supplied")
+    assert null_replicates(calm.lss, train, inputs=["x", "g"]).n_draws == 0
+    for report in CHECK_REPORTS:
+        body = check_body(report, calm.lss, train, inputs=["x", "g"])
+        assert (body["level_source"], body["n_draws"], body["level_note"]) == ("known", 0, None)
+
+
 def test_the_training_rows_keep_the_known_parameter_bands(calm):
     bodies = {r: check_body(r, calm.lss, calm.train, inputs=["x", "g"]) for r in CHECK_REPORTS}
     for body in bodies.values():

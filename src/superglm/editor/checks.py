@@ -114,8 +114,8 @@ QUANTILE_GRID = (0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.975, 0.99, 0.995
 QQ_DISPLAY_POINTS = 800
 #: Lowest and highest order statistics a Q-Q body always sends.
 _QQ_ENDS = 10
-#: The ``source`` of the split that holds the rows the model was fitted on.
-_FIT_ROWS = "retained_fit_data"
+#: The ``name`` of the split that holds the rows the model was fitted on, supplied or retained.
+_FIT_ROWS = "train"
 #: Stream of the replicates' uniforms; the residuals' own streams are domains 0 to 5.
 _RESPONSE_STREAM = 6
 #: Rows simulated at once: the posterior pushforward and the responses hold this many rows of
@@ -463,7 +463,7 @@ def _level(
     replicates: NullReplicates | None,
 ) -> _Level:
     """The level of ``report``'s band on ``dataset``: known on the fitted rows, else simulated."""
-    if dataset.source == _FIT_ROWS:
+    if dataset.name == _FIT_ROWS:
         return _Level(None, 0, None)
     found = null_replicates(model, dataset, inputs=inputs) if replicates is None else replicates
     return _Level(found.levels.get(report), found.n_draws, found.note)
@@ -518,7 +518,7 @@ def check_body(
 ) -> dict[str, Any]:
     """One model's body of ``report`` on ``dataset``; ``inputs`` are the columns A/E groups by.
 
-    On the rows the model was fitted on (``dataset.source == "retained_fit_data"``) the band
+    On the rows the model was fitted on (the split named ``"train"``) the band
     has its known-parameter level. On any other split the level is read from ``replicates``,
     :func:`null_replicates` of this model, split and inputs, which one simulation gives every
     check; with none given the body simulates its own. Each available body says which in
@@ -959,8 +959,8 @@ def null_replicates(
     same cells. Each check's level is Barnard's rule over its replicates' statistics, and only
     the levels are kept. ``inputs`` are the columns actual over expected groups by.
 
-    The rows the model was fitted on keep the known-parameter bands, so nothing is simulated
-    for them, nor for a model or split no check can answer. Where the posterior refuses its
+    The rows the model was fitted on (the split named ``"train"``) keep the known-parameter
+    bands, so nothing is simulated for them, nor for a model or split no check can answer. Where the posterior refuses its
     draws, or the rows have no law a replicate can draw (truncated or censored rows, a draw
     that leaves a parameter outside its link's domain, a family with no distribution
     function), nothing is simulated and ``note`` says which. Beyond the residual sampler's cap
@@ -970,7 +970,7 @@ def null_replicates(
     """
     nothing = NullReplicates(levels={}, n_draws=0, seed=int(seed))
     lss = _lss(model)
-    if lss is None or dataset.source == _FIT_ROWS or lss_split_reason(lss, dataset) is not None:
+    if lss is None or dataset.name == _FIT_ROWS or lss_split_reason(lss, dataset) is not None:
         return nothing
     fitted = lss._require_fitted()
     family = fitted.family
