@@ -20,6 +20,9 @@ import {
 } from "../../src/superglm/editor/app/state/selectors.js";
 
 /** @typedef {import('../../src/superglm/editor/app/api/contracts.js').EditorState} EditorState */
+/** @typedef {import('../../src/superglm/editor/app/api/contracts.js').ReportName} ReportName */
+/** @typedef {import('../../src/superglm/editor/app/api/contracts.js').AppView} AppView */
+/** @typedef {import('../../src/superglm/editor/app/api/contracts.js').PendingStep} PendingStep */
 
 const { createEditorActions } = actionsModule;
 
@@ -1783,7 +1786,7 @@ test("a Run CV that settles lapses its reports and asks for the open one", async
 
 test("Refresh from Python lapses the job reports only when a job's result moved", async () => {
   let state = createInitialEditorState({ ...snapshot(3), results_generation: 4 });
-  for (const [sequence, report] of ["validation", "cv"].entries()) {
+  for (const [sequence, report] of /** @type {ReportName[]} */ (["validation", "cv"]).entries()) {
     const retry = { path: "/report", payload: { report } };
     state = beginEvidence(state, report, 3, sequence + 1, retry);
     state = completeEvidence(state, report, 3, sequence + 1, { report });
@@ -1798,7 +1801,7 @@ test("Refresh from Python lapses the job reports only when a job's result moved"
     }
   });
   /** @returns {string[]} */
-  const statuses = () => ["validation", "cv"].map((name) => store.getState().request.evidence[name].status);
+  const statuses = () => /** @type {ReportName[]} */ (["validation", "cv"]).map((name) => store.getState().request.evidence[name].status);
 
   // The session is as this page holds it: every report stays.
   await actions.refreshFromPython();
@@ -1938,7 +1941,7 @@ test("a staged change runs without blocking the page and, at an unchanged revisi
 });
 
 test("a report opened while a staged change is answered is asked again, not left loading", async () => {
-  /** @param {string} id */
+  /** @param {string} id @returns {PendingStep} */
   const step = (id) => ({
     id, operation: "collapse", term: "age", label: "Collapse", params: {}, note: null, time: 0
   });
@@ -1963,7 +1966,9 @@ test("a report opened while a staged change is answered is asked again, not left
     waitForPaint: async () => {},
     // The page's scheduler: the open report is Validation.
     scheduleVisibleEvidence: (_revision, options) => actions.scheduleReports(
-      ["validation"].filter((panel) => !options?.onlyStale || selectReportNeedsAsk(store.getState(), panel)),
+      /** @type {ReportName[]} */ (["validation"]).filter(
+        (panel) => !options?.onlyStale || selectReportNeedsAsk(store.getState(), panel)
+      ),
       options
     )
   });
@@ -2037,14 +2042,17 @@ test("a Run CV result a note's answer brings first is asked for, never left at t
     },
     // The page's scheduler: the open report is Cross-validation.
     scheduleVisibleEvidence: (_revision, options) => actions.scheduleReports(
-      ["cv"].filter((panel) => !options?.onlyStale || selectReportNeedsAsk(store.getState(), panel)),
+      /** @type {ReportName[]} */ (["cv"]).filter(
+        (panel) => !options?.onlyStale || selectReportNeedsAsk(store.getState(), panel)
+      ),
       options
     )
   });
   const cv = () => store.getState().request.evidence.cv;
+  const cvScore = () => /** @type {{score: number}} */ (cv().payload).score;
   actions.scheduleReports(["cv"], { immediate: true });
   await settled();
-  assert.deepEqual([cv().status, cv().payload.score], ["current", 10]);
+  assert.deepEqual([cv().status, cvScore()], ["current", 10]);
 
   // Run CV publishes, and a note's answer carries the new state before the poll sees the end.
   python.results += 1;
@@ -2059,7 +2067,7 @@ test("a Run CV result a note's answer brings first is asked for, never left at t
   await actions.refreshFromPython();
   await settled();
 
-  assert.deepEqual([cv().status, cv().payload.score], ["current", 20]);
+  assert.deepEqual([cv().status, cvScore()], ["current", 20]);
   assert.deepEqual(sent, ["cv", "/note", "cv"]);
 });
 
@@ -2154,7 +2162,7 @@ test("a report whose request failed is left to Retry, not asked again by itself"
   held[1].reply.reject(new Error("Python stopped answering."));
   await settled();
   assert.equal(store.getState().request.evidence.validation.status, "error");
-  for (const view of ["cv", "validation", "cv", "validation"]) {
+  for (const view of /** @type {AppView[]} */ (["cv", "validation", "cv", "validation"])) {
     actions.patchView({ activeView: view });
     timers.fire();
     await settled();

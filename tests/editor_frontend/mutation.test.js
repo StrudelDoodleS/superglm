@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createEmptyEvidenceState } from "../../src/superglm/editor/app/api/contracts.js";
+import { EVIDENCE_PANELS, createEmptyEvidenceState } from "../../src/superglm/editor/app/api/contracts.js";
 import { MUTATION, isHeld, moveMutation } from "../../src/superglm/editor/app/state/mutation.js";
 
 /** @typedef {import('../../src/superglm/editor/app/api/contracts.js').EditorRequestState} EditorRequestState */
@@ -36,11 +36,9 @@ const EVENTS = {
 function request(status, recovery = status === "error" ? { message: "network down", retry } : null) {
   return {
     mutation: MUTATIONS[status],
-    evidence: {
-      metrics: createEmptyEvidenceState(),
-      summary: createEmptyEvidenceState(),
-      report: createEmptyEvidenceState()
-    },
+    evidence: /** @type {EditorRequestState['evidence']} */ (Object.fromEntries(
+      EVIDENCE_PANELS.map((panel) => [panel, createEmptyEvidenceState()])
+    )),
     recovery,
     nextSequence: 1
   };

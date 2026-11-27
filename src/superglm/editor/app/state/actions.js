@@ -42,7 +42,7 @@ import {
  * @typedef {Object} EditorStore
  * @property {()=>EditorState} getState
  * @property {(updater:(state:EditorState)=>EditorState)=>void} update
- * @property {<T>(selector:(state:EditorState)=>T, listener:(next:T, previous:T)=>void)=>()=>void} subscribe
+ * @property {<T>(selector:(state:EditorState)=>T, listener:(next:T, previous:T)=>void, equals?:(next:T, previous:T)=>boolean)=>()=>void} subscribe
  */
 /**
  * @typedef {Object} ActionClient
@@ -893,7 +893,8 @@ export function createEditorActions({
     (panels) => {
       if (panels.length > 0) scheduleReports(panels);
     },
-    (next, previous) => next.join() === previous.join()
+    (/** @type {ReportName[]} */ next, /** @type {ReportName[]} */ previous) =>
+      next.join() === previous.join()
   );
 
   /**
