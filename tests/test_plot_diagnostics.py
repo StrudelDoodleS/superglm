@@ -232,6 +232,32 @@ class TestPanelContent:
         lines = ax4.get_lines()
         assert len(lines) >= 1  # N(0,1) density
 
+    @pytest.mark.parametrize("n", [300, 1_500])
+    def test_qq_points_sit_at_blom_positions(self, n):
+        """The k-th smallest of n residuals plots at ``Phi^-1((k - 3/8) / (n + 1/4))``.
+
+        Blom (1958) counts ranks k from 1, so the smallest and largest residuals sit
+        at ``-z`` and ``+z``. Above 1,000 rows the panel reads a grid of ranks that
+        keeps the first and the last. Each x is mapped back to its rank, which must be
+        a whole number from 1 to n. Mutation check: counting ranks from 0 puts the
+        smallest of 300 at -3.024 and the largest at +2.757, against +-2.866.
+        """
+        from scipy import stats as scipy_stats
+
+        X, y = _make_poisson_data(np.random.default_rng(42), n=n)
+        model = SuperGLM(family="poisson", features={"x": Spline(n_knots=5)}, selection_penalty=0.0)
+        model.fit(X, y)
+        fig = model.plot_diagnostics(X, y, n_sim=10)
+        try:
+            theoretical = fig.get_axes()[0].lines[0].get_xdata()
+        finally:
+            plt.close(fig)
+        ranks = scipy_stats.norm.cdf(theoretical) * (n + 0.25) + 0.375
+        np.testing.assert_allclose(ranks, np.round(ranks), rtol=0.0, atol=1e-6)
+        assert np.round(ranks[0]) == 1 and np.round(ranks[-1]) == n
+        assert np.all(np.diff(ranks) > 0.5)
+        np.testing.assert_allclose(theoretical[0], -theoretical[-1], rtol=1e-9)
+
 
 # ── T4: Edge case — intercept-only model ─────────────────────────
 
