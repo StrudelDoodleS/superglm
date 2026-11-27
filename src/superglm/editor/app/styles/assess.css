@@ -283,6 +283,123 @@
   display: none;
 }
 
+/* The hover readout: a ring round the point and its text, on a halo of the plot's ground. It
+   takes no pointer events, so the plot under it keeps the hover. */
+.check-readout {
+  pointer-events: none;
+}
+
+.check-readout-ring {
+  fill: none;
+  stroke: var(--text);
+  stroke-width: 1.5;
+}
+
+.check-readout-text {
+  fill: var(--text);
+  stroke: var(--surface);
+  stroke-width: 4;
+  stroke-linejoin: round;
+  paint-order: stroke;
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A check drawn large: the header as a report's, then the plot. The frame scrolls a scene
+   taller than itself (A/E with many inputs), and keeps its scrollbar's room so a redraw at
+   its width does not change that width. */
+.check-panel {
+  min-height: 0;
+  overflow: hidden;
+  padding: 2px 4px 4px;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.check-panel[hidden] {
+  display: none;
+}
+
+.check-header {
+  max-width: none;
+}
+
+.check-heading {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  column-gap: 10px;
+}
+
+.check-split {
+  color: var(--muted);
+  font-size: var(--font-size-md);
+  font-variant-numeric: tabular-nums;
+}
+
+.check-level {
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  cursor: help;
+}
+
+.check-frame {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.check-frame > .check-plot {
+  display: block;
+}
+
+.check-frame:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.check-reason {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--font-size-md);
+}
+
+.check-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: var(--font-size-sm);
+}
+
+.check-legend[hidden] {
+  display: none;
+}
+
+.check-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.check-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  box-sizing: border-box;
+}
+
+.check-swatch-edited {
+  background: var(--ridge-fill);
+  border: 1px solid var(--blue);
+}
+
+.check-swatch-original {
+  border: 2px solid var(--grey);
+}
+
 /* A thumbnail's strokes are thinner, the fit's still wider than the edit's. */
 .assess-card-plot :is(.check-edited, .check-band, .check-reference) {
   stroke-width: 0.7;

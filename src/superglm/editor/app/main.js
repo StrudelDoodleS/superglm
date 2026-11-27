@@ -1,6 +1,6 @@
 import { canShowContributions, showsRelativity } from "./chart/display.js";
 import { EditorAPIError, editorClient } from "./api/client.js";
-import { REPORT_NAMES, isReportName } from "./api/contracts.js";
+import { REPORT_NAMES, isCheckReport, isReportName, isReportView } from "./api/contracts.js";
 import {
   bindPointLens,
   bindPointTooltip,
@@ -77,7 +77,14 @@ import { defaultRiskLine, renderRiskPanel, riskPlotsHost } from "./views/risk_pa
 import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
 import { bindAssessList, renderAssessList } from "./views/assess_list.js";
 import { bindOverview, drawOverview, overviewGroups } from "./views/assess_overview.js";
-import { compareSwitch, flaggedChecks, renderCompareSwitch } from "./views/assess_check.js";
+import {
+  bindCheckHover,
+  checkPayload,
+  compareSwitch,
+  flaggedChecks,
+  renderCheckView,
+  renderCompareSwitch
+} from "./views/assess_check.js";
 import {
   placeTermViewToggle,
   renderContextBar,
@@ -192,6 +199,17 @@ const assessRows = document.getElementById("assessRows");
 const assessOverview = document.getElementById("assessOverview");
 const assessCards = document.getElementById("assessCards");
 const overviewCompare = document.getElementById("overviewCompare");
+const checkPanel = document.getElementById("checkPanel");
+const checkFreshness = document.getElementById("checkFreshness");
+const checkRetry = document.getElementById("checkRetry");
+const checkCompare = document.getElementById("checkCompare");
+const checkFrame = document.getElementById("checkFrame");
+const checkNodes = Object.freeze({
+  title: document.getElementById("checkTitle"),
+  split: document.getElementById("checkSplit"),
+  legend: document.getElementById("checkLegend"),
+  frame: checkFrame
+});
 const reportPanel = document.getElementById("reportPanel");
 const reportTitle = document.getElementById("reportTitle");
 const reportStatus = document.getElementById("reportStatus");
@@ -1245,7 +1263,8 @@ function renderAppView(activeView) {
   riskView.hidden = tab !== "risk";
   assessView.hidden = tab !== "assess";
   assessOverview.hidden = activeView !== "assess";
-  reportPanel.hidden = !isReportName(activeView);
+  reportPanel.hidden = !isReportView(activeView);
+  checkPanel.hidden = !isCheckReport(activeView);
   assessView.dataset.view = activeView;
   // Cross-validation and Smoothing search lay the panel out their own way (cv.css).
   reportPanel.dataset.report = activeView;
@@ -1265,6 +1284,43 @@ function renderOverview() {
   const compare = compareSwitch(evidence, offered, state.view.compareOriginal);
   renderCompareSwitch(overviewCompare, compare, offered.length > 0);
   drawOverview(assessCards, overviewGroups(evidence, { offered, compare: compare.checked }));
+}
+
+// The check open large, as drawn: its scene, which the hover reads, and the frame size it was
+// drawn at, so a resize redraws it and nothing else does twice.
+let checkView = null;
+let checkDrawnAt = "";
+
+function checkFrameSize() {
+  return { width: checkFrame.clientWidth, height: checkFrame.clientHeight };
+}
+
+// Draw the open check from the evidence the page holds; it asks Python for nothing.
+function renderCheckPanel() {
+  const state = store.getState();
+  const activeView = state.view.activeView;
+  if (!isCheckReport(activeView) || checkPanel.hidden) return;
+  // The switch reads the check on screen: only it is asked again after an edit or an Undo here.
+  const shown = selectOfferedChecks(state).includes(activeView) ? [activeView] : [];
+  const evidence = state.request.evidence[activeView];
+  const compare = compareSwitch(state.request.evidence, shown, state.view.compareOriginal);
+  renderCompareSwitch(checkCompare, compare, shown.length > 0);
+  checkPanel.dataset.report = activeView;
+  checkFrame.setAttribute("aria-busy", evidence.status === "updating" ? "true" : "false");
+  checkFrame.dataset.freshness = evidence.status;
+  const payload = checkPayload(evidence);
+  const { width, height } = checkFrameSize();
+  checkDrawnAt = `${width}x${height}`;
+  checkView = renderCheckView(checkNodes, activeView, payload?.report === activeView ? payload : null,
+    { compare: compare.checked, width, height });
+  renderEvidenceFreshness(evidence, {
+    statusNode: checkFreshness,
+    retryButton: checkRetry,
+    loading: "Loading check...",
+    updating: "Updating check...",
+    stale: "Check may be stale.",
+    error: "Check unavailable."
+  });
 }
 
 function renderChartWorkspace() {
@@ -1894,6 +1950,7 @@ function renderActiveViewState({ ready, activeView }) {
   if (!ready) return;
   renderAppView(activeView);
   renderPill();
+  renderCheckPanel();
   const evidence = openReportEvidence(store.getState());
   if (evidence) renderReportEvidence(evidence, activeView);
 }
@@ -2056,14 +2113,14 @@ function renderMetricsEvidence(evidence) {
 // The evidence of the report on screen, or null on a view that is not a report.
 function openReportEvidence(state) {
   const activeView = state.view.activeView;
-  return isReportName(activeView) ? state.request.evidence[activeView] : null;
+  return isReportView(activeView) ? state.request.evidence[activeView] : null;
 }
 
 function renderReportEvidence(evidence, activeView) {
   const busy = evidence.status === "updating";
   reportFrame.setAttribute("aria-busy", busy ? "true" : "false");
   reportFrame.dataset.freshness = evidence.status;
-  if (!isReportName(activeView)) return;
+  if (!isReportView(activeView)) return;
   const title = assessEntry(activeView)?.label ?? "";
   const payloadMatchesView = evidence.payload !== null && evidence.payload.report === activeView;
   if (payloadMatchesView) {
@@ -2636,10 +2693,19 @@ bindOverview(assessCards, {
   }
 });
 // Compare with the fit draws the fitted model beside the edit; it asks Python for nothing.
-overviewCompare.addEventListener("click", () => {
-  if (overviewCompare.getAttribute("aria-disabled") === "true") return;
-  actions.patchView({ compareOriginal: !store.getState().view.compareOriginal });
-});
+// The large view's switch is the same one view flag.
+for (const button of [overviewCompare, checkCompare]) {
+  button.addEventListener("click", () => {
+    if (button.getAttribute("aria-disabled") === "true") return;
+    actions.patchView({ compareOriginal: !store.getState().view.compareOriginal });
+  });
+}
+bindCheckHover(checkFrame, () => checkView);
+// A new size redraws the open check at it, from the evidence the page holds.
+new ResizeObserver(() => {
+  const { width, height } = checkFrameSize();
+  if (`${width}x${height}` !== checkDrawnAt) renderCheckPanel();
+}).observe(checkFrame);
 renderAssessList(assessRows, store.getState().view.activeView, assessListChecks(store.getState()));
 renderOverview();
 
@@ -2762,9 +2828,13 @@ if (summaryRetry) {
 if (reportRetry) {
   reportRetry.addEventListener("click", () => {
     const activeView = store.getState().view.activeView;
-    if (isReportName(activeView)) void actions.retryEvidence(activeView);
+    if (isReportView(activeView)) void actions.retryEvidence(activeView);
   });
 }
+checkRetry.addEventListener("click", () => {
+  const activeView = store.getState().view.activeView;
+  if (isCheckReport(activeView)) void actions.retryEvidence(activeView);
+});
 summarySource.addEventListener("change", refreshSummaryView);
 refitOffset.addEventListener("click", async () => {
   const payload = await runOffsetRefit(summaryNodes(), refreshMetricsView);
@@ -2951,6 +3021,17 @@ store.subscribe(
     ...overviewReports(selectOfferedChecks(state)).map((name) => state.request.evidence[name])
   ],
   renderOverview,
+  (next, previous) => next.length === previous.length && next.every((item, index) => item === previous[index])
+);
+// The open check redraws when its evidence moves, the offer changes, or the switch is turned.
+store.subscribe(
+  (state) => [
+    state.view.activeView,
+    state.view.compareOriginal,
+    selectOfferedChecks(state).join(),
+    isCheckReport(state.view.activeView) ? state.request.evidence[state.view.activeView] : null
+  ],
+  renderCheckPanel,
   (next, previous) => next.length === previous.length && next.every((item, index) => item === previous[index])
 );
 // The list hides the checks the model does not offer and flags those that left their band.
