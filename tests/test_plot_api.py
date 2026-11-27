@@ -581,6 +581,33 @@ class TestInteractionDensity:
 
 @pytest.mark.skipif(not PLOTLY_AVAILABLE, reason="plotly not installed")
 class TestPlotlyMainEffects:
+    def test_numeric_hover_omits_undetermined_intervals(self):
+        x = np.linspace(-1.0, 1.0, 40)
+        frame = pd.DataFrame({"x": x, "twin": x, "curve": x**2})
+        y = 1.0 + x + 0.3 * x**2 + 0.1 * np.cos(4 * x)
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            discrete=False,
+            features={name: Numeric() for name in frame},
+        ).fit(frame, y)
+
+        fig = model.plot(engine="plotly")
+        link_hovers = fig.layout.updatemenus[0].buttons[1].args[0]["hovertemplate"]
+        intervals = {}
+        for i, trace in enumerate(fig.data):
+            if trace.name == "Relativity":
+                assert np.isfinite(float(trace.y[0]))
+                intervals[trace.legendgroup] = (
+                    "CI:" in trace.hovertemplate,
+                    "CI:" in link_hovers[i],
+                )
+        assert intervals == {
+            "x:line": (False, False),
+            "twin:line": (False, False),
+            "curve:line": (True, True),
+        }
+
     def test_plotly_single_main_effect_rejected(self, fitted_model):
         with pytest.raises(ValueError, match="multi-term main-effect explorer"):
             fitted_model.plot("age", engine="plotly")

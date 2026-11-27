@@ -1753,7 +1753,7 @@ def _numeric_hovertemplate(
 ) -> str:
     """Hovertemplate for one-point numeric summaries with optional CI text."""
     template = f"{name}: per unit<br>{y_label}: %{{y:.4f}}"
-    if ci_low is not None and ci_high is not None:
+    if ci_low is not None and ci_high is not None and not (np.isnan(ci_low) or np.isnan(ci_high)):
         template += f"<br>{int((1 - alpha) * 100)}% CI: [{ci_low:.4f}, {ci_high:.4f}]"
     return template + "<extra></extra>"
 
