@@ -116,8 +116,8 @@ test("the banned-word check finds each word whole, in any case or plural, and pa
 });
 
 const SHARED_ENDING = "Orange marks a check with something outside its band. Checks read the validation rows, else the training rows. "
-  + "On validation rows the band allows for the uncertainty in the fitted parameters; on the training rows it takes them as exact, "
-  + "so a validation split is the sharper test.";
+  + "On validation rows the band allows for the uncertainty in the fitted parameters, unless its split line says they are taken as exact; "
+  + "on the training rows it takes them as exact, so a validation split is the sharper test.";
 
 /** A check's or a control's Help entry, as the Help pane shows it. */
 const helpEntry = (id) => CHECK_HELP[id] ?? CONTROL_HELP[id];
@@ -127,7 +127,7 @@ test("Help for every check is in neutral words", () => {
   for (const id of [...CHECK_REPORTS, "compare_original"]) assert.deepEqual(neutralCopy(helpText(id)), [], id);
 });
 
-test("each check and Compare with the fit has its Help entry, each ending the same way", () => {
+test("each check has its Help entry ending the same way, and Compare with the fit its own two sentences", () => {
   const bodies = {
     check_qq: "Each point is a sorted quantile residual against the value it would have if each row's predicted distribution were right. "
       + "The band holds for every point at once: a model that fits leaves it only 5% of the time, so one point outside is evidence. "
@@ -146,7 +146,8 @@ test("each check and Compare with the fit has its Help entry, each ending the sa
   const titles = { check_qq: "Q-Q plot", check_pit: "PIT histogram", check_ae: "Actual over expected",
     check_calibration: "Quantile calibration", compare_original: "Compare with the fit" };
   for (const [id, body] of Object.entries(bodies)) {
-    assert.deepEqual({ ...helpEntry(id) }, { title: titles[id], body: `${body} ${SHARED_ENDING}` }, id);
+    const ending = id === "compare_original" ? "" : ` ${SHARED_ENDING}`;
+    assert.deepEqual({ ...helpEntry(id) }, { title: titles[id], body: `${body}${ending}` }, id);
   }
   // Each Help title is the entry's list label.
   for (const entry of ASSESS_GROUPS.slice(1).flatMap((group) => group.entries)) assert.equal(CHECK_HELP[entry.id].title, entry.label);

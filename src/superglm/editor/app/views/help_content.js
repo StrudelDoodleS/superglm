@@ -182,11 +182,11 @@ export const STRUCTURE_HELP = Object.freeze({
   }),
 });
 
-// Every check's Help, and Compare with the fit's, ends with what orange means and which rows a
-// check reads.
+// Every check's Help ends with what orange means and which rows a check reads.
 const CHECKS_END = "Orange marks a check with something outside its band. Checks read the validation rows, "
-  + "else the training rows. On validation rows the band allows for the uncertainty in the fitted parameters; "
-  + "on the training rows it takes them as exact, so a validation split is the sharper test.";
+  + "else the training rows. On validation rows the band allows for the uncertainty in the fitted parameters, "
+  + "unless its split line says they are taken as exact; on the training rows it takes them as exact, so a "
+  + "validation split is the sharper test.";
 
 /**
  * Each check's Help, under its list label.
@@ -239,7 +239,7 @@ export const CONTROL_HELP = Object.freeze({
   compare_original: Object.freeze({
     title: "Compare with the fit",
     body: "Draws the model as fitted in grey beside the model as edited in blue, on every check. "
-      + `It changes only what is drawn. ${CHECKS_END}`,
+      + "It changes only what is drawn.",
   }),
 });
 
