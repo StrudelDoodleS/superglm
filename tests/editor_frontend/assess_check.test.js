@@ -192,6 +192,7 @@ function fakeFrame({ width = 820, height = 520 } = {}) {
     pointerLeave() { nodes.frame.dispatch("pointerleave"); },
     key(key) { return nodes.frame.dispatch("keydown", { key }); },
     flushFrame() { for (const callback of frames.splice(0)) callback(0); },
+    pendingFrames: () => frames.length,
     readout,
     readoutShown: () => !readout().hidden,
     readoutText: () => readout().querySelector("text")?.textContent ?? "",
@@ -212,6 +213,7 @@ test("hover moves only the readout", () => {
   assert.equal(dom.readoutText(), scene.marks[nearestMark(scene.marks, 500, 200)].text);
   // Many moves in one frame read out once, at the last of them.
   for (const x of [120, 340, 560]) dom.pointerMove(x, 260);
+  assert.equal(dom.pendingFrames(), 1);
   dom.flushFrame();
   assert.equal(dom.readoutText(), scene.marks[nearestMark(scene.marks, 560, 260)].text);
   dom.pointerLeave();
