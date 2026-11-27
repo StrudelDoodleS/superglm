@@ -1330,7 +1330,11 @@ def _assess_checks_fixture(calm: Case, wrong: Case) -> dict[str, Any]:
 
 
 def _assert_close_json(stored: Any, fresh: Any, path: str = "$", scale: float | None = None):
-    """Numbers within ``64 u M``, ``M`` the largest magnitude of their list; the rest equal."""
+    """Floats within ``1e-9 M``, ``M`` the largest magnitude of their list; the rest equal.
+
+    The simulated levels pass through BLAS, so their last bits differ by OpenBLAS kernel;
+    ``1e-9`` relative is the accepted across-kernel difference.
+    """
     if isinstance(stored, dict):
         assert isinstance(fresh, dict) and stored.keys() == fresh.keys(), path
         for key in stored:
@@ -1342,7 +1346,7 @@ def _assert_close_json(stored: Any, fresh: Any, path: str = "$", scale: float | 
         for i, (a, b) in enumerate(zip(stored, fresh, strict=True)):
             _assert_close_json(a, b, f"{path}[{i}]", largest)
     elif type(stored) is float and type(fresh) is float:
-        bound = 64 * _U * (abs(stored) if scale is None else max(scale, abs(stored)))
+        bound = 1e-9 * (abs(stored) if scale is None else max(scale, abs(stored)))
         assert abs(stored - fresh) <= bound, (path, stored, fresh)
     else:
         assert type(stored) is type(fresh) and stored == fresh, (path, stored, fresh)
