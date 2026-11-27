@@ -65,15 +65,39 @@ def test_a_report_already_drawn_is_drawn_again_from_the_page(assess_page):
         assert sorted(asked) == ["cv", "diagnose", "validation"]
 
 
+def _is_report_request(request, name: str) -> bool:
+    return (
+        request.method == "POST"
+        and urlsplit(request.url).path == "/report"
+        and request.post_data_json["report"] == name
+    )
+
+
 def test_a_final_fit_that_finishes_shows_on_final_fit(assess_page):
-    """Final fit, held from before the job ran, is asked again once the job finishes."""
+    """Final fit, held from before the job ran, is asked again once the job finishes.
+
+    The open Cross-validation report is asked once after the job: an answer to a request
+    sent after the job settled is kept, not dropped and asked for again.
+    """
     with assess_page() as (page, _session):
         open_report(page, "final")
         wait_for_report(page, "final")
         assert "Run Final fit on all rows" in page.locator("#reportFrame .final-fit").inner_text()
         open_report(page, "cv")
-        page.locator('#reportFrame [data-cv-start="final_fit"]').click()
-        page.locator('#reportFrame .cv-job[data-cv-job="final_fit"][data-status="done"]').wait_for()
+        wait_for_report(page, "cv")
+        asked = []
+        page.on("request", lambda request: _is_report_request(request, "cv") and asked.append(1))
+        # The job's end asks for the open report at least once.
+        with page.expect_request(lambda request: _is_report_request(request, "cv")):
+            page.locator('#reportFrame [data-cv-start="final_fit"]').click()
+            page.locator(
+                '#reportFrame .cv-job[data-cv-job="final_fit"][data-status="done"]'
+            ).wait_for()
+        # Current only once an answer is kept; a dropped one is asked again before that.
+        page.locator('#reportFrame[aria-busy="false"][data-freshness="current"]').wait_for(
+            state="attached"
+        )
+        assert len(asked) == 1
         open_report(page, "final")
         page.locator("#reportFrame .final-fit table").wait_for()
         assert "Refitted on" in page.locator("#reportFrame .final-fit").inner_text()

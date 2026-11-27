@@ -1629,6 +1629,91 @@ test("a report asked before a job settled is asked again once its answer lands",
   assert.deepEqual(sent, ["cv", "cv"]);
 });
 
+/**
+ * A client whose `/report` replies are held until answered, in the order sent.
+ * @param {()=>Promise<unknown>} getState
+ */
+function heldReportClient(getState) {
+  /** @type {string[]} */
+  const sent = [];
+  /** @type {{body:Record<string, unknown>, reply:ReturnType<typeof deferred>}[]} */
+  const held = [];
+  const client = {
+    /** @param {string} _path @param {Record<string, unknown>} body */
+    postJSON: (_path, body) => {
+      sent.push(String(body.report));
+      const reply = deferred();
+      held.push({ body, reply });
+      return reply.promise;
+    },
+    getState
+  };
+  /** @param {number} i @param {number} revision */
+  const answer = async (i, revision) => {
+    const { body, reply } = held[i];
+    reply.resolve({
+      report: body.report, model_revision: revision, request_sequence: body.request_sequence
+    });
+    await settled();
+  };
+  return { sent, held, client, answer };
+}
+
+test("Retry of a report waits its turn behind the report in flight", async () => {
+  const { sent, held, client, answer } = heldReportClient(async () => snapshot(0));
+  const store = createEditorStore(createInitialEditorState(snapshot(0)));
+  const actions = createEditorActions({ store, client });
+  actions.scheduleReports(["cv"], { immediate: true });
+  held[0].reply.reject(new Error("offline"));
+  await settled();
+  assert.equal(store.getState().request.evidence.cv.status, "error");
+
+  actions.scheduleReports(["validation"], { immediate: true });
+  const retried = actions.retryEvidence("cv");
+  assert.deepEqual(sent, ["cv", "validation"]);
+  await answer(1, 0);
+  assert.deepEqual(sent, ["cv", "validation", "cv"]);
+  await answer(2, 0);
+  assert.equal(await retried, true);
+  assert.equal(store.getState().request.evidence.cv.status, "current");
+});
+
+test("an older snapshot from Refresh from Python leaves the newer model's reports alone", async () => {
+  const older = { ...snapshot(3), state_generation: 1 };
+  const newer = { ...snapshot(4), state_generation: 2 };
+  const reread = deferred();
+  const { sent, client, answer } = heldReportClient(() => reread.promise);
+  const store = createEditorStore(createInitialEditorState(older));
+  const actions = createEditorActions({ store, client });
+
+  const refreshing = actions.refreshFromPython();
+  // Undo commits revision 4 and asks for its open report before the re-read answers.
+  store.update((state) => commitRemote(state, newer));
+  actions.scheduleReports(["cv"], { immediate: true });
+  reread.resolve(older);
+  await refreshing;
+  assert.strictEqual(store.getState().remote.snapshot, newer);
+  await answer(0, 4);
+
+  assert.deepEqual(sent, ["cv"]);
+  assert.equal(store.getState().request.evidence.cv.status, "current");
+});
+
+test("a report opened before the first snapshot is asked once it lands", async () => {
+  const initial = deferred();
+  const { sent, client } = heldReportClient(() => initial.promise);
+  const store = createEditorStore(createInitialEditorState());
+  const actions = createEditorActions({ store, client });
+
+  const loading = actions.initialize();
+  actions.scheduleReports(["cv"], { immediate: true });
+  assert.deepEqual(sent, []);
+  initial.resolve(snapshot(0));
+  await loading;
+
+  assert.deepEqual(sent, ["cv"]);
+});
+
 test("Refresh from Python lapses every report the page holds", async () => {
   const retry = { path: "/report", payload: { report: "validation" } };
   let state = beginEvidence(createInitialEditorState(snapshot(3)), "validation", 3, 1, retry);

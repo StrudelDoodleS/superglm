@@ -13,6 +13,7 @@ import {
   waitingListChanged
 } from "./store.js";
 import { isHeld, moveMutation } from "./mutation.js";
+import { isReportName } from "../api/contracts.js";
 import { selectModelRevision, selectReportNeedsAsk } from "./selectors.js";
 
 /** @typedef {import('../api/contracts.js').ActionResult} ActionResult */
@@ -203,6 +204,8 @@ export function createEditorActions({
   /** @type {any} */
   let reportTimer = null;
   let reportsDraining = false;
+  /** @type {Map<ReportName, ((current:boolean)=>void)[]>} */
+  const reportRetries = new Map();
 
   /** @returns {boolean} whether a change is running and the next must wait for it */
   const held = () => isHeld(store.getState().request);
@@ -476,10 +479,15 @@ export function createEditorActions({
       return { ok: false, error: new Error("Python returned an editor state this page cannot read.") };
     }
     const snapshot = /** @type {EditorSnapshot} */ (candidate);
-    // What Python holds beside the model, a job's result, can have moved: every report lapses.
-    store.update((state) => withNotice(
-      withLatestView(lapseReportEvidence(commitRemote(state, snapshot)), made), snapshot
-    ));
+    // What Python holds beside the model, a job's result, can have moved: every report lapses,
+    // unless the snapshot is older than one already held and so not taken.
+    store.update((state) => {
+      const committed = commitRemote(state, snapshot);
+      const taken = committed.remote.snapshot === snapshot;
+      return withNotice(
+        withLatestView(taken ? lapseReportEvidence(committed) : committed, made), snapshot
+      );
+    });
     void Promise.resolve(scheduleVisibleEvidence(snapshot.model_revision, { immediate: true }))
       .catch(() => {});
     return { ok: true, snapshot };
@@ -513,6 +521,8 @@ export function createEditorActions({
   async function initialize() {
     const snapshot = /** @type {EditorSnapshot} */ (await client.getState());
     store.update((state) => withNotice(commitRemote(state, snapshot), snapshot));
+    // A report opened before the first snapshot waited for it.
+    void drainReports();
     return snapshot;
   }
 
@@ -779,20 +789,37 @@ export function createEditorActions({
     evidenceTimers.set(panel, setTimer(invoke, EVIDENCE_DEBOUNCE_MS));
   }
 
-  /** Ask each queued report in turn, skipping one the page already holds by its turn. */
+  /**
+   * Ask each queued report in turn, skipping one the page already holds by its turn. Before
+   * the first snapshot the queue waits; `initialize` resumes it.
+   */
   async function drainReports() {
     if (reportsDraining) return;
     reportsDraining = true;
     try {
-      while (reportQueue.size > 0) {
+      while (reportQueue.size > 0 && store.getState().remote.snapshot !== null) {
         const [panel] = reportQueue;
         reportQueue.delete(panel);
-        if (!selectReportNeedsAsk(store.getState(), panel)) continue;
-        await refreshEvidence(panel, "/report", { report: panel });
+        if (selectReportNeedsAsk(store.getState(), panel)) {
+          await refreshEvidence(panel, "/report", { report: panel });
+        }
+        settleReportRetries(panel);
       }
     } finally {
       reportsDraining = false;
     }
+  }
+
+  /**
+   * Answer each Retry of `panel` once its turn is over: whether it is now current.
+   * @param {ReportName} panel
+   */
+  function settleReportRetries(panel) {
+    const waiting = reportRetries.get(panel);
+    if (!waiting) return;
+    reportRetries.delete(panel);
+    const current = store.getState().request.evidence[panel].status === "current";
+    for (const resolve of waiting) resolve(current);
   }
 
   /**
@@ -833,10 +860,20 @@ export function createEditorActions({
     return executeStateMutation(retry);
   }
 
-  /** @param {EvidencePanel} panel @returns {Promise<boolean>} */
+  /**
+   * Ask a failed or lapsed panel again. A report takes its turn in the queue, so Python
+   * still answers one report at a time.
+   *
+   * @param {EvidencePanel} panel @returns {Promise<boolean>}
+   */
   function retryEvidence(panel) {
     const retry = store.getState().request.evidence[panel].retry;
-    return retry ? refreshEvidence(panel, retry.path, retry.payload) : Promise.resolve(false);
+    if (!retry) return Promise.resolve(false);
+    if (!isReportName(panel)) return refreshEvidence(panel, retry.path, retry.payload);
+    return new Promise((resolve) => {
+      reportRetries.set(panel, [...(reportRetries.get(panel) ?? []), resolve]);
+      scheduleReports([panel], { immediate: true });
+    });
   }
 
   /** @returns {void} */
