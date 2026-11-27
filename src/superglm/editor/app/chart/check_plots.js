@@ -50,10 +50,13 @@ const PANEL_MARGIN = { left: 44, top: 20, bottom: 24 };
 // The least height of an A/E panel's plot, and the room below the last row of panels.
 const PANEL_PLOT_MIN = 120;
 const AE_FOOT = 8;
+// A Q-Q thumbnail's points, shared between the models when compared, a third of each model's
+// share kept for the points outside its band.
 const THUMB_QQ_POINTS = 60;
-const THUMB_QQ_OUTSIDE = 20;
-// The share of a value axis left beyond the outermost drawn value.
+const THUMB_QQ_OUTSIDE_SHARE = 1 / 3;
+// The share of a value axis left beyond the outermost drawn value; a Q-Q's beyond its points.
 const PAD_SHARE = 0.04;
+const QQ_PAD_SHARE = 0.05;
 // The share of its bin a PIT bar fills, and of its group's slot a weight bar fills.
 const BAR_SHARE = 0.84;
 const WEIGHT_SHARE = 0.6;
@@ -96,10 +99,10 @@ function linear(d0, d1, r0, r1) {
 }
 
 /**
- * The range of the finite `values`, widened by `PAD_SHARE` of itself on each side.
- * @param {Iterable<number>} values @returns {[number, number]}
+ * The range of the finite `values`, widened by `share` of itself on each side.
+ * @param {Iterable<number>} values @param {number} [share] @returns {[number, number]}
  */
-function span(values) {
+function span(values, share = PAD_SHARE) {
   let lo = Infinity;
   let hi = -Infinity;
   for (const v of values) {
@@ -109,7 +112,7 @@ function span(values) {
   }
   if (!(hi >= lo)) return [0, 1];
   if (hi === lo) return [lo - 0.5, hi + 0.5];
-  const room = (hi - lo) * PAD_SHARE;
+  const room = (hi - lo) * share;
   return [lo - room, hi + room];
 }
 
@@ -161,19 +164,50 @@ function spaced(items, count) {
   return Array.from({ length: count }, (_, j) => items[Math.round((j * (items.length - 1)) / (count - 1))]);
 }
 
+/**
+ * The part of one side's half-plane, `inside(p) >= 0`, a closed polygon covers.
+ * @param {Array<[number, number]>} points @param {(p: [number, number]) => number} inside
+ * @returns {Array<[number, number]>}
+ */
+function clipSide(points, inside) {
+  /** @type {Array<[number, number]>} */
+  const kept = [];
+  for (const [j, b] of points.entries()) {
+    const a = points[(j + points.length - 1) % points.length];
+    const [fa, fb] = [inside(a), inside(b)];
+    if ((fa >= 0) !== (fb >= 0)) {
+      const t = fa / (fa - fb);
+      kept.push([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])]);
+    }
+    if (fb >= 0) kept.push(b);
+  }
+  return kept;
+}
+
+/**
+ * A closed polygon clipped to `rect`, one side at a time (Sutherland and Hodgman, "Reentrant
+ * polygon clipping", Comm. ACM 17(1), 1974): exact for any polygon against a convex window.
+ * @param {Array<[number, number]>} points @param {Rect} rect @returns {Array<[number, number]>}
+ */
+function clipPolygon(points, rect) {
+  /** @type {Array<(p: [number, number]) => number>} */
+  const sides = [(p) => p[0] - rect.left, (p) => rect.right - p[0], (p) => p[1] - rect.top, (p) => rect.bottom - p[1]];
+  return sides.reduce(clipSide, points);
+}
+
 /** @param {QQStats} s @param {number} i */
 const qqOutside = (s, i) => s.observed[i] < s.band_lower[i] || s.observed[i] > s.band_upper[i];
 
 /**
- * The positions of a Q-Q body's points a scene draws: all of them, or for a thumbnail up to
- * `THUMB_QQ_OUTSIDE` outside the band and evenly spaced others up to `THUMB_QQ_POINTS` in all.
- * @param {QQStats} s @param {Box} box @returns {number[]}
+ * The positions of a Q-Q body's points a scene draws: all of them, or for a thumbnail up to a
+ * third of `budget` outside the band and evenly spaced others up to `budget` in all.
+ * @param {QQStats} s @param {Box} box @param {number} budget @returns {number[]}
  */
-function qqShown(s, box) {
+function qqShown(s, box, budget) {
   const all = s.index.map((_, i) => i);
   if (!box.thumb) return all;
-  const outside = spaced(all.filter((i) => qqOutside(s, i)), THUMB_QQ_OUTSIDE);
-  const inside = spaced(all.filter((i) => !qqOutside(s, i)), THUMB_QQ_POINTS - outside.length);
+  const outside = spaced(all.filter((i) => qqOutside(s, i)), Math.round(budget * THUMB_QQ_OUTSIDE_SHARE));
+  const inside = spaced(all.filter((i) => !qqOutside(s, i)), budget - outside.length);
   return [...outside, ...inside].sort((a, b) => a - b);
 }
 
@@ -181,14 +215,16 @@ function qqShown(s, box) {
 function qqScene(editedBody, originalBody, box) {
   const edited = /** @type {QQStats} */ (/** @type {unknown} */ (editedBody));
   const original = originalBody && /** @type {QQStats} */ (/** @type {unknown} */ (originalBody));
-  const shown = qqShown(edited, box);
-  const shownOriginal = original ? qqShown(original, box) : [];
+  const budget = original ? THUMB_QQ_POINTS / 2 : THUMB_QQ_POINTS;
+  const shown = qqShown(edited, box, budget);
+  const shownOriginal = original ? qqShown(original, box, budget) : [];
   /** @type {number[]} */
   const values = [];
-  for (const i of shown) values.push(edited.theoretical[i], edited.observed[i], edited.band_lower[i], edited.band_upper[i]);
+  for (const i of shown) values.push(edited.theoretical[i], edited.observed[i]);
   if (original) for (const i of shownOriginal) values.push(original.theoretical[i], original.observed[i]);
-  // One range for both axes, so y = x is the plot's diagonal.
-  const [lo, hi] = span(values);
+  // One range for both axes, so y = x is the plot's diagonal; the points fill it, and the
+  // band's flared ends are clipped to it.
+  const [lo, hi] = span(values, QQ_PAD_SHARE);
   const rect = plotRect(box);
   const sx = linear(lo, hi, rect.left, rect.right);
   const sy = linear(lo, hi, rect.bottom, rect.top);
@@ -198,7 +234,8 @@ function qqScene(editedBody, originalBody, box) {
   const marks = [];
   /** @type {(bound: number[]) => (i: number) => [number, number]} */
   const along = (bound) => (i) => [sx(edited.theoretical[i]), sy(bound[i])];
-  parts.band.push(`${polyline([...shown.map(along(edited.band_upper)), ...[...shown].reverse().map(along(edited.band_lower))])} Z`);
+  const band = clipPolygon([...shown.map(along(edited.band_upper)), ...[...shown].reverse().map(along(edited.band_lower))], rect);
+  if (band.length > 0) parts.band.push(`${polyline(band)} Z`);
   parts.reference.push(polyline([[sx(lo), sy(lo)], [sx(hi), sy(hi)]]));
   if (original) for (const i of shownOriginal) parts.original.push(dot(sx(original.theoretical[i]), sy(original.observed[i]), r));
   for (const i of shown) {

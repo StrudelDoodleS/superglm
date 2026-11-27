@@ -52,6 +52,31 @@ test("the Q-Q scene puts each drawn point at its residual and keeps y = x on the
   assert.ok(!scene.layers.some((l) => l.role === "original"));
 });
 
+test("the Q-Q axes span the points with a 5% margin, and the band is clipped to the plot", () => {
+  const calm = FIXTURE.calm.check_qq, body = calm.models.edited;
+  const wide = structuredClone(calm);
+  wide.models.edited.band_lower = body.theoretical.map((v) => v - 10);
+  wide.models.edited.band_upper = body.theoretical.map((v) => v + 10);
+  const values = [...body.theoretical, ...body.observed];
+  const [lo, hi] = [Math.min(...values), Math.max(...values)];
+  const pad = (hi - lo) * 0.05;
+  const plain = checkScene("check_qq", calm, BOX, { compare: false });
+  for (const scene of [plain, checkScene("check_qq", wide, BOX, { compare: false })]) {
+    // The diagonal runs corner to corner of the plot: its ends are the range's.
+    const [left, bottom, right, top] = subpaths(layer(scene, "reference").d)[0];
+    const sx = affine(lo - pad, left, hi + pad, right);
+    const sy = affine(lo - pad, bottom, hi + pad, top);
+    for (const [i, mark] of scene.marks.entries()) {
+      near(mark.x, sx(body.theoretical[i]), 0.02);
+      near(mark.y, sy(body.observed[i]), 0.02);
+    }
+    for (const [x, y] of absolutePoints(layer(scene, "band").d)) {
+      if (x !== null) assert.ok(left - 0.011 <= x && x <= right + 0.011, `x ${x}`);
+      if (y !== null) assert.ok(top - 0.011 <= y && y <= bottom + 0.011, `y ${y}`);
+    }
+  }
+});
+
 test("a flagged Q-Q draws its outside points in their own role", () => {
   const scene = checkScene("check_qq", FIXTURE.wrong.check_qq, BOX, { compare: false });
   const outside = layer(scene, "outside");
@@ -275,6 +300,11 @@ test("a thumbnail has no text, at most 60 Q-Q points, and stays in its box", () 
   const count = (role) => (layer(qq, role)?.d.match(/M/g) ?? []).length;
   assert.ok(count("edited") + count("outside") <= 60);
   assert.equal(count("outside"), 20);
+  // Compared, the two models share the one budget of 60 points.
+  const both = checkScene("check_qq", FIXTURE.edited.check_qq, THUMB, { compare: true });
+  const drawn = (role) => (layer(both, role)?.d.match(/M/g) ?? []).length;
+  assert.ok(drawn("original") > 0);
+  assert.ok(drawn("edited") + drawn("outside") + drawn("original") <= 60, String(drawn("original")));
   // The thumbnail of A/E is its predicted-Mean bands alone.
   const ae = checkScene("check_ae", FIXTURE.wrong.check_ae, THUMB, { compare: false });
   assert.equal(subpaths(layer(ae, "reference").d).length, 1);
