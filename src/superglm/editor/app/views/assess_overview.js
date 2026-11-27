@@ -8,6 +8,7 @@ import { cvSourceLine, meanSpreadText } from "./cv_tab.js";
 import { verdictParts } from "./diagnose_tab.js";
 
 /** @typedef {import('../api/contracts.js').ReportName} ReportName */
+/** @typedef {import('../api/contracts.js').ReportView} ReportView */
 /** @typedef {import('../api/contracts.js').EvidenceStatus} EvidenceStatus */
 /** @typedef {import('../api/contracts.js').EvidenceState} EvidenceState */
 /**
@@ -22,6 +23,7 @@ import { verdictParts } from "./diagnose_tab.js";
 /** @typedef {import('../api/contracts.js').CVReportPayload} CVReportPayload */
 /** @typedef {import('./diagnose_tab.js').DiagnosePayload} DiagnosePayload */
 /** @typedef {import('../state/assess.js').AssessEntry} AssessEntry */
+/** An entry with a card: a report view's. @typedef {AssessEntry & {id: ReportView}} CardEntry */
 /**
  * The parts of a validation report a card reads.
  * @typedef {{name?: string, n_obs?: number, available?: boolean, error?: string,
@@ -115,7 +117,7 @@ export function smoothingCard(payload) {
 
 /**
  * The face of card `id` from the payload of the report it reads.
- * @param {ReportName} id @param {unknown} payload
+ * @param {ReportView} id @param {unknown} payload
  * @returns {CardFace}
  */
 function cardFace(id, payload) {
@@ -133,7 +135,7 @@ function cardFace(id, payload) {
 
 /**
  * An entry's card. Final fit reads the cv report, whose `final_fit` says whether one ran.
- * @param {Readonly<AssessEntry>} entry @param {Record<ReportName, EvidenceState>} evidence
+ * @param {Readonly<CardEntry>} entry @param {Record<ReportName, EvidenceState>} evidence
  * @returns {CardModel}
  */
 function overviewCard(entry, evidence) {
@@ -153,12 +155,20 @@ function overviewCard(entry, evidence) {
 }
 
 /**
- * The entries of `group` that have a card: the reports. A check has none yet.
+ * Whether `entry` has a card: a report view does, a check has none yet.
+ * @param {AssessEntry} entry @returns {entry is CardEntry}
+ */
+function hasCard(entry) {
+  return isReportView(entry.id);
+}
+
+/**
+ * The entries of `group` that have a card.
  * @param {Readonly<{entries: readonly AssessEntry[]}>} group
- * @returns {readonly AssessEntry[]}
+ * @returns {CardEntry[]}
  */
 function carded(group) {
-  return group.entries.filter((entry) => isReportView(entry.id));
+  return group.entries.filter(hasCard);
 }
 
 /**
