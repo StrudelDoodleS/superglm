@@ -1461,6 +1461,23 @@ def test_busy_state_makes_all_editor_regions_inert_and_cleans_up(open_editor_pag
             assert page.locator(selector).get_attribute("inert") is None
 
 
+def test_a_refit_that_ends_in_assess_gives_focus_to_the_open_assess_entry(open_editor_page):
+    """Refit's button, disabled once the last waiting change is applied, cannot take focus
+    back, and the Editor's fallbacks are hidden in Assess: the entry open in its list does."""
+    with open_editor_page() as (page, _session):
+        page.locator("#assessTab").click()
+        page.locator('[data-assess-entry="validation"]').click()
+        page.locator('[data-assess-entry="validation"][aria-current="true"]').wait_for()
+        refit = page.locator("#refitPendingAction")
+        refit.evaluate("node => { node.disabled = false; node.focus(); }")
+        assert refit.evaluate("node => document.activeElement === node")
+        page.evaluate("window.__superglmTest.setAppBusy(true, 'Refitting', 'Waiting')")
+        refit.evaluate("node => { node.disabled = true; }")
+        page.evaluate("window.__superglmTest.setAppBusy(false)")
+
+        assert page.evaluate("document.activeElement?.dataset.assessEntry") == "validation"
+
+
 def test_text_selection_is_scoped_and_reduced_motion_stops_spinner(open_editor_page):
     with open_editor_page() as (page, _session):
         page.get_by_role("button", name="Help", exact=True).click()

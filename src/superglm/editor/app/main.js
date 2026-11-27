@@ -1144,7 +1144,12 @@ function setAppBusy(active, title = "Working...", detail = "") {
 }
 
 function restoreFocusAfterBusy(opener) {
-  for (const candidate of [opener, featureListNodes.search, inspectorToggle]) {
+  // In Assess the Editor's controls are hidden: the entry open in its list takes focus, else
+  // its tab.
+  const fallbacks = editorView?.hidden
+    ? [assessRows?.querySelector('[aria-current="true"]'), document.getElementById("assessTab")]
+    : [featureListNodes.search, inspectorToggle];
+  for (const candidate of [opener, ...fallbacks]) {
     if (!candidate || !candidate.isConnected || typeof candidate.focus !== "function") continue;
     candidate.focus({ preventScroll: true });
     if (document.activeElement === candidate) return;
