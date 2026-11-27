@@ -47,11 +47,12 @@ export function assessListMarkup(view) {
   return rowMarkup(OVERVIEW_ENTRY, current) + groups.join("");
 }
 
-/** @param {HTMLElement} root @returns {HTMLElement[]} */
+/** The entries shown, in list order. @param {HTMLElement} root @returns {HTMLElement[]} */
 function rowsOf(root) {
-  return Array.from(root.querySelectorAll("[data-assess-entry]")).filter(
-    (row) => row instanceof HTMLElement && !row.hidden,
+  const rows = Array.from(root.querySelectorAll("[data-assess-entry]")).filter(
+    /** @returns {row is HTMLElement} */ (row) => row instanceof HTMLElement,
   );
+  return rows.filter((row) => !row.hidden);
 }
 
 /**

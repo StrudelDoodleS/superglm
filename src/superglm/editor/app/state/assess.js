@@ -14,7 +14,7 @@ import { isReportName } from "../api/contracts.js";
 
 /** @type {Readonly<OverviewEntry>} */
 export const OVERVIEW_ENTRY = Object.freeze({
-  id: "assess",
+  id: /** @type {"assess"} */ ("assess"),
   label: "Overview",
   hint: "One card per report, each with its headline number.",
   icon: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z",
