@@ -1,7 +1,6 @@
 // @ts-nocheck
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { CHECK_REPORTS } from "../../src/superglm/editor/app/api/contracts.js";
@@ -15,6 +14,7 @@ import {
   smoothingCard,
   validationCard
 } from "../../src/superglm/editor/app/views/assess_overview.js";
+import { CHECK_FIXTURE as FIXTURE, withCurrentChecks } from "./check_evidence.js";
 
 // Trimmed from a SuperLSS session's /report (demo 8767) and a bare Poisson GLM's.
 const LSS_LABELS = { log_score: "Log score", crps: "CRPS", actual_expected: "Actual / expected" };
@@ -224,14 +224,9 @@ test("the card's markup carries its marker, clipped unless it is shown", () => {
   assert.match(markup, /data-card="cv"[^]*?<span class="assess-card-marker" data-shown="false">Earlier result, updating<\/span>/);
 });
 
-const FIXTURE = JSON.parse(readFileSync(new URL("./fixtures/assess_checks.json", import.meta.url)));
-
 /** The page's evidence with every check of `reports` current, the reports still loading. */
 function evidenceFrom(reports) {
-  const evidence = createInitialEditorState(snapshot(0)).request.evidence;
-  const checks = Object.fromEntries(CHECK_REPORTS.map((name) =>
-    [name, { ...evidence[name], status: "current", payload: reports[name] }]));
-  return { ...evidence, ...checks };
+  return withCurrentChecks(createInitialEditorState(snapshot(0)).request.evidence, reports);
 }
 
 test("the overview shows a check group only for checks the model offers", () => {

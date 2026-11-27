@@ -1,7 +1,6 @@
 // @ts-nocheck
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { CHECK_REPORTS } from "../../src/superglm/editor/app/api/contracts.js";
@@ -12,9 +11,8 @@ import {
   compareSwitch,
   flaggedChecks
 } from "../../src/superglm/editor/app/views/assess_check.js";
+import { CHECK_FIXTURE as FIXTURE, withCurrentChecks } from "./check_evidence.js";
 import { neutralCopy } from "./neutral_copy.js";
-
-const FIXTURE = JSON.parse(readFileSync(new URL("./fixtures/assess_checks.json", import.meta.url)));
 
 function snapshot() {
   return {
@@ -29,10 +27,7 @@ function snapshot() {
 
 /** The page's evidence with every check of `reports` current. */
 function evidenceFrom(reports) {
-  const evidence = createInitialEditorState(snapshot()).request.evidence;
-  const checks = Object.fromEntries(CHECK_REPORTS.map((name) =>
-    [name, { ...evidence[name], status: "current", payload: reports[name] }]));
-  return { ...evidence, ...checks };
+  return withCurrentChecks(createInitialEditorState(snapshot()).request.evidence, reports);
 }
 
 test("each card face counts what left its band and names one figure", () => {
