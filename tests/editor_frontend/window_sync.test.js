@@ -106,24 +106,95 @@ test("a window tells the others and hears them", () => {
   assert.doesNotThrow(() => createWindowSync({ name: "n", onMessage: () => {}, Channel: undefined }).announce(heard[0]));
 });
 
-test("a re-read asked for while one runs is run once more after it, not once per ask", async () => {
-  let runs = 0;
-  let release;
-  const reread = coalesce(async () => {
-    runs += 1;
-    if (runs === 1) await new Promise((resolve) => { release = resolve; });
-    return runs;
+// A run per call of `next()`: each run waits until the test finishes it, and
+// resolves to its number, or rejects when the test says so.
+function gatedRuns() {
+  const runs = [];
+  const run = () => new Promise((resolve, reject) => {
+    runs.push({ number: runs.length + 1, resolve, reject });
   });
+  const tick = () => new Promise((resolve) => { setImmediate(resolve); });
+  const finish = async (number, error = null) => {
+    await tick();
+    const entry = runs[number - 1];
+    if (error) entry.reject(error);
+    else entry.resolve(entry.number);
+    await tick();
+  };
+  return { runs, run, finish, tick };
+}
+
+test("asks made while a run goes share one trailing run", async () => {
+  const { runs, run, finish, tick } = gatedRuns();
+  const reread = coalesce(run);
   const first = reread();
-  await new Promise((resolve) => { setImmediate(resolve); });
+  await tick();
+  const during = [reread(), reread(), reread(), reread(), reread()];
+  assert.ok(during.every((promise) => promise === during[0]));
+  assert.equal(runs.length, 1);
+  await finish(1);
+  assert.equal(runs.length, 2);
+  await finish(2);
+  assert.deepEqual(await Promise.all([first, ...during]), [1, 2, 2, 2, 2, 2]);
+  assert.equal(runs.length, 2);
+});
+
+test("an ask a run's completion makes cannot hold back an ask already waiting", async () => {
+  const { runs, run, finish, tick } = gatedRuns();
+  const reread = coalesce(run);
+  // Each run's completion asks again, as a caller that re-reads on every answer would.
+  let again = 5;
+  const askOnCompletion = (promise) => promise.then(() => {
+    if (again-- > 0) askOnCompletion(reread());
+  });
+  askOnCompletion(reread());
+  await tick();
+  const waiting = reread();
+  let got = null;
+  waiting.then((value) => { got = value; });
+  await finish(1);
+  await finish(2);
+  assert.equal(got, 2);
+  for (let number = 3; number <= runs.length; number += 1) await finish(number);
+});
+
+test("a run that fails fails only the asks it covers", async () => {
+  const { run, finish, tick } = gatedRuns();
+  const reread = coalesce(run);
+  const first = assert.rejects(reread(), /first failed/);
+  await tick();
   const second = reread();
-  const third = reread();
-  assert.equal(second, third);
-  assert.equal(runs, 1);
-  release();
-  // Each ask resolves to the run that covers it: the later asks to the run after the first.
-  assert.deepEqual(await Promise.all([first, second, third]), [1, 2, 2]);
-  assert.equal(await reread(), 3);
+  await finish(1, new Error("first failed"));
+  await first;
+  const third = assert.rejects(reread(), /third failed/);
+  await finish(2);
+  assert.equal(await second, 2);
+  await finish(3, new Error("third failed"));
+  await third;
+  const fourth = reread();
+  await finish(4);
+  assert.equal(await fourth, 4);
+});
+
+test("an ask never gets the outcome of a run that started before it", async () => {
+  const { runs, run, finish, tick } = gatedRuns();
+  const reread = coalesce(run);
+  const asked = [];
+  const ask = () => {
+    const started = runs.length;
+    asked.push(reread().then((number) => [started, number]));
+  };
+  ask();
+  await tick();
+  ask();
+  ask();
+  await finish(1);
+  ask();
+  await finish(2);
+  await finish(3);
+  for (const [started, number] of await Promise.all(asked)) {
+    assert.ok(number > started, `an ask made after ${started} runs got run ${number}`);
+  }
 });
 
 // One editor's windows over a channel that delivers later, beside a Python session
@@ -263,6 +334,44 @@ test("a Final fit's end, its key told before its notice, costs each window at mo
   assert.ok(fromMain.reads <= 2 && fromPopup.reads <= 2, JSON.stringify([fromMain, fromPopup]));
   assert.deepEqual(fromMain.asks, ["cv"]);
   assert.equal(fromPopup.lapses, 1);
+  assert.equal(main.key, popup.key);
+  await world.run();
+  assert.deepEqual([main.reads, popup.reads], [0, 0]);
+});
+
+test("a Final fit's end both windows poll at once costs each at most three reads, then the windows agree and go quiet", async () => {
+  const world = editorWorld();
+  const main = world.editorWindow();
+  const popup = world.editorWindow();
+  await world.load(main);
+  await world.load(popup);
+  const started = { id: "ff-1", phase: "started" };
+  world.python.running = ["ff-1"];
+  const startedHere = main.peer.sawJob(started);
+  await world.run();
+  await startedHere;
+  await popup.peer.sawJob(started);
+  await world.run();
+  main.count();
+  popup.count();
+
+  // Both polls see the end first, so both start their settlement re-read. The main
+  // window's is answered first: its moved key and its notice reach the popup while the
+  // popup still holds the key from before the end.
+  const settled = { id: "ff-1", phase: "settled" };
+  world.python.running = [];
+  world.python.finalFit = true;
+  const ended = [
+    main.peer.sawJob(settled, main.settle("final_fit")),
+    popup.peer.sawJob(settled, popup.settle("final_fit")),
+  ];
+  await world.run();
+  await Promise.all(ended);
+  await world.run();
+
+  const [fromMain, fromPopup] = [main.count(), popup.count()];
+  assert.ok(fromMain.reads <= 3 && fromPopup.reads <= 3, JSON.stringify([fromMain, fromPopup]));
+  assert.deepEqual([fromMain.asks, fromPopup.asks], [["cv"], ["cv"]]);
   assert.equal(main.key, popup.key);
   await world.run();
   assert.deepEqual([main.reads, popup.reads], [0, 0]);

@@ -360,6 +360,8 @@ def test_the_second_window_follows_a_job_and_starts_or_cancels_none(assess_page)
         # A request after the clicks, answered by the interception probe's route.
         popup.evaluate("() => fetch('/__intercepting__').then((reply) => reply.status)")
         assert sent == []
+        # The held polls' route callbacks must not outlive the page.
+        popup.unroute_all(behavior="ignoreErrors")
 
 
 def test_the_second_window_hides_the_editor_before_its_script_runs(assess_page, chromium_browser):

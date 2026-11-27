@@ -126,9 +126,13 @@ export function createWindowSync({ name, onMessage, Channel }) {
 }
 
 /**
- * Run `run` once for a burst of asks: an ask while it runs runs it once more
- * after, however many came. Each ask resolves to the result of the run that
- * covers it, the one that started after it was made.
+ * Run `run` once for a burst of asks: single flight with one trailing run.
+ * With nothing running, an ask starts a run and gets its promise. Every ask
+ * made while a run goes shares one trailing promise, and the trailing run
+ * starts the moment the running one settles, before any other callback can
+ * start a run, and settles that promise with its own outcome. So each ask
+ * gets the outcome of a run that started after it, waits behind at most one
+ * run, and the queue is at most one promise.
  * @template T
  * @param {() => Promise<T>} run
  * @returns {() => Promise<T>}
@@ -136,25 +140,43 @@ export function createWindowSync({ name, onMessage, Channel }) {
 export function coalesce(run) {
   /** @type {Promise<T>|null} */
   let running = null;
-  /** @type {Promise<T>|null} */
-  let queued = null;
+  /** @type {{promise: Promise<T>, resolve: (value: T) => void, reject: (reason: unknown) => void}|null} */
+  let trailing = null;
+
   /** @returns {Promise<T>} */
-  function ask() {
-    if (running === null) {
-      const current = Promise.resolve().then(run);
-      running = current;
-      current.then(() => { running = null; }, () => { running = null; });
-      return current;
-    }
-    if (queued === null) {
-      queued = running.then(() => undefined, () => undefined).then(() => {
-        queued = null;
-        return ask();
-      });
-    }
-    return queued;
+  function start() {
+    const current = Promise.resolve().then(run);
+    running = current;
+    // Registered before any caller's handler, so it runs first when `current` settles.
+    current.then(handOn, handOn);
+    return current;
   }
-  return ask;
+
+  function handOn() {
+    const next = trailing;
+    trailing = null;
+    if (next === null) {
+      running = null;
+      return;
+    }
+    start().then(next.resolve, next.reject);
+  }
+
+  return function ask() {
+    if (running === null) return start();
+    if (trailing === null) {
+      /** @type {(value: T) => void} */
+      let resolve = () => {};
+      /** @type {(reason: unknown) => void} */
+      let reject = () => {};
+      const promise = /** @type {Promise<T>} */ (new Promise((onResolve, onReject) => {
+        resolve = onResolve;
+        reject = onReject;
+      }));
+      trailing = { promise, resolve, reject };
+    }
+    return trailing.promise;
+  };
 }
 
 /** @param {JobNotice} notice */
