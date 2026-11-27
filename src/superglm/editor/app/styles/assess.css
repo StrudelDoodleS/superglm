@@ -117,6 +117,7 @@
 }
 
 .assess-card {
+  position: relative;
   display: grid;
   align-content: start;
   gap: 4px;
@@ -151,9 +152,25 @@
   color: var(--muted);
 }
 
-.assess-card-note {
+.assess-card-note,
+.assess-card-marker {
   color: var(--muted);
   font-size: var(--font-size-sm);
+}
+
+/* An earlier report's number says so: in sight where its update failed, and to a
+   screen reader alone while it is asked again. */
+.assess-card-marker:empty {
+  display: none;
+}
+
+.assess-card-marker[data-shown="false"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 /* Open in new window sits at the end of the overview's and each report's header.

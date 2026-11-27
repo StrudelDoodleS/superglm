@@ -8,6 +8,8 @@ import {
   cvCard,
   finalCard,
   overviewCards,
+  overviewGroups,
+  overviewMarkup,
   smoothingCard,
   validationCard
 } from "../../src/superglm/editor/app/views/assess_overview.js";
@@ -188,4 +190,34 @@ test("a card shows its report's payload, and Final fit takes the freshness of th
     ["cv", "Log score 10.4182 ± 0.0486", "stale"],
     ["final", "400 rows", "stale"],
     ["diagnose", "2 of 2 fits converged", "updating"]]);
+});
+
+test("a number from an earlier report says so in words, in sight where its update failed", () => {
+  const evidence = createInitialEditorState(snapshot(0)).request.evidence;
+  const held = (status, error = null) => ({ ...evidence.validation, status, payload: LSS_VALIDATION, error });
+  const card = (validation) => overviewCards({ ...evidence, validation })[0];
+  const face = (c) => [c.value, c.note, c.marker, c.markerShown];
+
+  assert.deepEqual(face(card(held("current"))), ["Log score 10.4", "Validation, 331 rows", "", false]);
+  // Asked again: the earlier number stays, muted, and a screen reader hears it is earlier.
+  assert.deepEqual(face(card(held("updating"))),
+    ["Log score 10.4", "Validation, 331 rows", "Earlier result, updating", false]);
+  assert.deepEqual(face(card(held("stale"))),
+    ["Log score 10.4", "Validation, 331 rows", "Earlier result, may be out of date", false]);
+  // The update failed over a payload kept: the card says the number is earlier, and why.
+  assert.deepEqual(face(card(held("stale", "Python stopped answering."))),
+    ["Log score 10.4", "Update failed. Python stopped answering.", "Earlier result", true]);
+  // A failure with nothing to keep, and a first request, show no number.
+  assert.deepEqual(face(card({ ...evidence.validation, status: "error", error: "boom" })),
+    ["—", "Report unavailable.", "", false]);
+  assert.deepEqual(face(card(evidence.validation)), ["—", "Loading report...", "", false]);
+});
+
+test("the card's markup carries its marker, clipped unless it is shown", () => {
+  const evidence = createInitialEditorState(snapshot(0)).request.evidence;
+  const failed = { ...evidence.validation, status: "stale", payload: LSS_VALIDATION, error: "offline" };
+  const updating = { ...evidence.cv, status: "updating", payload: LSS_CV };
+  const markup = overviewMarkup(overviewGroups({ ...evidence, validation: failed, cv: updating }));
+  assert.match(markup, /data-card="validation"[^]*?<span class="assess-card-marker" data-shown="true">Earlier result<\/span><span class="assess-card-note">Update failed\. offline<\/span>/);
+  assert.match(markup, /data-card="cv"[^]*?<span class="assess-card-marker" data-shown="false">Earlier result, updating<\/span>/);
 });

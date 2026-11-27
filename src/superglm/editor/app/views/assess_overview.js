@@ -12,8 +12,11 @@ import { verdictParts } from "./diagnose_tab.js";
 /** @typedef {import('../api/contracts.js').EvidenceState} EvidenceState */
 /**
  * One overview card: its report, the report's name, the headline number, the
- * line under it, and the state of the evidence the number comes from.
- * @typedef {{id: ReportName, title: string, value: string, note: string, freshness: EvidenceStatus}} CardModel
+ * line under it, and the state of the evidence the number comes from. A number
+ * from an earlier report carries a `marker` saying so, in words: shown where the
+ * update failed, and read only by a screen reader while it is asked again.
+ * @typedef {{id: ReportName, title: string, value: string, note: string, freshness: EvidenceStatus,
+ *   marker: string, markerShown: boolean}} CardModel
  */
 /** @typedef {{name: string, cards: CardModel[]}} CardGroup */
 /** @typedef {import('../api/contracts.js').CVReportPayload} CVReportPayload */
@@ -31,6 +34,7 @@ import { verdictParts } from "./diagnose_tab.js";
 /** A card's headline number and the line under it. @typedef {{value: string, note: string}} CardFace */
 
 const MISSING = "—";
+const EARLIER = "Earlier result";
 
 /**
  * The report's first score on the validation split, else on the first split it scored.
@@ -133,11 +137,19 @@ function cardFace(id, payload) {
  * @returns {CardModel}
  */
 function overviewCard(entry, evidence) {
-  const { status, payload } = evidence[entry.id === "final" ? "cv" : entry.id];
-  const face = payload !== null
-    ? cardFace(entry.id, payload)
-    : { value: MISSING, note: status === "error" ? "Report unavailable." : "Loading report..." };
-  return { id: entry.id, title: entry.label, ...face, freshness: status };
+  const { status, payload, error } = evidence[entry.id === "final" ? "cv" : entry.id];
+  const card = { id: entry.id, title: entry.label, freshness: status, marker: "", markerShown: false };
+  if (payload === null) {
+    return { ...card, value: MISSING, note: status === "error" ? "Report unavailable." : "Loading report..." };
+  }
+  const face = cardFace(entry.id, payload);
+  // A failed update keeps the earlier report on screen, as the report does, and says why.
+  if (error) {
+    return { ...card, value: face.value, note: `Update failed. ${error}`, marker: EARLIER, markerShown: true };
+  }
+  if (status === "updating") return { ...card, ...face, marker: `${EARLIER}, updating` };
+  if (status === "stale") return { ...card, ...face, marker: `${EARLIER}, may be out of date` };
+  return { ...card, ...face };
 }
 
 /**
@@ -154,6 +166,7 @@ function cardMarkup(card) {
   return `<button class="assess-card" type="button" data-card="${card.id}" data-freshness="${card.freshness}">` +
     `<span class="assess-card-title">${escapeHTML(card.title)}</span>` +
     `<span class="assess-card-value">${escapeHTML(card.value)}</span>` +
+    `<span class="assess-card-marker" data-shown="${card.markerShown}">${escapeHTML(card.marker)}</span>` +
     `<span class="assess-card-note">${escapeHTML(card.note)}</span></button>`;
 }
 
@@ -171,8 +184,8 @@ export function overviewMarkup(groups) {
 }
 
 /**
- * Draw the cards into `root`: built once, then each card's value, note and freshness
- * written in place, so a card being pressed or holding focus stays the same element
+ * Draw the cards into `root`: built once, then each card's value, marker, note and
+ * freshness written in place, so a card being pressed or holding focus stays the same element
  * while another report lands.
  * @param {HTMLElement} root
  * @param {CardGroup[]} groups
@@ -187,8 +200,13 @@ export function drawOverview(root, groups) {
     if (!(node instanceof HTMLElement)) continue;
     node.dataset.freshness = card.freshness;
     const value = node.querySelector(".assess-card-value");
+    const marker = node.querySelector(".assess-card-marker");
     const note = node.querySelector(".assess-card-note");
     if (value) value.textContent = card.value;
+    if (marker instanceof HTMLElement) {
+      marker.textContent = card.marker;
+      marker.dataset.shown = String(card.markerShown);
+    }
     if (note) note.textContent = card.note;
   }
 }
