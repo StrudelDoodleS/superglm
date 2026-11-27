@@ -414,10 +414,12 @@ def _ae_body(
         outside += int(np.count_nonzero((ratio - half > 1.0) | (ratio + half < 1.0)))
     actual = float(np.sum(tables[0]["actual"]))
     expected = float(np.sum(tables[0]["expected"]))
+    # A zero expected total has no ratio: NaN, as the library's grouped ratios, sent as null.
+    ratio = actual / expected if expected != 0.0 else math.nan
     body = {
         "tables": tables,
         "z": z,
-        "overall": {"actual": actual, "expected": expected, "ratio": actual / expected},
+        "overall": {"actual": actual, "expected": expected, "ratio": ratio},
         **found.fields(),
     }
     return _answered(body, outside=outside, cells=cells)

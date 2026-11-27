@@ -16,6 +16,7 @@ from scipy import special, stats
 from superglm import (
     Categorical,
     GammaLS,
+    GaussianLS,
     GeneralizedParetoLSS,
     Spline,
     SuperGLM,
@@ -372,6 +373,27 @@ def test_a_law_without_finite_variance_has_no_ae_interval(heavy_gpd):
         )
         assert body["available"] and body["level_source"] == "simulated"
         assert body["n_draws"] == 99 and body["local_level"] == replicates.levels[report]
+
+
+@pytest.mark.parametrize(
+    ("name", "source"), [("train", "retained_fit_data"), ("validation", "supplied")]
+)
+def test_a_zero_expected_total_has_no_overall_ratio(name, source):
+    """An intercept-only Gaussian fit to alternating -1 and +1: its Mean is 0 on every row.
+
+    Actual over expected of the whole split is then undefined, NaN as the library's grouped
+    ratios are, which the body sends as ``null``; the card still answers, on the rows the
+    model was fitted on and on a held-out split.
+    """
+    family = GaussianLS()
+    X = pd.DataFrame({"x": np.arange(40.0)})
+    y = np.tile([-1.0, 1.0], 20)
+    lss = SuperLSS(family, family.location(), family.scale()).fit(X, y)
+    split = EvaluationDataset(name=name, label=name.title(), X=X, y=y, source=source)
+    body = check_body("check_ae", lss, split, inputs=["x"])
+    assert body["available"] and body["overall"]["expected"] == 0.0
+    assert body["overall"]["ratio"] is None
+    json.dumps(body, allow_nan=False)
 
 
 def test_an_error_that_is_not_about_variance_still_raises(calm, monkeypatch):
