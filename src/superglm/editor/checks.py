@@ -25,6 +25,8 @@ from collections.abc import Iterable, Sequence
 from typing import Any
 
 import numpy as np
+import scipy.linalg
+import scipy.spatial
 from numpy.typing import NDArray
 from scipy import special, stats
 

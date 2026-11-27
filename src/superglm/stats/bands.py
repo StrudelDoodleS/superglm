@@ -89,6 +89,7 @@ class UniformBand:
 
 def _bounds(n: int, eta: float) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """The ``eta / 2`` and ``1 - eta / 2`` quantiles of ``Beta(i, n + 1 - i)``, ``i = 1..n``."""
+    import scipy.linalg
     from scipy import special
 
     i = np.arange(1, n + 1, dtype=np.float64)
@@ -106,6 +107,7 @@ def _global_level(lower: NDArray[np.float64], upper: NDArray[np.float64]) -> flo
     ``N`` over the counts between ``#{upper_i <= t}`` and ``#{lower_i < t}``: a count outside
     breaks a bound already passed or, since ``N`` only grows, one still ahead.
     """
+    import scipy.linalg
     from scipy import special
 
     n = lower.size
@@ -166,6 +168,7 @@ def _local_level(n: int, alpha: float) -> float:
 @functools.lru_cache(maxsize=32)
 def _stored_band(points: int, level: float) -> tuple[bytes, bytes, bytes, float]:
     """The band's lower and upper bounds and medians as bytes, and its local level."""
+    import scipy.linalg
     from scipy import special
 
     eta = float(_local_level(points, level))
@@ -253,6 +256,7 @@ def bonferroni_binomial_band(
         If a count of trials is not a whole number from 0 to ``2**53 - 1``, a probability
         lies outside ``[0, 1]``, or ``alpha`` is below ``1e-12`` or not below 1.
     """
+    import scipy.spatial
     from scipy import stats
 
     n_trials, p = np.broadcast_arrays(
