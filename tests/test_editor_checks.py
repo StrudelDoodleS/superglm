@@ -495,9 +495,11 @@ def test_a_split_beyond_the_occurrence_cap_draws_the_sample_the_checks_read(calm
 
     The split's own responses at that sample, scored as a replicate, give the PIT histogram
     bin by bin. Quantile calibration of the response and actual over expected read every
-    occurrence, which no replicate draws, so they keep the known level and say why. Mutation
-    check: expanding every occurrence before taking the sample allocates an 800 MB index and
-    breaks the envelope.
+    occurrence, which no replicate draws, so they keep the known level and say why. The
+    sample spans 98 blocks of 1,024 given responses, the last ragged. Mutation checks:
+    expanding every occurrence before taking the sample allocates an 800 MB index and breaks
+    the envelope; scoring only the first block, or dropping the ragged last one, fails the PIT
+    histogram.
     """
     weighted, _ = calm_frequency
     counts = weighted.validation.sample_weight * 250_000

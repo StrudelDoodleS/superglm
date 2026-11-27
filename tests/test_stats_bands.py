@@ -300,6 +300,34 @@ def _direct_levels(rows):
     return np.array([_exact_order_statistic_level(row)[0] for row in rows])
 
 
+def test_replicates_past_the_screening_block_read_as_one_block_does(monkeypatch):
+    """Twenty replicates, the three with the least levels in the last, ragged block of 16.
+
+    Every level is the one-block result to the bit, the three least are the direct Beta tails,
+    and the tails are read at the same points. Mutation check: a screen or a final pass that
+    drops the replicates after its first block fails it.
+    """
+    rng = np.random.default_rng(13)
+    u = np.sort(rng.uniform(size=(20, 300)) ** rng.uniform(0.9, 1.1, size=(20, 1)), axis=1)
+    order = np.argsort(-_direct_levels(u))
+    u, direct = u[order], _direct_levels(u)[order]
+    assert len(u) > bands._SCREEN_BLOCK
+    read = []
+    tails = bands._beta_tail_levels
+
+    def spy(values, i, n):
+        read.append(np.ravel(values))
+        return tails(values, i, n)
+
+    monkeypatch.setattr(bands, "_beta_tail_levels", spy)
+    levels = bands._order_statistic_levels(u, resolve=3)
+    blocked, read[:] = np.sort(np.concatenate(read)), []
+    monkeypatch.setattr(bands, "_SCREEN_BLOCK", len(u))
+    np.testing.assert_array_equal(levels, bands._order_statistic_levels(u, resolve=3))
+    np.testing.assert_array_equal(blocked, np.sort(np.concatenate(read)))
+    np.testing.assert_array_equal(levels[-3:], direct[-3:])
+
+
 @pytest.mark.parametrize("replicates", [19, 99])
 def test_the_monte_carlo_level_of_order_statistics_is_the_direct_level_at_barnards_rank(
     replicates,
@@ -341,11 +369,12 @@ def test_a_least_tail_beside_a_band_edge_float64_cannot_place_is_read(n, ratio):
 def test_a_screening_target_of_zero_reads_every_row():
     """Two rows at level zero make the target zero, where the band holds every value.
 
-    Every row's level is then its direct one, the positive ones included. Mutation check:
-    filling the rows the band does not resolve with the target, zero, fails it.
+    Every row's level is then its direct one, the positive ones included, across a ragged
+    second block of rows. Mutation checks: filling the rows the band does not resolve with the
+    target, zero, or reading only the first block, fails it.
     """
     rng = np.random.default_rng(11)
-    positive = np.sort(rng.uniform(size=(3, 40)), axis=1)
+    positive = np.sort(rng.uniform(size=(17, 40)), axis=1)
     rows = np.concatenate([np.zeros((2, 40)), positive])
     direct = _direct_levels(rows)
     assert np.all(direct[:2] == 0.0) and np.all(direct[2:] > 0.0)

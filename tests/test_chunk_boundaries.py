@@ -600,6 +600,9 @@ BOUNDARY_TESTS: dict[str, str | tuple[str, ...]] = {
     "distributional/solver/chunks.py::iter_row_chunks": (
         "test_declared_scalar_vertical_slice.py::test_fixed_penalty_independent_objective_chunk_replay_and_offsets"
     ),
+    "editor/checks.py::_replicates": (
+        "test_editor_checks.py::test_a_split_beyond_the_occurrence_cap_draws_the_sample_the_checks_read"
+    ),
     "features/_spline_runtime.py::score": (
         "test_chunk_boundaries.py::test_a_reml_fit_reads_the_same_across_chunk_boundaries"
     ),
@@ -758,6 +761,10 @@ BOUNDARY_TESTS: dict[str, str | tuple[str, ...]] = {
     ),
     "solvers/mode_score.py::weighted_column_centring": (
         "test_chunk_boundaries.py::test_the_dense_centres_and_centring_read_every_chunk"
+    ),
+    "stats/bands.py::_order_statistic_levels": (
+        "test_stats_bands.py::test_replicates_past_the_screening_block_read_as_one_block_does",
+        "test_stats_bands.py::test_a_screening_target_of_zero_reads_every_row",
     ),
 }
 _SRC = Path(importlib.import_module("superglm").__file__).parent
