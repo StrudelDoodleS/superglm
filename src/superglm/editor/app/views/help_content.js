@@ -182,6 +182,46 @@ export const STRUCTURE_HELP = Object.freeze({
   }),
 });
 
+// Every check's Help, and Compare with the fit's, ends with what orange means and which rows a
+// check reads.
+const CHECKS_END = "Orange marks a check with something outside its band. Checks read the validation rows, "
+  + "else the training rows. On validation rows the band allows for the uncertainty in the fitted parameters; "
+  + "on the training rows it takes them as exact, so a validation split is the sharper test.";
+
+/**
+ * Each check's Help, under its list label.
+ * @type {Readonly<Record<string, Readonly<HelpEntry>>>}
+ */
+export const CHECK_HELP = Object.freeze({
+  check_qq: Object.freeze({
+    title: "Q-Q plot",
+    body: "Each point is a sorted quantile residual against the value it would have if each row's predicted "
+      + "distribution were right. The band holds for every point at once: a model that fits leaves it only 5% of "
+      + "the time, so one point outside is evidence. A curve above the band at the top end means larger values "
+      + "come more often than the model allows. Band: equal local levels (Aldor-Noiman et al. 2013; Weine, "
+      + `McPeek and Abney 2023). ${CHECKS_END}`,
+  }),
+  check_pit: Object.freeze({
+    title: "PIT histogram",
+    body: "Each observed value is placed at its own predicted distribution's cumulative probability, and the 20 "
+      + "bars count them. A model that fits gives flat bars. A hump means its predicted distributions are too "
+      + "wide, a U too narrow, a slope a shifted Mean, and one end alone a tail. The band holds for all 20 bars "
+      + `at once. ${CHECKS_END}`,
+  }),
+  check_ae: Object.freeze({
+    title: "Actual over expected",
+    body: "Observed total over predicted total, for each band of predicted Mean and each group of every input. "
+      + "1 is on target. Each interval comes from the predicted distribution's own variance, and all of them "
+      + `hold at once, so a group outside its interval is evidence. ${CHECKS_END}`,
+  }),
+  check_calibration: Object.freeze({
+    title: "Quantile calibration",
+    body: "For each predicted quantile, the share of rows above it against the share that should be. The 99% "
+      + "quantile should be exceeded by 1% of rows. The band is exact binomial and holds for all 11 quantiles "
+      + `at once. ${CHECKS_END}`,
+  }),
+});
+
 /** @type {Readonly<Record<string, Readonly<HelpEntry>>>} */
 export const CONTROL_HELP = Object.freeze({
   level: Object.freeze({
@@ -195,6 +235,11 @@ export const CONTROL_HELP = Object.freeze({
   new_window: Object.freeze({
     title: "Open in new window",
     body: "Show this view in a second browser window, for another monitor. It follows every change made here.",
+  }),
+  compare_original: Object.freeze({
+    title: "Compare with the fit",
+    body: "Draws the model as fitted in grey beside the model as edited in blue, on every check. "
+      + `It changes only what is drawn. ${CHECKS_END}`,
   }),
 });
 
@@ -388,6 +433,13 @@ export const HELP_SECTIONS = Object.freeze([
     ]),
   }),
   Object.freeze({
+    title: "Checks",
+    keys: Object.freeze(["check_qq", "check_pit", "check_ae", "check_calibration", "compare_original"]),
+    items: Object.freeze([
+      "Hover over a check's plot to read out the nearest point. With the plot focused, the arrow keys step from point to point.",
+    ]),
+  }),
+  Object.freeze({
     title: "Smoothing search",
     items: Object.freeze([
       "Smoothing search, under Assess, says whether each fit converged, whether its numbers can be used, and what to try if not. It reads what the fits recorded, so opening it refits nothing. It lists All rows, the model you are editing fitted on every training row, and, when folds are available, each fold, and opens on the first fit that did not converge.",
@@ -438,8 +490,12 @@ export function helpForElement(element) {
     return OPERATION_HELP[operation];
   }
 
+  // A disabled control's own reason outranks its help, as for tools.
   const control = element.dataset.helpControl;
-  if (control && CONTROL_HELP[control]) return CONTROL_HELP[control];
+  if (control && CONTROL_HELP[control]) {
+    const disabled = element.getAttribute("aria-disabled") === "true" || element.hasAttribute("disabled");
+    if (!(disabled && element.dataset.popoverBody)) return CONTROL_HELP[control];
+  }
 
   const title = element.dataset.popoverTitle;
   if (!title) return null;

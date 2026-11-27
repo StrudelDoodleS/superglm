@@ -20,7 +20,12 @@ import {
   overviewReports,
   tabOf,
 } from "../../src/superglm/editor/app/state/assess.js";
-import { HELP_SECTIONS } from "../../src/superglm/editor/app/views/help_content.js";
+import {
+  CHECK_HELP,
+  CONTROL_HELP,
+  HELP_SECTIONS,
+  helpForElement,
+} from "../../src/superglm/editor/app/views/help_content.js";
 import { BANNED_WORDS, neutralCopy } from "./neutral_copy.js";
 
 test("every entry is a report the page can ask for, once, in list order", () => {
@@ -108,4 +113,68 @@ test("the banned-word check finds each word whole, in any case or plural, and pa
   assert.deepEqual(neutralCopy("Losses"), ["loss", "losses"]);
   assert.deepEqual(neutralCopy("A bookmark, a closed claimant, unpriced"), []);
   for (const word of BANNED_WORDS) assert.ok(neutralCopy(`the ${word.toUpperCase()} here`).includes(word), word);
+});
+
+const SHARED_ENDING = "Orange marks a check with something outside its band. Checks read the validation rows, else the training rows. "
+  + "On validation rows the band allows for the uncertainty in the fitted parameters; on the training rows it takes them as exact, "
+  + "so a validation split is the sharper test.";
+
+/** A check's or a control's Help entry, as the Help pane shows it. */
+const helpEntry = (id) => CHECK_HELP[id] ?? CONTROL_HELP[id];
+const helpText = (id) => `${helpEntry(id).title} ${helpEntry(id).body}`;
+
+test("Help for every check is in neutral words", () => {
+  for (const id of [...CHECK_REPORTS, "compare_original"]) assert.deepEqual(neutralCopy(helpText(id)), [], id);
+});
+
+test("each check and Compare with the fit has its Help entry, each ending the same way", () => {
+  const bodies = {
+    check_qq: "Each point is a sorted quantile residual against the value it would have if each row's predicted distribution were right. "
+      + "The band holds for every point at once: a model that fits leaves it only 5% of the time, so one point outside is evidence. "
+      + "A curve above the band at the top end means larger values come more often than the model allows. "
+      + "Band: equal local levels (Aldor-Noiman et al. 2013; Weine, McPeek and Abney 2023).",
+    check_pit: "Each observed value is placed at its own predicted distribution's cumulative probability, and the 20 bars count them. "
+      + "A model that fits gives flat bars. A hump means its predicted distributions are too wide, a U too narrow, a slope a shifted Mean, "
+      + "and one end alone a tail. The band holds for all 20 bars at once.",
+    check_ae: "Observed total over predicted total, for each band of predicted Mean and each group of every input. 1 is on target. "
+      + "Each interval comes from the predicted distribution's own variance, and all of them hold at once, so a group outside its "
+      + "interval is evidence.",
+    check_calibration: "For each predicted quantile, the share of rows above it against the share that should be. "
+      + "The 99% quantile should be exceeded by 1% of rows. The band is exact binomial and holds for all 11 quantiles at once.",
+    compare_original: "Draws the model as fitted in grey beside the model as edited in blue, on every check. It changes only what is drawn.",
+  };
+  const titles = { check_qq: "Q-Q plot", check_pit: "PIT histogram", check_ae: "Actual over expected",
+    check_calibration: "Quantile calibration", compare_original: "Compare with the fit" };
+  for (const [id, body] of Object.entries(bodies)) {
+    assert.deepEqual({ ...helpEntry(id) }, { title: titles[id], body: `${body} ${SHARED_ENDING}` }, id);
+  }
+  // Each Help title is the entry's list label.
+  for (const entry of ASSESS_GROUPS.slice(1).flatMap((group) => group.entries)) assert.equal(CHECK_HELP[entry.id].title, entry.label);
+  const section = HELP_SECTIONS.find((s) => s.title === "Checks");
+  assert.deepEqual(section?.keys, ["check_qq", "check_pit", "check_ae", "check_calibration", "compare_original"]);
+  assert.deepEqual(neutralCopy(JSON.stringify(section)), []);
+});
+
+class FakeHelpElement {
+  constructor(dataset, attributes = {}) { this.dataset = dataset; this.attributes = attributes; }
+  getAttribute(name) { return this.attributes[name] ?? null; }
+  hasAttribute(name) { return name in this.attributes; }
+}
+
+test("a disabled control's own reason outranks its Help, as a tool's does", () => {
+  const previous = globalThis.HTMLElement;
+  globalThis.HTMLElement = FakeHelpElement;
+  try {
+    const reason = "The model is as fitted; there is no edit to compare.";
+    const dataset = { helpControl: "compare_original", popoverTitle: "Compare with the fit", popoverBody: reason };
+    assert.deepEqual({ ...helpForElement(new FakeHelpElement(dataset, { "aria-disabled": "true" })) },
+      { title: "Compare with the fit", body: reason });
+    assert.deepEqual({ ...helpForElement(new FakeHelpElement(dataset, { disabled: "" })) },
+      { title: "Compare with the fit", body: reason });
+    assert.equal(helpForElement(new FakeHelpElement(dataset, { "aria-disabled": "false" })), CONTROL_HELP.compare_original);
+    // A disabled control with no reason of its own keeps its Help.
+    assert.equal(helpForElement(new FakeHelpElement({ helpControl: "new_window" }, { disabled: "" })), CONTROL_HELP.new_window);
+  } finally {
+    globalThis.HTMLElement = previous;
+  }
 });
