@@ -118,6 +118,78 @@ test("A/E draws a panel per table with its interval around each ratio", () => {
   for (const name of ["1", "10", "a", "b", "c"]) assert.ok(texts.includes(name), name);
 });
 
+/** The first `k` groups of an A/E table. */
+const firstGroups = (table, k) => ({
+  ...table,
+  ...Object.fromEntries(["ratio", "lower", "upper", "n", "weight", "actual", "expected"].map((key) => [key, table[key].slice(0, k)]))
+});
+
+test("A/E compare draws every band of both models when they bin predicted Mean differently", () => {
+  const band = FIXTURE.edited.check_ae.models.edited.tables[0];
+  for (const [ke, kf] of [[1, 10], [10, 1]]) {
+    const payload = structuredClone(FIXTURE.edited.check_ae);
+    const fitted = firstGroups(band, kf);
+    // The fitted model's last band reaches highest: the scale must reach it, and only it.
+    fitted.upper[kf - 1] = 3;
+    payload.models.edited.tables = [firstGroups(band, ke)];
+    payload.models.original.tables = [fitted];
+    const scene = checkScene("check_ae", payload, BOX, { compare: true });
+    const [left, , right] = subpaths(layer(scene, "reference").d)[0];
+    const top = scene.labels.find((l) => l.text === "Predicted Mean").y + 8;
+    const bottom = subpaths(layer(scene, "weight").d)[0][1];
+    const drawn = [1];
+    for (const t of [payload.models.edited.tables[0], fitted]) drawn.push(...t.ratio, ...t.lower, ...t.upper);
+    const [lo, hi] = [Math.min(...drawn), Math.max(...drawn)];
+    const pad = (hi - lo) * 0.04;
+    const y = affine(lo - pad, bottom, hi + pad, top);
+    // Each series sits at its own ordinals, the middle of k equal slots across the panel.
+    const ordinal = (i, k) => left + ((i + 0.5) * (right - left)) / k;
+    const case_ = `${ke} against ${kf}`;
+    assert.equal(scene.marks.length, ke, case_);
+    for (const [i, mark] of scene.marks.entries()) {
+      assert.ok(Math.abs(mark.x - ordinal(i, ke)) <= 4.011, case_);
+      near(mark.y, y(payload.models.edited.tables[0].ratio[i]), 0.02);
+      assert.ok(mark.text.startsWith(`predicted Mean band ${i + 1} `), mark.text);
+    }
+    const dots = subpaths(layer(scene, "original").d).filter((p) => p.length > 3);
+    const ticks = subpaths(layer(scene, "original").d).filter((p) => p.length === 3);
+    assert.equal(dots.length, kf, case_);
+    for (const [i, [x, at]] of dots.entries()) {
+      assert.ok(Math.abs(x - ordinal(i, kf)) <= 4.011, case_);
+      near(at, y(fitted.ratio[i]), 0.02);
+      near(ticks[i][1], y(fitted.lower[i]), 0.02);
+      near(ticks[i][2], y(fitted.upper[i]), 0.02);
+    }
+  }
+});
+
+test("A/E keeps each panel 120 px tall when there are many inputs, and the view grows to hold them", () => {
+  const payload = structuredClone(FIXTURE.edited.check_ae);
+  const [band, input] = payload.models.edited.tables;
+  payload.models.edited.tables = [band, ...Array.from({ length: 16 }, (_, j) => ({ ...input, covariate: `x${j + 1}` }))];
+  const scene = checkScene("check_ae", payload, BOX, { compare: false });
+  assert.ok(scene.height > BOX.height, String(scene.height));
+  assert.ok(sceneMarkup(scene).startsWith(`<svg class="check-plot" viewBox="0 0 820 ${scene.height}"`));
+  // A panel's group names sit 16 px below its plot and its title 8 px above; the title is
+  // written after the panel's other labels.
+  let names = [];
+  const heights = [];
+  for (const label of scene.labels) {
+    if (label.anchor === "middle") names.push(label);
+    if (label.axis && label.text !== "Actual over expected") {
+      heights.push(names[0].y - 16 - (label.y + 8));
+      names = [];
+    }
+  }
+  assert.equal(heights.length, 17);
+  for (const h of heights) assert.ok(h >= 120, String(h));
+  for (const { d } of scene.layers) {
+    for (const [, y] of absolutePoints(d)) if (y !== null) assert.ok(y <= scene.height, String(y));
+  }
+  // The thumbnail is still the predicted-Mean bands alone.
+  assert.equal(subpaths(layer(checkScene("check_ae", payload, THUMB, { compare: false }), "reference").d).length, 1);
+});
+
 test("quantile calibration reads shares on a log axis against 1 - p", () => {
   const payload = FIXTURE.wrong.check_calibration, body = payload.models.edited, q = body.quantiles;
   const scene = checkScene("check_calibration", payload, BOX, { compare: false });

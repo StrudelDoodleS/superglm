@@ -47,6 +47,9 @@ const MARGIN = { left: 52, right: 16, top: 32, bottom: 46 };
 // A/E's panels: the gap between them, and the room for each one's title and tick labels.
 const PANEL_GAP = { col: 24, row: 12 };
 const PANEL_MARGIN = { left: 44, top: 20, bottom: 24 };
+// The least height of an A/E panel's plot, and the room below the last row of panels.
+const PANEL_PLOT_MIN = 120;
+const AE_FOOT = 8;
 const THUMB_QQ_POINTS = 60;
 const THUMB_QQ_OUTSIDE = 20;
 // The share of a value axis left beyond the outermost drawn value.
@@ -286,22 +289,27 @@ function aePanel(parts, labels, marks, rect, domain, table, original, box) {
   const sy = linear(domain[0], domain[1], rect.bottom, rect.top);
   const k = table.ratio.length;
   const slot = (rect.right - rect.left) / k;
-  const shift = original ? Math.min(COMPARE_SHIFT, slot * 0.15) : 0;
+  // Each model bins its own predicted Mean, so each series sits at its own groups' ordinals.
+  const at = (/** @type {AETable} */ t, /** @type {number} */ i) => rect.left + ((i + 0.5) * (rect.right - rect.left)) / t.ratio.length;
+  const shift = (/** @type {AETable} */ t) => (original ? Math.min(COMPARE_SHIFT, ((rect.right - rect.left) / t.ratio.length) * 0.15) : 0);
   const heaviest = Math.max(0, ...table.weight.filter(Number.isFinite));
   const r = radius(box);
   parts.reference.push(hline(rect.left, rect.right, sy(1)));
+  if (original) {
+    for (const i of original.ratio.keys()) {
+      if (!aeDrawn(original, i)) continue;
+      const x = at(original, i) - shift(original);
+      parts.original.push(vline(x, sy(original.lower[i]), sy(original.upper[i])), dot(x, sy(original.ratio[i]), r));
+    }
+  }
   for (let i = 0; i < k; i++) {
-    const centre = rect.left + (i + 0.5) * slot;
+    const centre = at(table, i);
     if (heaviest > 0 && table.weight[i] > 0) {
       const h = (rect.bottom - rect.top) * WEIGHT_HEIGHT * (table.weight[i] / heaviest);
       parts.weight.push(bar(centre - (slot * WEIGHT_SHARE) / 2, centre + (slot * WEIGHT_SHARE) / 2, rect.bottom, rect.bottom - h));
     }
-    if (original && aeDrawn(original, i)) {
-      parts.original.push(vline(centre - shift, sy(original.lower[i]), sy(original.upper[i])),
-        dot(centre - shift, sy(original.ratio[i]), r));
-    }
     if (!aeDrawn(table, i)) continue;
-    const x = centre + shift;
+    const x = centre + shift(table);
     const y = sy(table.ratio[i]);
     const outside = table.lower[i] > 1 || table.upper[i] < 1;
     parts.interval.push(vline(x, sy(table.lower[i]), sy(table.upper[i])));
@@ -337,8 +345,8 @@ function aeScene(editedBody, originalBody, box) {
   const pairs = tables.map((table) => ({ table, original: original?.tables[edited.tables.indexOf(table)] ?? null }));
   /** @type {number[]} */
   const values = [1];
-  for (const { table, original: fitted } of pairs) {
-    for (const t of fitted ? [table, fitted] : [table]) values.push(...t.ratio, ...t.lower, ...t.upper);
+  for (const t of pairs.flatMap((pair) => (pair.original ? [pair.table, pair.original] : [pair.table]))) {
+    for (const i of t.ratio.keys()) if (aeDrawn(t, i)) values.push(t.ratio[i], t.lower[i], t.upper[i]);
   }
   // One scale for every panel, so their ratios read alike.
   const domain = span(values);
@@ -346,9 +354,12 @@ function aeScene(editedBody, originalBody, box) {
   const rows = Math.ceil(tables.length / cols);
   const outer = box.thumb
     ? plotRect(box)
-    : { left: 8, top: MARGIN.top, right: box.width - MARGIN.right, bottom: box.height - 8 };
+    : { left: 8, top: MARGIN.top, right: box.width - MARGIN.right, bottom: box.height - AE_FOOT };
   const cellW = (outer.right - outer.left - PANEL_GAP.col * (cols - 1)) / cols;
-  const cellH = (outer.bottom - outer.top - PANEL_GAP.row * (rows - 1)) / rows;
+  const fill = (outer.bottom - outer.top - PANEL_GAP.row * (rows - 1)) / rows;
+  // A large view's panels keep a readable plot; when the box cannot hold them, the view grows.
+  const cellH = box.thumb ? fill : Math.max(fill, PANEL_PLOT_MIN + PANEL_MARGIN.top + PANEL_MARGIN.bottom);
+  const height = box.thumb ? box.height : Math.max(box.height, outer.top + rows * cellH + PANEL_GAP.row * (rows - 1) + AE_FOOT);
   const parts = emptyParts();
   /** @type {Label[]} */
   const labels = [];
@@ -359,12 +370,12 @@ function aeScene(editedBody, originalBody, box) {
     const top = outer.top + Math.floor(k / cols) * (cellH + PANEL_GAP.row);
     const rect = box.thumb
       ? outer
-      : { left: left + PANEL_MARGIN.left, top: top + PANEL_MARGIN.top, right: left + cellW, bottom: Math.max(top + PANEL_MARGIN.top + 1, top + cellH - PANEL_MARGIN.bottom) };
+      : { left: left + PANEL_MARGIN.left, top: top + PANEL_MARGIN.top, right: left + cellW, bottom: top + cellH - PANEL_MARGIN.bottom };
     aePanel(parts, labels, marks, rect, domain, table, fitted, box);
   }
   labels.push({ x: 8, y: MARGIN.top - 14, text: "Actual over expected", anchor: "start", axis: true });
   marks.sort((a, b) => a.x - b.x);
-  return finish(box, parts, labels, marks);
+  return finish({ ...box, height }, parts, labels, marks);
 }
 
 /** @param {CheckBody} editedBody @param {CheckBody|null} originalBody @param {Box} box @returns {Scene} */
