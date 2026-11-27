@@ -68,6 +68,9 @@ export function cvCard(payload) {
 
 /**
  * The rows a final fit refitted on, or that none has run: never a verdict on the refit.
+ * The note is the report's own `final_fit.note`, which names the rows a book without
+ * validation data refits on; a refusal's reason, and a final fit the model has moved
+ * past, say that instead.
  * @param {CVReportPayload} cvPayload
  * @returns {CardFace}
  */
@@ -76,10 +79,12 @@ export function finalCard(cvPayload) {
   if (final.done) {
     return {
       value: `${countText(final.n_rows)} rows`,
-      note: final.stale ? "The model changed after the final fit." : "Refitted on train and validation rows.",
+      note: final.stale
+        ? "The model changed after the final fit."
+        : final.note || "Refitted on train and validation rows.",
     };
   }
-  return { value: "Not run", note: final.reason ?? "Run Final fit on all rows from Cross-validation." };
+  return { value: "Not run", note: final.reason ?? (final.note || "Run Final fit on all rows from Cross-validation.") };
 }
 
 /**

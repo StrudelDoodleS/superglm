@@ -60,6 +60,11 @@ const NO_CV = {
   results: []
 };
 const NO_FINAL_ROWS = "Final fit needs the rows the model was fitted on.";
+// final_fit.note on a book with no validation rows, before and after a final fit (bare GLM).
+const TRAIN_ONLY_FINAL = "No validation data was supplied, so Final fit uses the train rows only.";
+function trainOnly(payload) {
+  return { ...payload, final_fit: { ...payload.final_fit, note: TRAIN_ONLY_FINAL } };
+}
 
 function withDelta(delta) {
   return { ...LSS_VALIDATION_SPLIT, metrics: { ...LSS_VALIDATION_SPLIT.metrics, delta: { log_score: delta } } };
@@ -123,6 +128,16 @@ test("Final fit reads the cv report's final_fit", () => {
   assert.deepEqual(finalCard(finalDone(LSS_CV, 400, false)), { value: "400 rows", note: "Refitted on train and validation rows." });
   assert.equal(finalCard(finalDone(LSS_CV, 400, true)).note, "The model changed after the final fit.");
   assert.equal(finalCard(refused(LSS_CV, NO_FINAL_ROWS)).note, NO_FINAL_ROWS);
+});
+
+test("Final fit on a book with no validation rows says it refits on the train rows", () => {
+  assert.deepEqual(finalCard(trainOnly(LSS_CV)), { value: "Not run", note: TRAIN_ONLY_FINAL });
+  const done = finalCard(trainOnly(finalDone(LSS_CV, 800, false)));
+  assert.deepEqual(done, { value: "800 rows", note: TRAIN_ONLY_FINAL });
+  assert.doesNotMatch(done.note, /train and validation/);
+  // The model moving past the final fit, and a refusal, say so over the note.
+  assert.equal(finalCard(trainOnly(finalDone(LSS_CV, 800, true))).note, "The model changed after the final fit.");
+  assert.equal(finalCard(refused(trainOnly(LSS_CV), NO_FINAL_ROWS)).note, NO_FINAL_ROWS);
 });
 
 test("Smoothing search counts the fits", () => {
