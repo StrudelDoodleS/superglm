@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import tracemalloc
+from pathlib import Path
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -965,6 +966,7 @@ def test_a_correct_model_is_flagged_at_its_level_on_a_held_out_split(calm):
 
 # The /report route: each check for the model as edited and, after an edit, as fitted.
 
+FIXTURE = Path(__file__).parent / "editor_frontend" / "fixtures" / "assess_checks.json"
 #: The validation report's payload keys, read on master before the checks joined /report.
 VALIDATION_KEYS = {
     "available",
@@ -980,6 +982,9 @@ VALIDATION_KEYS = {
     "splits",
     "title",
 }
+#: What the widget adds to ``check_report_payload``; the fixture holds the payload alone.
+_WIDGET_FIELDS = ("model_revision", "request_sequence", "in_force")
+_U = 2.0**-53
 
 
 def _session(case: Case) -> EditorSession:
@@ -1158,3 +1163,83 @@ def test_the_four_reports_answer_as_before(calm_session):
     assert set(_ask(widget, "validation")) == VALIDATION_KEYS
     for report in ("cv", "final", "diagnose"):
         assert _ask(widget, report)["report"] == report
+
+
+def _reports(session: EditorSession) -> dict[str, Any]:
+    widget = session.widget()
+    try:
+        answers = {report: _ask(widget, report) for report in CHECK_REPORTS}
+    finally:
+        widget.close()
+    return {
+        report: {key: value for key, value in answer.items() if key not in _WIDGET_FIELDS}
+        for report, answer in answers.items()
+    }
+
+
+def _assess_checks_fixture(calm: Case, wrong: Case) -> dict[str, Any]:
+    """The four check payloads the editor's Assess graphs draw, by case.
+
+    ``calm`` and ``wrong`` read the validation split (simulated levels); ``edited`` is the calm
+    fit after a weighted average over ``mean:x``'s first six points, with the fitted model
+    beside it; ``train`` is the calm fit on the rows it was fitted on (known levels).
+    """
+    edited = _session(calm)
+    _average(edited, 6)
+    train = {
+        report: check_report_payload(
+            report,
+            dataset=calm.train,
+            compares_edit=False,
+            edited=check_body(report, calm.lss, calm.train, inputs=["x", "g"]),
+            original=None,
+        )
+        for report in CHECK_REPORTS
+    }
+    cases = {
+        "calm": _reports(_session(calm)),
+        "wrong": _reports(_session(wrong)),
+        "edited": _reports(edited),
+        "train": train,
+    }
+    return json.loads(json.dumps(cases, allow_nan=False))
+
+
+def _assert_close_json(stored: Any, fresh: Any, path: str = "$", scale: float | None = None):
+    """Numbers within ``64 u M``, ``M`` the largest magnitude of their list; the rest equal."""
+    if isinstance(stored, dict):
+        assert isinstance(fresh, dict) and stored.keys() == fresh.keys(), path
+        for key in stored:
+            _assert_close_json(stored[key], fresh[key], f"{path}.{key}")
+    elif isinstance(stored, list):
+        assert isinstance(fresh, list) and len(stored) == len(fresh), path
+        numbers = [abs(x) for x in stored if type(x) is float]
+        largest = max(numbers, default=0.0)
+        for i, (a, b) in enumerate(zip(stored, fresh, strict=True)):
+            _assert_close_json(a, b, f"{path}[{i}]", largest)
+    elif type(stored) is float and type(fresh) is float:
+        bound = 64 * _U * (abs(stored) if scale is None else max(scale, abs(stored)))
+        assert abs(stored - fresh) <= bound, (path, stored, fresh)
+    else:
+        assert type(stored) is type(fresh) and stored == fresh, (path, stored, fresh)
+
+
+def test_the_assess_checks_fixture_is_current(calm, wrong):
+    stored = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    fresh = _assess_checks_fixture(calm, wrong)
+    assert {case["check_qq"]["models"]["edited"]["level_source"] for case in fresh.values()} == {
+        "simulated",
+        "known",
+    }
+    _assert_close_json(stored, fresh)
+
+
+if __name__ == "__main__":
+    FIXTURE.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(
+        _assess_checks_fixture(_calm_case(), _wrong_case()),
+        indent=1,
+        sort_keys=True,
+        allow_nan=False,
+    )
+    FIXTURE.write_text(text + "\n", encoding="utf-8")
