@@ -110,7 +110,7 @@ def test_the_top_bar_is_editor_and_assess_and_assess_opens_on_its_overview(asses
         tabs = page.get_by_role("tablist", name="Editor views").get_by_role("tab")
         assert tabs.all_inner_texts() == ["Editor", "Assess"]
         page.locator("#assessTab").click()
-        assert page.locator("#assessOverviewTitle").inner_text() == "Is this model any good?"
+        assert page.locator("#assessOverviewTitle").inner_text() == "Overview"
         assert page.locator("#assessList [data-assess-entry]").all_inner_texts() == [
             "Overview",
             "Validation",
