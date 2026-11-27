@@ -1,5 +1,5 @@
 // @ts-check
-import { EVIDENCE_PANELS, REPORT_NAMES, createEmptyEvidenceState } from "../api/contracts.js";
+import { EVIDENCE_PANELS, REPORT_NAMES, REPORT_VIEWS, createEmptyEvidenceState } from "../api/contracts.js";
 import { defineMachine } from "./machine.js";
 import { createRiskProfiles } from "./risk.js";
 import { selectActiveTermName } from "./selectors.js";
@@ -27,6 +27,7 @@ export function createInitialEditorState(snapshot = null) {
       freeLevels: null,
       showFreeLevels: false,
       showUnsmoothed: false,
+      compareOriginal: false,
       risks: createRiskProfiles(),
       unsmoothed: {},
       summaryLevelDisplay: "expanded",
@@ -239,7 +240,7 @@ function invalidatePriorEvidence(state, revision) {
  * Whether two snapshots wait for different changes. Undo and Redo of a
  * waiting change keep the model revision, so this is how a report that shows
  * the waiting list (the Cross-validation tab's chip and Run CV's reason)
- * learns it is out of date.
+ * learns it is out of date. A check reads only the model in force, so it stays.
  *
  * @param {EditorSnapshot|null} previous @param {EditorSnapshot} next
  */
@@ -339,7 +340,7 @@ export function commitRemote(state, snapshot) {
   const modelRequest = previousRevision !== undefined && previousRevision !== snapshot.model_revision
     ? invalidatePriorEvidence(state, snapshot.model_revision)
     : waitingListChanged(state.remote.snapshot, snapshot)
-      ? lapseReports(state).request
+      ? lapseReports(state, REPORT_VIEWS).request
       : state.request;
   // Whatever response carries it, a snapshot whose job results moved lapses the job reports.
   const request = jobResultsMoved(state.remote.snapshot, snapshot)

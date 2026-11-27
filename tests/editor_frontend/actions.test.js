@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import * as actionsModule from "../../src/superglm/editor/app/state/actions.js";
+import { CHECK_REPORTS } from "../../src/superglm/editor/app/api/contracts.js";
 import {
   beginEvidence,
   commitRemote,
@@ -1681,6 +1682,54 @@ test("Retry of a report waits its turn behind the report in flight", async () =>
   await answer(2, 0);
   assert.equal(await retried, true);
   assert.equal(store.getState().request.evidence.cv.status, "current");
+});
+
+test("the overview asks its reports and then each offered check, never two at once", async () => {
+  const { sent, client, answer } = heldReportClient(async () => snapshot(0));
+  let inFlight = 0;
+  let most = 0;
+  const counted = {
+    ...client,
+    /** @param {string} path @param {Record<string, unknown>} body */
+    postJSON: (path, body) => {
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      return client.postJSON(path, body).finally(() => { inFlight -= 1; });
+    }
+  };
+  const timers = manualTimers();
+  const store = createEditorStore(createInitialEditorState({ ...snapshot(0), checks: [...CHECK_REPORTS] }));
+  const actions = createEditorActions({
+    store, client: counted, setTimer: timers.setTimer, clearTimer: timers.clearTimer
+  });
+
+  actions.patchView({ activeView: "assess" });
+  timers.fire();
+  for (let i = 0; i < 7; i += 1) {
+    assert.equal(sent.length, i + 1);
+    await answer(i, 0);
+  }
+  assert.deepEqual(sent, ["validation", "cv", "diagnose", "check_pit", "check_ae", "check_calibration", "check_qq"]);
+  assert.equal(most, 1);
+  for (const name of CHECK_REPORTS) assert.equal(store.getState().request.evidence[name].status, "current");
+});
+
+test("Retry of a check waits its turn behind the check in flight", async () => {
+  const { sent, held, client, answer } = heldReportClient(async () => snapshot(0));
+  const store = createEditorStore(createInitialEditorState(snapshot(0)));
+  const actions = createEditorActions({ store, client });
+  actions.scheduleReports(["check_qq"], { immediate: true });
+  held[0].reply.reject(new Error("offline"));
+  await settled();
+  assert.equal(store.getState().request.evidence.check_qq.status, "error");
+
+  actions.scheduleReports(["check_pit"], { immediate: true });
+  const retried = actions.retryEvidence("check_qq");
+  assert.deepEqual(sent, ["check_qq", "check_pit"]);
+  await answer(1, 0);
+  assert.deepEqual(sent, ["check_qq", "check_pit", "check_qq"]);
+  await answer(2, 0);
+  assert.equal(await retried, true);
 });
 
 test("an older snapshot from Refresh from Python leaves the newer model's reports alone", async () => {

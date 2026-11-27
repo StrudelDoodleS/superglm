@@ -21,7 +21,7 @@
   // before the first paint. These are the views readAssessWindow
   // (views/window_sync.js) takes.
   {
-    const ASSESS_WINDOW_VIEWS = ["assess", "validation", "cv", "final", "diagnose"];
+    const ASSESS_WINDOW_VIEWS = ["assess", "validation", "cv", "final", "diagnose", "check_pit", "check_ae", "check_calibration", "check_qq"];
     if (ASSESS_WINDOW_VIEWS.includes(new URLSearchParams(location.search).get("assess"))) {
       document.documentElement.dataset.window = "assess";
     }

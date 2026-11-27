@@ -1,6 +1,6 @@
 // @ts-check
 
-import { isReportName } from "../api/contracts.js";
+import { isReportName, isReportView } from "../api/contracts.js";
 import { escapeHTML } from "../format.js";
 import { countText, deltaText, metricColumns, metricText } from "../reports.js";
 import { ASSESS_GROUPS } from "../state/assess.js";
@@ -153,12 +153,21 @@ function overviewCard(entry, evidence) {
 }
 
 /**
- * A card per Assess entry, in list order.
+ * The entries of `group` that have a card: the reports. A check has none yet.
+ * @param {Readonly<{entries: readonly AssessEntry[]}>} group
+ * @returns {readonly AssessEntry[]}
+ */
+function carded(group) {
+  return group.entries.filter((entry) => isReportView(entry.id));
+}
+
+/**
+ * A card per Assess report, in list order.
  * @param {Record<ReportName, EvidenceState>} evidence
  * @returns {CardModel[]}
  */
 export function overviewCards(evidence) {
-  return ASSESS_GROUPS.flatMap((group) => group.entries.map((entry) => overviewCard(entry, evidence)));
+  return ASSESS_GROUPS.flatMap((group) => carded(group).map((entry) => overviewCard(entry, evidence)));
 }
 
 /** @param {CardModel} card */
@@ -219,8 +228,8 @@ export function drawOverview(root, groups) {
 export function overviewGroups(evidence) {
   return ASSESS_GROUPS.map((group) => ({
     name: group.name,
-    cards: group.entries.map((entry) => overviewCard(entry, evidence)),
-  }));
+    cards: carded(group).map((entry) => overviewCard(entry, evidence)),
+  })).filter((group) => group.cards.length > 0);
 }
 
 /**

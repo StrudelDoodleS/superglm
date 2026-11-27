@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { REPORT_NAMES } from "../../src/superglm/editor/app/api/contracts.js";
+import { REPORT_VIEWS } from "../../src/superglm/editor/app/api/contracts.js";
 import { assessListMarkup, stepEntry } from "../../src/superglm/editor/app/views/assess_list.js";
 
 test("the list marks the open entry and keeps one tab stop", () => {
@@ -15,7 +15,7 @@ test("the list marks the open entry and keeps one tab stop", () => {
 });
 
 test("arrow keys, Home and End step through the entries", () => {
-  const ids = ["assess", ...REPORT_NAMES];
+  const ids = ["assess", ...REPORT_VIEWS];
   assert.equal(stepEntry(ids, "assess", "ArrowDown"), "validation");
   assert.equal(stepEntry(ids, "assess", "ArrowUp"), "assess");
   assert.equal(stepEntry(ids, "cv", "End"), "diagnose");
