@@ -497,6 +497,9 @@ BOUNDARY_TESTS: dict[str, str | tuple[str, ...]] = {
     "_group_matrix/_lookup_tables.py::table_leverages": (
         "test_reml_leverage_tables.py::test_a_random_effect_is_a_lookup_on_both_leverage_routes"
     ),
+    "_group_matrix/_lookup_tables.py::table_row_bound": (
+        "test_reml_leverage_tables.py::test_table_row_bound_reads_the_dense_rows_of_every_block"
+    ),
     "_group_matrix/_lookup_tables.py::table_rmatvec": (
         "test_reml_leverage_tables.py::test_hand_built_dense_columns_match_the_materialised_design"
     ),
