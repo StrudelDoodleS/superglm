@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Literal
 
 import numpy as np
@@ -279,6 +280,54 @@ def test_a_finish_that_stalls_after_a_rejected_round_leaves_the_round_s_verdict(
     assert (rejected.stage, rejected.accepted) == ("efs", False)
     assert promoted.activated_face_components == (_Z,)
     assert smoothing.lambdas == rejected.lambdas_before
+
+
+def test_a_stalled_finish_keeps_the_plateau_earned_after_a_rejection(monkeypatch) -> None:
+    """A new accepted round supersedes a rejection that survived a face release.
+
+    Feed the search an accepted trial and a stalled finish, so the verdict
+    test is independent of the numerical path of either Newton finish.
+    """
+    from superglm.distributional.smoothing import loop
+
+    search = loop._SmoothingSearch.__new__(loop._SmoothingSearch)
+    search.outer_config = DistributionalEFSConfig(outer="efs+finish")
+    search.mode = loop._OUTER_MODES["efs+finish"]
+    search.estimated_names = (_X,)
+    search.layout = None
+    search.history = []
+    search.initial_lambdas = {_X: 1.0}
+    search.initial_objective = 20.0
+    search.fall = math.inf
+    search.cap_held = frozenset()
+    search.endpoint_caps = set()
+    search.beyond_cap = {}
+    search.unearned = True  # rejection from before the face release
+    search.endgame_stationary = False
+    search.newton_budget = 1
+
+    fit = SimpleNamespace(terminal_curvature=None)
+    evidence = loop._FreshRawEvidence((), (_X,), None, 1.0e-6, (), ())
+    search.coefficient_fits = [fit, fit]
+    search.state = loop.EndgameState(search.initial_lambdas, fit, 20.0, None, evidence, 0)
+    monkeypatch.setattr(search, "_evidence", lambda _memo: evidence)
+    search.penalty_memo = None
+    trial = loop._Trial(fit, 1, {_X: 1.000001}, {_X: 1.0e-6}, 19.999999)
+    round_ = loop._Round(1, None, 1.0e-6, fit_indices=[1])
+    round_.accept_as_proposed(trial, search.estimated_names)
+    search._adopt_round(round_, trial)
+
+    def exhausted(state, budget):
+        return loop.NewtonEndgameOutcome("max_iterations", state, None, None, (), budget, 0)
+
+    monkeypatch.setattr(search, "_endgame_at", exhausted)
+    result = search._run_endgame()
+
+    assert result is not None
+    assert (result.converged, result.convergence_reason) == (True, "practical_plateau")
+    assert result.history[-1].accepted
+    assert result.objective == trial.objective
+    assert result.lambdas == trial.lambdas
 
 
 def test_a_plateau_earned_in_the_last_round_keeps_its_terminal_checks() -> None:

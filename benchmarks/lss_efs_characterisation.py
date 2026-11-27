@@ -786,9 +786,9 @@ def _unearned_survives() -> dict:
     face (on this fixture a real finish spends its whole budget); the strict stop's
     revalidation is scripted to find the face's direction finite, so the face is
     released and Fellner-Schall rounds go on. They are accepted up to a practical
-    plateau, which hands to a second finish, scripted to stall: the search reports
-    ``objective_rejected``, the rejected round's verdict, though accepted rounds have
-    since earned the plateau.
+    plateau, which hands to a second finish, scripted to stall. The accepted rounds
+    ended the rejected round's verdict, so the stall leaves their plateau, and on
+    the face the search goes on to Fellner-Schall rounds.
     """
 
     from dataclasses import replace
