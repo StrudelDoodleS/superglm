@@ -1023,17 +1023,25 @@ def _scored_replicates(
 def check_report_payload(
     report: str,
     *,
-    dataset: EvaluationDataset,
+    dataset: EvaluationDataset | None,
     compares_edit: bool,
     edited: dict[str, Any],
     original: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """The ``/report`` payload of ``report``: the edited model's body and the fitted one's."""
+    """The ``/report`` payload of ``report``: the edited model's body and the fitted one's.
+
+    ``split`` is ``None`` for a session with no rows to read, whose bodies are unavailable.
+    """
+    split = (
+        None
+        if dataset is None
+        else {"name": dataset.name, "label": dataset.label, "n_obs": dataset.n_obs}
+    )
     return {
         "report": report,
         "available": edited["available"],
         "reason": edited["reason"],
-        "split": {"name": dataset.name, "label": dataset.label, "n_obs": dataset.n_obs},
+        "split": split,
         "compares_edit": bool(compares_edit),
         "models": {"edited": edited, "original": original},
     }

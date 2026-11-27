@@ -25,6 +25,15 @@ import numpy as np
 from superglm.editor import metrics as metrics_module
 from superglm.editor import persistence, rating_preview, staging
 from superglm.editor.apply import materialize_edit_request, model_for_split_scoring
+from superglm.editor.checks import (
+    CHECK_REPORTS,
+    NullReplicates,
+    check_body,
+    check_inputs,
+    check_report_payload,
+    null_replicates,
+    offered_checks,
+)
 from superglm.editor.cv import (
     FINAL_NOT_RUN,
     FINAL_STALE,
@@ -245,6 +254,14 @@ class EditorWidget:
         self._closed = False
         self._evaluation_cache = EvaluationCache()
         self._evidence = EvidenceCoordinator(f"editor-{id(self):x}")
+        # The checks' evidence, read and written only by check jobs, which the coordinator runs
+        # one at a time. Each entry keeps the split it was read on, compared by identity, and
+        # its model's signature and inputs: the fitted model's body of each check on a split,
+        # and one simulation each for the fitted and the edited model on a split.
+        self._original_checks: dict[tuple[str, str], tuple[tuple[Any, ...], Any, dict]] = {}
+        self._check_replicates: dict[
+            tuple[str, str], tuple[tuple[Any, ...], Any, NullReplicates]
+        ] = {}
         self._server: EditorAppServer | None = None
         self._notebook: NotebookTransport | None = None
         self.host: str | None = None
@@ -331,6 +348,7 @@ class EditorWidget:
             }
             if is_lss(self.session.model):
                 state["unavailable"] = session_availability(self.session)
+            state["checks"] = offered_checks(self.session.model)
             self._state_generation += 1
             state["state_generation"] = self._state_generation
             state["chart_generation"] = self._chart_generation
@@ -772,6 +790,13 @@ class EditorWidget:
             if not self._asked_is_in_force(model_revision, in_force):
                 return _superseded_payload(model_revision, request_sequence, in_force)
             asked = InForce.of(self.session)
+        if report in CHECK_REPORTS:
+            return self._check_report(
+                report,
+                model_revision=model_revision,
+                request_sequence=request_sequence,
+                in_force=in_force,
+            )
         if report in ("cv", "diagnose"):
             # Each captures what it reads, and the model in force with it, under one hold of
             # the lock; the payload names that model.
@@ -851,6 +876,105 @@ class EditorWidget:
                 return _superseded_payload(revision, request_sequence, source.token)
         payload["in_force"] = source.token
         return payload
+
+    def _check_report(
+        self,
+        report: str,
+        *,
+        model_revision: int | None,
+        request_sequence: int | None,
+        in_force: str | None,
+    ) -> dict[str, Any]:
+        """``report``, one of ``CHECK_REPORTS``, for the model in force and, after an edit, the
+        fitted model, on the default split."""
+        with self._lock:
+            if not self._asked_is_in_force(model_revision, in_force):
+                return _superseded_payload(model_revision, request_sequence, in_force)
+            revision = self.session.model_revision
+            asked = InForce.of(self.session)
+            dataset = default_metrics_dataset(self.session)
+            reference = self.session.reference_model
+            compares_edit = reference is not self.session.model or bool(asked.edits)
+            inputs = tuple(check_inputs(self.session.model, self.session.terms))
+        if not is_lss(asked.model):
+            # No check reads a SuperGLM: its body says so without a model or a split.
+            body = check_body(report, asked.model, dataset, inputs=inputs)
+            payload = check_report_payload(
+                report,
+                dataset=dataset,
+                compares_edit=compares_edit,
+                edited=body,
+                original=body if compares_edit else None,
+            )
+            return {
+                **payload,
+                "model_revision": revision,
+                "request_sequence": request_sequence,
+                "in_force": asked.token,
+            }
+        edited, source = self._current_model_for_evidence(statistics=False, expected=asked)
+        if edited is None:
+            return _superseded_payload(revision, request_sequence, source.token)
+
+        def compute_bodies() -> dict[str, Any]:
+            fitted = model_metric_signature(reference)
+            replicates = self._check_replicates_for(edited, dataset, inputs, fitted=fitted)
+            bodies = {
+                "edited": check_body(report, edited, dataset, inputs=inputs, replicates=replicates),
+                "original": None,
+            }
+            if compares_edit:
+                bodies["original"] = self._fitted_check(report, reference, dataset, inputs, fitted)
+            return bodies
+
+        key = EvidenceKey(source.token, "check", f"{report}:{dataset.name}")
+        outcome = self._evidence.submit(key, compute_bodies).result()
+        if outcome.status == "superseded" or outcome.payload is None:
+            return _superseded_payload(revision, request_sequence, source.token)
+        with self._lock:
+            if not source.describes(self.session):
+                return _superseded_payload(revision, request_sequence, source.token)
+            revision = self.session.model_revision
+        payload = check_report_payload(
+            report,
+            dataset=dataset,
+            compares_edit=compares_edit,
+            edited=outcome.payload["edited"],
+            original=outcome.payload["original"],
+        )
+        return {
+            **payload,
+            "model_revision": revision,
+            "request_sequence": request_sequence,
+            "in_force": source.token,
+        }
+
+    def _check_replicates_for(
+        self, model, dataset, inputs: tuple[str, ...], *, fitted: tuple[Any, ...]
+    ) -> NullReplicates:
+        """``model``'s one simulation on ``dataset``, shared by its four checks; ``fitted`` is the
+        fitted model's signature. Run only inside a check job."""
+        key = (model_metric_signature(model), inputs)
+        for held, held_dataset, replicates in self._check_replicates.values():
+            if held == key and held_dataset is dataset:
+                return replicates
+        replicates = null_replicates(model, dataset, inputs=inputs)
+        role = "original" if key[0] == fitted else "edited"
+        self._check_replicates[(role, dataset.name)] = (key, dataset, replicates)
+        return replicates
+
+    def _fitted_check(
+        self, report: str, reference, dataset, inputs: tuple[str, ...], fitted: tuple[Any, ...]
+    ) -> dict[str, Any]:
+        """The fitted model's body of ``report`` on ``dataset``, kept while that model, split and
+        inputs stand; ``fitted`` is its signature. Run only inside a check job."""
+        held = self._original_checks.get((report, dataset.name))
+        if held is not None and held[0] == (fitted, inputs) and held[1] is dataset:
+            return held[2]
+        replicates = self._check_replicates_for(reference, dataset, inputs, fitted=fitted)
+        body = check_body(report, reference, dataset, inputs=inputs, replicates=replicates)
+        self._original_checks[(report, dataset.name)] = ((fitted, inputs), dataset, body)
+        return body
 
     def _export_bytes(self, format: str, filename: str | None = None) -> ExportResult:
         """Build one validated export from one captured model revision."""

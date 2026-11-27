@@ -29,7 +29,8 @@ from superglm.distributional.kernels.generalized_pareto import (
 )
 from superglm.distributional.posterior import PosteriorDraws, posterior_parameters
 from superglm.distributional.residuals import compute_residuals, replication_sample
-from superglm.editor import checks
+from superglm.editor import EditorSession, checks
+from superglm.editor import widget as widget_module
 from superglm.editor.checks import (
     CHECK_REPORTS,
     QUANTILE_GRID,
@@ -40,6 +41,7 @@ from superglm.editor.checks import (
     offered_checks,
     qq_from_residuals,
 )
+from superglm.editor.cv import InForce
 from superglm.editor.evaluation import EvaluationDataset
 from superglm.model.base import NoPredictedMeanError
 from superglm.stats import (
@@ -93,13 +95,11 @@ def _fitted_case(y_of, *, n_validation: int = 200, **kwargs) -> Case:
     return Case(lss, _validation(X.iloc[600:].reset_index(drop=True), y[600:]), train)
 
 
-@pytest.fixture(scope="module")
-def calm() -> Case:
+def _calm_case() -> Case:
     return _fitted_case(lambda rng, mean, cv: rng.gamma(1.0 / cv**2, mean * cv**2))
 
 
-@pytest.fixture(scope="module")
-def wrong() -> Case:
+def _wrong_case() -> Case:
     """Log-normal amounts under a Gamma fit, read on 1,000 rows.
 
     At 200 rows the PIT histogram's Bonferroni band over 20 bins holds this misfit
@@ -110,6 +110,16 @@ def wrong() -> Case:
         lambda rng, mean, cv: mean * np.exp(sigma * rng.standard_normal(len(mean)) - sigma**2 / 2),
         n_validation=1_000,
     )
+
+
+@pytest.fixture(scope="module")
+def calm() -> Case:
+    return _calm_case()
+
+
+@pytest.fixture(scope="module")
+def wrong() -> Case:
+    return _wrong_case()
 
 
 @pytest.fixture(scope="module")
@@ -687,6 +697,14 @@ def test_the_report_payload_carries_both_bodies(calm):
     }
 
 
+def test_a_payload_without_rows_names_no_split(poisson_glm):
+    body = check_body("check_qq", poisson_glm, None, inputs=[])
+    payload = check_report_payload(
+        "check_qq", dataset=None, compares_edit=False, edited=body, original=None
+    )
+    assert payload["split"] is None and payload["reason"] == body["reason"]
+
+
 def _ae_statistic(body: dict[str, Any]) -> float:
     """The largest ``|ratio - 1| / ratio_se`` over every cell of every table of an A/E body."""
     ratio = np.concatenate([np.asarray(t["ratio"], dtype=np.float64) for t in body["tables"]])
@@ -943,3 +961,200 @@ def test_a_correct_model_is_flagged_at_its_level_on_a_held_out_split(calm):
             flags[report] += body["flagged"]
     low, high = stats.binom.ppf([0.001, 0.999], _SPLITS, 0.05)
     assert all(low <= count <= high for count in flags.values()), (flags, low, high)
+
+
+# The /report route: each check for the model as edited and, after an edit, as fitted.
+
+#: The validation report's payload keys, read on master before the checks joined /report.
+VALIDATION_KEYS = {
+    "available",
+    "can_run_cv",
+    "compares_edit",
+    "cv_report",
+    "in_force",
+    "metric_labels",
+    "model_revision",
+    "note",
+    "report",
+    "request_sequence",
+    "splits",
+    "title",
+}
+
+
+def _session(case: Case) -> EditorSession:
+    return EditorSession.from_model(
+        case.lss,
+        train_data=(case.train.X, case.train.y),
+        validation_data=(case.validation.X, case.validation.y),
+    )
+
+
+def _close_widgets(session: EditorSession) -> None:
+    for widget in [w for w in widget_module._LIVE_WIDGETS if w.session is session]:
+        widget.close()
+
+
+@pytest.fixture
+def calm_session(calm):
+    session = _session(calm)
+    yield session
+    _close_widgets(session)
+
+
+@pytest.fixture
+def glm_session(poisson_glm):
+    session = EditorSession.from_model(poisson_glm)
+    yield session
+    _close_widgets(session)
+
+
+def _ask(widget, report, **extra):
+    with widget._lock:
+        rev, token = widget.session.model_revision, InForce.of(widget.session).token
+    return widget._report(report, model_revision=rev, in_force=token, request_sequence=5, **extra)
+
+
+def _average(session: EditorSession, count: int) -> None:
+    session.select_indices("mean:x", list(range(count)))
+    session.weighted_average("mean:x")
+
+
+def test_each_check_report_answers_with_the_model_as_edited(calm_session):
+    widget = calm_session.widget()
+    assert widget._state()["checks"] == list(CHECK_REPORTS)
+    for report in CHECK_REPORTS:
+        payload = _ask(widget, report)
+        assert payload["report"] == report and payload["request_sequence"] == 5
+        assert payload["split"] == {"name": "validation", "label": "Validation", "n_obs": 200}
+        assert payload["compares_edit"] is False and payload["models"]["original"] is None
+        assert payload["in_force"] == InForce.of(calm_session).token
+        assert payload["models"]["edited"] == check_body(
+            report,
+            calm_session.model,
+            calm_session._evaluation_data["validation"],
+            inputs=["x", "g"],
+        )
+
+
+def test_after_an_edit_the_report_carries_the_model_as_fitted(calm_session):
+    widget = calm_session.widget()
+    before = _ask(widget, "check_ae")["models"]["edited"]
+    _average(calm_session, 6)
+    after = _ask(widget, "check_ae")
+    assert after["compares_edit"] is True and after["models"]["original"] == before
+    assert after["models"]["edited"] != before
+
+
+def test_the_fitted_half_is_computed_once_across_edits(calm_session, monkeypatch):
+    calls = []
+    real = checks.check_body
+    monkeypatch.setattr(
+        widget_module, "check_body", lambda *a, **k: calls.append(a[1]) or real(*a, **k)
+    )
+    widget = calm_session.widget()
+    for k in (2, 4):
+        _average(calm_session, k)
+        _ask(widget, "check_pit")
+    reference = calm_session.reference_model
+    assert sum(model is reference for model in calls) == 1 and len(calls) == 3
+
+
+def test_the_four_checks_share_one_simulation(calm_session, monkeypatch):
+    """Counted wherever a body may draw them: the widget, or a body given none.
+
+    Mutation checks: drawing the replicates for every body, or giving a body none, makes four
+    calls per model.
+    """
+    drawn = []
+    real = checks.null_replicates
+
+    def counted(*a, **k):
+        drawn.append(a[0])
+        return real(*a, **k)
+
+    monkeypatch.setattr(widget_module, "null_replicates", counted)
+    monkeypatch.setattr(checks, "null_replicates", counted)
+    widget = calm_session.widget()
+    for report in CHECK_REPORTS:
+        _ask(widget, report)
+    assert len(drawn) == 1
+    for k in (2, 4):
+        _average(calm_session, k)
+        for report in CHECK_REPORTS:
+            assert _ask(widget, report)["compares_edit"] is True
+    # One for each edited model; the fitted model's simulation from before the edits serves.
+    assert len(drawn) == 3 and sum(model is calm_session.reference_model for model in drawn) == 1
+    calm_session.undo()
+    calm_session.undo()
+    for report in CHECK_REPORTS:
+        _ask(widget, report)
+    assert len(drawn) == 3
+
+
+def test_a_split_replaced_under_its_name_is_read_again(calm_session, calm):
+    """Mutation checks: a body or a simulation kept by the split's name alone reads old rows."""
+    widget = calm_session.widget()
+    _average(calm_session, 6)
+    _ask(widget, "check_pit")
+    rows = calm.validation
+    half = _validation(rows.X.iloc[:100].reset_index(drop=True), rows.y[:100])
+    calm_session._evaluation_data["validation"] = half
+    payload = _ask(widget, "check_pit")
+    assert payload["split"]["n_obs"] == 100
+    reference = calm_session.reference_model
+    assert payload["models"]["original"] == check_body(
+        "check_pit", reference, half, inputs=["x", "g"]
+    )
+    edited, _ = widget._current_model_for_evidence(statistics=False)
+    assert payload["models"]["edited"] == check_body("check_pit", edited, half, inputs=["x", "g"])
+
+
+def test_undo_returns_to_no_comparison(calm_session):
+    widget = calm_session.widget()
+    _average(calm_session, 2)
+    assert _ask(widget, "check_qq")["compares_edit"] is True
+    calm_session.undo()
+    payload = _ask(widget, "check_qq")
+    assert payload["compares_edit"] is False and payload["models"]["original"] is None
+
+
+@pytest.mark.pins_behaviour
+def test_a_stale_request_is_superseded(calm_session):
+    """Pins that a check named for a model no longer in force is answered superseded."""
+    widget = calm_session.widget()
+    answer = widget._report("check_qq", model_revision=-1, in_force="gone", request_sequence=1)
+    assert answer["status"] == "superseded"
+
+
+def test_an_edit_while_the_check_is_drawn_supersedes_its_answer(calm_session, monkeypatch):
+    """Mutation check: without the closing test the answer names a model no longer in force."""
+    real = checks.check_body
+
+    def edit_then_draw(*a, **k):
+        if calm_session.model_revision == 0:
+            _average(calm_session, 3)
+        return real(*a, **k)
+
+    monkeypatch.setattr(widget_module, "check_body", edit_then_draw)
+    widget = calm_session.widget()
+    asked = InForce.of(calm_session).token
+    answer = _ask(widget, "check_pit")
+    assert answer["status"] == "superseded" and answer["in_force"] == asked
+
+
+def test_a_superglm_session_offers_no_checks_and_says_why(glm_session):
+    widget = glm_session.widget()
+    assert widget._state()["checks"] == []
+    payload = _ask(widget, "check_qq")
+    assert payload["available"] is False
+    assert payload["reason"] == "This check is available for SuperLSS models."
+
+
+@pytest.mark.pins_behaviour
+def test_the_four_reports_answer_as_before(calm_session):
+    """Pins that the report names validation, cv, final and diagnose keep their payload keys."""
+    widget = calm_session.widget()
+    assert set(_ask(widget, "validation")) == VALIDATION_KEYS
+    for report in ("cv", "final", "diagnose"):
+        assert _ask(widget, report)["report"] == report
