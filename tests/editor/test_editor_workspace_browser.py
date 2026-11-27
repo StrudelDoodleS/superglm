@@ -1050,7 +1050,9 @@ def test_selection_popovers_keep_focus_and_explain_parent_icons(open_editor_page
         popover = page.locator("#uiPopover")
         trigger.hover()
         popover.wait_for(state="visible")
-        trigger.focus()
+        # Keyboard focus: a tooltip shows for focus the browser marks focus-visible, and a
+        # programmatic focus() after a click is not.
+        trigger.evaluate("node => node.focus({focusVisible: true})")
         page.mouse.move(4, 4)
 
         assert popover.is_visible()
@@ -1060,7 +1062,7 @@ def test_selection_popovers_keep_focus_and_explain_parent_icons(open_editor_page
         popover.wait_for(state="hidden")
         assert trigger.get_attribute("aria-describedby") is None
 
-        trigger.focus()
+        trigger.evaluate("node => node.focus({focusVisible: true})")
         popover.wait_for(state="visible")
         assert popover.locator("[data-popover-heading]").inner_text() == "Straighten selection"
         assert popover.locator("[data-popover-description]").inner_text() == (
@@ -1548,7 +1550,9 @@ def test_analyst_can_discover_edit_undo_redo_help_and_export(open_editor_page):
         page.locator("#selectionMenu").wait_for(state="visible")
 
         increase = page.get_by_role("button", name="Increase selection", exact=True)
-        increase.focus()
+        # Keyboard focus: a tooltip shows for focus the browser marks focus-visible, and a
+        # programmatic focus() after a click is not.
+        increase.evaluate("node => node.focus({focusVisible: true})")
         tooltip = page.get_by_role("tooltip")
         tooltip.wait_for(state="visible")
         assert tooltip.locator("[data-popover-heading]").inner_text() == "Increase selection"

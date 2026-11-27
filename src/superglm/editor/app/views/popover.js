@@ -211,6 +211,9 @@ export function bindPopovers({ root, popover }) {
   function onFocusIn(event) {
     const next = candidate(event.target);
     if (!next) return;
+    // Focus shows a tooltip only where the browser marks it focus-visible (the keyboard);
+    // focus a click moved somewhere shows nothing, and the pointer's own hover still does.
+    if (event.target instanceof Element && !event.target.matches(":focus-visible")) return;
     focusedTarget = next;
     syncTarget(true);
   }

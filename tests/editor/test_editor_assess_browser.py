@@ -149,3 +149,18 @@ def test_the_list_steps_with_the_keyboard(assess_page):
         page.keyboard.press("Enter")
         wait_for_report(page, "diagnose")
         assert page.locator('#assessList [tabindex="0"]').count() == 1
+
+
+def test_a_card_click_moves_focus_to_the_list_without_a_popover(assess_page):
+    """Focus a click moved shows no tooltip; keyboard focus on an entry still shows its own."""
+    with assess_page() as (page, _session):
+        popover = page.locator("#uiPopover")
+        page.locator("#assessTab").click()
+        page.locator('#assessCards [data-card="cv"]').click()
+        wait_for_report(page, "cv")
+        assert page.evaluate("document.activeElement?.dataset.assessEntry") == "cv"
+        assert popover.is_hidden()
+        page.keyboard.press("ArrowDown")
+        assert page.evaluate("document.activeElement?.dataset.assessEntry") == "final"
+        popover.wait_for(state="visible")
+        assert popover.locator("[data-popover-heading]").inner_text() == "Final fit"

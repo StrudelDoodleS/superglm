@@ -61,7 +61,9 @@ def test_long_labels_truncate_only_on_screen_and_keep_exact_model_strings(open_e
         assert tick.count() == 1
         assert tick.text_content().endswith("…")
         assert tick.get_attribute("data-full-label") == full
-        tick.focus()
+        # Keyboard focus: a tooltip shows for focus the browser marks focus-visible, and a
+        # programmatic focus() after a click is not.
+        tick.evaluate("node => node.focus({focusVisible: true})")
         popover = page.get_by_role("tooltip")
         assert popover.is_visible()
         assert full in popover.inner_text()
