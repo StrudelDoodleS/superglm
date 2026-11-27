@@ -257,8 +257,8 @@ export const JOB_REPORTS = Object.freeze(["cv", "final", "diagnose"]);
 
 /**
  * What the job reports read beside the model, as a snapshot shows it: the jobs running, the
- * Final fit's state, and how many job results Python has published. A finished Run CV shows
- * only in the last, so a page that missed its end still sees this move.
+ * Final fit's state, and how many jobs have ended. A Run CV that ended, done, failed or
+ * cancelled, shows only in the last, so a page that missed its end still sees this move.
  * @param {EditorSnapshot|null} snapshot
  * @returns {string}
  */
@@ -273,8 +273,8 @@ export function jobResultsKey(snapshot) {
 }
 
 /**
- * Whether the job reports' part of the snapshot moved between two snapshots: a job result
- * published, a job started or ended, or the Final fit's state changed.
+ * Whether the job reports' part of the snapshot moved between two snapshots: a job started or
+ * ended, or the Final fit's state changed.
  * @param {EditorSnapshot|null} previous @param {EditorSnapshot} next
  */
 export function jobResultsMoved(previous, next) {

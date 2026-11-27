@@ -215,8 +215,9 @@ class EditorWidget:
         # Keyed by the model and its fit in force (``cv._fit_in_force``).
         self._diagnose_all_rows: tuple[tuple[Any, Any], dict[str, Any] | None] | None = None
         self._final_fit: FinalFit | None = None
-        # Counts the job results published (a Run CV, a Final fit), which the reports read
-        # but no other part of the state shows: a page that missed a job's end sees it move.
+        # Counts the Run CV and Final fit jobs that ended, done, failed or cancelled: the
+        # reports read their outcome but no other part of the state shows it, so a page that
+        # missed a job's end sees this move.
         self._results_generation = 0
         # Run CV and Final fit: one background job of each kind at a time.
         # A starter captures a job's inputs under the widget lock and returns
@@ -1307,7 +1308,12 @@ class EditorWidget:
             raise EditorValueError("Unknown job kind.")
         with self._lock:
             work, publish = starter()
-        return self._jobs.status(self._jobs.start(kind, work, publish))
+        return self._jobs.status(self._jobs.start(kind, work, publish, self._count_job_end))
+
+    def _count_job_end(self) -> None:
+        """A job ended without publishing: it still moves the count, as a publication does."""
+        with self._lock:
+            self._results_generation += 1
 
     def _running_jobs(self) -> list[dict[str, Any]]:
         latest = (self._jobs.latest(kind) for kind in self._job_starters)

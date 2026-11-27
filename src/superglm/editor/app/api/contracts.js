@@ -505,8 +505,8 @@
  * @property {PendingStep[]} [pending]
  * @property {{available:boolean, stale:boolean}} [final_fit] whether Export can offer the Final fit model
  * @property {JobStatus[]} [jobs_running] jobs still running when this state was read
- * @property {number} [results_generation] counts the job results Python has published, a Run
- *   CV or a Final fit: it moves when a job ends with a result
+ * @property {number} [results_generation] counts the Run CV and Final fit jobs that ended, done,
+ *   failed or cancelled: it moves when a job ends
  * @property {number} [fit_token] changes only when the fitted model in force is replaced
  * @property {Record<string, string>} [unavailable] SuperLSS sessions only: the reason for each session tool that is off
  */

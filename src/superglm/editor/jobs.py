@@ -7,7 +7,8 @@ runs on state captured beforehand, and ``publish`` takes the lock itself and
 stores the result only if that state is still current. A cancel is a flag
 the work checks between steps (between folds for Run CV); once the work has
 returned, publication can no longer be cancelled, so a cancelled job never
-publishes anything. A finished job evicts the finished jobs of its kind
+publishes anything. A job that ends without publishing, cancelled or failed,
+calls its ``unpublished`` step before its status turns terminal. A finished job evicts the finished jobs of its kind
 before it, so the runner keeps the last of each kind.
 """
 
@@ -69,8 +70,13 @@ class JobRunner:
         kind: str,
         work: Callable[[JobContext], Any],
         publish: Callable[[Any], dict[str, Any]],
+        unpublished: Callable[[], None] | None = None,
     ) -> str:
-        """Run ``work`` on a new thread, then ``publish`` its value; return the job id."""
+        """Run ``work`` on a new thread, then ``publish`` its value; return the job id.
+
+        ``unpublished`` runs instead of a publication that never happened, on a cancel or a
+        failure, before the job's status says so.
+        """
         with self._condition:
             if self._closed:
                 raise RuntimeError("The job runner is closed.")
@@ -96,7 +102,7 @@ class JobRunner:
             }
         threading.Thread(
             target=self._run,
-            args=(job_id, work, publish, flag),
+            args=(job_id, work, publish, flag, unpublished),
             name=f"superglm-{self._name}-{job_id}",
             daemon=True,
         ).start()
@@ -141,7 +147,7 @@ class JobRunner:
                 flag.set()
             self._condition.notify_all()
 
-    def _run(self, job_id, work, publish, flag: threading.Event) -> None:
+    def _run(self, job_id, work, publish, flag: threading.Event, unpublished=None) -> None:
         context = JobContext(job_id, flag, lambda entry: self._append(job_id, entry))
         try:
             value = work(context)
@@ -151,14 +157,22 @@ class JobRunner:
                 self._jobs[job_id]["publishing"] = True
             result = publish(value)
         except JobCancelledError:
-            self._finish(job_id, "cancelled")
+            self._finish_unpublished(job_id, unpublished, "cancelled")
         except EditorClientError as exc:
-            self._finish(job_id, "failed", error=exc.public_message)
+            self._finish_unpublished(job_id, unpublished, "failed", error=exc.public_message)
         except Exception:
             _LOGGER.exception("Unhandled SuperGLM editor job error.")
-            self._finish(job_id, "failed", error=_INTERNAL_ERROR)
+            self._finish_unpublished(job_id, unpublished, "failed", error=_INTERNAL_ERROR)
         else:
             self._finish(job_id, "done", result=result)
+
+    def _finish_unpublished(self, job_id: str, unpublished, status: str, **details: Any) -> None:
+        if unpublished is not None:
+            try:
+                unpublished()
+            except Exception:
+                _LOGGER.exception("Unhandled SuperGLM editor job error.")
+        self._finish(job_id, status, **details)
 
     def _append(self, job_id: str, entry: dict[str, Any]) -> None:
         with self._condition:

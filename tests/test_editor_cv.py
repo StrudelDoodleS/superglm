@@ -986,6 +986,38 @@ def test_job_routes_run_a_job_off_the_widget_lock(cv_fit):
     assert unknown == (400, {"error": "Unknown job kind."})
 
 
+@pytest.mark.parametrize("kind", ["cv", "final_fit"])
+def test_a_job_cancelled_or_failed_moves_the_count_a_reconnecting_page_compares(cv_fit, kind):
+    """A Run CV or Final fit that ends with no result still moves ``results_generation``."""
+    from superglm.editor.errors import EditorValueError
+
+    def refused(context):
+        raise EditorValueError("A sentence written for the browser.")
+
+    model, _supplied = cv_fit
+    widget = EditorSession.from_model(model, terms=["region"]).widget()
+    entered, release, published = threading.Event(), threading.Event(), []
+    try:
+        opened = widget._state()["results_generation"]
+        widget._job_starters[kind] = lambda: _blocking_job(entered, release, published)
+        cancelled = widget._job_start(kind)["job_id"]
+        assert entered.wait(30)
+        widget._job_cancel(cancelled)
+        release.set()
+        assert widget._job_status(cancelled, wait=True)["status"] == "cancelled"
+        after_cancel = widget._state()["results_generation"]
+        widget._job_starters[kind] = lambda: (refused, lambda value: {})
+        failed = widget._job_start(kind)["job_id"]
+        assert widget._job_status(failed, wait=True)["status"] == "failed"
+        after_failure = widget._state()["results_generation"]
+    finally:
+        release.set()
+        widget.close()
+
+    assert opened < after_cancel < after_failure
+    assert published == []
+
+
 # ── Run CV and Final fit ─────────────────────────────────────────
 
 

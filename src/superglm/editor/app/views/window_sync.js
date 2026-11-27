@@ -63,7 +63,7 @@ export function syncChannelName(href) {
 /**
  * What two windows must agree on to show the same session: the model and the
  * one in force, what waits for Refit, and what the job reports read (the jobs
- * running, the Final fit, the job results published). A selection is not in
+ * running, the Final fit, the jobs that ended). A selection is not in
  * it, so moving through the Editor tells nobody anything.
  * @param {EditorSnapshot|null} snapshot
  * @returns {string}
