@@ -42,9 +42,10 @@ between cells, so the band holds for the multinomial bins of a histogram too.
 Both assume iid continuous values on the probability scale from a law whose
 parameters are known, and that is where their level holds. With parameters
 fitted to the same rows the level moves, by an amount and in a direction that
-depend on the estimator: for a normal Q-Q band at 5% on 100 to 10,000 rows,
-Weine et al. (section 2.6, table 1) measure about 0.1% with the sample
-standard deviation and about 10% with the median absolute deviation.
+depend on the estimator. For a normal Q-Q band at 5%, Weine et al. (section
+2.6, table 1) measure 0.11%, 0.35% and 1.11% at 100, 500 and 10,000 rows with
+the sample mean and standard deviation, and 9.6% to 10.4% with the median and
+the median absolute deviation.
 """
 
 from __future__ import annotations
@@ -65,8 +66,8 @@ _CORRECTION = {0.01: 1.591, 0.05: 1.3, 0.1: 1.1}
 _ASYMPTOTIC_FROM = 250
 #: The exact search stops once ``eta`` is known to this relative tolerance.
 _SEARCH_RTOL = 1e-9
-#: The least positive float64, a subnormal.
-_LEAST_POSITIVE = float(np.nextafter(0.0, 1.0))
+#: The least global level ``bonferroni_binomial_band`` accepts.
+_LEAST_ALPHA = 1e-12
 
 
 @dataclass(frozen=True)
@@ -213,20 +214,23 @@ def equal_local_levels_band(n: int, *, alpha: float = 0.05) -> UniformBand:
 
 
 def _least_count(
-    trials: NDArray[np.float64], holds: Callable[[NDArray[np.float64]], NDArray[np.bool_]]
+    trials: NDArray[np.float64], holds: Callable[[NDArray[np.int64]], NDArray[np.bool_]]
 ) -> NDArray[np.float64]:
     """The least count ``k`` in ``[0, trials]`` at which ``holds(k)``, cell by cell.
 
-    ``holds`` is monotone in ``k`` and true at ``trials``. Bisection reads one probability per
-    cell per step, about ``log2(trials)`` steps.
+    ``holds`` is monotone in ``k`` and true at ``trials``. The bisection runs in integers: its
+    midpoint ``low + (high - low) // 2`` lies below ``high`` while the interval is open, so
+    every step shrinks it, and at most ``log2(trials) + 1`` steps end it, one probability per
+    cell each.
     """
-    low, high = np.zeros_like(trials), trials.copy()
+    low = np.zeros(trials.shape, dtype=np.int64)
+    high = trials.astype(np.int64)
     while np.any(low < high):
-        middle = np.floor((low + high) / 2.0)
+        middle = low + (high - low) // 2
         met = holds(middle)
         high = np.where(met, middle, high)
-        low = np.where(met, low, middle + 1.0)
-    return low
+        low = np.where(met, low, middle + 1)
+    return low.astype(np.float64)
 
 
 def bonferroni_binomial_band(
@@ -238,14 +242,16 @@ def bonferroni_binomial_band(
     ``cut = alpha / (2 m)`` its bounds are the ``cut`` and ``1 - cut`` quantiles of that law,
     each decided in its own tail: ``lower`` is the least count with ``P(X <= lower) >= cut``,
     so ``P(X < lower) < cut``, and ``upper`` the least with ``P(X > upper) <= cut``. So any
-    cell leaves with chance at most ``alpha``, whatever the dependence between cells.
-    ``trials`` and ``probability`` broadcast together, and the bounds take their shape.
+    cell leaves with chance at most ``alpha``, whatever the dependence between cells. Each
+    tail is computed and compared with the cut in float64, so a tail equal to the cut to the
+    last bit is decided in float64. ``trials`` and ``probability`` broadcast together, and the
+    bounds take their shape.
 
     Raises
     ------
     ValueError
         If a count of trials is not a whole number from 0 to ``2**53 - 1``, a probability
-        lies outside ``[0, 1]``, or ``alpha`` outside ``(0, 1)``.
+        lies outside ``[0, 1]``, or ``alpha`` is below ``1e-12`` or not below 1.
     """
     from scipy import stats
 
@@ -253,8 +259,10 @@ def bonferroni_binomial_band(
         np.asarray(trials, dtype=np.float64), np.asarray(probability, dtype=np.float64)
     )
     level = float(alpha)
-    if not 0.0 < level < 1.0:
-        raise ValueError(f"bonferroni_binomial_band: alpha must lie in (0, 1); got {alpha!r}")
+    if not _LEAST_ALPHA <= level < 1.0:
+        raise ValueError(
+            f"bonferroni_binomial_band: alpha must be at least 1e-12 and below 1; got {alpha!r}"
+        )
     whole = np.isfinite(n_trials) & (n_trials == np.floor(n_trials))
     if not np.all(whole & (n_trials >= 0) & (n_trials < 2.0**53)):
         raise ValueError(
@@ -265,10 +273,7 @@ def bonferroni_binomial_band(
     if n_trials.size == 0:
         return np.zeros(n_trials.shape), np.zeros(n_trials.shape)
     cut = level / (2.0 * n_trials.size)
-    # A cut that underflows to zero still lies above zero. No float lies between it and the least
-    # positive float, so the lower tail compares with that float and the upper tail with zero.
-    least_cut = max(cut, _LEAST_POSITIVE)
-    lower = _least_count(n_trials, lambda k: stats.binom.cdf(k, n_trials, p) >= least_cut)
+    lower = _least_count(n_trials, lambda k: stats.binom.cdf(k, n_trials, p) >= cut)
     upper = _least_count(n_trials, lambda k: stats.binom.sf(k, n_trials, p) <= cut)
     return lower, upper
 

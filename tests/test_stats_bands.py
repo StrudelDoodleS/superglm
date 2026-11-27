@@ -125,21 +125,14 @@ def test_the_binomial_band_cuts_each_tail_at_alpha_over_2m():
         assert 1 - cdf(int(hi)) <= cut < 1 - cdf(int(hi) - 1)  # P(X > hi) <= cut
 
 
-@pytest.mark.parametrize(
-    ("trials", "p", "alpha"),
-    [
-        (1, 0.025000000000000005, 0.05),  # P(X > 0) lies one rounding above the cut
-        (100_000, 0.5, 1e-20),  # an inverse that loses a cut this far into the tail
-        (2000, 0.5, 5e-324),  # alpha / 2 underflows to zero
-    ],
-)
-def test_each_binomial_bound_is_decided_by_its_own_tail(trials, p, alpha):
+def test_each_binomial_bound_is_decided_by_its_own_tail():
     """A bound meets ``P(X < lower) < cut <= P(X <= lower)`` and ``P(X > upper) <= cut <
     P(X > upper - 1)``, read from ``binom.cdf`` and ``binom.sf`` and compared exactly with
-    ``cut = alpha / 2`` for one cell, which in the last case lies below every positive float.
+    ``cut = alpha / 2`` for one cell. Here ``P(X > 0) = p`` lies one rounding above the cut.
 
-    Mutation check: bounds from ``binom.ppf(cut)`` and ``binom.isf(cut)`` fail all three cases.
+    Mutation check: bounds from ``binom.ppf(cut)`` and ``binom.isf(cut)`` fail it.
     """
+    trials, p, alpha = 1, 0.025000000000000005, 0.05
     (lower,), (upper,) = bonferroni_binomial_band([trials], [p], alpha=alpha)
     cut = Fraction(alpha) / 2
     lo, hi = int(lower), int(upper)
@@ -148,6 +141,34 @@ def test_each_binomial_bound_is_decided_by_its_own_tail(trials, p, alpha):
     assert 0 <= lo <= hi <= trials
     assert cdf(lo - 1) < cut <= cdf(lo)
     assert sf(hi) <= cut < sf(hi - 1)
+
+
+@pytest.mark.parametrize("alpha", [1e-13, 1e-20, 5e-324, 0.0, 1.0])
+def test_the_binomial_band_refuses_a_level_outside_its_range(alpha):
+    """Mutation check: without the lower limit, 1e-13, 1e-20 and 5e-324 are accepted."""
+    with pytest.raises(ValueError, match="at least 1e-12 and below 1"):
+        bonferroni_binomial_band([40], [0.5], alpha=alpha)
+
+
+def test_the_bisection_ends_within_one_step_per_bit_of_the_trials():
+    """At ``low = 2**53 - 5``, ``high = 2**53 - 4`` a float midpoint rounds to ``high``.
+
+    Mutation check: the float midpoint ``floor((low + high) / 2)`` never moves there; the
+    counting predicate stops it at 64 steps instead of letting it loop.
+    """
+    trials = np.array([2.0**53 - 4])
+    steps = []
+
+    def holds(k):
+        steps.append(k)
+        if len(steps) > 64:
+            raise RuntimeError("the bisection did not end in 64 steps")
+        return k >= trials
+
+    assert bands._least_count(trials, holds)[0] == trials[0]
+    assert len(steps) <= 54
+    lower, upper = bonferroni_binomial_band(2**53 - 4, 1.0)
+    assert (float(lower), float(upper)) == (2.0**53 - 4, 2.0**53 - 4)
 
 
 def test_an_input_the_band_refuses_is_refused_after_a_valid_call_too():
