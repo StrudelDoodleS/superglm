@@ -822,7 +822,8 @@ export function createEditorActions({
 
   /**
    * Ask each queued report in turn, skipping one the page already holds by its turn. Before
-   * the first snapshot the queue waits; `initialize` resumes it.
+   * the first snapshot the queue waits, and `initialize` resumes it; every caller waiting on a
+   * turn the drain cannot serve is answered false, as a direct request that cannot ask is.
    */
   async function drainReports() {
     if (reportsDraining) return;
@@ -836,6 +837,10 @@ export function createEditorActions({
           await askEvidence(panel, "/report", { report: panel });
         }
         settleReportWaiters(panel);
+      }
+      if (store.getState().remote.snapshot === null) {
+        for (const resolve of [...reportWaiters.values()].flat()) resolve(false);
+        reportWaiters.clear();
       }
     } finally {
       reportsDraining = false;

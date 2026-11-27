@@ -1765,6 +1765,15 @@ test("a check asked by refreshEvidence or schedulePanelEvidence waits its turn b
   }
 });
 
+test("a check refreshed before the first snapshot answers false at once and sends nothing", async () => {
+  const { sent, client } = heldReportClient(async () => snapshot(0));
+  const store = createEditorStore(createInitialEditorState());
+  const actions = createEditorActions({ store, client });
+
+  assert.equal(await actions.refreshEvidence("check_qq", "/report", { report: "check_qq" }), false);
+  assert.deepEqual(sent, []);
+});
+
 test("an older snapshot from Refresh from Python leaves the newer model's reports alone", async () => {
   const older = { ...snapshot(3), state_generation: 1 };
   const newer = { ...snapshot(4), state_generation: 2 };
