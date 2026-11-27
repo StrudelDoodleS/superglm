@@ -161,7 +161,8 @@ def test_table_row_bound_reads_the_dense_rows_of_every_block(monkeypatch):
     """The bound's largest dense row, row 966 of 1,500, counts whichever block holds it.
 
     At 61-row blocks it lies in the sixteenth; the bound equals the one read in a single
-    block and the reference formed here from the materialised centred rows.
+    block and the reference formed here from the materialised centred rows, to the rounding
+    of a sum of nonnegative terms (BLAS may order a product's sums differently by shape).
     """
     model = _poisson_model(1.0e3)
     centre_hi, centre_lo = _centre(model)
@@ -178,10 +179,13 @@ def test_table_row_bound_reads_the_dense_rows_of_every_block(monkeypatch):
         + float((np.abs(term.offset) + np.abs(centre_hi[term.columns])) @ scale[term.columns])
         for term in plan.terms
     )
+    # Sums of nonnegative terms, each rounded within gamma_(p + 2) of its own magnitude.
+    within = 2 * _gamma(dm.p + len(plan.terms) + 2)
     whole = leverage_tables.table_row_bound(plan, scale, centre_hi, centre_lo)
     monkeypatch.setattr(leverage_tables, "_BLOCK_ROWS", 61)
-    assert leverage_tables.table_row_bound(plan, scale, centre_hi, centre_lo) == whole
-    assert whole == terms + float(np.max(row_sums))
+    chunked = leverage_tables.table_row_bound(plan, scale, centre_hi, centre_lo)
+    assert chunked == pytest.approx(whole, rel=within)
+    assert whole == pytest.approx(terms + float(np.max(row_sums)), rel=within)
 
 
 def test_table_leverages_are_bitwise_identical_for_any_worker_count(monkeypatch):
