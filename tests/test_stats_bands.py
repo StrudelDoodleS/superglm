@@ -284,15 +284,56 @@ def test_the_order_statistic_level_finds_a_least_tail_that_no_normal_screen_rank
 
 
 def test_the_batched_levels_are_exact_up_to_the_rank_they_resolve():
-    """The ``resolve`` smallest levels are exact; any other is at most its own level and at
-    least every exact one, so the ``resolve``-th smallest is exact."""
+    """The ``resolve`` smallest levels are the direct ones to the bit; any other is at most its
+    own level and above every exact one, so the ``resolve``-th smallest is exact."""
     rng = np.random.default_rng(5)
     u = np.sort(rng.uniform(size=(40, 600)) ** rng.uniform(0.9, 1.1, size=(40, 1)), axis=1)
     exact = np.array([_exact_order_statistic_level(row)[0] for row in u])
     levels = bands._order_statistic_levels(u, resolve=5)
     order = np.argsort(exact)
-    np.testing.assert_allclose(levels[order[:5]], exact[order[:5]], rtol=1e-12)
-    assert np.all(levels <= exact * (1 + 1e-12)) and np.all(levels[order[5:]] >= exact[order[4]])
+    np.testing.assert_array_equal(levels[order[:5]], exact[order[:5]])
+    assert np.all(levels <= exact) and np.all(levels[order[5:]] > exact[order[4]])
+
+
+def _direct_levels(rows):
+    """Each row's least two-sided tail, every point read from SciPy's Beta law."""
+    return np.array([_exact_order_statistic_level(row)[0] for row in rows])
+
+
+@pytest.mark.parametrize(("n", "ratio"), [(12, 10.0), (20, 20.0)])
+def test_a_least_tail_beside_a_band_edge_float64_cannot_place_is_read(n, ratio):
+    """Next to 1 the band's edge rounds onto a sample value whose tail is far below the target.
+
+    Row A is ``n`` copies of the float below 1, row B ``n`` copies of a small value whose least
+    tail is ``ratio`` times A's, so B's level is the target and A's least tail lies on the
+    band's rounded upper edge. Both levels are the direct ones, so A ranks first, and A's
+    single-row level is its direct one, not the float above it. At ``n = 20`` both levels are
+    subnormal, at ``n = 12`` normal. Mutation check: trusting every band edge, as SciPy rounds
+    it, ranks B first and returns the float above A's level.
+    """
+    top = np.full(n, np.nextafter(1.0, 0.0))
+    small = np.full(n, (ratio * _exact_order_statistic_level(top)[0] / 2.0) ** (1.0 / n))
+    rows = np.stack([top, small])
+    direct = _direct_levels(rows)
+    assert direct[1] / direct[0] == pytest.approx(ratio, rel=1e-3)
+    levels = bands._order_statistic_levels(rows, resolve=2)
+    np.testing.assert_array_equal(levels, direct)
+    assert list(np.argsort(levels)) == [0, 1]
+    assert order_statistic_level(top) == direct[0]
+
+
+def test_a_screening_target_of_zero_reads_every_row():
+    """Two rows at level zero make the target zero, where the band holds every value.
+
+    Every row's level is then its direct one, the positive ones included. Mutation check:
+    filling the rows the band does not resolve with the target, zero, fails it.
+    """
+    rng = np.random.default_rng(11)
+    positive = np.sort(rng.uniform(size=(3, 40)), axis=1)
+    rows = np.concatenate([np.zeros((2, 40)), positive])
+    direct = _direct_levels(rows)
+    assert np.all(direct[:2] == 0.0) and np.all(direct[2:] > 0.0)
+    np.testing.assert_array_equal(bands._order_statistic_levels(rows, resolve=2), direct)
 
 
 def test_an_unsorted_sample_has_no_order_statistic_level():

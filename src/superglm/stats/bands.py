@@ -288,10 +288,28 @@ def _beta_tail_levels(u: NDArray[np.float64], i: NDArray[np.float64], n: int) ->
     return 2.0 * np.minimum(special.betainc(i, b, u), special.betaincc(i, b, u))
 
 
+def _edge_levels(
+    lower: NDArray[np.float64], upper: NDArray[np.float64], i: NDArray[np.float64], n: int
+) -> NDArray[np.float64]:
+    """``2 min(I_lower(i, n + 1 - i), 1 - I_upper(i, n + 1 - i))``, the least two-sided tail
+    of any value between a band's edges, each tail read at its own edge."""
+    import scipy.linalg
+    from scipy import special
+
+    b = n + 1.0 - i
+    return 2.0 * np.minimum(special.betainc(i, b, lower), special.betaincc(i, b, upper))
+
+
 #: Order statistics per replicate whose tails an upper bound on its level reads.
 _SCREEN_POINTS = 8
 #: Replicates screened at once, so the standardised deviations stay a small block.
 _SCREEN_BLOCK = 16
+#: The band at local level ``2 t`` leaves a factor two between its edges' level and the target
+#: ``t``. An edge is trusted when SciPy's level at it keeps this much of the factor, which
+#: leaves the rest for SciPy's evaluation error at the values between the edges.
+_EDGE_MARGIN = math.sqrt(2.0)
+#: The least positive normal float64. Below it SciPy's tails carry an absolute error.
+_LEAST_NORMAL = float(np.finfo(np.float64).tiny)
 
 
 def _order_statistic_levels(u_sorted: NDArray[np.float64], *, resolve: int) -> NDArray:
@@ -303,17 +321,22 @@ def _order_statistic_levels(u_sorted: NDArray[np.float64], *, resolve: int) -> N
     1. Each row's tail at its two end points and at its ``_SCREEN_POINTS`` largest deviations
        ``|u_i - E U_(i)| / sd U_(i)`` bounds its level from above, so the ``resolve``-th
        smallest of these bounds, ``t``, is at least the ``resolve``-th smallest level.
-    2. A point inside the band at local level ``2 t`` has each one-sided tail at least ``t``,
-       so a two-sided tail at least ``2 t``, since each Beta law's distribution function
-       increases in ``u``; that band's bounds are SciPy's Beta quantiles, whose tail is far
-       within a factor two of the one asked. So every point whose tail is at most ``t`` lies
-       outside that band, and reading the tail of every point outside it gives the exact level
-       of each row whose level is at most ``t``: at least ``resolve`` rows. A non-finite bound
-       counts as outside.
+    2. The band at local level ``2 t`` has its edges at one-sided tail ``t``. Each Beta law's
+       distribution function increases in ``u``, so a point between the two edges of its order
+       statistic has a two-sided tail at least the lesser of the edges' own. That is read from
+       SciPy at the edges themselves rather than assumed from the quantile asked: an order
+       statistic whose edge level falls below ``_EDGE_MARGIN t``, as where float64 cannot
+       place the quantile next to 0 or 1, or whose edge is not finite, has every point read.
+       Every other point outside the band is read too. A point not read then has a two-sided
+       tail above ``t`` by a margin SciPy's evaluation error cannot close, so every point whose
+       tail is at most ``t`` is read, and so is the exact level of each row whose level is at
+       most ``t``: at least ``resolve`` rows.
 
     Every other row's level is above ``t`` and is returned as the next float above ``t``: at
     most its own level and above every exact one, so ranks up to ``resolve`` read exact levels
-    and name the rows that hold them.
+    and name the rows that hold them. A target below the least normal float, zero among them,
+    reads every point of every row: there SciPy's tails carry an absolute error the margin does
+    not cover, and at zero the band holds every value.
     """
     count, n = u_sorted.shape
     i = np.arange(1, n + 1, dtype=np.float64)
@@ -331,11 +354,19 @@ def _order_statistic_levels(u_sorted: NDArray[np.float64], *, resolve: int) -> N
         values = np.take_along_axis(block, points, axis=1)
         bounds[start : start + len(block)] = np.min(_beta_tail_levels(values, i[points], n), axis=1)
     target = float(np.partition(bounds, min(resolve, count) - 1)[min(resolve, count) - 1])
+    if not target >= _LEAST_NORMAL:
+        return np.concatenate(
+            [
+                np.min(_beta_tail_levels(u_sorted[start : start + _SCREEN_BLOCK], i, n), axis=1)
+                for start in range(0, count, _SCREEN_BLOCK)
+            ]
+        )
     lower, upper = _bounds(n, min(1.0, 2.0 * target))
-    levels = np.full(count, np.nextafter(target, np.inf) if target > 0.0 else 0.0)
+    trusted = _edge_levels(lower, upper, i, n) >= _EDGE_MARGIN * target
+    levels = np.full(count, np.nextafter(target, np.inf))
     for start in range(0, count, _SCREEN_BLOCK):
         block = u_sorted[start : start + _SCREEN_BLOCK]
-        rows, columns = np.nonzero(~((block >= lower) & (block <= upper)))
+        rows, columns = np.nonzero(~((block >= lower) & (block <= upper) & trusted))
         tails = _beta_tail_levels(block[rows, columns], i[columns], n)
         least = np.full(len(block), np.inf)
         np.minimum.at(least, rows, tails)
