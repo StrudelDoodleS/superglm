@@ -354,13 +354,13 @@ def test_a_law_without_finite_variance_has_no_ae_interval(heavy_gpd):
         "so actual over expected has no interval.",
     }
     replicates = null_replicates(heavy_gpd.lss, heavy_gpd.validation, inputs=["x"])
-    assert replicates.statistics["check_ae"] is None
+    assert replicates.levels["check_ae"] is None
     for report in ("check_qq", "check_pit", "check_calibration"):
         body = check_body(
             report, heavy_gpd.lss, heavy_gpd.validation, inputs=["x"], replicates=replicates
         )
         assert body["available"] and body["level_source"] == "simulated"
-        assert body["n_draws"] == 99 and len(replicates.statistics[report]) == 99
+        assert body["n_draws"] == 99 and body["local_level"] == replicates.levels[report]
 
 
 def test_an_error_that_is_not_about_variance_still_raises(calm, monkeypatch):
@@ -625,10 +625,34 @@ def _statistics(bodies: dict[str, dict[str, Any]]) -> dict[str, float]:
     }
 
 
+def _direct_qq_levels(transforms: np.ndarray) -> np.ndarray:
+    """Each row's least two-sided tail, every order statistic read from SciPy's Beta law."""
+    n = transforms.shape[1]
+    i = np.arange(1, n + 1)
+    lower, upper = stats.beta.cdf(transforms, i, n + 1 - i), stats.beta.sf(transforms, i, n + 1 - i)
+    return np.min(2 * np.minimum(lower, upper), axis=1)
+
+
+def _replicate_statistics(scored: Any) -> dict[str, np.ndarray]:
+    """Each check's statistic on every replicate ``_scored_replicates`` scores, Q-Q's direct."""
+    return {**scored.statistics, "check_qq": _direct_qq_levels(scored.transforms)}
+
+
 def test_a_held_out_split_reads_each_level_from_99_replicates(calm):
-    """Barnard's rule at 99 replicates: the 5th smallest level, or the 5th largest ``|z|``."""
+    """Barnard's rule at 99 replicates: the 5th smallest level, or the 5th largest ``|z|``.
+
+    The replicates keep each check's level alone, one float, and it is the statistic of the
+    replicate at that rank: for Q-Q, read here from every point's Beta tail. Mutation check: a
+    Q-Q level read from a screen that resolves only the least replicate fails it.
+    """
     replicates = null_replicates(calm.lss, calm.validation, inputs=["x", "g"])
     assert (replicates.n_draws, replicates.seed, replicates.note) == (99, 42, None)
+    fields = [field.name for field in dataclasses.fields(replicates)]
+    assert fields == ["levels", "n_draws", "seed", "note"]
+    assert all(type(replicates.levels[report]) is float for report in CHECK_REPORTS)
+    statistics = _replicate_statistics(
+        checks._scored_replicates(calm.lss, calm.validation, inputs=["x", "g"])
+    )
     bodies = {
         r: check_body(r, calm.lss, calm.validation, inputs=["x", "g"], replicates=replicates)
         for r in CHECK_REPORTS
@@ -641,17 +665,17 @@ def test_a_held_out_split_reads_each_level_from_99_replicates(calm):
         )
         assert body == check_body(report, calm.lss, calm.validation, inputs=["x", "g"])
     qq = bodies["check_qq"]
-    eta = monte_carlo_level(replicates.statistics["check_qq"], alpha=0.05)
-    assert qq["local_level"] == eta
+    eta = monte_carlo_level(statistics["check_qq"], alpha=0.05)
+    assert qq["local_level"] == replicates.levels["check_qq"] == eta
     band = band_at_level(qq["n"], eta)
     k = np.asarray(qq["index"])
     np.testing.assert_array_equal(qq["band_lower"], special.ndtri(band.lower[k]))
     np.testing.assert_array_equal(qq["band_upper"], special.ndtri(band.upper[k]))
     for report in ("check_pit", "check_calibration"):
-        level = monte_carlo_level(replicates.statistics[report], alpha=0.05)
-        assert bodies[report]["local_level"] == level
+        level = monte_carlo_level(statistics[report], alpha=0.05)
+        assert bodies[report]["local_level"] == replicates.levels[report] == level
     ae = bodies["check_ae"]
-    assert ae["z"] == np.sort(replicates.statistics["check_ae"])[-5]
+    assert ae["z"] == replicates.levels["check_ae"] == np.sort(statistics["check_ae"])[-5]
     for table in ae["tables"]:
         ratio, se = np.asarray(table["ratio"]), np.asarray(table["ratio_se"])
         np.testing.assert_array_equal(table["lower"], ratio - ae["z"] * se)
@@ -694,9 +718,9 @@ def test_a_replicate_is_scored_as_the_split_is(name, request):
     Prior weights enter each law and each total, an offset each draw's parameters, and a
     response at an atom is randomised as the split's is: from one stream across the rows, or
     under frequency weights per occurrence from the occurrences' own. Where each row has one
-    response, a replicate is also a split of its own: the one that sets the Q-Q level, whose
-    Q-Q statistic is exact, gives its bodies' statistics, and every replicate gives its PIT
-    histogram's. A frequency-weighted row's occurrences share one response in a split but not
+    response, a replicate is also a split of its own: the one whose Q-Q statistic is the Q-Q
+    level gives its bodies' statistics, and every replicate gives its PIT histogram's. A
+    frequency-weighted row's occurrences share one response in a split but not
     in a replicate, so there the first check stands alone. Mutation checks: scoring each
     replicate under the draw it was simulated from, totals without the prior weights, and atoms
     randomised from another stream, or weighted occurrences' atoms from the rows' stream, each
@@ -714,26 +738,30 @@ def test_a_replicate_is_scored_as_the_split_is(name, request):
         r: check_body(r, case.lss, case.validation, inputs=["x", "g"], replicates=replicates)
         for r in CHECK_REPORTS
     }
-    _assert_same_statistics(scored.statistics, 0, _statistics(bodies))
+    _assert_same_statistics(_replicate_statistics(scored), 0, _statistics(bodies))
     # Bin by bin, so a randomised atom drawn otherwise shows wherever it lands.
     assert scored.counts[0].tolist() == bodies["check_pit"]["counts"]
     if name == "zeros_frequency":
         return
     responses = checks._replicate_responses(case.lss, case.validation)
     assert responses.shape == (99, case.validation.n_obs)
-    j = int(np.argsort(replicates.statistics["check_qq"])[4])
+    statistics = _replicate_statistics(
+        checks._scored_replicates(case.lss, case.validation, inputs=["x", "g"])
+    )
+    j = int(np.argsort(statistics["check_qq"])[4])
+    assert statistics["check_qq"][j] == replicates.levels["check_qq"]
     copy = dataclasses.replace(case.validation, y=responses[j])
     bodies = {
         r: check_body(r, case.lss, copy, inputs=["x", "g"], replicates=replicates)
         for r in CHECK_REPORTS
     }
-    _assert_same_statistics(replicates.statistics, j, _statistics(bodies))
+    _assert_same_statistics(statistics, j, _statistics(bodies))
     # The PIT histogram reads every transform, so every replicate's is its own split's.
     for i, y in enumerate(responses):
         split = dataclasses.replace(case.validation, y=y)
         pit = check_body("check_pit", case.lss, split, inputs=[], replicates=replicates)
         level = binomial_cell_level(pit["counts"], pit["n_rows"], 1 / 20)
-        assert replicates.statistics["check_pit"][i] == level
+        assert statistics["check_pit"][i] == level
 
 
 def test_the_replicates_follow_the_fitted_law_with_its_offset(with_offset):
@@ -764,7 +792,7 @@ def test_a_refused_draw_falls_back_to_the_known_parameter_band(calm, monkeypatch
 
     monkeypatch.setattr(checks, "posterior_draws", refuse)
     replicates = null_replicates(calm.lss, calm.validation, inputs=["x", "g"])
-    assert replicates.n_draws == 0 and all(v is None for v in replicates.statistics.values())
+    assert replicates.n_draws == 0 and all(v is None for v in replicates.levels.values())
     for report in CHECK_REPORTS:
         body = check_body(report, calm.lss, calm.validation, inputs=["x", "g"])
         assert (body["level_source"], body["n_draws"]) == ("known", 0)

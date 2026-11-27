@@ -88,8 +88,7 @@ from superglm.editor.lss.view import LSSModelView, column_of, is_lss, lss_key
 from superglm.model.base import NoPredictedMeanError
 from superglm.stats.bands import (
     _binomial_cell_levels,
-    _monte_carlo_rank,
-    _order_statistic_levels,
+    _monte_carlo_order_statistic_level,
     band_at_level,
     bonferroni_binomial_band,
     equal_local_levels_band,
@@ -273,7 +272,7 @@ def qq_from_residuals(
 def _pit_body(residuals: Any, level: _Level) -> dict[str, Any]:
     payload = pit_payload(residuals, n_bins=PIT_BINS, alpha=CHECK_ALPHA / PIT_BINS)
     body = {**payload.to_json(), "alpha": CHECK_ALPHA, "local_level": CHECK_ALPHA / (2 * PIT_BINS)}
-    cut = level.read()
+    cut = level.value
     if cut is not None:
         lower, upper = bonferroni_binomial_band(payload.n_rows, 1.0 / PIT_BINS, cut=cut)
         body.update(band_lower=float(lower), band_upper=float(upper), local_level=cut)
@@ -300,7 +299,7 @@ def _calibration_body(
     table = payload.quantiles
     p = table["p"].to_numpy(dtype=np.float64)
     trials = np.rint(table["weight"].to_numpy(dtype=np.float64))
-    cut = level.read()
+    cut = level.value
     if cut is None:
         low, high = bonferroni_binomial_band(trials, 1.0 - p, alpha=CHECK_ALPHA)
         cut = CHECK_ALPHA / (2 * len(QUANTILE_GRID))
@@ -403,7 +402,7 @@ def _ae_body(
     errors = [np.asarray(t["ratio_se"], dtype=np.float64) for t in tables]
     cells = int(sum(np.count_nonzero(np.isfinite(se)) for se in errors))
     found = level()
-    z = found.read(larger_is_extreme=True)
+    z = found.value
     if z is None and cells:
         z = float(stats.norm.isf(CHECK_ALPHA / (2.0 * cells)))
     outside = 0
@@ -436,24 +435,16 @@ def _no_quote(fitted, dataset: EvaluationDataset, y, refused: NoPredictedMeanErr
 class _Level(NamedTuple):
     """Where a body's band level comes from: replicates of a held-out split, or known parameters.
 
-    ``statistics`` are the check's replicate statistics, or ``None`` for the known-parameter
+    ``value`` is the level the check's replicates give, or ``None`` for the known-parameter
     level; ``note`` is the page's sentence when a held-out split keeps that level.
     """
 
-    statistics: NDArray[np.float64] | None
+    value: float | None
     n_draws: int
     note: str | None
 
-    def read(self, *, larger_is_extreme: bool = False) -> float | None:
-        """The level the replicates give, or ``None`` for the known-parameter one."""
-        if self.statistics is None:
-            return None
-        return monte_carlo_level(
-            self.statistics, alpha=CHECK_ALPHA, larger_is_extreme=larger_is_extreme
-        )
-
     def fields(self) -> dict[str, Any]:
-        simulated = self.statistics is not None
+        simulated = self.value is not None
         return {
             "level_source": "simulated" if simulated else "known",
             "n_draws": self.n_draws if simulated else 0,
@@ -472,7 +463,7 @@ def _level(
     if dataset.source == _FIT_ROWS:
         return _Level(None, 0, None)
     found = null_replicates(model, dataset, inputs=inputs) if replicates is None else replicates
-    return _Level(found.statistics.get(report), found.n_draws, found.note)
+    return _Level(found.levels.get(report), found.n_draws, found.note)
 
 
 def _body(
@@ -506,7 +497,7 @@ def _body(
         if report == "check_qq":
             found = level()
             quantile = _sample_residuals(residuals, seed=CHECK_SEED).quantile
-            return {**qq_from_residuals(quantile, local_level=found.read()), **found.fields()}
+            return {**qq_from_residuals(quantile, local_level=found.value), **found.fields()}
         if report == "check_pit":
             return _pit_body(residuals, level())
         return _calibration_body(fitted, dataset, y, residuals, level())
@@ -554,15 +545,14 @@ class _NotSampled(Exception):  # noqa: N818 - the level falls back, not a fault
 # Compared and hashed by identity: a cache holds it as a value, keyed by what it was drawn from.
 @dataclass(frozen=True, eq=False)
 class NullReplicates:
-    """One split's simulated null: each check's statistic on every one of ``n_draws`` replicates.
+    """One split's simulated null: each check's level, read from ``n_draws`` replicates.
 
-    ``statistics`` maps each of ``CHECK_REPORTS`` to its ``(n_draws,)`` replicate statistics,
-    or to ``None`` when that check has none: it is unavailable on its own (actual over
-    expected without a finite variance), or nothing was simulated. Q-Q, PIT and quantile
-    statistics are levels, small when extreme; actual over expected's is the largest
-    ``|ratio - 1| / ratio_se``, large when extreme. A Q-Q statistic above the
-    ``floor(CHECK_ALPHA (n_draws + 1))``-th smallest may stand at a floor above every exact one
-    and at most its own value, which no level at ``CHECK_ALPHA`` reads.
+    ``levels`` maps each of ``CHECK_REPORTS`` to the level its band is drawn at, Barnard's rule
+    at ``CHECK_ALPHA`` over its replicate statistics: Q-Q's local level, the PIT and quantile
+    per-cell cuts, and actual over expected's ``z``. Each is one float, exactly the statistic of
+    the replicate at that rank. A check maps to ``None`` when it has no level: it is
+    unavailable on its own (actual over expected without a finite variance), or nothing was
+    simulated.
 
     ``note`` is the page's sentence for each check that keeps the known-parameter level on this
     split for want of a replicate: the fit's uncertainty could not be sampled, or these rows
@@ -571,20 +561,17 @@ class NullReplicates:
     answer. Nothing simulated leaves ``n_draws`` 0.
     """
 
-    statistics: Mapping[str, NDArray[np.float64] | None]
+    levels: Mapping[str, float | None]
     n_draws: int
     seed: int
     note: str | None = None
 
     def __post_init__(self) -> None:
-        frozen = {}
-        for report in CHECK_REPORTS:
-            values = self.statistics.get(report)
-            if values is not None:
-                values = np.array(values, dtype=np.float64)
-                values.setflags(write=False)
-            frozen[report] = values
-        object.__setattr__(self, "statistics", MappingProxyType(frozen))
+        floats = {
+            report: None if (level := self.levels.get(report)) is None else float(level)
+            for report in CHECK_REPORTS
+        }
+        object.__setattr__(self, "levels", MappingProxyType(floats))
 
 
 class _Split(NamedTuple):
@@ -812,13 +799,30 @@ def _ae_statistics(tables: list[_AETable], totals: NDArray) -> NDArray[np.float6
 
 
 class _Scores(NamedTuple):
-    """What the replicates give: each check's statistic per replicate, or ``None`` where it has
-    none, each replicate's PIT histogram, and each actual-over-expected table's
+    """What the replicates give: each replicate's sorted transforms the Q-Q plot reads, a
+    ``(replicates, n)`` block; each other check's statistic per replicate, or ``None`` where it
+    has none; each replicate's PIT histogram; and each actual-over-expected table's
     ``(replicates, cells)`` actual totals by name."""
 
+    transforms: NDArray[np.float64]
     statistics: dict[str, NDArray[np.float64] | None]
     counts: NDArray[np.int64]
     totals: dict[str, NDArray[np.float64]]
+
+    def levels(self) -> dict[str, float | None]:
+        """Each check's level by Barnard's rule at ``CHECK_ALPHA``, Q-Q's read exactly."""
+        levels = {
+            "check_qq": _monte_carlo_order_statistic_level(self.transforms, alpha=CHECK_ALPHA)
+        }
+        for report, values in self.statistics.items():
+            # Actual over expected's statistic is large when extreme, the others small.
+            larger = report == "check_ae"
+            levels[report] = (
+                None
+                if values is None
+                else monte_carlo_level(values, alpha=CHECK_ALPHA, larger_is_extreme=larger)
+            )
+        return levels
 
 
 def _scores(
@@ -869,9 +873,7 @@ def _scores(
     elif thresholds is not None:
         calibration = _binomial_cell_levels(exceeded, occurrences, 1.0 - grid)
     read.sort(axis=1)
-    resolve = max(1, _monte_carlo_rank(count, CHECK_ALPHA))
     statistics = {
-        "check_qq": _order_statistic_levels(read, resolve=resolve),
         "check_pit": _binomial_cell_levels(pit, read.shape[1], 1.0 / PIT_BINS),
         "check_calibration": calibration,
         "check_ae": _ae_statistics(tables, totals) if tables else None,
@@ -880,7 +882,7 @@ def _scores(
         table.check.covariate: totals[:, start:end]
         for table, start, end in zip(tables, starts[:-1], starts[1:], strict=True)
     }
-    return _Scores(statistics, pit, by_table)
+    return _Scores(read, statistics, pit, by_table)
 
 
 def _replicates(
@@ -925,7 +927,7 @@ def null_replicates(
     n_draws: int = CHECK_DRAWS,
     seed: int = CHECK_SEED,
 ) -> NullReplicates:
-    """Simulate the null of ``dataset``'s checks once, for each check to read its level from.
+    """Simulate the null of ``dataset``'s checks once and read each check's level from it.
 
     ``n_draws`` coefficient sets are drawn from ``N(beta_hat, V)``, the fit's posterior
     (:func:`superglm.distributional.posterior.posterior_draws`, fixed smoothing), and each is
@@ -933,7 +935,8 @@ def null_replicates(
     read through the family's quantile function (prior weights and offsets as the split's rows
     carry them; each frequency occurrence its own response), and is scored with the fitted
     model exactly as the split is: the same transform, the same randomisation of atoms, the
-    same cells. ``inputs`` are the columns actual over expected groups by.
+    same cells. Each check's level is Barnard's rule over its replicates' statistics, and only
+    the levels are kept. ``inputs`` are the columns actual over expected groups by.
 
     The rows the model was fitted on keep the known-parameter bands, so nothing is simulated
     for them, nor for a model or split no check can answer. Where the posterior refuses its
@@ -944,14 +947,14 @@ def null_replicates(
     and a randomised quantile calibration read; quantile calibration of the response and actual
     over expected read every occurrence, so they keep the known level and ``note`` says why.
     """
-    nothing = NullReplicates(statistics={}, n_draws=0, seed=int(seed))
+    nothing = NullReplicates(levels={}, n_draws=0, seed=int(seed))
     lss = _lss(model)
     if lss is None or dataset.source == _FIT_ROWS or lss_split_reason(lss, dataset) is not None:
         return nothing
     fitted = lss._require_fitted()
     family = fitted.family
     if not isinstance(family, DistributionFunctionFamily) or response_spec(family).shape:
-        return NullReplicates(statistics={}, n_draws=0, seed=int(seed), note=_UNSIMULATED_ROWS)
+        return NullReplicates(levels={}, n_draws=0, seed=int(seed), note=_UNSIMULATED_ROWS)
     try:
         split, scores, count = _replicates(
             fitted, dataset, inputs, n_draws=int(n_draws), seed=int(seed)
@@ -959,9 +962,9 @@ def null_replicates(
     except NoPredictedMeanError:
         return nothing
     except _NotSampled as unsampled:
-        return NullReplicates(statistics={}, n_draws=0, seed=int(seed), note=unsampled.note)
+        return NullReplicates(levels={}, n_draws=0, seed=int(seed), note=unsampled.note)
     return NullReplicates(
-        statistics=scores.statistics,
+        levels=scores.levels(),
         n_draws=count,
         seed=int(seed),
         note=None if split.complete else _UNSIMULATED_ROWS,
@@ -987,7 +990,8 @@ def _scored_replicates(
     n_draws: int = CHECK_DRAWS,
     seed: int = CHECK_SEED,
 ) -> _Scores:
-    """What :func:`null_replicates` reads from its replicates, cell totals too, for tests.
+    """What :func:`null_replicates` reads its levels from, PIT histograms and cell totals too,
+    for tests.
 
     ``responses``, one row per replicate over the occurrences the replicates draw, are scored
     in place of simulated ones.
