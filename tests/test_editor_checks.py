@@ -1185,6 +1185,22 @@ def test_an_edit_while_the_check_is_drawn_supersedes_its_answer(calm_session, mo
     assert answer["status"] == "superseded" and answer["in_force"] == asked
 
 
+def test_a_training_only_session_keeps_the_known_parameter_bands(calm):
+    """A session opened with train_data alone reads its checks on the rows the model was fitted
+    on. Mutation check: deciding held out by ``source == "retained_fit_data"`` simulates them."""
+    session = EditorSession.from_model(calm.lss, train_data=(calm.train.X, calm.train.y))
+    try:
+        widget = session.widget()
+        for report in CHECK_REPORTS:
+            payload = _ask(widget, report)
+            assert payload["split"]["name"] == "train"
+            body = payload["models"]["edited"]
+            assert body["available"] is True
+            assert body["level_source"] == "known" and body["n_draws"] == 0
+    finally:
+        _close_widgets(session)
+
+
 def test_a_superglm_session_offers_no_checks_and_says_why(glm_session):
     widget = glm_session.widget()
     assert widget._state()["checks"] == []
