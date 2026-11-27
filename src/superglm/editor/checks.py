@@ -118,7 +118,7 @@ _FIT_ROWS = "retained_fit_data"
 _RESPONSE_STREAM = 6
 #: Rows simulated at once: the posterior pushforward and the responses hold this many rows of
 #: ``(draws, rows, parameters)`` floats at a time, and the transforms one ``(draws, n)`` array.
-_SIMULATION_ROWS = 4096
+_SIMULATION_ROWS = 1024
 #: Simulated uniforms lie strictly inside (0, 1) by this margin, as ``posterior_predictive``'s do.
 _PROBABILITY_MARGIN = 1.0e-12
 
