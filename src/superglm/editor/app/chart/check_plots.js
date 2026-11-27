@@ -11,7 +11,9 @@ import { niceTicks } from "./fan.js";
 /** @typedef {import('../api/contracts.js').CheckReport} CheckReport */
 /** @typedef {import('../api/contracts.js').CheckPayload} CheckPayload */
 /** @typedef {import('../api/contracts.js').CheckBody} CheckBody */
-/** @typedef {'band'|'reference'|'edited'|'original'|'outside'|'interval'|'weight'|'grid'} Role */
+/**
+ * @typedef {'band'|'reference'|'edited'|'original'|'original-interval'|'outside'|'interval'|'weight'|'grid'} Role
+ */
 /** @typedef {{role: Role, d: string}} Layer one path per role; points are arcs inside the path */
 /** @typedef {{x:number, y:number, text:string}} Mark a hover target in px and its readout */
 /**
@@ -39,7 +41,9 @@ import { niceTicks } from "./fan.js";
  */
 
 /** The order the layers are painted in: the ground first, the points over everything. */
-const ROLES = /** @type {const} */ (["grid", "weight", "band", "reference", "original", "interval", "edited", "outside"]);
+const ROLES = /** @type {const} */ (
+  ["grid", "weight", "band", "reference", "original-interval", "original", "interval", "edited", "outside"]
+);
 
 const THUMB_PAD = 2;
 // Room for the tick labels and the axis titles around a large view's plot.
@@ -124,7 +128,9 @@ function plotRect(box) {
 
 /** @returns {Parts} */
 function emptyParts() {
-  return { grid: [], weight: [], band: [], reference: [], original: [], interval: [], edited: [], outside: [] };
+  return {
+    grid: [], weight: [], band: [], reference: [], "original-interval": [], original: [], interval: [], edited: [], outside: []
+  };
 }
 
 /** @param {Box} box @param {Parts} parts @param {Label[]} labels @param {Mark[]} marks @returns {Scene} */
@@ -336,7 +342,8 @@ function aePanel(parts, labels, marks, rect, domain, table, original, box) {
     for (const i of original.ratio.keys()) {
       if (!aeDrawn(original, i)) continue;
       const x = at(original, i) - shift(original);
-      parts.original.push(vline(x, sy(original.lower[i]), sy(original.upper[i])), dot(x, sy(original.ratio[i]), r));
+      parts["original-interval"].push(vline(x, sy(original.lower[i]), sy(original.upper[i])));
+      parts.original.push(dot(x, sy(original.ratio[i]), r));
     }
   }
   for (let i = 0; i < k; i++) {

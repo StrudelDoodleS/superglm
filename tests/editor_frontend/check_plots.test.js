@@ -176,8 +176,10 @@ test("A/E compare draws every band of both models when they bin predicted Mean d
       near(mark.y, y(payload.models.edited.tables[0].ratio[i]), 0.02);
       assert.ok(mark.text.startsWith(`predicted Mean band ${i + 1} `), mark.text);
     }
-    const dots = subpaths(layer(scene, "original").d).filter((p) => p.length > 3);
-    const ticks = subpaths(layer(scene, "original").d).filter((p) => p.length === 3);
+    // The fit's points and its intervals are drawn in their own roles, so each takes its own stroke.
+    const dots = subpaths(layer(scene, "original").d);
+    const ticks = subpaths(layer(scene, "original-interval").d);
+    assert.ok(dots.every((p) => p.length > 3) && ticks.every((p) => p.length === 3), case_);
     assert.equal(dots.length, kf, case_);
     for (const [i, [x, at]] of dots.entries()) {
       assert.ok(Math.abs(x - ordinal(i, kf)) <= 4.011, case_);

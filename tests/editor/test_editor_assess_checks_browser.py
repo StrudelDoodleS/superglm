@@ -416,6 +416,12 @@ def test_compare_draws_the_fit_without_asking_python(checks_page, choose_feature
         assert page.locator("#checkFrame path.check-original").count() == 1
         assert page.locator("#checkLegend").is_visible()
         assert page.locator("#checkLegend").inner_text().split() == ["As", "edited", "As", "fitted"]
+        # The fit's intervals are as thin as the edit's; only its rings are wider.
+        widths = page.locator("#checkFrame svg.check-plot").evaluate(
+            """svg => Object.fromEntries(["original", "original-interval", "interval"].map((role) =>
+                [role, parseFloat(getComputedStyle(svg.querySelector(`path.check-${role}`)).strokeWidth)]))"""
+        )
+        assert widths["original-interval"] == widths["interval"] < widths["original"]
         # One flag: the overview's switch reads it too.
         page.locator('[data-assess-entry="assess"]').click()
         assert page.locator("#overviewCompare").get_attribute("aria-checked") == "true"

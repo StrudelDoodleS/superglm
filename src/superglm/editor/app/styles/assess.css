@@ -255,6 +255,14 @@
   stroke-linecap: round;
 }
 
+/* The fit's intervals are as thin as the edit's; only its rings are wider. */
+.check-original-interval {
+  fill: none;
+  stroke: var(--grey);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+
 .check-edited {
   fill: var(--ridge-fill);
   stroke: var(--blue);
@@ -405,7 +413,7 @@
   stroke-width: 0.7;
 }
 
-.assess-card-plot :is(.check-outside, .check-interval) {
+.assess-card-plot :is(.check-outside, .check-interval, .check-original-interval) {
   stroke-width: 0.9;
 }
 
