@@ -635,7 +635,8 @@ export function createEditorActions({
     if (noteSave && !(await afterNoteSave())) return skippedMutation(NOTE_NOT_SAVED);
     if (held()) return skippedMutation(ALREADY_RUNNING);
 
-    const previousRevision = store.getState().remote.snapshot?.model_revision ?? -1;
+    const previousSnapshot = store.getState().remote.snapshot;
+    const previousRevision = previousSnapshot?.model_revision ?? -1;
     const requestPayload = snapshotPayload(payload);
     store.update((state) => moved(state, { type: "hold", operation: name, blocking }));
 
@@ -679,16 +680,22 @@ export function createEditorActions({
     }
     await notifyTimingHook(onPaintSettled);
     finishStructuralMutation(envelope.state.notice ?? null);
-    // A staged change leaves the model, so its evidence, as it was.
-    if (envelope.state.model_revision !== previousRevision) {
-      try {
+    try {
+      if (envelope.state.model_revision !== previousRevision) {
         void Promise.resolve(scheduleVisibleEvidence(envelope.state.model_revision, {
           immediate: true,
           summaryCommitted: true
         })).catch(() => {});
-      } catch {
-        // Evidence refresh cannot change an authoritative structural success.
+      } else if (waitingListChanged(previousSnapshot, envelope.state)) {
+        // A staged change leaves the model as it was, but a report showing the waiting list
+        // went stale (commitRemote), and a request in flight for it was dropped: ask again.
+        void Promise.resolve(scheduleVisibleEvidence(envelope.state.model_revision, {
+          immediate: true,
+          onlyStale: true
+        })).catch(() => {});
       }
+    } catch {
+      // Evidence refresh cannot change an authoritative structural success.
     }
     return { ok: true, envelope };
   }

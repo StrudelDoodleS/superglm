@@ -15,7 +15,8 @@ import {
 } from "../../src/superglm/editor/app/state/store.js";
 import {
   selectActiveTermName,
-  selectCurrentSelection
+  selectCurrentSelection,
+  selectReportNeedsAsk
 } from "../../src/superglm/editor/app/state/selectors.js";
 
 /** @typedef {import('../../src/superglm/editor/app/api/contracts.js').EditorState} EditorState */
@@ -1873,7 +1874,7 @@ test("refreshFromPython leaves state unchanged on a malformed snapshot", async (
   assert.strictEqual(store.getState(), before);
 });
 
-test("a staged change runs without blocking the page and, at an unchanged revision, asks for no evidence", async () => {
+test("a staged change runs without blocking the page and, at an unchanged revision, asks only for stale reports", async () => {
   const envelope = transitionEnvelope(2);
   envelope.state.pending = [{
     id: "a1b2c3d",
@@ -1887,7 +1888,7 @@ test("a staged change runs without blocking the page and, at an unchanged revisi
   const store = createEditorStore(createInitialEditorState(snapshot(2)));
   /** @type {boolean|undefined} */
   let blockingSeen;
-  /** @type {number[]} */
+  /** @type {unknown[]} */
   const scheduled = [];
   const actions = createEditorActions({
     store,
@@ -1903,7 +1904,7 @@ test("a staged change runs without blocking the page and, at an unchanged revisi
       getState: async () => { throw new Error("success must not recover through /state"); }
     },
     waitForPaint: async () => {},
-    scheduleVisibleEvidence: (revision) => { scheduled.push(revision); }
+    scheduleVisibleEvidence: (revision, options) => { scheduled.push([revision, options]); }
   });
 
   const result = await actions.executeStructuralMutation({
@@ -1917,7 +1918,60 @@ test("a staged change runs without blocking the page and, at an unchanged revisi
   assert.equal(blockingSeen, false);
   assert.strictEqual(store.getState().remote.snapshot, envelope.state);
   assert.equal(store.getState().request.mutation.status, "idle");
-  assert.deepEqual(scheduled, []);
+  assert.deepEqual(scheduled, [[2, { immediate: true, onlyStale: true }]]);
+});
+
+test("a report opened while a staged change is answered is asked again, not left loading", async () => {
+  /** @param {string} id */
+  const step = (id) => ({
+    id, operation: "collapse", term: "age", label: "Collapse", params: {}, note: null, time: 0
+  });
+  // Refit is staged: one change waits.
+  const opened = snapshot(2);
+  opened.pending = [step("a1b2c3d")];
+  const envelope = transitionEnvelope(2);
+  envelope.state.pending = [step("a1b2c3d"), step("e4f5a6b")];
+  const stage = deferred();
+  const { sent, client, answer } = heldReportClient(async () => envelope.state);
+  const store = createEditorStore(createInitialEditorState(opened));
+  /** @type {ReturnType<typeof createEditorActions>} */
+  let actions;
+  actions = createEditorActions({
+    store,
+    client: {
+      ...client,
+      /** @param {string} path @param {Record<string, unknown>} body */
+      postJSON: (path, body) => (path === "/stage" ? stage.promise : client.postJSON(path, body))
+    },
+    waitForPaint: async () => {},
+    // The page's scheduler: the open report is Validation.
+    scheduleVisibleEvidence: (_revision, options) => actions.scheduleReports(
+      ["validation"].filter((panel) => !options?.onlyStale || selectReportNeedsAsk(store.getState(), panel)),
+      options
+    )
+  });
+
+  // Collapse, then open Assess while /stage is still answering.
+  const staging = actions.executeStructuralMutation({
+    name: "collapse levels",
+    path: "/stage",
+    payload: { operation: "collapse", term: "age", params: { levels: ["1", "2"] } },
+    blocking: false
+  });
+  await settled();
+  actions.scheduleReports(["validation"], { immediate: true });
+  assert.deepEqual(sent, ["validation"]);
+  stage.resolve(envelope);
+  assert.equal((await staging).ok, true);
+  await settled();
+  // The waiting list moved under the request in flight, so its answer is dropped.
+  await answer(0, 2);
+  assert.deepEqual(sent, ["validation", "validation"]);
+  await answer(1, 2);
+
+  const validation = store.getState().request.evidence.validation;
+  assert.equal(validation.status, "current");
+  assert.notEqual(validation.payload, null);
 });
 
 test("a refused structural request shows Python's fixed sentence, not an uncertain outcome", async () => {
