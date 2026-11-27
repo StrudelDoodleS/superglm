@@ -581,19 +581,15 @@ class NullReplicates:
 class _Split(NamedTuple):
     """A split's retained rows as every check scores them and as each replicate draws them.
 
-    Each replicate draws one response per simulated occurrence. Under prior or unit weights
-    these are the retained rows, of which Q-Q and PIT read ``read`` (``None`` for all), the rows
-    ``replication_sample`` selects. Under other frequency weights they are the occurrences
-    ``replication_sample`` selects, in its order, and every one is read: each literal
-    occurrence up to its cap, a sample of them beyond it. ``per_occurrence`` marks those
-    weights, under which ``_sample_residuals`` randomises each occurrence at an atom on its
-    own. ``complete`` says the simulated occurrences are every one that quantile calibration of
-    the response and actual over expected read.
-
-    ``rows`` is each simulated occurrence's retained row and ``prior_law`` its prior weight
-    where the row law carries one. ``total_weights`` are each retained row's weight on one
-    occurrence's response in an actual total: its prior weight, or one under frequency
-    weights, whose occurrences are each drawn.
+    A replicate draws one response per simulated occurrence. Under prior or unit weights these
+    are the retained rows, of which Q-Q and PIT read ``read``, the rows ``replication_sample``
+    selects (``None`` for all). Under other frequency weights they are the occurrences
+    ``replication_sample`` selects, all read; ``per_occurrence`` marks them, each occurrence's
+    atom randomised on its own. ``complete`` says they are every occurrence that quantile calibration of the
+    response and actual over expected read. ``rows`` is each occurrence's retained row,
+    ``prior_law`` its prior weight where the row law carries one, and ``total_weights`` each
+    retained row's weight on one occurrence's response in an actual total: its prior weight, or
+    one under frequency weights.
     """
 
     fitted: Any

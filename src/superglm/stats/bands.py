@@ -313,28 +313,15 @@ _LEAST_NORMAL = float(np.finfo(np.float64).tiny)
 def _order_statistic_levels(u_sorted: NDArray[np.float64], *, resolve: int) -> NDArray:
     """Each row's equal-local-levels statistic, exact for at least its ``resolve`` smallest.
 
-    ``u_sorted`` is a ``(replicates, n)`` block of rows sorted ascending. Two passes find the
-    ``resolve`` smallest levels without reading every point's Beta tail:
-
-    1. Each row's tail at its two end points and at its ``_SCREEN_POINTS`` largest deviations
-       ``|u_i - E U_(i)| / sd U_(i)`` bounds its level from above, so the ``resolve``-th
-       smallest of these bounds, ``t``, is at least the ``resolve``-th smallest level.
-    2. The band at local level ``2 t`` has its edges at one-sided tail ``t``. Each Beta law's
-       distribution function increases in ``u``, so a point between the two edges of its order
-       statistic has a two-sided tail at least the lesser of the edges' own. That is read from
-       SciPy at the edges themselves rather than assumed from the quantile asked: an order
-       statistic whose edge level falls below ``_EDGE_MARGIN t``, as where float64 cannot
-       place the quantile next to 0 or 1, or whose edge is not finite, has every point read.
-       Every other point outside the band is read too. A point not read then has a two-sided
-       tail above ``t`` by a margin SciPy's evaluation error cannot close, so every point whose
-       tail is at most ``t`` is read, and so is the exact level of each row whose level is at
-       most ``t``: at least ``resolve`` rows.
-
-    Every other row's level is above ``t`` and is returned as the next float above ``t``: at
-    most its own level and above every exact one, so ranks up to ``resolve`` read exact levels
-    and name the rows that hold them. A target below the least normal float, zero among them,
-    reads every point of every row: there SciPy's tails carry an absolute error the margin does
-    not cover, and at zero the band holds every value.
+    ``u_sorted`` is a ``(replicates, n)`` block of ascending rows. A screen reads each row's
+    tails at its end points and its ``_SCREEN_POINTS`` largest standardised deviations, an
+    upper bound on its level, and ``t`` is the ``resolve``-th smallest bound. Every point
+    outside the band at local level ``2 t`` is read, and every point of an order statistic
+    whose edge level, read from SciPy at the edge, is below ``_EDGE_MARGIN t`` or not finite.
+    An unread point's tail then exceeds ``t``, so each row whose level is at most ``t`` is
+    exact, and every other row returns the next float above ``t``, at most its own level. A
+    target below the least normal float, where SciPy's tails carry an absolute error, reads
+    every point.
     """
     count, n = u_sorted.shape
     i = np.arange(1, n + 1, dtype=np.float64)
