@@ -360,6 +360,7 @@ def _log_fraction(
     times ``a |log x| + b |log y| + |log B(a, b)|``, plus SciPy's ``betaln``, about
     ``u (a + b) log(a + b)``; that is the relative error of the tail.
     """
+    import scipy.linalg
     from scipy import special
 
     f = a * (a * y - b * x + 1.0) / (a + 1.0)
@@ -437,6 +438,7 @@ def _log_band_lower(n: int, log_level: float) -> NDArray[np.float64]:
     and every step after it rises to the root without passing it. A step below ``sqrt(eps)``
     relative leaves an error of about its square.
     """
+    import scipy.linalg
     from scipy import special
 
     i = np.arange(1, n + 1, dtype=np.float64)
@@ -459,21 +461,16 @@ def _log_band_lower(n: int, log_level: float) -> NDArray[np.float64]:
 def _order_statistic_levels(
     u_sorted: NDArray[np.float64], *, resolve: int, log: bool = False
 ) -> NDArray:
-    """Each row's equal-local-levels statistic, exact for at least its ``resolve`` smallest;
-    with ``log``, its natural log, exact below float64's range too.
+    """Each ``(replicates, n)`` ascending row's level, exact for its ``resolve`` smallest; in
+    logs with ``log``, exact below float64's range too.
 
-    ``u_sorted`` is a ``(replicates, n)`` block of ascending rows. A screen reads each row's
-    tails at its end points and its ``_SCREEN_POINTS`` largest standardised deviations, an
-    upper bound on its level, and ``t`` is the ``resolve``-th smallest bound. Every point
-    outside the band at local level ``2 t`` is read, and every point of an order statistic
-    whose edge level, read from SciPy at the edge, is below ``_EDGE_MARGIN t`` or not finite.
-    An unread point's tail then exceeds ``t``, so each row whose level is at most ``t`` is
-    exact, and every other row returns the next float above ``t``, at most its own level. A
-    target below the least normal float, where SciPy's tails carry an absolute error, reads
-    every point. With ``log`` the screen, the target and the read are all in logs, and such a
-    target reads the points outside the band at ``2 t`` found in logs: the edges come from
-    Newton's method to about ``1e-10`` of their tail, which the factor two leaves no point to
-    miss.
+    A screen of each row's end points and ``_SCREEN_POINTS`` largest standardised deviations
+    bounds its level; ``t`` is the ``resolve``-th smallest bound. Every point outside the band
+    at ``2 t`` is read, with every point whose edge level is below ``_EDGE_MARGIN t`` or not
+    finite, so a row with level at most ``t`` is exact and any other returns the next float
+    above ``t``, at most its level. A target below the least normal float reads every point;
+    with ``log`` it reads those outside the band at ``2 t`` found in logs, whose Newton edges
+    are good to ``1e-10``.
     """
     count, n = u_sorted.shape
     i = np.arange(1, n + 1, dtype=np.float64)
@@ -726,6 +723,7 @@ def bonferroni_binomial_band(
 def _log_binomial_at_most(k: ArrayLike, trials: ArrayLike, p: ArrayLike) -> NDArray[np.float64]:
     """``log P(X <= k)`` for ``X ~ Binomial(trials, p)``: SciPy's tail, and below
     ``_LOG_BELOW`` the continued fraction of ``I_{1-p}(trials - k, k + 1)``, its lower tail."""
+    import scipy.spatial
     from scipy import stats
 
     k, trials, p = np.broadcast_arrays(*(np.asarray(v, dtype=np.float64) for v in (k, trials, p)))
@@ -742,6 +740,7 @@ def _log_binomial_at_least(k: ArrayLike, trials: ArrayLike, p: ArrayLike) -> NDA
     """``log P(X >= k)`` for ``X ~ Binomial(trials, p)``: SciPy's tail, and below
     ``_LOG_BELOW`` the continued fraction of ``I_p(k, trials - k + 1)``; above ``trials`` the
     chance is 0."""
+    import scipy.spatial
     from scipy import stats
 
     k, trials, p = np.broadcast_arrays(*(np.asarray(v, dtype=np.float64) for v in (k, trials, p)))
