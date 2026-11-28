@@ -120,7 +120,8 @@ PIT_BINS = 20
 AE_BINS = 10
 #: Probabilities whose predicted quantiles quantile calibration reads.
 QUANTILE_GRID = (0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.975, 0.99, 0.995)
-#: Order statistics a Q-Q body sends evenly spaced, beside its ends and every point outside.
+#: Order statistics a Q-Q body sends evenly spaced, beside its ends; it sends at most as many
+#: of those outside the band, beside the farthest beyond each edge.
 QQ_DISPLAY_POINTS = 800
 #: Lowest and highest order statistics a Q-Q body always sends.
 _QQ_ENDS = 10
@@ -271,7 +272,9 @@ def qq_from_residuals(
     :func:`null_replicates` calibrates it, or by default the known-parameter
     level of :func:`superglm.stats.equal_local_levels_band`. ``index`` names
     the order statistics the body sends: ``QQ_DISPLAY_POINTS`` evenly spaced,
-    the ``10`` lowest and highest and every one outside the band.
+    the ``10`` lowest and highest, and those outside the band: every one up to
+    ``QQ_DISPLAY_POINTS`` of them, else that many evenly by rank, the lowest and
+    highest included, with the farthest beyond each edge on the normal scale.
 
     With ``log``, ``local_level`` is the level's natural log. Below twice the
     least normal float each edge is found in logs and mapped to the normal
@@ -294,9 +297,12 @@ def qq_from_residuals(
         lower, upper, median = special.ndtri(band.lower), special.ndtri(band.upper), band.median
         stated = _level_fields(float(band.local_level), log=False)
     outside = (z < lower) | (z > upper)
-    spaced = np.rint(np.linspace(0, n - 1, min(n, QQ_DISPLAY_POINTS))).astype(np.intp)
+    spaced = _evenly(np.arange(n))
     ends = np.r_[np.arange(min(_QQ_ENDS, n)), np.arange(max(n - _QQ_ENDS, 0), n)]
-    index = np.union1d(np.union1d(spaced, ends), np.flatnonzero(outside)).astype(np.intp)
+    # The farthest beyond each edge, on the sides some point leaves.
+    farthest = [np.argmax(gap) for gap in (lower - z, z - upper) if np.any(gap > 0.0)]
+    shown = np.r_[_evenly(np.flatnonzero(outside)), np.asarray(farthest, dtype=np.intp)]
+    index = np.union1d(np.union1d(spaced, ends), shown).astype(np.intp)
     body = {
         "n": n,
         "alpha": CHECK_ALPHA,
@@ -308,6 +314,13 @@ def qq_from_residuals(
         "band_upper": upper[index],
     }
     return _answered(body, outside=int(np.count_nonzero(outside)), cells=n)
+
+
+def _evenly(positions: NDArray[np.intp]) -> NDArray[np.intp]:
+    """``positions``, or ``QQ_DISPLAY_POINTS`` of them evenly by rank, the first and last kept."""
+    if len(positions) <= QQ_DISPLAY_POINTS:
+        return positions
+    return positions[np.rint(np.linspace(0, len(positions) - 1, QQ_DISPLAY_POINTS)).astype(np.intp)]
 
 
 def _level_fields(level: float, *, log: bool) -> dict[str, Any]:

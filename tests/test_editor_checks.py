@@ -50,6 +50,7 @@ from superglm.editor import widget as widget_module
 from superglm.editor.checks import (
     CHECK_REPORTS,
     CHECK_SEED,
+    QQ_DISPLAY_POINTS,
     QUANTILE_GRID,
     check_body,
     check_inputs,
@@ -460,7 +461,11 @@ def test_levels_below_float64s_range_still_flag_a_far_misfit():
     observed = np.asarray(qq["observed"])
     low = np.array([-np.inf if v is None else v for v in qq["band_lower"]])
     high = np.array([np.inf if v is None else v for v in qq["band_upper"]])
-    assert qq["outside"] == expected == np.count_nonzero((observed < low) | (observed > high))
+    assert qq["outside"] == expected
+    # Each point sent is outside its drawn band exactly when it is counted outside.
+    m = n - np.asarray(qq["index"])
+    leaves = (m > 100) | (tails[np.minimum(m, 100) - 1] < level)
+    np.testing.assert_array_equal((observed < low) | (observed > high), leaves)
     # No edge is infinite. The extreme order statistics, ``Beta(1, n)`` and ``Beta(n, 1)``, have
     # edges at ``x = 1 - (1 - p / 2)^(1 / n)`` from either end, ``p / (2 n)`` to float64 here.
     edge = -special.ndtri_exp(level - math.log(2.0 * n))
@@ -1071,6 +1076,38 @@ def test_the_qq_body_keeps_every_point_outside_the_band():
     assert body["outside"] == len(outside) >= 40
     assert set(outside.tolist()) <= set(body["index"])
 
+
+@pytest.mark.parametrize(
+    "misfit",
+    [lambda z: 1.6 * z, lambda z: z + 0.3, lambda z: z - 0.3],
+    ids=["wide", "high", "low"],
+)
+def test_a_far_misfit_sends_its_outside_points_thinned_to_the_budget(misfit):
+    """20,000 residuals too wide, too high or too low leave the band almost everywhere. The body
+    sends ``QQ_DISPLAY_POINTS`` of those outside, evenly by rank, beside the ends and the
+    farthest beyond each edge it leaves, and ``outside`` still counts every one. Shifted, the
+    farthest lies between the points sent evenly. Mutation checks: sending every point outside
+    sends about 19,000 points and 1.6 MiB; leaving out the farthest drops it when shifted."""
+    n = 20_000
+    z = misfit(np.random.default_rng(3).standard_normal(n))
+    body = qq_from_residuals(z)
+    band = equal_local_levels_band(n)
+    order = np.sort(z)
+    lower, upper = special.ndtri(band.lower), special.ndtri(band.upper)
+    outside = np.flatnonzero((order < lower) | (order > upper))
+    assert body["outside"] == len(outside) > 10 * QQ_DISPLAY_POINTS
+    index = np.asarray(body["index"])
+    assert np.all(np.diff(index) > 0) and len(index) <= 2 * QQ_DISPLAY_POINTS + 22
+    assert {*range(10), *range(n - 10, n)} <= set(index.tolist())
+    for gap in (lower - order, order - upper):
+        if np.any(gap > 0.0):
+            assert np.argmax(gap) in index
+    # Evenly by rank: no run of the points outside is skipped longer than the budget's step.
+    ranks = np.searchsorted(outside, np.intersect1d(index, outside))
+    assert ranks[0] == 0 and ranks[-1] == len(outside) - 1
+    assert np.max(np.diff(ranks)) <= math.ceil((len(outside) - 1) / (QQ_DISPLAY_POINTS - 1))
+    assert body["observed"] == order[index].tolist()
+    assert len(json.dumps(body)) < 300_000
 
 
 def test_a_held_out_qq_band_left_open_counts_its_edge_as_infinite():
