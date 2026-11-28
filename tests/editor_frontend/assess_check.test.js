@@ -171,8 +171,21 @@ class FakeNode {
     const readout = new FakeNode("g", this.log, { class: "check-readout", hidden: "" });
     svg.adopt(readout); this.adopt(svg);
   }
+  get localName() { return this.tag; }
   adopt(child) { child.parent = this; this.children.push(child); }
   append(...nodes) { this.write("children"); for (const node of nodes) this.adopt(node); }
+  insertBefore(node, ref) {
+    this.write("children");
+    node.parent = this;
+    const at = ref ? this.children.indexOf(ref) : -1;
+    this.children.splice(at < 0 ? this.children.length : at, 0, node);
+    return node;
+  }
+  remove() {
+    this.parent?.write("children");
+    if (this.parent) this.parent.children = this.parent.children.filter((child) => child !== this);
+    this.parent = null;
+  }
   matches(selector) {
     if (selector.startsWith(".")) return (this.attrs.get("class") ?? "").split(/\s+/).includes(selector.slice(1));
     return this.tag === selector;
@@ -448,6 +461,35 @@ test("compared, the legend and split line stay as they are whatever a zoom shows
   renderCheckView(dom.nodes, "check_qq", payload, options);
   assert.equal(dom.nodes.legend.hidden, false);
   assert.match(dom.nodes.split.innerHTML, />parameters taken as exact \(as fitted\)<\/span>$/);
+});
+
+test("a zoom's redraw writes the plot's svg in place, as its scene draws it", () => {
+  const payload = FIXTURE.wrong.check_qq;
+  const dom = fakeFrame();
+  const whole = renderCheckView(dom.nodes, "check_qq", payload, VIEW);
+  const svg = dom.nodes.frame.querySelector("svg");
+  const { base } = whole.zoom;
+  const domains = [
+    { x: [base.x[0], base.x[0] + 0.3 * (base.x[1] - base.x[0])], y: [base.y[0], base.y[0] + 0.2 * (base.y[1] - base.y[0])] },
+    { x: [base.x[1] - 0.05 * (base.x[1] - base.x[0]), base.x[1]], y: [base.y[0], base.y[0] + 0.05 * (base.y[1] - base.y[0])] },
+    null,
+  ];
+  const round = (v) => String(Math.round(v * 100) / 100);
+  for (const domain of domains) {
+    const scene = redrawCheckPlot(dom.nodes.frame, "check_qq", payload, { ...VIEW, domain });
+    assert.equal(dom.nodes.frame.querySelector("svg"), svg, "the svg is kept");
+    assert.equal(dom.nodes.frame.html.length > 0, true);
+    const kinds = svg.children.map((node) => node.tag);
+    // The paths, then the labels, then the readout, as sceneMarkup lays them out.
+    assert.deepEqual(kinds, [...scene.layers.map(() => "path"), ...scene.labels.map(() => "text"), "g"]);
+    const paths = svg.children.filter((node) => node.tag === "path");
+    assert.deepEqual(paths.map((p) => [p.getAttribute("class"), p.getAttribute("d")]),
+      scene.layers.map((l) => [`check-${l.role}`, l.d]));
+    const texts = svg.children.filter((node) => node.tag === "text");
+    assert.deepEqual(texts.map((t) => [t.getAttribute("class"), t.getAttribute("x"), t.getAttribute("y"), t.getAttribute("text-anchor"), t.textContent]),
+      scene.labels.map((l) => [l.axis ? "check-title" : "check-tick", round(l.x), round(l.y), l.anchor, l.text]));
+    assert.equal(dom.readout().hidden, true);
+  }
 });
 
 /** Where the readout's text sits in the scene, by the fake's text metrics, and its lines. */

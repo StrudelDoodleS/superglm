@@ -1205,3 +1205,46 @@ def test_a_wheel_waiting_for_its_frame_is_dropped_by_home_or_another_check(check
         assert page.evaluate(_WHEEL_THEN, "check_pit") == {}
         page.locator('#checkPanel[data-report="check_pit"]').wait_for(state="visible")
         assert page.evaluate(_ZOOM) == {}
+
+
+# The plot on screen against the scene `checkScene` gives at the check's zoom, from the page's
+# own /report answer: its paths' roles and d, and its labels.
+_PLOT_AGAINST_SCENE = """async (report) => {
+  const token = new URLSearchParams(location.search).get("token") || "";
+  const reply = await fetch("/report", { method: "POST",
+    headers: { "Content-Type": "application/json", "X-SuperGLM-Editor-Token": token },
+    body: JSON.stringify({ report }) });
+  const { checkScene } = await import("/assets/chart/check_plots.js");
+  const frame = document.getElementById("checkFrame");
+  const highlight = document.getElementById("checkHighlight").getAttribute("aria-checked") === "true";
+  const scene = checkScene(report, await reply.json(), { width: frame.clientWidth, height: frame.clientHeight },
+    { compare: false, highlight, domain: window.__superglmTest.checkZoom()[report] ?? null });
+  const svg = frame.querySelector("svg.check-plot");
+  const round = (v) => String(Math.round(v * 100) / 100);
+  return {
+    kept: svg === window.__plotBefore,
+    paths: [...svg.querySelectorAll(":scope > path")].map((p) => [p.getAttribute("class"), p.getAttribute("d")]),
+    layers: scene.layers.map((l) => [`check-${l.role}`, l.d]),
+    texts: [...svg.querySelectorAll(":scope > text")].map((t) => [t.getAttribute("x"), t.getAttribute("y"), t.textContent]),
+    labels: scene.labels.map((l) => [round(l.x), round(l.y), l.text]),
+  };
+}"""
+
+
+def test_a_zoom_writes_the_plot_in_place_as_its_scene_draws_it(checks_page):
+    with checks_page() as page:
+        _open_check(page, "check_qq")
+        page.evaluate(
+            "() => { window.__plotBefore = document.querySelector('#checkFrame svg.check-plot'); }"
+        )
+        _zoom_qq(page, steps=4)
+        drawn = page.evaluate(_PLOT_AGAINST_SCENE, "check_qq")
+        assert drawn["kept"]
+        assert drawn["paths"] == drawn["layers"]
+        assert drawn["texts"] == drawn["labels"]
+        page.locator("#checkHome").click()
+        page.wait_for_function("() => !window.__superglmTest.checkZoom().check_qq")
+        drawn = page.evaluate(_PLOT_AGAINST_SCENE, "check_qq")
+        assert drawn["kept"]
+        assert drawn["paths"] == drawn["layers"]
+        assert drawn["texts"] == drawn["labels"]

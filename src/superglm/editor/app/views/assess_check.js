@@ -5,7 +5,7 @@
  * the overview and the large view share it, and so does the large view with its hover readout.
  */
 
-import { checkScene, nearestMark, sceneMarkup } from "../chart/check_plots.js";
+import { checkScene, nearestMark, patchScene, sceneMarkup } from "../chart/check_plots.js";
 import { escapeHTML } from "../format.js";
 import { countText } from "../reports.js";
 import { assessEntry } from "../state/assess.js";
@@ -271,7 +271,8 @@ export function renderCheckView(nodes, report, payload, { compare, highlight, do
 /**
  * Draw the plot renderCheckView drew again at another domain, and nothing else: a zoom's
  * redraw, which leaves the heading, split line, legend and switches as they are. They read
- * `Scene.fitted`, which a domain does not change.
+ * `Scene.fitted`, which a domain does not change. The svg on screen is written in place, and its
+ * readout hidden until the hover places it on the new scene.
  * @param {HTMLElement} frame @param {CheckReport} report @param {CheckPayload} payload
  * @param {SceneOptions & {width: number, height: number}} options
  * @returns {Scene}
@@ -279,7 +280,14 @@ export function renderCheckView(nodes, report, payload, { compare, highlight, do
 export function redrawCheckPlot(frame, report, payload, { compare, highlight, domain = null, width, height }) {
   const scene = checkScene(report, payload, { width, height }, { compare, highlight, domain });
   frame.dataset.zoomed = String(domain !== null);
-  frame.innerHTML = sceneMarkup(scene);
+  const svg = frame.querySelector("svg");
+  if (!svg) {
+    frame.innerHTML = sceneMarkup(scene);
+    return scene;
+  }
+  patchScene(svg, scene);
+  const readout = svg.querySelector(".check-readout");
+  if (readout && !readout.hasAttribute("hidden")) readout.setAttribute("hidden", "");
   return scene;
 }
 

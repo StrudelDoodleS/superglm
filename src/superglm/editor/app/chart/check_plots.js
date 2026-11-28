@@ -738,6 +738,47 @@ export function sceneMarkup(scene) {
     + `<g class="check-readout" hidden></g></svg>`;
 }
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/** @param {Element} node @param {string} name @param {string} value set only when it changes */
+const setAttr = (node, name, value) => {
+  if (node.getAttribute(name) !== value) node.setAttribute(name, value);
+};
+
+/**
+ * Write `scene` into `svg`, an svg `sceneMarkup` drew, in place: the svg's size, each layer's
+ * role and `d`, and each label's place, anchor and text, reusing the nodes there and adding or
+ * removing only as the counts differ, so the browser parses no markup. The readout group and what
+ * follows it are left as they are. What it leaves reads as `sceneMarkup(scene)` does.
+ * @param {Element} svg @param {Scene} scene
+ */
+export function patchScene(svg, scene) {
+  const [w, h] = [n(scene.width), n(scene.height)];
+  setAttr(svg, "viewBox", `0 0 ${w} ${h}`);
+  setAttr(svg, "width", w);
+  setAttr(svg, "height", h);
+  const nodes = Array.from(svg.children);
+  const paths = nodes.filter((node) => node.localName === "path");
+  const texts = nodes.filter((node) => node.localName === "text");
+  const readout = nodes.find((node) => node.localName === "g") ?? null;
+  const doc = svg.ownerDocument;
+  for (const [i, layer] of scene.layers.entries()) {
+    const path = paths[i] ?? svg.insertBefore(doc.createElementNS(SVG_NS, "path"), texts[0] ?? readout);
+    setAttr(path, "class", `check-${layer.role}`);
+    setAttr(path, "d", layer.d);
+  }
+  for (const path of paths.slice(scene.layers.length)) path.remove();
+  for (const [i, label] of scene.labels.entries()) {
+    const text = texts[i] ?? svg.insertBefore(doc.createElementNS(SVG_NS, "text"), readout);
+    setAttr(text, "class", label.axis ? "check-title" : "check-tick");
+    setAttr(text, "x", n(label.x));
+    setAttr(text, "y", n(label.y));
+    setAttr(text, "text-anchor", label.anchor);
+    if (text.textContent !== label.text) text.textContent = label.text;
+  }
+  for (const text of texts.slice(scene.labels.length)) text.remove();
+}
+
 /**
  * The index of the mark nearest `x`, by a binary search of `marks` sorted by x; with `y`, the
  * nearest in the plane, swept out from there. -1 when there are no marks.
