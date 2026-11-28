@@ -906,8 +906,11 @@ def test_the_draw_factor_is_the_covariances_unique_symmetric_square_root() -> No
     factor = posterior_module._posterior_covariance_factor(covariance)
     n, scale = len(covariance), np.max(np.abs(factor))
     np.testing.assert_allclose(factor, factor.T, rtol=0, atol=16 * n * _U * scale)
+    # Normwise: the eigensolver's error in the root is normwise, so a small entry of
+    # |S| |S'| bounds none of it.
     gram = np.abs(factor) @ np.abs(factor).T
-    assert np.all(np.abs(factor @ factor.T - covariance) <= 32 * n * _U * gram)
+    residual = np.linalg.norm(factor @ factor.T - covariance)
+    assert residual <= 32 * n * _U * max(np.linalg.norm(covariance), np.linalg.norm(gram))
     root = linalg.sqrtm(covariance)
     np.testing.assert_allclose(factor, np.real(root), rtol=0, atol=64 * n * _U * scale)
 
