@@ -266,7 +266,7 @@ def qq_from_residuals(
     """
     z = np.sort(np.asarray(quantile, dtype=np.float64).ravel())
     n = len(z)
-    if log and local_level < math.log(_LOG_BELOW):
+    if log and local_level is not None and local_level < math.log(_LOG_BELOW):
         lower = special.ndtri_exp(_log_band_lower(n, local_level))
         upper, median = -lower[::-1], _frozen(_stored_median(n))
         stated = _level_fields(local_level, log=True)
@@ -295,7 +295,7 @@ def qq_from_residuals(
     return _answered(body, outside=int(np.count_nonzero(outside)), cells=n)
 
 
-def _level_fields(level: float, *, log: bool) -> dict[str, float | None]:
+def _level_fields(level: float, *, log: bool) -> dict[str, Any]:
     """A body's level: ``local_level``, or below float64's range its natural log as
     ``log_local_level``, with ``local_level`` ``None``."""
     return {"local_level": None, "log_local_level": level} if log else {"local_level": level}
@@ -1007,7 +1007,7 @@ def _scores(
 
 
 def _cell_statistics(
-    counts: NDArray, trials: Any, probability: NDArray[np.float64]
+    counts: NDArray, trials: Any, probability: Any
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Each replicate's binomial cell level and its natural log."""
     return (

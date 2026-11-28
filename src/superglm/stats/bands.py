@@ -723,7 +723,7 @@ def bonferroni_binomial_band(
     return lower, upper
 
 
-def _log_binomial_at_most(k: NDArray, trials: NDArray, p: NDArray) -> NDArray[np.float64]:
+def _log_binomial_at_most(k: ArrayLike, trials: ArrayLike, p: ArrayLike) -> NDArray[np.float64]:
     """``log P(X <= k)`` for ``X ~ Binomial(trials, p)``: SciPy's tail, and below
     ``_LOG_BELOW`` the continued fraction of ``I_{1-p}(trials - k, k + 1)``, its lower tail."""
     from scipy import stats
@@ -738,7 +738,7 @@ def _log_binomial_at_most(k: NDArray, trials: NDArray, p: NDArray) -> NDArray[np
     return _logs(stats.binom.cdf(k, trials, p), deep_log)
 
 
-def _log_binomial_at_least(k: NDArray, trials: NDArray, p: NDArray) -> NDArray[np.float64]:
+def _log_binomial_at_least(k: ArrayLike, trials: ArrayLike, p: ArrayLike) -> NDArray[np.float64]:
     """``log P(X >= k)`` for ``X ~ Binomial(trials, p)``: SciPy's tail, and below
     ``_LOG_BELOW`` the continued fraction of ``I_p(k, trials - k + 1)``; above ``trials`` the
     chance is 0."""
@@ -756,7 +756,7 @@ def _log_binomial_at_least(k: NDArray, trials: NDArray, p: NDArray) -> NDArray[n
     return _logs(stats.binom.sf(k - 1.0, trials, p), deep_log)
 
 
-def _log_binomial_above(k: NDArray, trials: NDArray, p: NDArray) -> NDArray[np.float64]:
+def _log_binomial_above(k: ArrayLike, trials: ArrayLike, p: ArrayLike) -> NDArray[np.float64]:
     """``log P(X > k) = log P(X >= k + 1)``."""
     return _log_binomial_at_least(np.asarray(k, dtype=np.float64) + 1.0, trials, p)
 
