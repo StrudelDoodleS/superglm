@@ -1,8 +1,8 @@
 """The editor's four checks of a SuperLSS's predicted distribution on one split.
 
 Each check reads the split through the library's own builders and holds its
-flag to one band for the whole check, so a correct model is flagged with
-chance about ``CHECK_ALPHA`` however many points or cells the check reads:
+flag to one band for the whole check, so its chance does not grow with the
+points or cells read:
 
 * ``check_qq``: the sorted randomised quantile residuals (Dunn and Smyth 1996)
   against the equal local levels band, mapped to the normal scale;
@@ -29,9 +29,15 @@ under each, scores every replicate with the fitted model exactly as the split
 is scored, and each check's level is Barnard's Monte Carlo level of its
 replicates' statistic (Barnard 1963, as Myllymaki et al. 2017 describe it;
 :func:`superglm.stats.monte_carlo_level`). The band is drawn at that level and
-the flag is read from the drawn band. Where the fit's uncertainty cannot be
-sampled, or the rows cannot be simulated, the band keeps the known-parameter
-level and the body says which.
+the flag is read from the drawn band. A flag on a held-out split means the
+model's predictions miss new rows by more than the fit's uncertainty explains:
+either the model's form is wrong, or its estimates are too noisy for the data
+(many coefficients for the fitted rows, or a very small fit). Noisy estimates
+fall back toward the average on new rows, which replicates drawn around the
+fitted coefficients do not show. The level holds about ``CHECK_ALPHA`` for a
+correctly specified model only when its coefficients are few for its rows.
+Where the fit's uncertainty cannot be sampled, or the rows cannot be simulated,
+the band keeps the known-parameter level and the body says which.
 
 A body is JSON-clean: a value with no finite number is ``None``. A check the
 model or split cannot answer is the unavailable body, whose ``reason`` is a

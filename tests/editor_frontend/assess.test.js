@@ -118,6 +118,7 @@ test("the banned-word check finds each word whole, in any case or plural, and pa
 const SHARED_ENDING = "Orange marks a check with something outside its band. Checks read the validation rows, else the training rows. "
   + "On validation rows the band allows for the uncertainty in the fitted parameters, unless its split line says they are taken as exact; "
   + "on the training rows it takes them as exact, so a validation split is the sharper test. "
+  + "On validation rows a flag also shows estimates too noisy for the rows they were fitted on. "
   + "Click the chart and the wheel zooms it; click outside and the wheel scrolls the page. Ctrl or Cmd with the wheel, "
   + "or a pinch, zooms at any time. Shift and drag: zoom to a box. Drag: pan. Double-click or Home: reset.";
 
@@ -132,7 +133,7 @@ test("Help for every check is in neutral words", () => {
 test("each check has its Help entry ending the same way, and each switch its own two sentences", () => {
   const bodies = {
     check_qq: "Each point is a sorted quantile residual against the value it would have if each row's predicted distribution were right. "
-      + "The band holds for every point at once: a model that fits leaves it about 5% of the time, so one point outside is evidence. "
+      + "The band holds for every point at once, so a point outside is evidence that the model misses these rows. "
       + "A curve above the band at the top end means larger values come more often than the model allows. "
       + "Band: equal local levels (Aldor-Noiman et al. 2013; Weine, McPeek and Abney 2023).",
     check_pit: "Each observed value is placed at its own predicted distribution's cumulative probability, and the 20 bars count them. "

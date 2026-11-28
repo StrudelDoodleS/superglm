@@ -187,7 +187,8 @@ export const STRUCTURE_HELP = Object.freeze({
 const CHECKS_END = "Orange marks a check with something outside its band. Checks read the validation rows, "
   + "else the training rows. On validation rows the band allows for the uncertainty in the fitted parameters, "
   + "unless its split line says they are taken as exact; on the training rows it takes them as exact, so a "
-  + "validation split is the sharper test.";
+  + "validation split is the sharper test. On validation rows a flag also shows estimates too noisy for the "
+  + "rows they were fitted on.";
 // And how to zoom it, with the Editor chart's gestures.
 const CHECK_ZOOM = "Click the chart and the wheel zooms it; click outside and the wheel scrolls the page. Ctrl or "
   + "Cmd with the wheel, or a pinch, zooms at any time. Shift and drag: zoom to a box. Drag: pan. Double-click or "
@@ -201,10 +202,10 @@ export const CHECK_HELP = Object.freeze({
   check_qq: Object.freeze({
     title: "Q-Q plot",
     body: "Each point is a sorted quantile residual against the value it would have if each row's predicted "
-      + "distribution were right. The band holds for every point at once: a model that fits leaves it about 5% of "
-      + "the time, so one point outside is evidence. A curve above the band at the top end means larger values "
-      + "come more often than the model allows. Band: equal local levels (Aldor-Noiman et al. 2013; Weine, "
-      + `McPeek and Abney 2023). ${CHECKS_END} ${CHECK_ZOOM}`,
+      + "distribution were right. The band holds for every point at once, so a point outside is evidence that "
+      + "the model misses these rows. A curve above the band at the top end means larger values come more often "
+      + "than the model allows. Band: equal local levels (Aldor-Noiman et al. 2013; Weine, McPeek and Abney "
+      + `2023). ${CHECKS_END} ${CHECK_ZOOM}`,
   }),
   check_pit: Object.freeze({
     title: "PIT histogram",

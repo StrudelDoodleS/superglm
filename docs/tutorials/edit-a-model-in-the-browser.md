@@ -856,14 +856,16 @@ Click a card or list entry to open a check large:
 
 ### Bands and splits
 
-Every band holds for the whole plot at once, so a well-specified model leaves its band anywhere
-about 5% of the time and a single point outside is evidence. Checks read the validation rows when
-supplied, otherwise the training rows: on validation rows, the band level is set by simulation from
-the fit's posterior (99 replicates) to allow for uncertainty in the fitted parameters, and if the
-simulation cannot run it falls back to treating the parameters as exact and the split line says so.
-On training rows, the band uses the known-parameter level, which is conservative because the fit
-absorbs part of the noise on its own rows, making a validation split the sharper test; hand edits
-reuse the levels of the fit in force.
+Every band holds for the whole plot at once. On training rows, a flag is evidence of a wrong model
+form. On validation rows, it is evidence that the predictions miss new rows, either from a wrong
+form or from estimates too noisy for the data; a correctly specified model with few coefficients for
+its rows leaves the band about 5% of the time. Checks read the validation rows when supplied,
+otherwise the training rows: on validation rows, the band level is set by simulation from the fit's
+posterior (99 replicates) to allow for uncertainty in the fitted parameters, and if the simulation
+cannot run it falls back to treating the parameters as exact and the split line says so. On training
+rows, the band uses the known-parameter level, which is conservative because the fit absorbs part of
+the noise on its own rows, making a validation split the sharper test; hand edits reuse the levels
+of the fit in force.
 
 ### Zoom and pan
 
