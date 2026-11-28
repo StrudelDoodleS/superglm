@@ -1117,18 +1117,6 @@ def test_a_correct_model_is_flagged_at_its_level_on_a_held_out_split(calm):
 # The /report route: each check for the model as edited and, after an edit, as fitted.
 
 FIXTURE = Path(__file__).parent / "editor_frontend" / "fixtures" / "assess_checks.json"
-#: The four reports' payload keys, read on master (e9a4f842d) before the checks joined /report.
-_COMMON_KEYS = {"available", "in_force", "model_revision", "note", "report", "request_sequence"}
-REPORT_KEYS = {
-    "validation": _COMMON_KEYS
-    | {"can_run_cv", "compares_edit", "cv_report", "metric_labels", "splits", "title"},
-    "cv": _COMMON_KEYS
-    | {"final_fit", "header", "jobs", "metrics", "pending", "relativities", "results"}
-    | {"run_cv", "title"},
-    "final": _COMMON_KEYS
-    | {"can_run_cv", "compares_edit", "final_fit", "metric_labels", "splits", "title"},
-    "diagnose": _COMMON_KEYS | {"cost_label", "fits", "terms", "title"},
-}
 #: What the widget adds to ``check_report_payload``; the fixture holds the payload alone.
 _WIDGET_FIELDS = ("model_revision", "request_sequence", "in_force")
 _U = 2.0**-53
@@ -1425,15 +1413,6 @@ def test_a_superglm_session_offers_no_checks_and_says_why(glm_session):
     payload = _ask(widget, "check_qq")
     assert payload["available"] is False
     assert payload["reason"] == "This check is available for SuperLSS models."
-
-
-@pytest.mark.pins_behaviour
-def test_the_four_reports_answer_as_before(calm_session):
-    """Pins that the report names validation, cv, final and diagnose keep their payload keys."""
-    widget = calm_session.widget()
-    for report, keys in REPORT_KEYS.items():
-        answer = _ask(widget, report)
-        assert answer["report"] == report and set(answer) == keys, report
 
 
 def _reports(session: EditorSession) -> dict[str, Any]:

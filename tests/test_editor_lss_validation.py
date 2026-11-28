@@ -24,7 +24,13 @@ from superglm import (
     term,
 )
 from superglm.editor import edit
-from superglm.editor.cv import FINAL_NOT_RUN, capture_final_fit, final_fit_reason, run_final_fit
+from superglm.editor.cv import (
+    FINAL_NOT_RUN,
+    InForce,
+    capture_final_fit,
+    final_fit_reason,
+    run_final_fit,
+)
 from superglm.editor.errors import EditorValueError
 from superglm.editor.lss.availability import (
     LSS_UNAVAILABLE,
@@ -668,3 +674,37 @@ def test_the_final_fit_says_whether_a_test_split_stayed_held_out_and_how_it_conv
     finally:
         without.close()
         with_test.close()
+
+
+#: The four reports' payload keys, read on master (e9a4f842d) before the checks joined /report.
+_COMMON_KEYS = {"available", "in_force", "model_revision", "note", "report", "request_sequence"}
+REPORT_KEYS = {
+    "validation": _COMMON_KEYS
+    | {"can_run_cv", "compares_edit", "cv_report", "metric_labels", "splits", "title"},
+    "cv": _COMMON_KEYS
+    | {"final_fit", "header", "jobs", "metrics", "pending", "relativities", "results"}
+    | {"run_cv", "title"},
+    "final": _COMMON_KEYS
+    | {"can_run_cv", "compares_edit", "final_fit", "metric_labels", "splits", "title"},
+    "diagnose": _COMMON_KEYS | {"cost_label", "fits", "terms", "title"},
+}
+
+
+@pytest.mark.pins_behaviour
+def test_the_four_reports_answer_as_before():
+    """Pins that the report names validation, cv, final and diagnose keep their payload keys
+    for a SuperLSS opened with a validation split. This module collects on the merge base, so
+    the pin is decided there."""
+    case = gamma_case()
+    split = dataclasses.replace(holdout_rows(case, 200), sample_weight=None)
+    widget = open_case(case, validation_data=(split.X, split.y)).widget()
+    try:
+        for report, keys in REPORT_KEYS.items():
+            with widget._lock:
+                revision, token = widget.session.model_revision, InForce.of(widget.session).token
+            answer = widget._report(
+                report, model_revision=revision, in_force=token, request_sequence=5
+            )
+            assert answer["report"] == report and set(answer) == keys, report
+    finally:
+        widget.close()
