@@ -394,6 +394,8 @@ _U = _EPS / 2.0
 _FRACTION_TERMS = 100
 #: Newton steps of a log band edge at most: measured, at most 8 up to a million order statistics.
 _NEWTON_STEPS = 16
+#: Terms of the deviance's series at most: each is below ``1/100`` of the one before.
+_DEVIANCE_TERMS = 16
 
 
 def _log_fraction(
@@ -406,14 +408,9 @@ def _log_fraction(
     fraction of DiDonato and Morris (1992, ACM TOMS 18(3), Algorithm 708) as Boost.Math's
     ``ibeta`` uses it, evaluated by the modified Lentz method (Thompson and Barnett 1986). Below
     the mean every ``alpha`` is nonnegative and every ``beta`` positive, so no partial
-    denominator vanishes, and the fraction ends at ``b`` terms. The prefix stays in logs, where
-    it cannot underflow: its rounding is an absolute error in the log of at most a few ``u``
-    times ``a |log x| + b |log y| + |log B(a, b)|``, plus SciPy's ``betaln``, about
-    ``u (a + b) log(a + b)``; that is the relative error of the tail.
+    denominator vanishes, and the fraction ends at ``b`` terms. The prefix is
+    ``_log_beta_prefix``, in logs, where it neither underflows nor cancels.
     """
-    import scipy.linalg
-    from scipy import special
-
     f = a * (a * y - b * x + 1.0) / (a + 1.0)
     c, d = f.copy(), np.zeros_like(f)
     live = np.arange(f.size)
@@ -434,7 +431,72 @@ def _log_fraction(
         if not live.size:
             break
     with np.errstate(invalid="ignore"):
-        return a * log_x + b * log_y - special.betaln(a, b) - np.log(f), f
+        return _log_beta_prefix(a, b, x, y, log_x, log_y) - np.log(f), f
+
+
+def _log_beta_prefix(
+    a: NDArray, b: NDArray, x: NDArray, y: NDArray, log_x: NDArray, log_y: NDArray
+) -> NDArray[np.float64]:
+    """``log(x^a y^b / B(a, b))`` for whole ``a, b >= 1``, which is ``a y`` times the
+    ``Binomial(a + b - 1, x)`` probability of ``a``. That log is read in the form of Loader
+    (2000, *Fast and Accurate Computation of Binomial Probabilities*), from Stirling's errors and
+    the deviance ``bd0``, so the large terms of ``a log x + b log y - log B(a, b)`` never cancel:
+    its error is a few ``u`` times the log, at any count of trials."""
+    n, k = a + b - 1.0, a
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_n, log_k, log_rest = np.log(n), np.log(k), np.log(n - k)
+        density = (
+            _stirling_error(n)
+            - _stirling_error(k)
+            - _stirling_error(n - k)
+            - _deviance(k, n * x, log_n + log_x)
+            - _deviance(n - k, n * y, log_n + log_y)
+            + 0.5 * (log_n - log_k - log_rest)
+            - 0.5 * math.log(2.0 * math.pi)
+        )
+    # With b = 1 the probability is x^a itself, and the prefix a x^a y.
+    return np.log(a) + log_y + np.where(b == 1.0, a * log_x, density)
+
+
+def _stirling_error(m: NDArray) -> NDArray[np.float64]:
+    """``log m! - (m + 1/2) log m + m - log(2 pi) / 2`` for whole ``m``: from ``gammaln`` below
+    15, where no term is large, and above it the Stirling series to ``m^-9``, whose next term is
+    below ``u`` (Loader 2000, section 2). Zero at ``m = 0``, where it is not used."""
+    import scipy.linalg
+    from scipy import special
+
+    m = np.asarray(m, dtype=np.float64)
+    small = m < 15.0
+    out = np.zeros_like(m)
+    ms = m[small & (m > 0.0)]
+    out[small & (m > 0.0)] = (
+        special.gammaln(ms + 1.0) - (ms + 0.5) * np.log(ms) + ms - 0.5 * math.log(2.0 * math.pi)
+    )
+    ml = m[~small]
+    r = 1.0 / (ml * ml)
+    out[~small] = (1.0 / 12 - r * (1.0 / 360 - r * (1.0 / 1260 - r * (1.0 / 1680 - r / 1188)))) / ml
+    return out
+
+
+def _deviance(x: NDArray, mean: NDArray, log_mean: NDArray) -> NDArray[np.float64]:
+    """``x log(x / mean) + mean - x``, Loader's ``bd0``. Near ``x = mean``, where that form
+    cancels, it is ``(x - mean) v + 2 x sum_j v^(2j + 1) / (2j + 1)``, ``v = (x - mean) /
+    (x + mean)``, whose terms fall by ``v^2 < 1/100`` each."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = x * (np.log(x) - log_mean) + mean - x
+    near = np.abs(x - mean) < 0.1 * (x + mean)
+    if np.any(near):
+        xn, d = x[near], x[near] - mean[near]
+        v = d / (xn + mean[near])
+        total, term, v2 = d * v, 2.0 * xn * v, v * v
+        for j in range(1, _DEVIANCE_TERMS + 1):
+            term = term * v2
+            step = term / (2 * j + 1)
+            total = total + step
+            if np.all(np.abs(step) <= _EPS * np.abs(total)):
+                break
+        out[near] = total
+    return out
 
 
 def _logs(tails: NDArray, deep_log: Callable[[NDArray[np.bool_]], NDArray]) -> NDArray:

@@ -659,3 +659,29 @@ def test_a_finite_edge_scipy_misses_deep_in_a_tail_is_found_again():
     u[:63] = np.linspace(5.9e-6, 6e-6, 63)
     assert order_statistic_level(u, log=True) > -700.0
     assert not np.any((u < band.lower) | (u > band.upper))
+
+
+def test_a_deep_tail_at_a_hundred_trillion_trials_keeps_its_count():
+    """At ``10^14`` trials the prefix ``a log x + b log y - log B(a, b)`` cancels terms near
+    ``7e13`` and lost about 0.3 of the log tail, so a count whose tail is above the cut fell
+    outside the band. Loader's form keeps it: the prefix equals a 60-digit ``loggamma``
+    reading, and the level equals an independent 75-digit integration of the Beta density,
+    -799.7873376746786. Mutation check: the plain prefix reads -800.080 and the band's lower
+    bound passes the count."""
+    n, p, k = 10**14, 0.5, 49999800603170
+    a, b = np.array([5e13 + 2e8]), np.array([5e13 - 2e8 + 1.0])
+    prefix = bands._log_beta_prefix(
+        a, b, np.array([0.5]), np.array([0.5]), np.log([0.5]), np.log([0.5])
+    )
+    with mp.workdps(60):
+        A, B = mp.mpf(a[0]), mp.mpf(b[0])
+        exact = float(
+            (A + B) * mp.log(mp.mpf(0.5)) - mp.loggamma(A) - mp.loggamma(B) + mp.loggamma(A + B)
+        )
+    # The log is near -785; a few roundings of its terms, each well below 1e-12 of it.
+    assert prefix[0] == pytest.approx(exact, rel=0, abs=1e-9)
+    assert binomial_cell_level(k, n, p, log=True) == pytest.approx(
+        -799.7873376746786, rel=0, abs=1e-9
+    )
+    (lower,), _ = bonferroni_binomial_band([n], [p], cut=-800.0, log=True)
+    assert lower <= k
