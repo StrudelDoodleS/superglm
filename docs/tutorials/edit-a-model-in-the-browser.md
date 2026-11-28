@@ -127,9 +127,9 @@ with each term's kind and effective degrees of freedom. The current term is high
 - **Move** drags selected relativities. The curve previews immediately and Python confirms the edit
   when the pointer is released.
 - **Zoom** drags a box, and the mouse wheel zooms around the pointer. In the other tools, click the
-  chart and the wheel zooms it, shown by a slight border; click outside it and the wheel scrolls the
-  page. Ctrl or Cmd with the wheel, or a pinch, zooms at any time. Shift-drag or a middle-button drag
-  pans, and Home restores the fitted extent.
+  chart and the wheel zooms it (a slight border shows it is active); click outside it, or press
+  Escape, and the wheel scrolls the page. Ctrl or Cmd with the wheel, or a pinch, zooms at any time.
+  Shift-drag or a middle-button drag pans, and Home restores the fitted extent.
 - **Handles** edits a spline through fixed-x control handles. In Handles mode, when the fitted
   term exposes its basis, **Contrib** shows each basis function's contribution and **Build**
   animates them into the spline. Settings sets how long Build takes.
@@ -783,11 +783,11 @@ Each refusal from `apply` is a `superglm.StructureError` whose message names the
 ## Assess
 
 The top bar has two tabs: **Editor** and **Assess** (plus **Explain** for a SuperLSS model).
-**Assess** holds every report on the model you are editing, with a list on the left:
+**Assess** holds every report and check on the model you are editing, with a list on the left:
 
-- **Overview** opens first every time you select **Assess**. It shows one card per report, each
-  with its headline number and a short note. Click a card, or a name in the list, to open the
-  report large.
+- **Overview** opens first every time you select **Assess**. It shows one card per report and, for a
+  SuperLSS model, one card per check, grouped as the list groups them. Click a card, or a name in
+  the list, to open it large.
 - Under **Reports**, the list holds four reports:
   - **Validation** scores the model as edited on each split beside the model as fitted.
   - **Cross-validation** shows fold scores and term curves from a `cross_validate` result, and
@@ -796,22 +796,26 @@ The top bar has two tabs: **Editor** and **Assess** (plus **Explain** for a Supe
     back.
   - **Smoothing search** (formerly Diagnose) reports whether each fit's smoothing search converged
     and what to try if not, without refitting.
+- For a SuperLSS model, two groups of checks follow **Reports**:
+  - **Distribution**: **Q-Q plot** and **PIT histogram**.
+  - **Calibration**: **Actual over expected** and **Quantile calibration**.
+  SuperGLM models show **Reports** only; their check groups are not yet shown.
 
 Overview cards show these states:
 
-- While a report loads: "Loading report...".
-- When a first request fails: "Report unavailable.".
+- While a report or check loads: "Loading report..." or "Loading check...".
+- When a first request fails: "Report unavailable." or "Check unavailable.".
 - When a card keeps a number from an earlier result: "Earlier result", with "Update failed. …" when
   an update failed.
 - Without `cv=`: "No cross-validation result supplied".
 - Before Final fit has run: "Not run", with Python's own note.
 
-Switching back to a report already loaded for the current model is instant. The page keeps each
-report and asks Python again only after a change.
+Switching back to a report or check already loaded for the current model is instant. The page keeps
+each one and asks Python again only after a change.
 
-The square-arrow icon (**Open in new window**) on the overview and on each report opens the current
-view in a second browser window for another monitor. That window shows **Assess** only and only
-watches:
+The square-arrow icon (**Open in new window**) on the overview and on each report or check opens the
+current view in a second browser window for another monitor. That window shows **Assess** only and
+only watches:
 
 - it has no editing controls, and **Run CV**, **Final fit** and **Cancel** are not offered there;
 - it follows every change made in the main window;
@@ -819,6 +823,57 @@ watches:
 
 Below 1086 pixels wide, the list shows its icons only; hover over or focus an entry for its name.
 Arrow keys, Home and End step through the list, and Enter opens an entry.
+
+### Distribution and Calibration checks
+
+The four checks inspect a SuperLSS model's predicted distribution on one split:
+
+- **Q-Q plot** plots sorted quantile residuals against their expected normal quantiles.
+- **PIT histogram** places each observed value at its predicted cumulative probability across 20
+  bars; a well-fitting model gives flat bars.
+- **Actual over expected** compares observed totals with predicted totals across bands of the
+  predicted Mean and groups of each input, with variance-based intervals around 1.
+- **Quantile calibration** plots the share of rows above each of 11 predicted quantiles against the
+  nominal exceedance share.
+
+Each check has an overview card with a small plot, a count of what left its band (for example,
+"0 of 100 points outside the band", or bins, groups or quantiles), and one summary figure under it.
+When anything lies outside its band, an orange dot marks both the card and its row in the Assess
+list. Checks run in the background on their own lane, so the Editor tab's scores never wait behind
+them.
+
+Click a card or list entry to open a check large:
+
+- **Hover readout:** move the pointer over the plot to read out the nearest point, bar or group.
+  With the plot focused, the arrow keys step between points, Home and End jump to the ends, and
+  Escape hides the readout.
+- **Compare with the fit:** draws the model as fitted in grey beside the model as edited in blue, on
+  every check. It is available once the model differs from the fit.
+- **Highlight outside the band:** off by default; colours the points, bars or groups outside their
+  band. The counts on the overview cards do not change with it.
+- **Help icon:** beside the check's title, explains what the plot draws, how to read its band and
+  how to zoom it.
+
+### Bands and splits
+
+Every band holds for the whole plot at once, so a well-specified model leaves its band anywhere
+about 5% of the time and a single point outside is evidence. Checks read the validation rows when
+supplied, otherwise the training rows: on validation rows, the band level is set by simulation from
+the fit's posterior (99 replicates) to allow for uncertainty in the fitted parameters, and if the
+simulation cannot run it falls back to treating the parameters as exact and the split line says so.
+On training rows, the band uses the known-parameter level, which is conservative because the fit
+absorbs part of the noise on its own rows, making a validation split the sharper test; hand edits
+reuse the levels of the fit in force.
+
+### Zoom and pan
+
+Check views share the click-to-activate wheel rule with the Editor chart: click a plot (or focus it
+with the keyboard) and the wheel zooms about the pointer, with a slight border showing which chart
+is active; click outside it, or press Escape, and the wheel scrolls the page. (When a tall **Actual
+over expected** plot scrolls inside its frame, a plain wheel scrolls the frame.) Ctrl or Cmd with
+the wheel, or a pinch, zooms at any time. Shift and drag zooms to a box, drag pans once zoomed, and
+a double-click, Home or `0` resets to the whole plot (`+` and `-` zoom about the middle while the
+plot has focus).
 
 ## Cross-validation
 
