@@ -2751,7 +2751,8 @@ const checkZoom = bindCheckZoom(checkFrame, {
   onZoom: setCheckZoom,
   onRest: () => checkHover?.refresh(),
 });
-checkHome.addEventListener("click", () => setCheckZoom(null));
+// Home shows the check whole, and drops a gesture still waiting for its frame.
+checkHome.addEventListener("click", () => checkZoom.reset());
 checkHover = bindCheckHover(checkFrame, () => checkView, { busy: checkZoom.busy });
 // A new size redraws the open check at it, from the evidence the page holds.
 new ResizeObserver(() => {
@@ -3113,14 +3114,21 @@ store.subscribe(
   (state) => checkSplitKey(state.request.evidence),
   (split) => {
     if (!split) return;
-    if (checkZoomSplit && split !== checkZoomSplit) actions.patchView({ checkZoom: {} });
+    if (checkZoomSplit && split !== checkZoomSplit) {
+      checkZoom.cancel();
+      actions.patchView({ checkZoom: {} });
+    }
     checkZoomSplit = split;
   }
 );
-// A chart hidden by a view or tab change lets the wheel go, once the page has drawn the change.
+// A chart hidden by a view or tab change lets the wheel go, once the page has drawn the change,
+// and a check gesture still waiting for its frame is dropped with the check it was made on.
 store.subscribe(
   (state) => `${state.view.activeView} ${state.view.termView}`,
-  () => queueMicrotask(chartFocus.sync)
+  () => {
+    checkZoom.cancel();
+    queueMicrotask(chartFocus.sync);
+  }
 );
 // The list hides the checks the model does not offer and flags those that left their band.
 store.subscribe(

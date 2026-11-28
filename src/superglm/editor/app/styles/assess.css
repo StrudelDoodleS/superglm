@@ -366,11 +366,18 @@
   cursor: help;
 }
 
+/* A frame the wheel does not work on is not a scroll container the wheel can move, so a plain
+   wheel over it goes on to the page or the notebook around it; the active frame scrolls
+   (views/chart_focus.js). The gutter is kept either way, so the plot's width does not change. */
 .check-frame {
   min-height: 0;
   overflow-x: hidden;
-  overflow-y: auto;
+  overflow-y: hidden;
   scrollbar-gutter: stable;
+}
+
+.check-frame.is-wheel-active {
+  overflow-y: auto;
 }
 
 .check-frame > .check-plot {

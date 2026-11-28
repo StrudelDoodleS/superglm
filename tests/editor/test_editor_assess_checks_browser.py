@@ -1086,3 +1086,122 @@ def test_a_tall_check_scrolls_its_frame_only_while_active(chromium_browser):
             page.close()
     finally:
         widget.close()
+
+
+def test_a_plain_wheel_over_an_inactive_tall_check_scrolls_the_page(chromium_browser):
+    """At 640 px high six A/E panels scroll in their frame (below 620 px the frame grows to
+    hold them and only the page scrolls). With content below the editor the page scrolls too: a
+    plain wheel over the frame, not clicked, moves the page and leaves the frame; clicked, it
+    moves the frame."""
+    widget = _many_inputs_session().widget()
+    try:
+        page = chromium_browser.new_page(viewport={"width": 1278, "height": 640})
+        try:
+            page.goto(widget.app_url + "&test=1", wait_until="domcontentloaded")
+            page.locator("#chart path.edited").first.wait_for(state="attached")
+            _open_check(page, "check_ae")
+            page.evaluate(
+                "() => { const below = document.createElement('div');"
+                " below.style.height = '1200px'; document.body.append(below); }"
+            )
+            frame = page.locator("#checkFrame")
+            assert frame.evaluate("f => f.scrollHeight > f.clientHeight")
+            scroller = page.evaluate_handle(_PAGE_SCROLLER, "#checkFrame")
+            assert scroller.evaluate("node => node.scrollHeight > node.clientHeight")
+            assert scroller.evaluate("node => node.scrollTop") == 0
+            box = frame.bounding_box()
+            page.mouse.move(box["x"] + box["width"] / 2, box["y"] + 40)
+            page.mouse.wheel(0, 120)
+            page.wait_for_function("node => node.scrollTop > 0", arg=scroller)
+            assert frame.evaluate("f => f.scrollTop") == 0
+            assert page.evaluate(_ZOOM) == {}
+            scroller.evaluate("node => { node.scrollTop = 0; }")
+            box = frame.bounding_box()
+            page.mouse.click(box["x"] + box["width"] / 2, box["y"] + 40)
+            assert page.evaluate(_ACTIVE) == ["checkFrame"]
+            page.mouse.wheel(0, 120)
+            page.wait_for_function("() => document.getElementById('checkFrame').scrollTop > 0")
+            assert page.evaluate(_ZOOM) == {}
+        finally:
+            page.close()
+    finally:
+        widget.close()
+
+
+# A page that holds the editor in a frame between two blocks, as a notebook holds a cell's
+# output: the page scrolls, and the editor inside it, at 640 px high, does not.
+_HOST_PAGE = """<!doctype html><html><head><meta charset="utf-8"></head>
+<body style="margin:0"><div style="height:120px"></div>
+<iframe id="cell" src="{src}" style="display:block;border:0;width:1278px;height:640px"></iframe>
+<div style="height:1600px"></div></body></html>"""
+
+
+def test_a_plain_wheel_over_an_inactive_tall_check_scrolls_the_page_that_holds_it(
+    chromium_browser,
+):
+    """Inside a frame of a scrolling page, a plain wheel over the inactive tall A/E reaches that
+    page; clicked, the A/E's frame scrolls."""
+    widget = _many_inputs_session().widget()
+    try:
+        page = chromium_browser.new_page(viewport={"width": 1300, "height": 700})
+        try:
+            parts = urlsplit(widget.app_url)
+            host = f"{parts.scheme}://{parts.netloc}/__notebook_like_host.html"
+            body = _HOST_PAGE.format(src=widget.app_url + "&test=1")
+            page.route(host, lambda route: route.fulfill(content_type="text/html", body=body))
+            page.goto(host, wait_until="domcontentloaded")
+            page.frame_locator("#cell").locator("#chart path.edited").first.wait_for(
+                state="attached"
+            )
+            cell = page.frame(url=lambda url: "test=1" in url)
+            _open_check(cell, "check_ae")
+            frame = cell.locator("#checkFrame")
+            assert frame.evaluate("f => f.scrollHeight > f.clientHeight")
+            assert cell.evaluate("() => document.scrollingElement.scrollTop") == 0
+            host_top = "() => document.scrollingElement.scrollTop"
+            # Clicking into the cell may have scrolled the page to show what was clicked.
+            page.evaluate("() => { document.scrollingElement.scrollTop = 0; }")
+            box = frame.bounding_box()
+            point = (box["x"] + box["width"] / 2, box["y"] + 60)
+            page.mouse.move(*point)
+            page.mouse.wheel(0, 120)
+            page.wait_for_function(f"({host_top})() > 0")
+            assert frame.evaluate("f => f.scrollTop") == 0
+            assert cell.evaluate(_ZOOM) == {}
+            page.evaluate("() => { document.scrollingElement.scrollTop = 0; }")
+            page.mouse.click(*point)
+            assert cell.evaluate(_ACTIVE) == ["checkFrame"]
+            page.mouse.wheel(0, 120)
+            cell.wait_for_function("() => document.getElementById('checkFrame').scrollTop > 0")
+            assert cell.evaluate(_ZOOM) == {}
+        finally:
+            page.close()
+    finally:
+        widget.close()
+
+
+# A Ctrl+wheel over the Q-Q, then in the same task `then` (Home, or opening another check),
+# before the wheel's frame; resolves once two frames have drawn.
+_WHEEL_THEN = """async (then) => {
+  const svg = document.querySelector('#checkFrame svg.check-plot');
+  const box = svg.getBoundingClientRect();
+  svg.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, ctrlKey: true, bubbles: true,
+    cancelable: true, clientX: box.left + box.width * 0.6, clientY: box.top + box.height * 0.4 }));
+  if (then === 'home') document.getElementById('checkHome').click();
+  else document.querySelector(`#assessList [data-assess-entry="${then}"]`).click();
+  await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+  return window.__superglmTest.checkZoom();
+}"""
+
+
+def test_a_wheel_waiting_for_its_frame_is_dropped_by_home_or_another_check(checks_page):
+    with checks_page() as page:
+        _open_check(page, "check_qq")
+        _zoom_qq(page)
+        # Home before the wheel's frame: the check is whole and stays whole.
+        assert page.evaluate(_WHEEL_THEN, "home") == {}
+        assert page.locator("#checkFrame").get_attribute("data-zoomed") == "false"
+        # Another check opened before it: neither check moves.
+        assert page.evaluate(_WHEEL_THEN, "check_pit") == {}
+        page.locator('#checkPanel[data-report="check_pit"]').wait_for(state="visible")
+        assert page.evaluate(_ZOOM) == {}
