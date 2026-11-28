@@ -265,13 +265,15 @@ class EditorWidget:
         # closing never waits for one and its worker ends within a block.
         self._closing = threading.Event()
         # The checks' evidence, read and written only by jobs on the check lane, which runs them
-        # one at a time; it lives as long as the widget. Each entry keeps the split it was read
-        # on, compared by identity, and its model's ``_check_signature`` and inputs: the fitted
-        # model's body of each check on a split, and on a split one simulation for the fitted
-        # model and one for a refit in force, which the hand edits on each read.
-        self._original_checks: dict[tuple[str, str], tuple[tuple[Any, ...], Any, dict]] = {}
+        # one at a time; it lives as long as the widget. Each entry keeps its fit's
+        # ``_check_signature`` and inputs, and the fit and the split it was read from, both
+        # compared by identity: two fits can hold the same arrays and read other designs. The
+        # entries are the fitted model's body of each check on a split, and on a split one
+        # simulation for the fitted model and one for a refit in force, which the hand edits on
+        # each read.
+        self._original_checks: dict[tuple[str, str], tuple[tuple[Any, ...], Any, Any, dict]] = {}
         self._check_replicates: dict[
-            tuple[str, str], tuple[tuple[Any, ...], Any, NullReplicates]
+            tuple[str, str], tuple[tuple[Any, ...], Any, Any, NullReplicates]
         ] = {}
         self._server: EditorAppServer | None = None
         self._notebook: NotebookTransport | None = None
@@ -1001,8 +1003,8 @@ class EditorWidget:
         its own, which the hand edits made on it read.
         """
         key = (_check_signature(fit), inputs)
-        for held, held_dataset, replicates in self._check_replicates.values():
-            if held == key and held_dataset is dataset:
+        for held, held_fit, held_dataset, replicates in self._check_replicates.values():
+            if held == key and held_fit is fit and held_dataset is dataset:
                 return replicates
         replicates = null_replicates(
             model, dataset, inputs=inputs, fitted=fit, cancelled=self._closing.is_set
@@ -1010,7 +1012,7 @@ class EditorWidget:
         if self._closing.is_set():  # closed during the final scoring: nothing is kept
             raise SimulationCancelled
         role = "original" if fit is reference_fit else "in_force"
-        self._check_replicates[(role, dataset.name)] = (key, dataset, replicates)
+        self._check_replicates[(role, dataset.name)] = (key, fit, dataset, replicates)
         return replicates
 
     def _fitted_check(
@@ -1021,8 +1023,10 @@ class EditorWidget:
         that fit, the split and the inputs stand. Run only inside a check job."""
         fitted = _check_signature(reference_fit)
         held = self._original_checks.get((report, dataset.name))
-        if held is not None and held[0] == (fitted, inputs) and held[1] is dataset:
-            return held[2]
+        if held is not None:
+            key, held_fit, held_dataset, body = held
+            if key == (fitted, inputs) and held_fit is reference_fit and held_dataset is dataset:
+                return body
         replicates = self._check_replicates_for(
             reference, reference_fit, reference_fit, dataset, inputs
         )
@@ -1033,7 +1037,12 @@ class EditorWidget:
             raise SimulationCancelled
         # Kept under the captured fit's key only while that is still the model's fit.
         if _fit_in_force(reference) is reference_fit:
-            self._original_checks[(report, dataset.name)] = ((fitted, inputs), dataset, body)
+            self._original_checks[(report, dataset.name)] = (
+                (fitted, inputs),
+                reference_fit,
+                dataset,
+                body,
+            )
         return body
 
     def _export_bytes(self, format: str, filename: str | None = None) -> ExportResult:
@@ -1753,7 +1762,8 @@ def _check_signature(fit) -> tuple[Any, ...]:
     """What a SuperLSS's checks read from ``fit``, its fitted model (``cv._fit_in_force``): the
     family, the coefficients and a digest of the covariance the posterior draws read. A hand
     edit keeps the fit's covariance; a refit in place may keep the coefficients and move the
-    covariance."""
+    covariance. Two fits can hold the same arrays and read other designs, so a cache entry is
+    read only for the fit object it was computed from."""
     coefficients = np.asarray(fit.coefficients, dtype=np.float64)
     covariance = np.ascontiguousarray(fit.inference.covariance, np.float64)
     digest = hashlib.blake2b(covariance.tobytes(), digest_size=16).hexdigest()

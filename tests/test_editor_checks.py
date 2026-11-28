@@ -1640,8 +1640,10 @@ def test_closing_the_widget_stops_a_simulation_at_its_next_block(calm_session, m
 
 def _published(widget) -> dict[tuple[str, ...], int]:
     """What the widget's two check caches hold: each entry's key and its value's identity."""
-    held = {("replicates", *key): id(entry[2]) for key, entry in widget._check_replicates.items()}
-    return held | {("bodies", *key): id(entry[2]) for key, entry in widget._original_checks.items()}
+    held = {("replicates", *key): id(entry[-1]) for key, entry in widget._check_replicates.items()}
+    return held | {
+        ("bodies", *key): id(entry[-1]) for key, entry in widget._original_checks.items()
+    }
 
 
 @pytest.mark.parametrize(
@@ -1791,7 +1793,7 @@ def test_a_fit_replaced_while_its_check_runs_is_never_cached_under_the_old_key(c
         assert hashed and lss._require_fitted() is swapped
         fits = {real(opened): opened, real(swapped): swapped}
         assert widget._check_replicates
-        for (signature, inputs), dataset, replicates in widget._check_replicates.values():
+        for (signature, inputs), _, dataset, replicates in widget._check_replicates.values():
             kept = null_replicates(lss, dataset, inputs=inputs, fitted=fits[signature])
             assert replicates.levels == kept.levels
         other = null_replicates(lss, dataset, inputs=inputs, fitted=swapped)
@@ -1835,6 +1837,51 @@ def test_a_refit_that_moves_only_the_covariance_is_drawn_again(calm):
             assert answer == _ask(fresh, report)
             assert answer["compares_edit"] is True
         assert answer["models"]["original"] != before[report]["models"]["original"]
+    finally:
+        _close_widgets(session)
+
+
+def test_a_fit_with_the_same_arrays_and_another_design_is_drawn_again():
+    """Two Gaussian fits whose training labels and reference levels are swapped have the same
+    design on their training rows, so the same coefficients and covariance, and other designs
+    on the held-out rows. With the caches warm on the first, the second put in force answers
+    each check as a fresh widget does, and so does the opened model refitted in place to a copy
+    of the second's fit. Mutation checks: a simulation read on the signature alone, without the
+    captured fit's identity, serves the first fit's levels; a fitted body read so serves the
+    first fit's body."""
+    rng = np.random.default_rng(SEED)
+    X = pd.DataFrame({"g": rng.choice(["a", "b"], 300)})
+    y = np.where(X["g"] == "b", 1.0, 0.0) + rng.standard_normal(300)
+    family = GaussianLS()
+    fit, swapped = X.iloc[:200], X.iloc[:200].replace({"g": {"a": "b", "b": "a"}})
+    first = SuperLSS(family, family.location(cat("g", base="a")), family.scale()).fit(fit, y[:200])
+    second = SuperLSS(family, family.location(cat("g", base="b")), family.scale()).fit(
+        swapped, y[:200]
+    )
+    signature = widget_module._check_signature
+    assert signature(first._require_fitted()) == signature(second._require_fitted())
+    session = EditorSession.from_model(
+        first,
+        train_data=(fit, y[:200]),
+        validation_data=(X.iloc[200:].reset_index(drop=True), y[200:]),
+    )
+    try:
+        widget = session.widget()
+        before = {report: _ask(widget, report) for report in CHECK_REPORTS}
+        session.replace_in_force_model(second)
+        fresh = session.widget()
+        after = {report: _ask(widget, report) for report in CHECK_REPORTS}
+        for report in CHECK_REPORTS:
+            assert after[report] == _ask(fresh, report) and after[report]["compares_edit"]
+        level = after["check_qq"]["models"]["edited"]["local_level"]
+        assert level != before["check_qq"]["models"]["edited"]["local_level"]
+        # The opened model refitted in place: the fitted half is read from the new fit.
+        first._model = dataclasses.replace(second._require_fitted())
+        fresh = session.widget()
+        for report in CHECK_REPORTS:
+            answer = _ask(widget, report)
+            assert answer == _ask(fresh, report)
+            assert answer["models"]["original"] != after[report]["models"]["original"]
     finally:
         _close_widgets(session)
 
