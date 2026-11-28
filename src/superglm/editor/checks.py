@@ -464,12 +464,14 @@ def _level(
     dataset: EvaluationDataset,
     inputs: Sequence[str],
     replicates: NullReplicates | None,
+    fitted: Any,
 ) -> _Level:
     """The level of ``report``'s band on ``dataset``: known on the fitted rows, else simulated."""
     if dataset.name == _FIT_ROWS:
         return _Level(None, 0, None)
-    found = null_replicates(model, dataset, inputs=inputs) if replicates is None else replicates
-    return _Level(found.levels.get(report), found.n_draws, found.note)
+    if replicates is None:
+        replicates = null_replicates(model, dataset, inputs=inputs, fitted=fitted)
+    return _Level(replicates.levels.get(report), replicates.n_draws, replicates.note)
 
 
 def _body(
@@ -478,17 +480,18 @@ def _body(
     dataset: EvaluationDataset,
     inputs: Sequence[str],
     replicates: NullReplicates | None,
+    fitted: Any,
 ):
     lss = _lss(model)
     if lss is None:
         raise CheckUnavailable(_NOT_LSS)
-    fitted = lss._require_fitted()
+    fitted = lss._require_fitted() if fitted is None else fitted
     reason = _unsupported(report, fitted.family) or lss_split_reason(lss, dataset)
     if reason is not None:
         raise CheckUnavailable(reason)
     y = np.asarray(dataset.y, dtype=np.float64).ravel()
     # The level is read once the body's own rows are known to be scorable.
-    level = functools.partial(_level, report, model, dataset, inputs, replicates)
+    level = functools.partial(_level, report, model, dataset, inputs, replicates, fitted)
     try:
         if report == "check_ae":
             return _ae_body(fitted, dataset, y, inputs, level)
@@ -518,6 +521,7 @@ def check_body(
     *,
     inputs: Sequence[str],
     replicates: NullReplicates | None = None,
+    fitted: Any = None,
 ) -> dict[str, Any]:
     """One model's body of ``report`` on ``dataset``; ``inputs`` are the columns A/E groups by.
 
@@ -528,11 +532,15 @@ def check_body(
     ``level_source`` (``"simulated"`` or ``"known"``), ``n_draws`` (0 when known) and
     ``level_note`` (the page's sentence when a held-out split keeps the known level, else
     ``None``).
+
+    ``fitted``, the fitted model ``model`` held when the caller captured it (``model``'s own
+    when omitted), is the fit scored, as :func:`null_replicates` simulates it: a refit in place
+    replaces ``model``'s, so a body read against a captured fit's levels reads that fit too.
     """
     if report not in CHECK_REPORTS:
         raise ValueError(f"report must be one of {CHECK_REPORTS}; got {report!r}")
     try:
-        return _body(report, model, dataset, inputs, replicates)
+        return _body(report, model, dataset, inputs, replicates, fitted)
     except CheckUnavailable as unavailable:
         return _unavailable(unavailable.reason)
 
@@ -556,11 +564,14 @@ class SimulationCancelled(Exception):  # noqa: N818 - the caller stopped it, not
 def _unless_cancelled(
     blocks: Iterator[tuple[slice, NDArray[np.float64]]], cancelled: Callable[[], bool]
 ) -> Iterator[tuple[slice, NDArray[np.float64]]]:
-    """``blocks``, asking ``cancelled`` before each is drawn: once it answers true, the next
-    block raises :class:`SimulationCancelled` instead."""
+    """``blocks``, asking ``cancelled`` before each is drawn and once more after the last, so
+    nothing is scored once it answers true: the stream raises :class:`SimulationCancelled`
+    instead."""
     while not cancelled():
         block = next(blocks, None)
         if block is None:
+            if cancelled():  # asked again once the blocks end, before the final scoring
+                break
             return
         yield block
     raise SimulationCancelled

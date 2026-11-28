@@ -963,7 +963,10 @@ class EditorWidget:
         if outcome.status == "superseded" or outcome.payload is None:
             return _superseded_payload(revision, request_sequence, source.token)
         with self._lock:
-            if not source.describes(self.session):
+            # The comparison stands only while both of its fits are in force: the edited
+            # model's, which ``source`` names, and the opened model's, captured with it.
+            stale = _fit_in_force(reference) is not reference_fit or self._closing.is_set()
+            if stale or not source.describes(self.session):
                 return _superseded_payload(revision, request_sequence, source.token)
             revision = self.session.model_revision
         payload = check_report_payload(
@@ -1000,6 +1003,8 @@ class EditorWidget:
         replicates = null_replicates(
             model, dataset, inputs=inputs, fitted=fit, cancelled=self._closing.is_set
         )
+        if self._closing.is_set():  # closed during the final scoring: nothing is kept
+            raise SimulationCancelled
         role = "original" if fit is reference_fit else "in_force"
         self._check_replicates[(role, dataset.name)] = (key, dataset, replicates)
         return replicates
@@ -1007,9 +1012,9 @@ class EditorWidget:
     def _fitted_check(
         self, report: str, reference, reference_fit, dataset, inputs: tuple[str, ...]
     ) -> dict[str, Any]:
-        """The fitted model's body of ``report`` on ``dataset``, kept while that model's fit,
-        ``reference_fit`` as captured under the lock, the split and the inputs stand. Run only
-        inside a check job."""
+        """The fitted model's body of ``report`` on ``dataset``, read from ``reference_fit``,
+        that model's fit as captured under the lock, statistics and band alike, and kept while
+        that fit, the split and the inputs stand. Run only inside a check job."""
         fitted = _check_signature(reference_fit)
         held = self._original_checks.get((report, dataset.name))
         if held is not None and held[0] == (fitted, inputs) and held[1] is dataset:
@@ -1017,9 +1022,12 @@ class EditorWidget:
         replicates = self._check_replicates_for(
             reference, reference_fit, reference_fit, dataset, inputs
         )
-        body = check_body(report, reference, dataset, inputs=inputs, replicates=replicates)
-        # The body reads the model's statistics from its fit in force, kept under the captured
-        # fit's key only while that is the fit.
+        body = check_body(
+            report, reference, dataset, inputs=inputs, replicates=replicates, fitted=reference_fit
+        )
+        if self._closing.is_set():
+            raise SimulationCancelled
+        # Kept under the captured fit's key only while that is still the model's fit.
         if _fit_in_force(reference) is reference_fit:
             self._original_checks[(report, dataset.name)] = ((fitted, inputs), dataset, body)
         return body

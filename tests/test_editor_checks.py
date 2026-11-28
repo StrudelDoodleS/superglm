@@ -1501,7 +1501,10 @@ def test_closing_the_widget_closes_both_lanes(calm_session, monkeypatch):
         assert started.wait(_STUCK)
         workers = [t for t in threading.enumerate() if t.name.rsplit("_", 1)[0] in lanes]
         assert {t.name.rsplit("_", 1)[0] for t in workers} == lanes
-        widget.close()
+        # On a thread of its own, so a close that waited for the held job still reaches the
+        # cleanup that releases it.
+        _, closed, _ = _in_thread(widget.close)
+        assert closed.wait(_STUCK), "close waited for the check"
         for lane in (widget._evidence, widget._check_evidence):
             with pytest.raises(RuntimeError, match="closed"):
                 lane.submit(EvidenceKey(0, "check", "after close"), dict)
@@ -1574,6 +1577,79 @@ def test_closing_the_widget_stops_a_simulation_at_its_next_block(calm_session, m
     check.join(_STUCK)
     assert running["value"]["status"] == "superseded"
     assert waiting["value"]["status"] == "superseded"
+
+
+def _published(widget) -> dict[tuple[str, ...], int]:
+    """What the widget's two check caches hold: each entry's key and its value's identity."""
+    held = {("replicates", *key): id(entry[2]) for key, entry in widget._check_replicates.items()}
+    return held | {("bodies", *key): id(entry[2]) for key, entry in widget._original_checks.items()}
+
+
+@pytest.mark.parametrize(
+    "point", ["after_the_last_block", "final_scoring", "the_edited_body", "the_fitted_body"]
+)
+def test_a_check_closed_after_its_last_block_publishes_nothing(point, calm_session, monkeypatch):
+    """Closed while a check is held after its simulation has drawn every block (once the blocks
+    end, inside the final scoring, or once a body is read), the check answers superseded and
+    neither cache gains an entry; closed once the blocks end, the final scoring never runs.
+    Mutation checks: without the cancel check after the last block the final scoring runs;
+    without the closing check before either cache is written that cache keeps an entry; without
+    it before the answer the check answers completed.
+    """
+    entered, hold, scored, bodies = threading.Event(), threading.Event(), [], []
+
+    def pause():
+        entered.set()
+        hold.wait()  # only the cleanup below releases it
+
+    real_levels, real_blocks = checks._Scores.levels, checks._simulated_responses
+    real_body = checks.check_body
+
+    def levels(self):
+        scored.append(self)
+        answer = real_levels(self)
+        if point == "final_scoring":
+            pause()
+        return answer
+
+    def blocks(*a, **k):
+        yield from real_blocks(*a, **k)
+        pause()
+
+    def body(*a, **k):
+        answer = real_body(*a, **k)
+        bodies.append(a[1])
+        # Without an edit the one body is the edited model's; after a hand edit the fitted
+        # model's body follows it.
+        if len(bodies) == (2 if point == "the_fitted_body" else 1):
+            pause()
+        return answer
+
+    monkeypatch.setattr(checks._Scores, "levels", levels)
+    if point == "after_the_last_block":
+        monkeypatch.setattr(checks, "_simulated_responses", blocks)
+    if point in ("the_edited_body", "the_fitted_body"):
+        monkeypatch.setattr(widget_module, "check_body", body)
+    if point == "the_fitted_body":
+        _average(calm_session, 2)
+    widget = calm_session.widget()
+    lane = f"superglm-checks-{id(widget):x}"
+    try:
+        check, _, answer = _in_thread(lambda: _ask(widget, "check_qq"))
+        assert entered.wait(_STUCK)
+        published = _published(widget)
+        _, closed, _ = _in_thread(widget.close)
+        assert closed.wait(_STUCK), "close waited for the check"
+        workers = [t for t in threading.enumerate() if t.name.rsplit("_", 1)[0] == lane]
+    finally:
+        hold.set()
+    for worker in workers:
+        worker.join(_STUCK)
+    check.join(_STUCK)
+    assert answer["value"]["status"] == "superseded"
+    assert _published(widget) == published
+    if point == "after_the_last_block":
+        assert scored == []
 
 
 def test_a_check_delayed_before_the_lane_never_displaces_a_newer_one(calm_session, monkeypatch):
@@ -1697,6 +1773,67 @@ def test_a_refit_that_moves_only_the_covariance_is_drawn_again(calm):
             assert answer["compares_edit"] is True
         assert answer["models"]["original"] != before[report]["models"]["original"]
     finally:
+        _close_widgets(session)
+
+
+@pytest.mark.parametrize("refit", ["kept", "undone"])
+def test_a_comparison_never_mixes_two_fits_of_the_opened_model(refit, calm, monkeypatch):
+    """After a structural edit a check compares the refit with the opened model, whose fit the
+    request captured. The opened model is refitted in place while the edited model is simulated.
+    Kept, the fit compared is no longer the opened model's in force, so the answer is
+    superseded; undone before the answer, the fitted body is the captured fit's alone, its
+    statistics and its band together. Mutation checks: without the test of the opened model's
+    fit at the answer, the kept refit answers with a fit no longer in force; scoring the fitted
+    body from the opened model's live fit mixes the refit's statistics with the captured fit's
+    band.
+    """
+    lss = copy.deepcopy(calm.lss)
+    session = _session(calm._replace(lss=lss))
+    opened = lss._require_fitted()
+    refitted = (
+        _gamma_spec()
+        .fit(calm.train.X.iloc[:400], calm.train.y[:400], lambdas={"mean:x#wiggle": LAMBDA})
+        ._require_fitted()
+    )
+    real_draw, real_body = checks.null_replicates, checks.check_body
+    swaps = []
+
+    def draw(model, *a, **k):
+        if model is not session.reference_model and not swaps:
+            lss._model = refitted  # a refit in place, during the edited model's simulation
+            swaps.append(model)
+        return real_draw(model, *a, **k)
+
+    def body(report, model, *a, **k):
+        answer = real_body(report, model, *a, **k)
+        if model is session.reference_model and refit == "undone":
+            lss._model = opened
+        return answer
+
+    monkeypatch.setattr(widget_module, "null_replicates", draw)
+    monkeypatch.setattr(widget_module, "check_body", body)
+    try:
+        widget = session.widget()
+        session.replace_with_knots("mean:x", {"count": 5, "strategy": "uniform"})
+        reference = session.reference_model
+        assert session.model is not reference
+        answer = _ask(widget, "check_qq")
+        assert swaps
+        if refit == "kept":
+            assert lss._require_fitted() is refitted
+            assert answer["status"] == "superseded"
+            return
+        assert lss._require_fitted() is opened
+        assert "status" not in answer and answer["compares_edit"] is True
+        split, inputs = session._evaluation_data["validation"], ["x", "g"]
+        band = real_draw(reference, split, inputs=inputs)
+        clean = real_body("check_qq", reference, split, inputs=inputs, replicates=band)
+        assert answer["models"]["original"] == clean
+        lss._model = refitted
+        mixed = real_body("check_qq", reference, split, inputs=inputs, replicates=band)
+        assert mixed != clean  # the refit's statistics differ, so a mixed body is seen
+    finally:
+        lss._model = opened
         _close_widgets(session)
 
 
