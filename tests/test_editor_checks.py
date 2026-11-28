@@ -48,6 +48,7 @@ from superglm.editor.checks import (
 )
 from superglm.editor.cv import InForce
 from superglm.editor.evaluation import EvaluationDataset
+from superglm.editor.evidence import EvidenceKey
 from superglm.model.base import NoPredictedMeanError
 from superglm.stats import (
     UniformBand,
@@ -1351,6 +1352,143 @@ def test_an_edit_while_a_superglm_check_is_answered_cannot_outlive_it(glm_sessio
     if answer.get("status") != "superseded":
         assert answer["in_force"] == InForce.of(glm_session).token
         assert answer["model_revision"] == glm_session.model_revision
+
+
+#: How long a test waits for another thread before it calls that thread stuck: a bound on the
+#: wait, never a measurement.
+_STUCK = 60.0
+
+
+def _held_simulation(monkeypatch):
+    """The widget's simulation, made to wait for ``release`` once it has ``started``; ``drawn``
+    lists the models it was asked for."""
+    started, release, drawn = threading.Event(), threading.Event(), []
+    real = checks.null_replicates
+
+    def held(*a, **k):
+        drawn.append(a[0])
+        started.set()
+        assert release.wait(_STUCK)
+        return real(*a, **k)
+
+    monkeypatch.setattr(widget_module, "null_replicates", held)
+    return started, release, drawn
+
+
+def _in_thread(call):
+    """``call`` on a thread of its own: the thread, an event set once it answers, and the
+    answer under ``"value"`` (or what it raised under ``"error"``)."""
+    done, answer = threading.Event(), {}
+
+    def run():
+        try:
+            answer["value"] = call()
+        except BaseException as exc:
+            answer["error"] = exc
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread, done, answer
+
+
+def test_the_editor_answers_while_a_check_is_simulated(calm_session, monkeypatch):
+    """A check's first simulation on a held-out split runs for seconds (18 s at 200,000 rows),
+    on the check lane: while it is held, an edit answers and so does the Validation report, a
+    SuperLSS's metrics, which materialises the edit and scores it. Mutation check: check jobs
+    on the Editor's lane leave the Validation report waiting behind the simulation.
+    """
+    started, release, _ = _held_simulation(monkeypatch)
+    widget = calm_session.widget()
+    try:
+        check, checked, held = _in_thread(lambda: _ask(widget, "check_qq"))
+        assert started.wait(_STUCK)
+        state = widget._drag("mean:x", [0, 1, 2], delta=0.2)
+        assert state["in_force"] == InForce.of(calm_session).token
+        _, reported, scores = _in_thread(lambda: _ask(widget, "validation"))
+        assert reported.wait(_STUCK), "the Validation report waited behind the check"
+        assert not checked.is_set()
+    finally:
+        release.set()
+    assert "error" not in scores
+    report = scores["value"]
+    assert report["report"] == "validation" and report["in_force"] == state["in_force"]
+    assert report["compares_edit"] is True and report["splits"]
+    check.join(_STUCK)
+    assert held["value"]["status"] == "superseded"
+
+
+def test_a_newer_check_replaces_the_one_waiting_on_the_check_lane(calm_session, monkeypatch):
+    """The check lane keeps the Editor lane's rules: one check runs and one waits, and a newer
+    model in force replaces the one waiting, which answers superseded at once while the running
+    one is held. The newest answers for its model, from the one simulation of the fit its edits
+    are made on. Mutation check: a check key without the model in force's token shares the
+    running job, and the replaced request never answers while that job is held.
+    """
+    started, release, drawn = _held_simulation(monkeypatch)
+    widget = calm_session.widget()
+    lane, submitted = widget._check_evidence, threading.Semaphore(0)
+    real_submit = lane.submit
+
+    def counted(key, compute):
+        future = real_submit(key, compute)
+        submitted.release()
+        return future
+
+    monkeypatch.setattr(lane, "submit", counted)
+    try:
+        first, first_done, first_answer = _in_thread(lambda: _ask(widget, "check_qq"))
+        assert started.wait(_STUCK) and submitted.acquire(timeout=_STUCK)
+        with widget._lock:
+            _average(calm_session, 2)
+            replaced = InForce.of(calm_session).token
+        _, second_done, second_answer = _in_thread(lambda: _ask(widget, "check_qq"))
+        assert submitted.acquire(timeout=_STUCK)
+        with widget._lock:
+            _average(calm_session, 4)
+            newest = InForce.of(calm_session).token
+        third, third_done, third_answer = _in_thread(lambda: _ask(widget, "check_qq"))
+        assert second_done.wait(_STUCK), "the replaced check never answered"
+        assert not first_done.is_set()
+    finally:
+        release.set()
+    assert second_answer["value"]["status"] == "superseded"
+    assert second_answer["value"]["in_force"] == replaced
+    first.join(_STUCK)
+    third.join(_STUCK)
+    assert first_answer["value"]["status"] == "superseded"
+    answer = third_answer["value"]
+    assert "status" not in answer and answer["in_force"] == newest
+    assert answer["compares_edit"] is True
+    assert drawn == [calm_session.reference_model]
+
+
+def test_closing_the_widget_closes_both_lanes(calm_session, monkeypatch):
+    """Closed while a check is held, the widget takes no more evidence work, and once the held
+    job ends no worker of either lane is left running. Mutation check: a check lane left open
+    keeps its worker thread after its job ends.
+    """
+    started, release, _ = _held_simulation(monkeypatch)
+    widget = calm_session.widget()
+    _average(calm_session, 2)  # so the check materialises the edit on the Editor lane
+    lanes = {f"superglm-editor-{id(widget):x}", f"superglm-checks-{id(widget):x}"}
+    try:
+        check, checked, _ = _in_thread(lambda: _ask(widget, "check_qq"))
+        assert started.wait(_STUCK)
+        workers = [t for t in threading.enumerate() if t.name.rsplit("_", 1)[0] in lanes]
+        assert {t.name.rsplit("_", 1)[0] for t in workers} == lanes
+        widget.close()
+        for lane in (widget._evidence, widget._check_evidence):
+            with pytest.raises(RuntimeError, match="closed"):
+                lane.submit(EvidenceKey(0, "check", "after close"), dict)
+    finally:
+        release.set()
+    check.join(_STUCK)
+    assert checked.is_set()
+    for worker in workers:
+        worker.join(_STUCK)
+    assert not [worker.name for worker in workers if worker.is_alive()]
 
 
 def _with_covariance(lss, scale: float):

@@ -255,12 +255,16 @@ class EditorWidget:
         self._lock = _FollowingLock(lambda: self.session)
         self._closed = False
         self._evaluation_cache = EvaluationCache()
+        # Two evidence lanes, each running one job with one waiting: the Editor's (edit
+        # materialisation and scores) and the checks'. A check's first simulation on a held-out
+        # split runs for seconds, and on its own lane the Editor never waits behind it.
         self._evidence = EvidenceCoordinator(f"editor-{id(self):x}")
-        # The checks' evidence, read and written only by check jobs, which the coordinator runs
-        # one at a time. Each entry keeps the split it was read on, compared by identity, and
-        # its model's ``_check_signature`` and inputs: the fitted model's body of each check on
-        # a split, and on a split one simulation for the fitted model, which its hand edits read,
-        # and one for a refit in force.
+        self._check_evidence = EvidenceCoordinator(f"checks-{id(self):x}")
+        # The checks' evidence, read and written only by jobs on the check lane, which runs them
+        # one at a time; it lives as long as the widget. Each entry keeps the split it was read
+        # on, compared by identity, and its model's ``_check_signature`` and inputs: the fitted
+        # model's body of each check on a split, and on a split one simulation for the fitted
+        # model and one for a refit in force, which the hand edits on each read.
         self._original_checks: dict[tuple[str, str], tuple[tuple[Any, ...], Any, dict]] = {}
         self._check_replicates: dict[
             tuple[str, str], tuple[tuple[Any, ...], Any, NullReplicates]
@@ -311,6 +315,7 @@ class EditorWidget:
         _LIVE_WIDGETS.discard(self)
         self._jobs.close()
         self._evidence.close()
+        self._check_evidence.close()
         if self._server is not None:
             self._server.close()
         if self._notebook is not None:
@@ -916,6 +921,8 @@ class EditorWidget:
                     "request_sequence": request_sequence,
                     "in_force": asked.token,
                 }
+        # The edit is materialised on the Editor's lane, where the Validation scores share the
+        # same calculation, and only the bodies run on the check lane.
         edited, source = self._current_model_for_evidence(statistics=False, expected=asked)
         if edited is None:
             return _superseded_payload(revision, request_sequence, source.token)
@@ -934,7 +941,7 @@ class EditorWidget:
             return bodies
 
         key = EvidenceKey(source.token, "check", f"{report}:{dataset.name}")
-        outcome = self._evidence.submit(key, compute_bodies).result()
+        outcome = self._check_evidence.submit(key, compute_bodies).result()
         if outcome.status == "superseded" or outcome.payload is None:
             return _superseded_payload(revision, request_sequence, source.token)
         with self._lock:
