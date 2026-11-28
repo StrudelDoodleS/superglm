@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import * as actionsModule from "../../src/superglm/editor/app/state/actions.js";
+import { CHECK_REPORTS } from "../../src/superglm/editor/app/api/contracts.js";
 import {
   beginEvidence,
   commitRemote,
@@ -1681,6 +1682,235 @@ test("Retry of a report waits its turn behind the report in flight", async () =>
   await answer(2, 0);
   assert.equal(await retried, true);
   assert.equal(store.getState().request.evidence.cv.status, "current");
+});
+
+test("the overview asks its reports and then each offered check, never two at once", async () => {
+  const { sent, client, answer } = heldReportClient(async () => snapshot(0));
+  let inFlight = 0;
+  let most = 0;
+  const counted = {
+    ...client,
+    /** @param {string} path @param {Record<string, unknown>} body */
+    postJSON: (path, body) => {
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      return client.postJSON(path, body).finally(() => { inFlight -= 1; });
+    }
+  };
+  const timers = manualTimers();
+  const store = createEditorStore(createInitialEditorState({ ...snapshot(0), checks: [...CHECK_REPORTS] }));
+  const actions = createEditorActions({
+    store, client: counted, setTimer: timers.setTimer, clearTimer: timers.clearTimer
+  });
+
+  actions.patchView({ activeView: "assess" });
+  timers.fire();
+  for (let i = 0; i < 7; i += 1) {
+    assert.equal(sent.length, i + 1);
+    await answer(i, 0);
+  }
+  assert.deepEqual(sent, ["validation", "cv", "diagnose", "check_pit", "check_ae", "check_calibration", "check_qq"]);
+  assert.equal(most, 1);
+  for (const name of CHECK_REPORTS) assert.equal(store.getState().request.evidence[name].status, "current");
+});
+
+test("Retry of a check waits its turn behind the check in flight", async () => {
+  const { sent, held, client, answer } = heldReportClient(async () => snapshot(0));
+  const store = createEditorStore(createInitialEditorState(snapshot(0)));
+  const actions = createEditorActions({ store, client });
+  actions.scheduleReports(["check_qq"], { immediate: true });
+  held[0].reply.reject(new Error("offline"));
+  await settled();
+  assert.equal(store.getState().request.evidence.check_qq.status, "error");
+
+  actions.scheduleReports(["check_pit"], { immediate: true });
+  const retried = actions.retryEvidence("check_qq");
+  assert.deepEqual(sent, ["check_qq", "check_pit"]);
+  await answer(1, 0);
+  assert.deepEqual(sent, ["check_qq", "check_pit", "check_qq"]);
+  await answer(2, 0);
+  assert.equal(await retried, true);
+});
+
+test("a check asked by refreshEvidence or schedulePanelEvidence waits its turn behind the check in flight", async () => {
+  const { sent, client, answer } = heldReportClient(async () => snapshot(0));
+  let inFlight = 0;
+  let most = 0;
+  const counted = {
+    ...client,
+    /** @param {string} path @param {Record<string, unknown>} body */
+    postJSON: (path, body) => {
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      return client.postJSON(path, body).finally(() => { inFlight -= 1; });
+    }
+  };
+  const store = createEditorStore(createInitialEditorState(snapshot(0)));
+  const actions = createEditorActions({ store, client: counted });
+
+  actions.scheduleReports(["check_pit"], { immediate: true });
+  const refreshed = actions.refreshEvidence("check_qq", "/report", { report: "check_qq" });
+  actions.schedulePanelEvidence("check_ae", "/report", { report: "check_ae" }, { immediate: true });
+  assert.deepEqual(sent, ["check_pit"]);
+  await answer(0, 0);
+  assert.deepEqual(sent, ["check_pit", "check_qq"]);
+  await answer(1, 0);
+  assert.equal(await refreshed, true);
+  assert.deepEqual(sent, ["check_pit", "check_qq", "check_ae"]);
+  await answer(2, 0);
+
+  assert.equal(most, 1);
+  for (const name of /** @type {const} */ (["check_pit", "check_qq", "check_ae"])) {
+    assert.equal(store.getState().request.evidence[name].status, "current");
+  }
+});
+
+test("a refresh queued behind its check's older request is answered by its own turn", async () => {
+  const { sent, client, answer } = heldReportClient(async () => snapshot(1));
+  const store = createEditorStore(createInitialEditorState(snapshot(0)));
+  const actions = createEditorActions({ store, client });
+  actions.scheduleReports(["check_qq"], { immediate: true });
+  store.update((state) => commitRemote(state, snapshot(1)));
+  /** @type {boolean|null} */
+  let answered = null;
+  const refreshed = actions.refreshEvidence("check_qq", "/report", { report: "check_qq" })
+    .then((value) => { answered = value; });
+
+  // Revision 0's request ends, and is no answer for revision 1: its caller still waits.
+  await answer(0, 0);
+  assert.equal(answered, null);
+  assert.deepEqual(sent, ["check_qq", "check_qq"]);
+  await answer(1, 1);
+  await refreshed;
+  assert.equal(answered, true);
+});
+
+/** Timers that keep each delay asked for, fired by hand. */
+function delayedTimers() {
+  /** @type {Set<{callback:()=>void, delay:number}>} */
+  const timers = new Set();
+  /** @type {number[]} */
+  const delays = [];
+  return {
+    /** @param {()=>void} callback @param {number} delay */
+    setTimer: (callback, delay) => {
+      const timer = { callback, delay };
+      timers.add(timer);
+      delays.push(delay);
+      return timer;
+    },
+    /** @param {{callback:()=>void, delay:number}} timer */
+    clearTimer: (timer) => { timers.delete(timer); },
+    fire: () => {
+      const due = [...timers];
+      timers.clear();
+      for (const timer of due) timer.callback();
+    },
+    delays
+  };
+}
+
+/**
+ * A page showing the Q-Q check, whose replies are held, its timers fired by hand.
+ * @param {AppView} [view]
+ */
+function lanePage(view = "check_qq") {
+  const reports = heldReportClient(async () => snapshot(0));
+  const timers = delayedTimers();
+  const store = createEditorStore(createInitialEditorState({ ...snapshot(0), checks: [...CHECK_REPORTS] }));
+  const actions = createEditorActions({
+    store, client: reports.client, setTimer: timers.setTimer, clearTimer: timers.clearTimer
+  });
+  actions.patchView({ activeView: view });
+  timers.fire();
+  timers.delays.length = 0;
+  /** The check lane gave request `i`'s place to another window's check. @param {number} i */
+  const displace = async (i) => {
+    const { body, reply } = reports.held[i];
+    reply.resolve({ status: "displaced", model_revision: 0, request_sequence: body.request_sequence, in_force: null });
+    await settled();
+  };
+  return { ...reports, timers, store, actions, displace };
+}
+
+test("a check the lane displaced for another window's is asked again, not left on Retry", async () => {
+  const { sent, timers, store, displace, answer } = lanePage();
+  assert.deepEqual(sent, ["check_qq"]);
+  await displace(0);
+  const waiting = store.getState().request.evidence.check_qq;
+  assert.equal(waiting.status, "updating");
+  assert.equal(waiting.error, null);
+  assert.deepEqual(timers.delays, [150]);
+  timers.fire();
+  assert.deepEqual(sent, ["check_qq", "check_qq"]);
+  await answer(1, 0);
+  assert.equal(store.getState().request.evidence.check_qq.status, "current");
+});
+
+test("a check displaced again and again waits longer each time, and then stops on Retry", async () => {
+  const { sent, held, timers, store, displace } = lanePage();
+  for (let i = 0; i < 10; i += 1) {
+    await displace(i);
+    timers.fire();
+  }
+  assert.deepEqual(timers.delays, [150, 300, 600, 1200, 2400, 4800, 4800, 4800, 4800, 4800]);
+  assert.equal(sent.length, 11);
+  await displace(10);
+  assert.equal(held.length, 11);
+  const stopped = store.getState().request.evidence.check_qq;
+  assert.equal(stopped.status, "error");
+  assert.match(stopped.error ?? "", /Retry/);
+});
+
+test("a displaced check the page stopped showing is asked when it is shown again", async () => {
+  const { sent, timers, store, actions, displace, answer } = lanePage();
+  await displace(0);
+  actions.patchView({ activeView: "editor" });
+  timers.fire();
+  assert.deepEqual(sent, ["check_qq"]);
+  const left = store.getState().request.evidence.check_qq;
+  assert.equal(left.status, "stale");
+  assert.equal(left.error, null);
+  assert.equal(selectReportNeedsAsk(store.getState(), "check_qq"), true);
+  // A failure is asked again only by Retry; a check left this way is asked when it is shown.
+  actions.patchView({ activeView: "check_qq" });
+  actions.scheduleReports(["check_qq"], { immediate: true });
+  assert.deepEqual(sent, ["check_qq", "check_qq"]);
+  await answer(1, 0);
+  assert.equal(store.getState().request.evidence.check_qq.status, "current");
+});
+
+test("a displaced check whose model moved on is asked once, for the new model", async () => {
+  const { sent, held, timers, store, displace, answer } = lanePage();
+  await displace(0);
+  store.update((state) => commitRemote(state, { ...snapshot(1), checks: [...CHECK_REPORTS] }));
+  // The requeue finds another model and leaves; the new model's turn asks after its debounce.
+  timers.fire();
+  timers.fire();
+  assert.deepEqual(sent, ["check_qq", "check_qq"]);
+  assert.equal(held[1].body.model_revision, 1);
+  await answer(1, 1);
+  timers.fire();
+  assert.deepEqual(sent, ["check_qq", "check_qq"]);
+  assert.equal(store.getState().request.evidence.check_qq.status, "current");
+});
+
+test("a check request that fails still waits for Retry, and the lane's displacement does not", async () => {
+  const { sent, held, timers, store } = lanePage();
+  held[0].reply.reject(new Error("offline"));
+  await settled();
+  timers.fire();
+  assert.deepEqual(sent, ["check_qq"]);
+  assert.equal(store.getState().request.evidence.check_qq.status, "error");
+});
+
+test("a check refreshed before the first snapshot answers false at once and sends nothing", async () => {
+  const { sent, client } = heldReportClient(async () => snapshot(0));
+  const store = createEditorStore(createInitialEditorState());
+  const actions = createEditorActions({ store, client });
+
+  assert.equal(await actions.refreshEvidence("check_qq", "/report", { report: "check_qq" }), false);
+  assert.deepEqual(sent, []);
 });
 
 test("an older snapshot from Refresh from Python leaves the newer model's reports alone", async () => {

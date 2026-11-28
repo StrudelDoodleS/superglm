@@ -21,7 +21,7 @@
   // before the first paint. These are the views readAssessWindow
   // (views/window_sync.js) takes.
   {
-    const ASSESS_WINDOW_VIEWS = ["assess", "validation", "cv", "final", "diagnose"];
+    const ASSESS_WINDOW_VIEWS = ["assess", "validation", "cv", "final", "diagnose", "check_pit", "check_ae", "check_calibration", "check_qq"];
     if (ASSESS_WINDOW_VIEWS.includes(new URLSearchParams(location.search).get("assess"))) {
       document.documentElement.dataset.window = "assess";
     }
@@ -742,6 +742,16 @@
             <h2 id="assessOverviewTitle">Overview</h2>
           </div>
           <div class="assess-tools">
+            <button id="overviewCompare" class="assess-compare" type="button" role="switch"
+              aria-checked="false" aria-disabled="true" data-help-control="compare_original"
+              data-popover-title="Compare with the fit"
+              data-popover-body="The model is as fitted; there is no edit to compare." hidden>
+              <span class="assess-compare-track" aria-hidden="true"></span>Compare with the fit
+            </button>
+            <button id="overviewHighlight" class="assess-compare" type="button" role="switch"
+              aria-checked="false" data-help-control="highlight_outside" hidden>
+              <span class="assess-compare-track" aria-hidden="true"></span>Highlight outside the band
+            </button>
             <button class="icon-button" type="button" data-assess-window
               aria-label="Open in new window" data-help-control="new_window">
               <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -751,6 +761,59 @@
           </div>
         </div>
         <div id="assessCards" class="assess-cards"></div>
+      </section>
+      <section id="checkPanel" class="check-panel" aria-labelledby="checkTitle" hidden>
+        <div class="report-header check-header">
+          <div>
+            <div class="check-heading">
+              <h2 id="checkTitle">Q-Q plot</h2>
+              <span id="checkHelp" class="check-help" tabindex="0" role="img"
+                aria-label="About the Q-Q plot" data-help-check="check_qq">
+                <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="12" cy="12" r="9"></circle>
+                  <path d="M9.7 9a2.5 2.5 0 1 1 3.4 2.3c-.8.4-1.1.9-1.1 1.7M12 17h.01"></path>
+                </svg>
+              </span>
+              <span id="checkSplit" class="check-split"></span>
+            </div>
+            <div class="evidence-status-row">
+              <div id="checkFreshness" class="evidence-freshness" aria-live="polite">Loading check...</div>
+              <button id="checkRetry" class="evidence-retry" type="button" hidden>Retry</button>
+            </div>
+          </div>
+          <div class="assess-tools">
+            <button id="checkCompare" class="assess-compare" type="button" role="switch"
+              aria-checked="false" aria-disabled="true" data-help-control="compare_original"
+              data-popover-title="Compare with the fit"
+              data-popover-body="The model is as fitted; there is no edit to compare." hidden>
+              <span class="assess-compare-track" aria-hidden="true"></span>Compare with the fit
+            </button>
+            <button id="checkHighlight" class="assess-compare" type="button" role="switch"
+              aria-checked="false" data-help-control="highlight_outside" hidden>
+              <span class="assess-compare-track" aria-hidden="true"></span>Highlight outside the band
+            </button>
+            <button id="checkHome" class="icon-button" type="button" aria-label="Home"
+              data-popover-title="Home" data-popover-body="Show the whole check again after zooming." hidden>
+              <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m4 11 8-7 8 7"></path>
+                <path d="M6.5 9.5V20h11V9.5"></path>
+                <path d="M10 20v-6h4v6"></path>
+              </svg>
+            </button>
+            <div id="checkLegend" class="check-legend" hidden>
+              <span class="check-chip"><span class="check-swatch check-swatch-edited" aria-hidden="true"></span>As edited</span>
+              <span class="check-chip"><span class="check-swatch check-swatch-original" aria-hidden="true"></span>As fitted</span>
+            </div>
+            <button class="icon-button" type="button" data-assess-window
+              aria-label="Open in new window" data-help-control="new_window">
+              <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M14 4h6v6M20 4l-8 8M18 14v5H5V6h5"></path>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div id="checkFrame" class="check-frame" aria-busy="true" data-freshness="idle"></div>
+        <p id="checkReadoutLive" class="check-readout-live" aria-live="polite"></p>
       </section>
       <section id="reportPanel" class="report-panel" hidden>
         <div class="report-header">

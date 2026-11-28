@@ -1,6 +1,6 @@
 import { canShowContributions, showsRelativity } from "./chart/display.js";
 import { EditorAPIError, editorClient } from "./api/client.js";
-import { REPORT_NAMES, isReportName } from "./api/contracts.js";
+import { CHECK_REPORTS, REPORT_NAMES, isCheckReport, isReportName, isReportView } from "./api/contracts.js";
 import {
   bindPointLens,
   bindPointTooltip,
@@ -20,7 +20,7 @@ import { renderMetricGrid } from "./metrics.js";
 import { renderReport } from "./reports.js";
 import { shapeButtonState, shapeRangeForSelection } from "./shapes.js";
 import { createEditorActions } from "./state/actions.js";
-import { OVERVIEW_REPORTS, assessEntry, openableView, tabOf } from "./state/assess.js";
+import { assessEntry, openableView, overviewReports, tabOf } from "./state/assess.js";
 import {
   selectActiveTermName,
   selectCurrentSelection,
@@ -28,6 +28,7 @@ import {
   selectEvidenceNeedsRefresh,
   selectGroupDisplayMode,
   selectModelRevision,
+  selectOfferedChecks,
   selectPendingSteps,
   selectRenderableTerm,
   selectReportNeedsAsk,
@@ -74,8 +75,19 @@ import {
 import { createRiskController } from "./views/risk_controller.js";
 import { defaultRiskLine, renderRiskPanel, riskPlotsHost } from "./views/risk_panel.js";
 import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
-import { bindAssessList, renderAssessList } from "./views/assess_list.js";
+import { bindAssessList } from "./views/assess_list.js";
+import { bindChartFocus } from "./views/chart_focus.js";
+import { bindCheckDrawing } from "./views/check_drawing.js";
+import { moveViewport, splitOf, viewportDomain } from "./chart/check_zoom.js";
 import { bindOverview, drawOverview, overviewGroups } from "./views/assess_overview.js";
+import {
+  checkPayload,
+  compareSwitch,
+  differsFromFit,
+  flaggedChecks,
+  renderCompareSwitch,
+  renderHighlightSwitch
+} from "./views/assess_check.js";
 import {
   placeTermViewToggle,
   renderContextBar,
@@ -189,6 +201,23 @@ const assessView = document.getElementById("assessView");
 const assessRows = document.getElementById("assessRows");
 const assessOverview = document.getElementById("assessOverview");
 const assessCards = document.getElementById("assessCards");
+const overviewCompare = document.getElementById("overviewCompare");
+const overviewHighlight = document.getElementById("overviewHighlight");
+const checkPanel = document.getElementById("checkPanel");
+const checkFreshness = document.getElementById("checkFreshness");
+const checkRetry = document.getElementById("checkRetry");
+const checkCompare = document.getElementById("checkCompare");
+const checkHighlight = document.getElementById("checkHighlight");
+const checkFrame = document.getElementById("checkFrame");
+const checkHome = document.getElementById("checkHome");
+const checkNodes = Object.freeze({
+  title: document.getElementById("checkTitle"),
+  help: document.getElementById("checkHelp"),
+  split: document.getElementById("checkSplit"),
+  legend: document.getElementById("checkLegend"),
+  frame: checkFrame,
+  live: document.getElementById("checkReadoutLive")
+});
 const reportPanel = document.getElementById("reportPanel");
 const reportTitle = document.getElementById("reportTitle");
 const reportStatus = document.getElementById("reportStatus");
@@ -328,7 +357,8 @@ const historyFrame = document.getElementById("historyFrame");
 const statusNode = document.getElementById("status");
 const uiPopover = document.getElementById("uiPopover");
 if (!uiPopover) throw new Error("Editor popover element is missing");
-bindPopovers({ root: document, popover: uiPopover });
+// The one owner of the popover: a renderer that writes over anchors tells it (`anchorUpdated`).
+const popovers = bindPopovers({ root: document, popover: uiPopover });
 
 let buildProgress = null;
 let buildFrame = null;
@@ -1160,6 +1190,11 @@ if (new URLSearchParams(window.location.search).get("test") === "1") {
   window.__superglmTest = Object.freeze({
     setAppBusy,
     mutationStatus: () => store.getState().request.mutation.status,
+    // Each zoomed check's domain as drawn, on the rows its evidence reads.
+    checkZoom: () => Object.fromEntries(CHECK_REPORTS.flatMap((report) => {
+      const domain = checkDomain(store.getState(), report);
+      return domain ? [[report, domain]] : [];
+    })),
     currentImpact: () => selectCurrentTerm(store.getState())?.impact
   });
 }
@@ -1242,15 +1277,77 @@ function renderAppView(activeView) {
   riskView.hidden = tab !== "risk";
   assessView.hidden = tab !== "assess";
   assessOverview.hidden = activeView !== "assess";
-  reportPanel.hidden = !isReportName(activeView);
+  reportPanel.hidden = !isReportView(activeView);
+  checkPanel.hidden = !isCheckReport(activeView);
   assessView.dataset.view = activeView;
   // Cross-validation and Smoothing search lay the panel out their own way (cv.css).
   reportPanel.dataset.report = activeView;
-  renderAssessList(assessRows, activeView);
+  assessList.render(activeView, assessListChecks(store.getState()));
+}
+
+// The checks the model offers, and those of them flagged, as the Assess list shows them.
+function assessListChecks(state) {
+  const offered = selectOfferedChecks(state);
+  return { offered, flagged: flaggedChecks(state.request.evidence, offered) };
 }
 
 function renderOverview() {
-  drawOverview(assessCards, overviewGroups(store.getState().request.evidence));
+  const state = store.getState();
+  const offered = selectOfferedChecks(state);
+  const evidence = state.request.evidence;
+  const compare = compareSwitch(evidence, offered, state.view.compareOriginal, state.remote.snapshot);
+  renderCompareSwitch(overviewCompare, compare);
+  const highlight = state.view.highlightOutside;
+  renderHighlightSwitch(overviewHighlight, highlight, offered.length > 0);
+  drawOverview(assessCards, overviewGroups(evidence, { offered, compare: compare.checked, highlight }));
+  popovers.anchorUpdated();
+}
+
+function checkFrameSize() {
+  return { width: checkFrame.clientWidth, height: checkFrame.clientHeight };
+}
+
+// The domain `report` is drawn at: its viewport, on the rows its evidence reads.
+function checkDomain(state, report) {
+  return viewportDomain(state.view.checkViewport[report], splitOf(checkPayload(state.request.evidence[report])));
+}
+
+// Draw the open check from the evidence the page holds; it asks Python for nothing. The check
+// drawing (views/check_drawing.js, bound below) holds what is drawn, and closes when no check is
+// open.
+function renderCheckPanel() {
+  const state = store.getState();
+  const activeView = state.view.activeView;
+  if (!isCheckReport(activeView) || checkPanel.hidden) {
+    checkDrawing.close();
+    popovers.anchorUpdated();
+    return;
+  }
+  // The switch reads the check on screen: only it is asked again after an edit or an Undo here.
+  const shown = selectOfferedChecks(state).includes(activeView) ? [activeView] : [];
+  const evidence = state.request.evidence[activeView];
+  const compare = compareSwitch(state.request.evidence, shown, state.view.compareOriginal, state.remote.snapshot);
+  renderCompareSwitch(checkCompare, compare);
+  const highlight = state.view.highlightOutside;
+  renderHighlightSwitch(checkHighlight, highlight, shown.length > 0);
+  checkHome.hidden = shown.length === 0;
+  checkPanel.dataset.report = activeView;
+  checkFrame.setAttribute("aria-busy", evidence.status === "updating" ? "true" : "false");
+  checkFrame.dataset.freshness = evidence.status;
+  const payload = checkPayload(evidence);
+  const { width, height } = checkFrameSize();
+  const drawn = payload?.report === activeView ? payload : null;
+  const domain = checkDomain(state, activeView);
+  checkDrawing.draw(activeView, drawn, { compare: compare.checked, highlight, width, height, domain });
+  renderEvidenceFreshness(evidence, {
+    statusNode: checkFreshness,
+    retryButton: checkRetry,
+    loading: "Loading check...",
+    updating: "Updating check...",
+    stale: "Check may be stale.",
+    error: "Check unavailable."
+  });
+  popovers.anchorUpdated();
 }
 
 function renderChartWorkspace() {
@@ -1880,6 +1977,7 @@ function renderActiveViewState({ ready, activeView }) {
   if (!ready) return;
   renderAppView(activeView);
   renderPill();
+  renderCheckPanel();
   const evidence = openReportEvidence(store.getState());
   if (evidence) renderReportEvidence(evidence, activeView);
 }
@@ -2042,14 +2140,14 @@ function renderMetricsEvidence(evidence) {
 // The evidence of the report on screen, or null on a view that is not a report.
 function openReportEvidence(state) {
   const activeView = state.view.activeView;
-  return isReportName(activeView) ? state.request.evidence[activeView] : null;
+  return isReportView(activeView) ? state.request.evidence[activeView] : null;
 }
 
 function renderReportEvidence(evidence, activeView) {
   const busy = evidence.status === "updating";
   reportFrame.setAttribute("aria-busy", busy ? "true" : "false");
   reportFrame.dataset.freshness = evidence.status;
-  if (!isReportName(activeView)) return;
+  if (!isReportView(activeView)) return;
   const title = assessEntry(activeView)?.label ?? "";
   const payloadMatchesView = evidence.payload !== null && evidence.payload.report === activeView;
   if (payloadMatchesView) {
@@ -2539,9 +2637,16 @@ svg.addEventListener(
   true
 );
 
+// The wheel works on the chart pressed or focused last, and scrolls the page otherwise. Each
+// chart's Home button belongs to it.
+const chartFocus = bindChartFocus(document);
+chartFocus.register(svg, [resetZoom]);
+chartFocus.register(checkFrame, [checkHome]);
+
 const interactions = bindInteractions({
   svg,
   mode: interactionMode,
+  wheelActive: () => chartFocus.isActive(svg),
   selectedTerm,
   currentTerm,
   currentSelection,
@@ -2599,7 +2704,8 @@ bindFeatureList(featureListNodes, {
 });
 renderFeatureListState();
 
-bindAssessList(assessRows, { onOpen: showView });
+// The Assess list, and its tab stop, have one owner.
+const assessList = bindAssessList(assessRows, { onOpen: showView });
 // Open in new window shows the open Assess view in one second window; a click
 // again moves that window to the view now open. A notebook cell cannot offer
 // it, and the second window does not offer it again.
@@ -2621,7 +2727,51 @@ bindOverview(assessCards, {
     assessRows.querySelector(`[data-assess-entry="${id}"]`)?.focus();
   }
 });
-renderAssessList(assessRows, store.getState().view.activeView);
+// Compare with the fit draws the fitted model beside the edit; it asks Python for nothing.
+// The large view's switch is the same one view flag.
+for (const button of [overviewCompare, checkCompare]) {
+  button.addEventListener("click", () => {
+    if (button.getAttribute("aria-disabled") === "true") return;
+    actions.patchView({ compareOriginal: !store.getState().view.compareOriginal });
+  });
+}
+// Highlight outside the band colours what left a band; it asks Python for nothing, and the
+// flags and counts stay as they are. The large view's switch is the same one view flag.
+for (const button of [overviewHighlight, checkHighlight]) {
+  button.addEventListener("click", () => {
+    actions.patchView({ highlightOutside: !store.getState().view.highlightOutside });
+  });
+}
+// A check's viewport is the page's alone: it is kept per check for the session, and nothing
+// asks Python. This is its one setter, for a zoom or pan, Home, and the rows under a check
+// replaced.
+function moveCheckViewport(report, event) {
+  const { view } = store.getState();
+  const next = moveViewport(view.checkViewport, report, event);
+  if (next !== view.checkViewport) actions.patchView({ checkViewport: next });
+}
+// The open check's gestures zoom it on the rows its plot is drawn from, and Home shows it whole.
+function setCheckZoom(domain) {
+  const report = store.getState().view.activeView;
+  if (!isCheckReport(report)) return;
+  if (domain === null) {
+    moveCheckViewport(report, { type: "home" });
+    return;
+  }
+  const drawing = checkDrawing.current();
+  if (drawing.state !== "plot" || drawing.report !== report) return;
+  moveCheckViewport(report, { type: "zoom", split: splitOf(drawing.payload), domain });
+}
+// The open check as drawn, with its hover readout, zoom and pan.
+const checkDrawing = bindCheckDrawing(checkNodes, { focus: chartFocus, onZoom: setCheckZoom });
+// Home shows the check whole, and drops a gesture still waiting for its frame.
+checkHome.addEventListener("click", () => checkDrawing.reset());
+// A new size redraws the open check at it, from the evidence the page holds.
+new ResizeObserver(() => {
+  const { width, height } = checkFrameSize();
+  if (`${width}x${height}` !== checkDrawing.size()) renderCheckPanel();
+}).observe(checkFrame);
+assessList.render(store.getState().view.activeView, assessListChecks(store.getState()));
 renderOverview();
 
 bindSummarySearch(summarySearch, (query) => {
@@ -2743,9 +2893,13 @@ if (summaryRetry) {
 if (reportRetry) {
   reportRetry.addEventListener("click", () => {
     const activeView = store.getState().view.activeView;
-    if (isReportName(activeView)) void actions.retryEvidence(activeView);
+    if (isReportView(activeView)) void actions.retryEvidence(activeView);
   });
 }
+checkRetry.addEventListener("click", () => {
+  const activeView = store.getState().view.activeView;
+  if (isCheckReport(activeView)) void actions.retryEvidence(activeView);
+});
 summarySource.addEventListener("change", refreshSummaryView);
 refitOffset.addEventListener("click", async () => {
   const payload = await runOffsetRefit(summaryNodes(), refreshMetricsView);
@@ -2923,11 +3077,63 @@ store.subscribe(
   },
   (next, previous) => next.evidence === previous.evidence
 );
-// The cards redraw when the evidence of a report they read moves.
+// The cards redraw when the evidence of a report or offered check they read moves, the offer
+// changes, Compare with the fit or Highlight outside the band is turned, or the model in force
+// comes to differ from the fit or stops differing.
 store.subscribe(
-  (state) => OVERVIEW_REPORTS.map((name) => state.request.evidence[name]),
+  (state) => [
+    state.view.compareOriginal,
+    state.view.highlightOutside,
+    differsFromFit(state.remote.snapshot),
+    selectOfferedChecks(state).join(),
+    ...overviewReports(selectOfferedChecks(state)).map((name) => state.request.evidence[name])
+  ],
   renderOverview,
-  (next, previous) => next.every((evidence, index) => evidence === previous[index])
+  (next, previous) => next.length === previous.length && next.every((item, index) => item === previous[index])
+);
+// The open check redraws when its evidence moves, the offer changes, a switch is turned, or
+// the model in force comes to differ from the fit or stops differing.
+store.subscribe(
+  (state) => [
+    state.view.activeView,
+    state.view.compareOriginal,
+    state.view.highlightOutside,
+    differsFromFit(state.remote.snapshot),
+    selectOfferedChecks(state).join(),
+    isCheckReport(state.view.activeView) ? state.request.evidence[state.view.activeView] : null
+  ],
+  renderCheckPanel,
+  (next, previous) => next.length === previous.length && next.every((item, index) => item === previous[index])
+);
+// A zoom draws the open check's plot alone again, from what it was drawn from; with no plot of
+// it drawn, the check is drawn afresh.
+store.subscribe(
+  (state) => (isCheckReport(state.view.activeView) ? checkDomain(state, state.view.activeView) : null),
+  (domain) => {
+    if (!checkDrawing.zoom(store.getState().view.activeView, domain)) renderCheckPanel();
+  }
+);
+// A check whose evidence reads other rows than its zoom was made on, a refit on other rows under
+// the split's name included, is shown whole; its full redraw for that evidence ended its gestures.
+store.subscribe(
+  (state) => CHECK_REPORTS.map((report) => splitOf(checkPayload(state.request.evidence[report]))).join(" "),
+  () => {
+    for (const report of CHECK_REPORTS) {
+      const split = splitOf(checkPayload(store.getState().request.evidence[report]));
+      if (split) moveCheckViewport(report, { type: "replace", split });
+    }
+  }
+);
+// A chart hidden by a view or tab change lets the wheel go, once the page has drawn the change.
+// The open check's gestures end with the check (views/check_drawing.js).
+store.subscribe(
+  (state) => `${state.view.activeView} ${state.view.termView}`,
+  () => queueMicrotask(chartFocus.sync)
+);
+// The list hides the checks the model does not offer and flags those that left their band.
+store.subscribe(
+  (state) => JSON.stringify(assessListChecks(state)),
+  () => assessList.render(store.getState().view.activeView, assessListChecks(store.getState()))
 );
 for (const name of REPORT_NAMES) {
   store.subscribe(

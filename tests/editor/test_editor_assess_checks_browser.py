@@ -1,0 +1,1325 @@
+"""The four SuperLSS checks on Assess: thumbnail, number and flag, and each check drawn large."""
+
+from __future__ import annotations
+
+import itertools
+from contextlib import contextmanager
+from urllib.parse import urlsplit
+
+import numpy as np
+import pandas as pd
+import pytest
+from tests.editor._editor_waits import hold_requests, wait_for_editor_idle
+from tests.editor.assess_table import bare_glm_session, open_report, wait_for_report
+from tests.test_editor_checks import (
+    GROUPS,
+    LAMBDA,
+    SEED,
+    _calm_case,
+    _session,
+    _wrong_case,
+    _wrong_mean_case,
+)
+
+from superglm import GammaLS, SuperLSS, cat, s
+from superglm.editor import EditorSession
+
+pytest.importorskip("playwright.sync_api")
+pytestmark = pytest.mark.browser
+
+CHECKS = ("check_qq", "check_pit", "check_ae", "check_calibration")
+LABELS = {
+    "check_qq": "Q-Q plot",
+    "check_pit": "PIT histogram",
+    "check_ae": "Actual over expected",
+    "check_calibration": "Quantile calibration",
+}
+
+# The page's own /report answer for a check, and the face assess_check.js reads from it.
+_FACE_FROM_REPORT = """async (report) => {
+  const token = new URLSearchParams(location.search).get("token") || "";
+  const reply = await fetch("/report", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-SuperGLM-Editor-Token": token },
+    body: JSON.stringify({ report }),
+  });
+  const { checkFace } = await import("/assets/views/assess_check.js");
+  return checkFace(report, await reply.json(), "current");
+}"""
+# A colour token as the page computes it.
+_TOKEN_COLOUR = """(token) => {
+  const probe = document.createElement("span");
+  probe.style.color = `var(${token})`;
+  document.body.append(probe);
+  const colour = getComputedStyle(probe).color;
+  probe.remove();
+  return colour;
+}"""
+
+
+# The check open large, drawn again in the page from its own /report answer at the frame's
+# size: the points the readout may name, as the view's scene places them.
+_MARKS_FROM_REPORT = """async ([report, compare]) => {
+  const token = new URLSearchParams(location.search).get("token") || "";
+  const reply = await fetch("/report", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-SuperGLM-Editor-Token": token },
+    body: JSON.stringify({ report }),
+  });
+  const { checkScene } = await import("/assets/chart/check_plots.js");
+  const frame = document.getElementById("checkFrame");
+  const box = { width: frame.clientWidth, height: frame.clientHeight };
+  return checkScene(report, await reply.json(), box, { compare }).marks;
+}"""
+# Record each mutation under #checkFrame: whether its target sits inside the readout.
+_WATCH_FRAME = """() => {
+  window.__frameMutations = [];
+  new MutationObserver((records) => {
+    for (const record of records) {
+      const node = record.target.nodeType === Node.ELEMENT_NODE ? record.target : record.target.parentElement;
+      window.__frameMutations.push(Boolean(node?.closest(".check-readout")));
+    }
+  }).observe(document.getElementById("checkFrame"),
+    { subtree: true, attributes: true, childList: true, characterData: true });
+}"""
+_NO_EDIT = "The model is as fitted; there is no edit to compare."
+_WAITING = "Waiting for the edited model's answer; the comparison is ready once it has loaded."
+_COMPARES = (
+    "Draws the model as fitted in grey beside the model as edited in blue, on every check. "
+    "It changes only what is drawn."
+)
+
+
+def _calm_session():
+    """A Gamma fit of Gamma amounts, read on 200 validation rows: no check flags."""
+    return _session(_calm_case())
+
+
+def _many_inputs_session():
+    """A Gamma fit on five inputs, so Actual over expected draws six panels in three rows."""
+    rng = np.random.default_rng(SEED)
+    n = 800
+    X = pd.DataFrame(
+        {
+            "x": rng.uniform(0.0, 1.0, n),
+            "g": rng.choice(GROUPS, n),
+            "u": rng.uniform(0.0, 1.0, n),
+            "w": rng.uniform(0.0, 1.0, n),
+            "h": rng.choice(np.array(["p", "q"]), n),
+        }
+    )
+    mean = np.exp(1.0 + 0.5 * np.sin(2.0 * np.pi * X["x"].to_numpy()))
+    y = rng.gamma(4.0, mean / 4.0)
+    family = GammaLS()
+    spec = SuperLSS(
+        family,
+        family.mean(s("x", k=6), cat("g"), s("u", k=4), s("w", k=4), cat("h")),
+        family.scale(cat("g")),
+    )
+    smooths = {f"mean:{name}#wiggle": LAMBDA for name in ("x", "u", "w")}
+    lss = spec.fit(X.iloc[:600], y[:600], lambdas=smooths)
+    return EditorSession.from_model(
+        lss,
+        train_data=(X.iloc[:600], y[:600]),
+        validation_data=(X.iloc[600:].reset_index(drop=True), y[600:]),
+    )
+
+
+_LONG_GROUP = (
+    "a group whose name runs on for long enough that the readout of its ratio, its interval "
+    "and its rows cannot sit on one line of the plot, however wide the window the editor is "
+    "opened in happens to be"
+)
+
+
+def _long_name_session():
+    """A Gamma fit whose input ``g`` has a group with a long name, so its A/E readout is wider
+    than the plot."""
+    rng = np.random.default_rng(SEED)
+    n = 600
+    X = pd.DataFrame(
+        {"x": rng.uniform(0.0, 1.0, n), "g": rng.choice(np.array(["a", "b", _LONG_GROUP]), n)}
+    )
+    mean = np.exp(1.0 + 0.5 * np.sin(2.0 * np.pi * X["x"].to_numpy()))
+    y = rng.gamma(4.0, mean / 4.0)
+    family = GammaLS()
+    spec = SuperLSS(family, family.mean(s("x", k=6), cat("g")), family.scale(cat("g")))
+    lss = spec.fit(X.iloc[:400], y[:400], lambdas={"mean:x#wiggle": LAMBDA})
+    return EditorSession.from_model(
+        lss,
+        train_data=(X.iloc[:400], y[:400]),
+        validation_data=(X.iloc[400:].reset_index(drop=True), y[400:]),
+    )
+
+
+def _wrong_session():
+    """Log-normal amounts under a Gamma fit, read on 1,000 validation rows: three checks flag."""
+    return _session(_wrong_case())
+
+
+def _wrong_mean_session():
+    """Gamma amounts under a Mean without ``g``, read on 1,000 validation rows: A/E flags."""
+    return _session(_wrong_mean_case())
+
+
+def _edited_session():
+    """The same fit with ``mean:x`` flattened, so each check has the fit beside the edit."""
+    session = _wrong_session()
+    session.select_indices("mean:x", list(range(session.terms["mean:x"].size)))
+    session.weighted_average("mean:x")
+    return session
+
+
+@pytest.fixture
+def checks_page(chromium_browser):
+    """``with checks_page(build) as page``: the editor of ``build()``'s session, 1278 px wide."""
+
+    @contextmanager
+    def open_page(build=_wrong_session):
+        widget = build().widget()
+        try:
+            page = chromium_browser.new_page(viewport={"width": 1278, "height": 860})
+            try:
+                page.goto(widget.app_url + "&test=1", wait_until="domcontentloaded")
+                # A flattened curve draws a line with no height, which has no box to be visible.
+                page.locator("#chart path.edited").first.wait_for(state="attached")
+                yield page
+            finally:
+                page.close()
+        finally:
+            widget.close()
+
+    return open_page
+
+
+def _open_overview(page) -> None:
+    page.locator("#assessTab").click()
+    page.locator("#assessOverview").wait_for(state="visible")
+
+
+def _wait_for_checks(page) -> None:
+    for name in CHECKS:
+        page.locator(f'#assessCards [data-card="{name}"][data-freshness="current"]').wait_for()
+
+
+def _report_requests(page) -> list[str]:
+    asked: list[str] = []
+
+    def record(request):
+        if request.method == "POST" and urlsplit(request.url).path == "/report":
+            asked.append(request.post_data_json["report"])
+
+    page.on("request", record)
+    return asked
+
+
+def test_the_overview_draws_a_thumbnail_and_the_payloads_number_for_each_check(checks_page):
+    with checks_page() as page:
+        _open_overview(page)
+        _wait_for_checks(page)
+        titles = page.locator("#assessCards .assess-section-title").all_inner_texts()
+        assert titles == ["Reports", "Distribution", "Calibration"]
+        for name in CHECKS:
+            card = page.locator(f'#assessCards [data-card="{name}"]')
+            assert card.locator(".assess-card-title").inner_text() == LABELS[name]
+            plot = card.locator(".assess-card-plot svg")
+            assert plot.locator("path").count() >= 1
+            box = plot.bounding_box()
+            assert (round(box["width"]), round(box["height"])) == (160, 62)
+            face = page.evaluate(_FACE_FROM_REPORT, name)
+            assert card.locator(".assess-card-value").inner_text() == face["value"]
+            assert card.locator(".assess-card-note").inner_text() == face["note"]
+
+
+@pytest.mark.parametrize(
+    ("build", "expected"),
+    [
+        # The wrong family leaves the Q-Q, PIT and quantile bands.
+        (_wrong_session, {"check_qq", "check_pit", "check_calibration"}),
+        # The wrong Mean leaves two of A/E's intervals, and nothing else.
+        (_wrong_mean_session, {"check_ae"}),
+        # The calm fit stays inside every band, A/E's intervals included.
+        (_calm_session, set()),
+    ],
+    ids=["wrong", "wrong_mean", "calm"],
+)
+def test_a_flagged_check_is_orange_on_its_card_and_in_the_list(checks_page, build, expected):
+    with checks_page(build) as page:
+        _open_overview(page)
+        _wait_for_checks(page)
+        orange = page.evaluate(_TOKEN_COLOUR, "--orange")
+        orange_text = page.evaluate(_TOKEN_COLOUR, "--orange-text")
+        flagged = {name for name in CHECKS if page.evaluate(_FACE_FROM_REPORT, name)["flagged"]}
+        assert flagged == expected
+        for name in CHECKS:
+            card = page.locator(f'#assessCards [data-card="{name}"]')
+            row = page.locator(f'#assessList [data-assess-entry="{name}"]')
+            on = name in flagged
+            assert card.get_attribute("data-flagged") == str(on).lower()
+            assert card.locator(".assess-flag").is_visible() is on
+            assert row.locator(".assess-flag").is_visible() is on
+            value_colour = card.locator(".assess-card-value").evaluate(
+                "node => getComputedStyle(node).color"
+            )
+            assert (value_colour == orange_text) is on
+            assert row.get_attribute("aria-label") == (
+                f"{LABELS[name]}, flagged" if on else LABELS[name]
+            )
+            if on:
+                dot = card.locator(".assess-flag").evaluate(
+                    "node => getComputedStyle(node).backgroundColor"
+                )
+                assert dot == orange
+
+
+def test_a_row_the_arrows_reached_keeps_the_tab_stop_when_a_flag_lands(checks_page):
+    """Open Q-Q while its first answer waits, step up the list with an arrow, and let the answer
+    flag Q-Q: the row the arrow reached keeps focus and the single tab stop, and Q-Q is flagged
+    and current. Fails on the unfixed page, where the flag put the tab stop back on Q-Q."""
+    with checks_page() as page:
+        held = hold_requests(page, "**/report")
+        page.locator("#assessTab").click()
+        held.wait(1)
+        page.locator('#assessList [data-assess-entry="check_qq"]').click()
+        page.locator('#checkPanel[data-report="check_qq"]').wait_for(state="visible")
+        page.keyboard.press("ArrowUp")
+        page.unroute("**/report")
+        for route in held:
+            route.continue_()
+        page.locator('#assessList [data-assess-entry="check_qq"][data-flagged="true"]').wait_for(
+            state="attached"
+        )
+        stops = page.evaluate(
+            """() => ({ focused: document.activeElement?.dataset.assessEntry ?? null,
+              stops: [...document.querySelectorAll('#assessList [tabindex="0"]')].map(
+                (row) => row.dataset.assessEntry) })"""
+        )
+        assert stops == {"focused": "diagnose", "stops": ["diagnose"]}
+        current = page.locator('#assessList [aria-current="true"]')
+        assert current.get_attribute("data-assess-entry") == "check_qq"
+
+
+def test_a_flagged_check_stays_orange_while_its_earlier_result_is_kept(checks_page, choose_feature):
+    """An edit keeps each check's earlier number on its card while it is asked again, and
+    after the update fails; a flagged one keeps its flag and its orange through both."""
+    with checks_page() as page:
+        _open_overview(page)
+        _wait_for_checks(page)
+        orange_text = page.evaluate(_TOKEN_COLOUR, "--orange-text")
+        flagged = ("check_qq", "check_pit", "check_calibration")
+        held = hold_requests(page, "**/report")
+        page.locator("#editorTab").click()
+        choose_feature(page, "mean:x")
+        page.locator('button[data-op="select_all"]').click()
+        page.get_by_role("button", name="Increase selection").click()
+        wait_for_editor_idle(page)
+        _open_overview(page)
+        # The reports are asked one at a time: let them through up to the first flagged check.
+        for asked in itertools.count(1):
+            held.wait(asked)
+            asking = held[-1].request.post_data_json["report"]
+            if asking in flagged:
+                break
+            held[-1].continue_()
+
+        def assert_kept_and_orange(name: str, shown: str) -> None:
+            card = page.locator(f'#assessCards [data-card="{name}"]')
+            page.locator(f'#assessCards [data-card="{name}"]{shown}').wait_for()
+            assert card.get_attribute("data-flagged") == "true"
+            assert card.locator(".assess-flag").is_visible()
+            colour = card.locator(".assess-card-value").evaluate(
+                "node => getComputedStyle(node).color"
+            )
+            assert colour == orange_text
+
+        # The check asked again is updating; the two behind it wait, their numbers out of date.
+        for name in flagged:
+            freshness = "updating" if name == asking else "stale"
+            assert_kept_and_orange(name, f'[data-freshness="{freshness}"]')
+        page.unroute("**/report")
+        page.route("**/report", lambda route: route.abort())
+        held[-1].abort()
+        for name in flagged:
+            assert_kept_and_orange(name, ':has(.assess-card-note:text-matches("^Update failed"))')
+
+
+def test_a_superglm_session_shows_no_check_groups(checks_page):
+    with checks_page(bare_glm_session) as page:
+        _open_overview(page)
+        page.locator('#assessCards [data-card="diagnose"]').wait_for()
+        assert page.locator("#assessCards .assess-section-title").all_inner_texts() == ["Reports"]
+        assert page.locator('#assessCards [data-card^="check_"]').count() == 0
+        for name in CHECKS:
+            assert page.locator(f'#assessList [data-assess-entry="{name}"]').is_hidden()
+        for group in ("distribution", "calibration"):
+            assert page.locator(f'#assessList [data-assess-group="{group}"]').is_hidden()
+        assert page.locator("#overviewCompare").is_hidden()
+        # The keyboard steps over the hidden checks: End is the last report.
+        page.locator('[data-assess-entry="assess"]').focus()
+        page.keyboard.press("End")
+        assert page.evaluate("document.activeElement?.dataset.assessEntry") == "diagnose"
+
+
+def test_the_report_cards_keep_their_place_and_focus_while_the_checks_land(checks_page):
+    with checks_page() as page:
+        held = hold_requests(page, "**/report")
+        _open_overview(page)
+        held.wait(1)
+        card = page.locator('#assessCards [data-card="validation"]')
+        card.evaluate("node => { node.focus({focusVisible: true}); node.dataset.probe = 'held'; }")
+        page.unroute("**/report")
+        for route in held:
+            route.continue_()
+        _wait_for_checks(page)
+        assert page.evaluate("document.activeElement?.dataset.card") == "validation"
+        assert page.evaluate("document.activeElement?.dataset.probe") == "held"
+        cards = page.locator("#assessCards [data-card]").evaluate_all(
+            "nodes => nodes.map((node) => node.dataset.card)"
+        )
+        assert cards == ["validation", "cv", "final", "diagnose", *CHECKS]
+
+
+def test_compare_is_off_and_says_why_until_there_is_an_edit(checks_page):
+    with checks_page() as page:
+        _open_overview(page)
+        _wait_for_checks(page)
+        switch = page.locator("#overviewCompare")
+        assert switch.get_attribute("role") == "switch"
+        assert switch.inner_text().strip() == "Compare with the fit"
+        assert switch.get_attribute("aria-disabled") == "true"
+        assert switch.get_attribute("aria-checked") == "false"
+        # Playwright will not click an element marked disabled; a click still reaches it.
+        switch.dispatch_event("click")
+        assert switch.get_attribute("aria-checked") == "false"
+        switch.hover()
+        popover = page.locator("#uiPopover")
+        popover.wait_for(state="visible")
+        assert (
+            popover.locator("[data-popover-description]").inner_text()
+            == "The model is as fitted; there is no edit to compare."
+        )
+
+
+def test_compare_adds_the_fit_to_each_thumbnail_without_asking_python(checks_page):
+    with checks_page(_edited_session) as page:
+        _open_overview(page)
+        _wait_for_checks(page)
+        switch = page.locator("#overviewCompare")
+        assert switch.get_attribute("aria-disabled") == "false"
+        assert page.locator("#assessCards .assess-card-plot path.check-original").count() == 0
+        asked = _report_requests(page)
+        switch.click()
+        assert switch.get_attribute("aria-checked") == "true"
+        for name in CHECKS:
+            plot = page.locator(f'#assessCards [data-card="{name}"] .assess-card-plot')
+            assert plot.locator("path.check-original").count() == 1
+        # The fit is a grey ring painted under the edit, its stroke wider than the edit's.
+        widths = page.locator('#assessCards [data-card="check_qq"] .assess-card-plot').evaluate(
+            """plot => ["check-original", "check-edited"].map((role) =>
+                parseFloat(getComputedStyle(plot.querySelector(`path.${role}`)).strokeWidth))"""
+        )
+        assert widths[0] > widths[1]
+        switch.click()
+        assert page.locator("#assessCards .assess-card-plot path.check-original").count() == 0
+        assert asked == []
+
+
+def _open_check(page, name: str) -> None:
+    """Open check ``name`` from the Assess list and wait until it is drawn current. Opening
+    Assess shows the overview, which asks every check; they are let land first, so no answer
+    to the overview arrives during the test."""
+    if page.locator("#assessView").is_hidden():
+        page.locator("#assessTab").click()
+        page.locator("#assessView").wait_for(state="visible")
+        if page.locator("#assessOverview").is_visible():
+            _wait_for_checks(page)
+    page.locator(f'#assessList [data-assess-entry="{name}"]').click()
+    page.locator(f'#checkPanel[data-report="{name}"]').wait_for(state="visible")
+    page.locator('#checkFrame[data-freshness="current"] svg.check-plot').wait_for(state="attached")
+
+
+def _average_mean_x(page, choose_feature) -> None:
+    """Average every value of ``mean:x``, as an analyst does through the selection menu."""
+    page.locator("#editorTab").click()
+    choose_feature(page, "mean:x")
+    page.locator('button[data-op="select_all"]').click()
+    page.get_by_role("button", name="Level selected values").hover()
+    page.locator('button[data-op="average"]').click()
+    wait_for_editor_idle(page)
+
+
+def _nearest(marks: list[dict], x: float, y: float) -> dict:
+    return min(marks, key=lambda mark: (mark["x"] - x) ** 2 + (mark["y"] - y) ** 2)
+
+
+def _readout(page):
+    return page.locator("#checkFrame .check-readout")
+
+
+def _hover_mark(page, mark: dict, marks: list[dict]) -> None:
+    """Move the pointer onto ``mark`` and wait for the readout of the point nearest it."""
+    box = page.locator("#checkFrame svg.check-plot").bounding_box()
+    page.mouse.move(box["x"] + mark["x"], box["y"] + mark["y"])
+    page.wait_for_function(
+        "text => document.querySelector('#checkFrame .check-readout text')?.textContent === text",
+        arg=_nearest(marks, mark["x"], mark["y"])["text"],
+    )
+
+
+def _assert_readout_in_view(page) -> None:
+    """The readout's text lies inside the part of the frame on screen, scroll included."""
+    text, view = page.evaluate(
+        """() => { const frame = document.getElementById("checkFrame");
+          const text = frame.querySelector(".check-readout text").getBoundingClientRect();
+          const box = frame.getBoundingClientRect();
+          return [[text.left, text.top, text.right, text.bottom],
+            [box.left, box.top, box.left + frame.clientWidth, box.top + frame.clientHeight]]; }"""
+    )
+    assert view[0] <= text[0] and text[2] <= view[2], (text, view)
+    assert view[1] <= text[1] and text[3] <= view[3], (text, view)
+
+
+def test_opening_a_check_draws_its_title_split_and_points(checks_page):
+    with checks_page(_calm_session) as page:
+        _open_check(page, "check_qq")
+        assert page.locator("#reportPanel").is_hidden()
+        assert page.locator("#checkTitle").inner_text() == "Q-Q plot"
+        assert page.locator("#checkSplit").inner_text() == "Validation, 200 rows"
+        assert page.locator('[data-assess-entry="check_qq"][aria-current="true"]').count() == 1
+        frame = page.locator("#checkFrame")
+        # A plot that takes its own keys: an img's children, its readout, would be presentational.
+        assert frame.get_attribute("role") == "application"
+        assert frame.get_attribute("aria-roledescription") == "chart"
+        assert frame.get_attribute("tabindex") == "0"
+        assert frame.get_attribute("aria-label") == "Q-Q plot"
+        points = page.locator("#checkFrame path:is(.check-edited, .check-outside)").evaluate_all(
+            "paths => paths.reduce((sum, p) => sum + (p.getAttribute('d').match(/M/g) || []).length, 0)"
+        )
+        payload_points = page.evaluate(
+            """async () => {
+              const token = new URLSearchParams(location.search).get("token") || "";
+              const reply = await fetch("/report", { method: "POST",
+                headers: { "Content-Type": "application/json", "X-SuperGLM-Editor-Token": token },
+                body: JSON.stringify({ report: "check_qq" }) });
+              return (await reply.json()).models.edited.index.length;
+            }"""
+        )
+        assert points == payload_points == 200
+        # The plot fills the frame's width, and its height when it is not taller.
+        size = frame.evaluate(
+            """frame => { const svg = frame.querySelector("svg");
+              return [svg.getAttribute("width"), svg.getAttribute("height"),
+                frame.clientWidth, frame.clientHeight].map(Number); }"""
+        )
+        assert size[:2] == size[2:]
+        assert page.locator("#checkLegend").is_hidden()
+        assert page.locator("#checkCompare").get_attribute("aria-disabled") == "true"
+
+
+def test_compare_draws_the_fit_without_asking_python(checks_page, choose_feature):
+    with checks_page() as page:
+        _average_mean_x(page, choose_feature)
+        _open_check(page, "check_ae")
+        switch = page.locator("#checkCompare")
+        page.locator('#checkCompare[aria-disabled="false"]').wait_for()
+        assert page.locator("#checkFrame path.check-original").count() == 0
+        asked = _report_requests(page)
+        switch.click()
+        assert switch.get_attribute("aria-checked") == "true"
+        assert page.locator("#checkFrame path.check-original").count() == 1
+        assert page.locator("#checkLegend").is_visible()
+        assert page.locator("#checkLegend").inner_text().split() == ["As", "edited", "As", "fitted"]
+        # The fit's intervals are as thin as the edit's; only its rings are wider.
+        widths = page.locator("#checkFrame svg.check-plot").evaluate(
+            """svg => Object.fromEntries(["original", "original-interval", "interval"].map((role) =>
+                [role, parseFloat(getComputedStyle(svg.querySelector(`path.check-${role}`)).strokeWidth)]))"""
+        )
+        assert widths["original-interval"] == widths["interval"] < widths["original"]
+        # One flag: the overview's switch reads it too.
+        page.locator('[data-assess-entry="assess"]').click()
+        assert page.locator("#overviewCompare").get_attribute("aria-checked") == "true"
+        _open_check(page, "check_ae")
+        assert page.locator("#checkFrame path.check-original").count() == 1
+        switch.click()
+        assert page.locator("#checkFrame path.check-original").count() == 0
+        assert page.locator("#checkLegend").is_hidden()
+        assert asked == []
+
+
+def test_compare_waits_for_the_edited_models_check_after_an_edit(checks_page, choose_feature):
+    """Right after an edit, while the open check is asked again about it, Compare is off and
+    its popover says the edit's answer is loading, not that there is no edit; once the answer
+    lands it is live, and the popover still open under the pointer says what it draws. Fails on
+    the unfixed page, whose popover said the model is as fitted, and kept that once live.
+    """
+    with checks_page() as page:
+        _open_check(page, "check_ae")
+        held = hold_requests(page, "**/report")
+        _average_mean_x(page, choose_feature)
+        # The overview's first report is held, and the check waits its turn behind it.
+        page.locator("#assessTab").click()
+        held.wait(1)
+        page.locator('#assessList [data-assess-entry="check_ae"]').click()
+        page.locator('#checkPanel[data-report="check_ae"]').wait_for(state="visible")
+        switch = page.locator("#checkCompare")
+        assert switch.get_attribute("aria-disabled") == "true"
+        switch.hover()
+        page.wait_for_function(
+            "text => document.querySelector('#uiPopover [data-popover-description]')?.textContent === text",
+            arg=_WAITING,
+        )
+        page.unroute("**/report")
+        for route in held:
+            route.continue_()
+        page.locator('#checkCompare[aria-disabled="false"]').wait_for()
+        page.wait_for_function(
+            "text => document.querySelector('#uiPopover [data-popover-description]')?.textContent === text",
+            arg=_COMPARES,
+        )
+        assert page.locator("#uiPopover").is_visible()
+
+
+def test_compare_is_off_and_disabled_after_undo(checks_page, choose_feature):
+    """Undo turns Compare off at once, while the check is still asked about the fit, and a
+    failed answer keeps it off: the payload kept from the edit draws no fit."""
+    with checks_page() as page:
+        _average_mean_x(page, choose_feature)
+        _open_check(page, "check_ae")
+        switch = page.locator("#checkCompare")
+        page.locator('#checkCompare[aria-disabled="false"]').wait_for()
+        switch.click()
+        page.locator("#checkFrame path.check-original").wait_for(state="attached")
+        # Live, its popover is its own Help entry, without the checks' shared ending.
+        switch.hover()
+        popover = page.locator("#uiPopover")
+        popover.wait_for(state="visible")
+        assert popover.locator("[data-popover-description]").inner_text() == (
+            "Draws the model as fitted in grey beside the model as edited in blue, on every check. "
+            "It changes only what is drawn."
+        )
+        page.mouse.move(2, 2)
+        held = hold_requests(page, "**/report")
+        page.keyboard.press("Control+z")
+        # The check is asked again once Undo has committed; its answer is held.
+        held.wait(1)
+        assert held[-1].request.post_data_json["report"] == "check_ae"
+
+        def assert_off() -> None:
+            assert switch.get_attribute("aria-disabled") == "true"
+            assert switch.get_attribute("aria-checked") == "false"
+            assert (
+                page.locator(
+                    "#checkFrame path:is(.check-original, .check-original-interval)"
+                ).count()
+                == 0
+            )
+            assert page.locator("#checkLegend").is_hidden()
+
+        page.locator('#checkFrame[data-freshness="updating"]').wait_for()
+        assert_off()
+        # Off, its popover says why, over its Help entry.
+        switch.hover()
+        page.wait_for_function(
+            "text => document.querySelector('#uiPopover [data-popover-description]')?.textContent === text",
+            arg=_NO_EDIT,
+        )
+        assert popover.is_visible()
+        page.mouse.move(2, 2)
+        # The answer fails: the edit's payload stays on screen, and Compare stays off.
+        page.unroute("**/report")
+        page.route("**/report", lambda route: route.abort())
+        held[-1].abort()
+        page.locator('#checkFrame[data-freshness="stale"]').wait_for()
+        assert page.locator("#checkRetry").is_visible()
+        assert_off()
+
+
+def test_the_icon_by_a_checks_title_shows_its_help_entry(checks_page):
+    """Hovered or focused, the icon shows the check's entry as the Help pane gives it; a click
+    opens nothing and asks Python for nothing."""
+    with checks_page(_calm_session) as page:
+        _open_check(page, "check_pit")
+        icon = page.locator("#checkHelp")
+        assert icon.get_attribute("data-help-check") == "check_pit"
+        assert icon.get_attribute("aria-label") == "About the PIT histogram"
+        entry = page.evaluate(
+            """() => { const term = [...document.querySelectorAll("#helpPane dt")]
+                .find((dt) => dt.textContent === "PIT histogram");
+              return [term?.textContent, term?.nextElementSibling?.textContent]; }"""
+        )
+        assert entry[1] and entry[1].startswith("Each observed value is placed")
+        asked = _report_requests(page)
+        popover = page.locator("#uiPopover")
+        heading = popover.locator("[data-popover-heading]")
+        description = popover.locator("[data-popover-description]")
+        icon.hover()
+        popover.wait_for(state="visible")
+        assert [heading.inner_text(), description.inner_text()] == entry
+        page.mouse.move(2, 2)
+        popover.wait_for(state="hidden")
+        # The keyboard reaches it too.
+        page.locator('[data-assess-entry="check_pit"]').focus()
+        for _ in range(30):
+            page.keyboard.press("Tab")
+            if page.evaluate("document.activeElement?.id") == "checkHelp":
+                break
+        popover.wait_for(state="visible")
+        assert [heading.inner_text(), description.inner_text()] == entry
+        icon.click()
+        assert page.locator('[data-assess-entry="check_pit"][aria-current="true"]').count() == 1
+        assert page.locator("#checkPanel").is_visible() and page.locator("#helpPane").is_hidden()
+        assert asked == []
+
+
+def test_highlight_outside_the_band_colours_without_asking_python(checks_page):
+    """Off at first, what left a band is drawn as the rest of the edit; on, in orange. The
+    cards' flags and counts stay as they are, and nothing is asked."""
+    with checks_page() as page:
+        _open_overview(page)
+        _wait_for_checks(page)
+        switch = page.locator("#overviewHighlight")
+        assert switch.get_attribute("role") == "switch"
+        assert switch.inner_text().strip() == "Highlight outside the band"
+        assert switch.get_attribute("aria-checked") == "false"
+        assert page.locator("#assessCards path.check-outside").count() == 0
+
+        def faces() -> list[list[str | None]]:
+            return [
+                [
+                    page.locator(f'#assessCards [data-card="{name}"]').get_attribute(
+                        "data-flagged"
+                    ),
+                    page.locator(
+                        f'#assessCards [data-card="{name}"] .assess-card-value'
+                    ).inner_text(),
+                    page.locator(f'#assessList [data-assess-entry="{name}"]').get_attribute(
+                        "aria-label"
+                    ),
+                ]
+                for name in CHECKS
+            ]
+
+        before = faces()
+        asked = _report_requests(page)
+        switch.hover()
+        popover = page.locator("#uiPopover")
+        popover.wait_for(state="visible")
+        assert popover.locator("[data-popover-description]").inner_text() == (
+            "Colours the points, bars and groups that lie outside their band. "
+            "The count on each card is the same either way."
+        )
+        switch.click()
+        assert switch.get_attribute("aria-checked") == "true"
+        assert page.locator("#assessCards path.check-outside").count() == 3
+        assert faces() == before
+        # One flag: the large view's switch reads it too.
+        _open_check(page, "check_qq")
+        check_switch = page.locator("#checkHighlight")
+        assert check_switch.get_attribute("aria-checked") == "true"
+        assert page.locator("#checkFrame path.check-outside").count() == 1
+        count = "paths => paths.reduce((sum, p) => sum + (p.getAttribute('d').match(/M/g) || []).length, 0)"
+        drawn = page.locator("#checkFrame path:is(.check-edited, .check-outside)").evaluate_all(
+            count
+        )
+        check_switch.click()
+        assert check_switch.get_attribute("aria-checked") == "false"
+        assert page.locator("#checkFrame path.check-outside").count() == 0
+        assert page.locator("#checkFrame path.check-edited").evaluate_all(count) == drawn
+        assert page.locator("#checkFrame path.check-band").count() == 1
+        assert asked == []
+
+
+def test_hovering_a_check_changes_nothing_outside_its_readout(checks_page):
+    with checks_page() as page:
+        _open_check(page, "check_qq")
+        marks = page.evaluate(_MARKS_FROM_REPORT, ["check_qq", False])
+        box = page.locator("#checkFrame svg.check-plot").bounding_box()
+        page.evaluate(_WATCH_FRAME)
+        moves = [
+            (box["width"] * (0.1 + 0.8 * i / 39), box["height"] * (0.9 - 0.8 * i / 39))
+            for i in range(40)
+        ]
+        for x, y in moves:
+            page.mouse.move(box["x"] + x, box["y"] + y)
+        last = _nearest(marks, *moves[-1])
+        page.wait_for_function(
+            "text => document.querySelector('#checkFrame .check-readout text')?.textContent === text",
+            arg=last["text"],
+        )
+        mutations = page.evaluate("window.__frameMutations")
+        assert mutations and all(mutations)
+        assert _readout(page).is_visible()
+        assert page.locator("#uiPopover").is_hidden()
+        page.mouse.move(2, 2)
+        page.locator("#checkFrame .check-readout[hidden]").wait_for(state="attached")
+
+
+def test_a_tall_check_scrolls_and_hover_reads_through_the_scroll(chromium_browser):
+    """At 640 px high (above 620 px the page keeps its height), six A/E panels need 556 px
+    against a 505 px frame, which scrolls them."""
+    widget = _many_inputs_session().widget()
+    try:
+        page = chromium_browser.new_page(viewport={"width": 1278, "height": 640})
+        try:
+            page.goto(widget.app_url + "&test=1", wait_until="domcontentloaded")
+            page.locator("#chart path.edited").first.wait_for(state="attached")
+            _open_check(page, "check_ae")
+            frame = page.locator("#checkFrame")
+            assert frame.evaluate("frame => frame.scrollHeight > frame.clientHeight")
+            marks = page.evaluate(_MARKS_FROM_REPORT, ["check_ae", False])
+            frame.evaluate("frame => { frame.scrollTop = frame.scrollHeight; }")
+            assert frame.evaluate("frame => frame.scrollTop") > 0
+            _hover_mark(page, max(marks, key=lambda mark: mark["y"]), marks)
+            _assert_readout_in_view(page)
+        finally:
+            page.close()
+    finally:
+        widget.close()
+
+
+def test_a_long_readout_stays_inside_the_frame(checks_page):
+    """A group name over 40 characters is shortened in its readout to 39 characters and an
+    ellipsis, every value kept, and the readout lies inside the frame, with the whole name in its
+    accessible text; the rightmost point's readout turns to its left."""
+    shortened = f"g {_LONG_GROUP[:39]}… · "
+    with checks_page(_long_name_session) as page:
+        _open_check(page, "check_ae")
+        marks = page.evaluate(_MARKS_FROM_REPORT, ["check_ae", False])
+        long = next(mark for mark in marks if mark["text"].startswith(shortened))
+        assert long["text"].endswith(" rows") and " · interval " in long["text"]
+        rightmost = max(marks, key=lambda mark: mark["x"])
+        for mark in (long, rightmost):
+            _hover_mark(page, mark, marks)
+            _assert_readout_in_view(page)
+        _hover_mark(page, long, marks)
+        text = page.locator("#checkFrame .check-readout text")
+        assert text.get_attribute("aria-label") == long["aria"]
+        assert long["aria"].startswith(f"g {_LONG_GROUP} · ")
+
+
+def test_a_resize_redraws_the_check_without_a_request(checks_page):
+    with checks_page() as page:
+        _open_check(page, "check_pit")
+        svg_width = "() => Number(document.querySelector('#checkFrame svg.check-plot').getAttribute('width'))"
+        before = page.evaluate(svg_width)
+        asked = _report_requests(page)
+        page.set_viewport_size({"width": 1000, "height": 860})
+        page.wait_for_function(f"({svg_width})() < {before}")
+        after = page.evaluate(svg_width)
+        assert after == page.locator("#checkFrame").evaluate("frame => frame.clientWidth")
+        assert asked == []
+
+
+@pytest.mark.pins_behaviour
+def test_validation_still_opens_in_the_report_panel(checks_page):
+    """Pins that a report view keeps its own panel and renderReport: opening Validation shows the
+    report panel with its report, and the check panel stays hidden until a check is opened."""
+    with checks_page() as page:
+        page.locator("#assessTab").click()
+        open_report(page, "validation")
+        wait_for_report(page, "validation")
+        assert page.locator("#checkPanel").is_hidden()
+        assert page.locator("#reportTitle").inner_text() == "Validation"
+        assert page.locator("#reportFrame").inner_text().strip() != ""
+        _open_check(page, "check_pit")
+        assert page.locator("#reportPanel").is_hidden()
+        open_report(page, "validation")
+        wait_for_report(page, "validation")
+        assert page.locator("#checkPanel").is_hidden()
+
+
+# The check view's tick values, x then y, as numbers.
+_TICKS = """() => {
+  const read = (anchor) => [...document.querySelectorAll(`#checkFrame text.check-tick[text-anchor="${anchor}"]`)]
+    .map((t) => Number(t.textContent.replace(/[,%]/g, "")));
+  return [read("middle"), read("end")];
+}"""
+# A wheel over the middle of the check's plot, with Ctrl when asked; true when the page took it.
+_CHECK_WHEEL = """async ([ctrlKey, deltaY]) => {
+  const svg = document.querySelector('#checkFrame svg.check-plot');
+  const box = svg.getBoundingClientRect();
+  const taken = !svg.dispatchEvent(new WheelEvent('wheel', {
+    deltaY, ctrlKey, bubbles: true, cancelable: true,
+    clientX: box.left + box.width * 0.6, clientY: box.top + box.height * 0.4,
+  }));
+  await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+  return taken;
+}"""
+# What scrolls the page around an element: its nearest scrolling ancestor, else the document.
+_PAGE_SCROLLER = """(selector) => {
+  for (let node = document.querySelector(selector).parentElement; node; node = node.parentElement) {
+    if (node.scrollHeight > node.clientHeight && /auto|scroll/.test(getComputedStyle(node).overflowY)) return node;
+  }
+  return document.scrollingElement;
+}"""
+_ZOOM = "() => window.__superglmTest.checkZoom()"
+_ACTIVE = "() => [...document.querySelectorAll('.is-wheel-active')].map((node) => node.id)"
+
+
+def _span(values: list[float]) -> float:
+    return max(values) - min(values)
+
+
+def _plot_box(page) -> dict:
+    return page.locator("#checkFrame svg.check-plot").bounding_box()
+
+
+def _x_map(page):
+    """The Q-Q's x value at a client px, read from two of its drawn x ticks."""
+    ticks = page.locator('#checkFrame text.check-tick[text-anchor="middle"]').evaluate_all(
+        "ts => ts.map((t) => [Number(t.getAttribute('x')), Number(t.textContent.replace(/,/g, ''))])"
+    )
+    (p0, v0), (p1, v1) = ticks[0], ticks[-1]
+    left = _plot_box(page)["x"]
+    return lambda client: v0 + (client - left - p0) * (v1 - v0) / (p1 - p0)
+
+
+def _y_map(page):
+    """The Q-Q's y value at a client px, read from two of its drawn y ticks."""
+    ticks = page.locator('#checkFrame text.check-tick[text-anchor="end"]').evaluate_all(
+        "ts => ts.map((t) => [Number(t.getAttribute('y')) - 4,"
+        " Number(t.textContent.replace(/,/g, ''))])"
+    )
+    (p0, v0), (p1, v1) = ticks[0], ticks[-1]
+    top = _plot_box(page)["y"]
+    return lambda client: v0 + (client - top - p0) * (v1 - v0) / (p1 - p0)
+
+
+def _zoom_qq(page, steps: int = 3) -> None:
+    for _ in range(steps):
+        assert page.evaluate(_CHECK_WHEEL, [True, -100]) is True
+    page.wait_for_function("() => Boolean(window.__superglmTest.checkZoom().check_qq)")
+
+
+def test_ctrl_and_the_wheel_narrow_the_qq_axes_without_asking_python(checks_page):
+    with checks_page() as page:
+        _open_check(page, "check_qq")
+        before = page.evaluate(_TICKS)
+        asked = _report_requests(page)
+        _zoom_qq(page)
+        after = page.evaluate(_TICKS)
+        assert _span(after[0]) < _span(before[0]) and _span(after[1]) < _span(before[1])
+        zoom = page.evaluate(_ZOOM)["check_qq"]
+        # One range on both axes, so y = x stays the diagonal.
+        assert abs((zoom["x"][1] - zoom["x"][0]) - (zoom["y"][1] - zoom["y"][0])) < 1e-9
+        assert asked == []
+
+
+def test_shift_and_a_drag_zoom_to_the_box(checks_page):
+    with checks_page() as page:
+        _open_check(page, "check_qq")
+        box = _plot_box(page)
+        value = _x_map(page)
+        y_value = _y_map(page)
+        start = (box["x"] + box["width"] * 0.5, box["y"] + box["height"] * 0.45)
+        end = (box["x"] + box["width"] * 0.8, box["y"] + box["height"] * 0.3)
+        asked = _report_requests(page)
+        page.keyboard.down("Shift")
+        page.mouse.move(*start)
+        page.mouse.down()
+        page.mouse.move(*end, steps=4)
+        assert page.locator("#checkFrame rect.check-zoom-box").count() == 1
+        page.mouse.up()
+        page.keyboard.up("Shift")
+        page.wait_for_function("() => Boolean(window.__superglmTest.checkZoom().check_qq)")
+        zoom = page.evaluate(_ZOOM)["check_qq"]
+        # The box is wider than tall in values: each axis takes exactly the box's own range.
+        expected = (value(start[0]), value(end[0]))
+        assert abs(zoom["x"][0] - expected[0]) < 0.01 * (expected[1] - expected[0])
+        assert abs(zoom["x"][1] - expected[1]) < 0.01 * (expected[1] - expected[0])
+        expected_y = (y_value(start[1]), y_value(end[1]))
+        assert abs(zoom["y"][0] - expected_y[0]) < 0.01 * (expected_y[1] - expected_y[0])
+        assert abs(zoom["y"][1] - expected_y[1]) < 0.01 * (expected_y[1] - expected_y[0])
+        assert zoom["x"][1] - zoom["x"][0] > 1.2 * (zoom["y"][1] - zoom["y"][0])
+        xs, ys = page.evaluate(_TICKS)
+        assert expected[0] - 1e-6 <= min(xs) and max(xs) <= expected[1] + 1e-6
+        assert expected_y[0] - 1e-6 <= min(ys) and max(ys) <= expected_y[1] + 1e-6
+        assert page.locator("#checkFrame rect.check-zoom-box").count() == 0
+        assert asked == []
+
+
+def test_a_drag_pans_a_zoomed_check(checks_page):
+    with checks_page() as page:
+        _open_check(page, "check_qq")
+        _zoom_qq(page, steps=4)
+        before = page.evaluate(_ZOOM)["check_qq"]
+        box = _plot_box(page)
+        x, y = box["x"] + box["width"] * 0.5, box["y"] + box["height"] * 0.5
+        asked = _report_requests(page)
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x + 80, y - 40, steps=5)
+        page.mouse.up()
+        after = page.evaluate(_ZOOM)["check_qq"]
+        width = before["x"][1] - before["x"][0]
+        # Dragged right and up, the values move with the pointer: the view shows lower x and y.
+        assert after["x"][0] < before["x"][0] - 0.05 * width
+        assert after["y"][0] < before["y"][0] - 0.02 * width
+        assert abs((after["x"][1] - after["x"][0]) - width) < 1e-9
+        assert asked == []
+
+
+def test_home_and_a_double_click_show_the_check_whole(checks_page):
+    with checks_page() as page:
+        _open_check(page, "check_qq")
+        whole = page.evaluate(_TICKS)
+        home = page.locator("#checkHome")
+        assert home.get_attribute("aria-label") == "Home"
+        icon = (
+            "button => [...button.querySelectorAll('path')].map((path) => path.getAttribute('d'))"
+        )
+        assert home.evaluate(icon) == page.locator("#resetZoom").evaluate(icon)
+        _zoom_qq(page)
+        home.click()
+        page.wait_for_function("() => !window.__superglmTest.checkZoom().check_qq")
+        assert page.evaluate(_TICKS) == whole
+        _zoom_qq(page)
+        box = _plot_box(page)
+        page.mouse.dblclick(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        page.wait_for_function("() => !window.__superglmTest.checkZoom().check_qq")
+        assert page.evaluate(_TICKS) == whole
+
+
+def test_hover_after_a_zoom_reads_the_nearest_drawn_point(checks_page):
+    with checks_page() as page:
+        _open_check(page, "check_qq")
+        _zoom_qq(page, steps=5)
+        marks = page.evaluate(
+            """async (report) => {
+              const token = new URLSearchParams(location.search).get("token") || "";
+              const reply = await fetch("/report", { method: "POST",
+                headers: { "Content-Type": "application/json", "X-SuperGLM-Editor-Token": token },
+                body: JSON.stringify({ report }) });
+              const { checkScene } = await import("/assets/chart/check_plots.js");
+              const frame = document.getElementById("checkFrame");
+              const domain = window.__superglmTest.checkZoom()[report];
+              return checkScene(report, await reply.json(), { width: frame.clientWidth, height: frame.clientHeight },
+                { compare: false, highlight: false, domain }).marks;
+            }""",
+            "check_qq",
+        )
+        drawn = page.locator("#checkFrame path:is(.check-edited, .check-outside)").evaluate_all(
+            "paths => paths.reduce((sum, p) => sum + (p.getAttribute('d').match(/M/g) || []).length, 0)"
+        )
+        assert 0 < len(marks) == drawn < 1000
+        for mark in (marks[0], marks[len(marks) // 2], marks[-1]):
+            _hover_mark(page, mark, marks)
+            _assert_readout_in_view(page)
+
+
+def test_a_click_on_the_check_makes_the_wheel_zoom_it_and_a_click_outside_hands_it_back(
+    chromium_browser,
+):
+    """At 300 px high the page scrolls under the check view, whose shell keeps 401 px."""
+    widget = _wrong_session().widget()
+    try:
+        page = chromium_browser.new_page(viewport={"width": 1278, "height": 300})
+        try:
+            page.goto(widget.app_url + "&test=1", wait_until="domcontentloaded")
+            page.locator("#chart path.edited").first.wait_for(state="attached")
+            _open_check(page, "check_qq")
+            scroller = page.evaluate_handle(_PAGE_SCROLLER, "#checkFrame")
+            scroll_top = lambda: scroller.evaluate("node => node.scrollTop")  # noqa: E731
+            frame = page.locator("#checkFrame")
+            box = frame.bounding_box()
+            page.mouse.move(box["x"] + box["width"] / 2, box["y"] + 40)
+            page.mouse.wheel(0, 120)
+            page.wait_for_function("node => node.scrollTop > 0", arg=scroller)
+            assert page.evaluate(_ZOOM) == {}
+            assert page.evaluate(_ACTIVE) == []
+            scroller.evaluate("node => { node.scrollTop = 0; }")
+            box = frame.bounding_box()
+            page.mouse.click(box["x"] + box["width"] / 2, box["y"] + 40)
+            assert page.evaluate(_ACTIVE) == ["checkFrame"]
+            assert frame.evaluate("f => getComputedStyle(f).outlineWidth") == "1px"
+            page.mouse.wheel(0, -120)
+            page.wait_for_function("() => Boolean(window.__superglmTest.checkZoom().check_qq)")
+            assert scroll_top() == 0
+            page.locator("#checkTitle").click()
+            assert page.evaluate(_ACTIVE) == []
+            assert frame.evaluate("f => getComputedStyle(f).outlineStyle") == "none"
+            zoom = page.evaluate(_ZOOM)
+            page.mouse.move(box["x"] + box["width"] / 2, box["y"] + 40)
+            page.mouse.wheel(0, 120)
+            page.wait_for_function("node => node.scrollTop > 0", arg=scroller)
+            assert page.evaluate(_ZOOM) == zoom
+        finally:
+            page.close()
+    finally:
+        widget.close()
+
+
+def test_a_click_on_the_editor_chart_makes_the_wheel_zoom_it_and_a_click_outside_hands_it_back(
+    checks_page,
+):
+    with checks_page() as page:
+        column = page.locator(".plot-column")
+        chart = page.locator("#chart")
+        assert column.evaluate("c => c.scrollHeight > c.clientHeight")
+        span = (
+            "() => { const s = document.querySelector('#chart')._scale; return s.xMax - s.xMin; }"
+        )
+        whole = page.evaluate(span)
+        box = chart.bounding_box()
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        page.mouse.wheel(0, 120)
+        page.wait_for_function("() => document.querySelector('.plot-column').scrollTop > 0")
+        assert page.evaluate(span) == whole
+        assert page.evaluate(_ACTIVE) == []
+        column.evaluate("c => { c.scrollTop = 0; }")
+        chart.click(position={"x": 4, "y": 4})
+        assert page.evaluate(_ACTIVE) == ["chart"]
+        assert chart.evaluate("c => getComputedStyle(c).outlineWidth") == "1px"
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        page.mouse.wheel(0, -120)
+        page.wait_for_function(f"({span})() < {whole}")
+        assert column.evaluate("c => c.scrollTop") == 0
+        page.locator("#featureSearch").click()
+        assert page.evaluate(_ACTIVE) == []
+        zoomed = page.evaluate(span)
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        page.mouse.wheel(0, 120)
+        page.wait_for_function("() => document.querySelector('.plot-column').scrollTop > 0")
+        assert page.evaluate(span) == zoomed
+
+
+def test_escape_lets_the_check_go_and_only_one_chart_is_active(checks_page):
+    with checks_page() as page:
+        page.locator("#chart").click(position={"x": 4, "y": 4})
+        assert page.evaluate(_ACTIVE) == ["chart"]
+        # The chart leaves the page with the Editor tab; the check then takes the wheel.
+        _open_check(page, "check_qq")
+        assert page.evaluate(_ACTIVE) == []
+        assert page.evaluate(_CHECK_WHEEL, [False, -100]) is False
+        page.locator("#checkFrame").click()
+        assert page.evaluate(_ACTIVE) == ["checkFrame"]
+        assert page.evaluate(_CHECK_WHEEL, [False, -100]) is True
+        page.keyboard.press("Escape")
+        assert page.evaluate(_ACTIVE) == []
+        assert page.evaluate(_CHECK_WHEEL, [False, -100]) is False
+        # Focus reaching the plot activates it too.
+        page.locator("#checkFrame").evaluate("frame => frame.blur()")
+        page.locator("#checkFrame").focus()
+        assert page.evaluate(_ACTIVE) == ["checkFrame"]
+        page.locator("#editorTab").click()
+        page.locator("#chart").click(position={"x": 4, "y": 4})
+        assert page.evaluate(_ACTIVE) == ["chart"]
+
+
+def test_the_keys_zoom_a_focused_check_and_0_shows_it_whole(checks_page):
+    with checks_page() as page:
+        _open_check(page, "check_pit")
+        whole = page.evaluate(_TICKS)
+        page.locator("#checkFrame").focus()
+        page.keyboard.press("+")
+        page.wait_for_function("() => Boolean(window.__superglmTest.checkZoom().check_pit)")
+        assert _span(page.evaluate(_TICKS)[1]) < _span(whole[1])
+        # The arrow keys still step through the bars.
+        page.keyboard.press("ArrowRight")
+        assert _readout(page).is_visible()
+        page.keyboard.press("0")
+        page.wait_for_function("() => !window.__superglmTest.checkZoom().check_pit")
+        assert page.evaluate(_TICKS) == whole
+
+
+def test_a_tall_check_scrolls_its_frame_only_while_active(chromium_browser):
+    """At 640 px high six A/E panels scroll in their frame: a plain wheel scrolls the frame only
+    once it is clicked, and Ctrl with the wheel zooms it. Before it is clicked, its foot fades,
+    which shows there is more below; clicked, its scrollbar shows it instead."""
+    widget = _many_inputs_session().widget()
+    try:
+        page = chromium_browser.new_page(viewport={"width": 1278, "height": 640})
+        try:
+            page.goto(widget.app_url + "&test=1", wait_until="domcontentloaded")
+            page.locator("#chart path.edited").first.wait_for(state="attached")
+            _open_check(page, "check_ae")
+            frame = page.locator("#checkFrame")
+            assert frame.evaluate("f => f.scrollHeight > f.clientHeight")
+            assert frame.get_attribute("data-overflow") == "below"
+            assert frame.evaluate("f => getComputedStyle(f).maskImage") != "none"
+            box = frame.bounding_box()
+            page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            page.mouse.wheel(0, 200)
+            page.evaluate(
+                "() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))"
+            )
+            assert frame.evaluate("f => f.scrollTop") == 0
+            page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            assert frame.evaluate("f => getComputedStyle(f).maskImage") == "none"
+            page.mouse.wheel(0, 200)
+            page.wait_for_function("() => document.getElementById('checkFrame').scrollTop > 0")
+            # Scrolled, the frame says it has more of its plot above.
+            page.wait_for_function(
+                "() => (document.getElementById('checkFrame').dataset.overflow || '').includes('above')"
+            )
+            assert page.evaluate(_ZOOM) == {}
+            before = page.evaluate(_TICKS)[1]
+            assert page.evaluate(_CHECK_WHEEL, [True, -100]) is True
+            page.wait_for_function("() => Boolean(window.__superglmTest.checkZoom().check_ae)")
+            assert _span(page.evaluate(_TICKS)[1]) < _span(before)
+        finally:
+            page.close()
+    finally:
+        widget.close()
+
+
+def test_a_plain_wheel_over_an_inactive_tall_check_scrolls_the_page(chromium_browser):
+    """At 640 px high six A/E panels scroll in their frame (below 620 px the frame grows to
+    hold them and only the page scrolls). With content below the editor the page scrolls too: a
+    plain wheel over the frame, not clicked, moves the page and leaves the frame; clicked, it
+    moves the frame."""
+    widget = _many_inputs_session().widget()
+    try:
+        page = chromium_browser.new_page(viewport={"width": 1278, "height": 640})
+        try:
+            page.goto(widget.app_url + "&test=1", wait_until="domcontentloaded")
+            page.locator("#chart path.edited").first.wait_for(state="attached")
+            _open_check(page, "check_ae")
+            page.evaluate(
+                "() => { const below = document.createElement('div');"
+                " below.style.height = '1200px'; document.body.append(below); }"
+            )
+            frame = page.locator("#checkFrame")
+            assert frame.evaluate("f => f.scrollHeight > f.clientHeight")
+            scroller = page.evaluate_handle(_PAGE_SCROLLER, "#checkFrame")
+            assert scroller.evaluate("node => node.scrollHeight > node.clientHeight")
+            assert scroller.evaluate("node => node.scrollTop") == 0
+            box = frame.bounding_box()
+            page.mouse.move(box["x"] + box["width"] / 2, box["y"] + 40)
+            page.mouse.wheel(0, 120)
+            page.wait_for_function("node => node.scrollTop > 0", arg=scroller)
+            assert frame.evaluate("f => f.scrollTop") == 0
+            assert page.evaluate(_ZOOM) == {}
+            scroller.evaluate("node => { node.scrollTop = 0; }")
+            box = frame.bounding_box()
+            page.mouse.click(box["x"] + box["width"] / 2, box["y"] + 40)
+            assert page.evaluate(_ACTIVE) == ["checkFrame"]
+            page.mouse.wheel(0, 120)
+            page.wait_for_function("() => document.getElementById('checkFrame').scrollTop > 0")
+            assert page.evaluate(_ZOOM) == {}
+        finally:
+            page.close()
+    finally:
+        widget.close()
+
+
+# A page that holds the editor in a frame between two blocks, as a notebook holds a cell's
+# output: the page scrolls, and the editor inside it, at 640 px high, does not.
+_HOST_PAGE = """<!doctype html><html><head><meta charset="utf-8"></head>
+<body style="margin:0"><div style="height:120px"></div>
+<iframe id="cell" src="{src}" style="display:block;border:0;width:1278px;height:640px"></iframe>
+<div style="height:1600px"></div></body></html>"""
+
+
+def test_a_plain_wheel_over_an_inactive_tall_check_scrolls_the_page_that_holds_it(
+    chromium_browser,
+):
+    """Inside a frame of a scrolling page, a plain wheel over the inactive tall A/E reaches that
+    page; clicked, the A/E's frame scrolls."""
+    widget = _many_inputs_session().widget()
+    try:
+        page = chromium_browser.new_page(viewport={"width": 1300, "height": 700})
+        try:
+            parts = urlsplit(widget.app_url)
+            host = f"{parts.scheme}://{parts.netloc}/__notebook_like_host.html"
+            body = _HOST_PAGE.format(src=widget.app_url + "&test=1")
+            page.route(host, lambda route: route.fulfill(content_type="text/html", body=body))
+            page.goto(host, wait_until="domcontentloaded")
+            page.frame_locator("#cell").locator("#chart path.edited").first.wait_for(
+                state="attached"
+            )
+            cell = page.frame(url=lambda url: "test=1" in url)
+            _open_check(cell, "check_ae")
+            frame = cell.locator("#checkFrame")
+            assert frame.evaluate("f => f.scrollHeight > f.clientHeight")
+            assert cell.evaluate("() => document.scrollingElement.scrollTop") == 0
+            host_top = "() => document.scrollingElement.scrollTop"
+            # Clicking into the cell may have scrolled the page to show what was clicked.
+            page.evaluate("() => { document.scrollingElement.scrollTop = 0; }")
+            box = frame.bounding_box()
+            point = (box["x"] + box["width"] / 2, box["y"] + 60)
+            page.mouse.move(*point)
+            page.mouse.wheel(0, 120)
+            page.wait_for_function(f"({host_top})() > 0")
+            assert frame.evaluate("f => f.scrollTop") == 0
+            assert cell.evaluate(_ZOOM) == {}
+            page.evaluate("() => { document.scrollingElement.scrollTop = 0; }")
+            page.mouse.click(*point)
+            assert cell.evaluate(_ACTIVE) == ["checkFrame"]
+            page.mouse.wheel(0, 120)
+            cell.wait_for_function("() => document.getElementById('checkFrame').scrollTop > 0")
+            assert cell.evaluate(_ZOOM) == {}
+        finally:
+            page.close()
+    finally:
+        widget.close()
+
+
+# A Ctrl+wheel over the Q-Q, then in the same task `then` (Home, or opening another check),
+# before the wheel's frame; resolves once two frames have drawn.
+_WHEEL_THEN = """async (then) => {
+  const svg = document.querySelector('#checkFrame svg.check-plot');
+  const box = svg.getBoundingClientRect();
+  svg.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, ctrlKey: true, bubbles: true,
+    cancelable: true, clientX: box.left + box.width * 0.6, clientY: box.top + box.height * 0.4 }));
+  if (then === 'home') document.getElementById('checkHome').click();
+  else document.querySelector(`#assessList [data-assess-entry="${then}"]`).click();
+  await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+  return window.__superglmTest.checkZoom();
+}"""
+
+
+def test_a_wheel_waiting_for_its_frame_is_dropped_by_home_or_another_check(checks_page):
+    with checks_page() as page:
+        _open_check(page, "check_qq")
+        _zoom_qq(page)
+        # Home before the wheel's frame: the check is whole and stays whole.
+        assert page.evaluate(_WHEEL_THEN, "home") == {}
+        assert page.locator("#checkFrame").get_attribute("data-zoomed") == "false"
+        # Another check opened before it: neither check moves.
+        assert page.evaluate(_WHEEL_THEN, "check_pit") == {}
+        page.locator('#checkPanel[data-report="check_pit"]').wait_for(state="visible")
+        assert page.evaluate(_ZOOM) == {}
+
+
+# The plot on screen against the scene `checkScene` gives at the check's zoom, from the page's
+# own /report answer: its paths' roles and d, and its labels.
+_PLOT_AGAINST_SCENE = """async (report) => {
+  const token = new URLSearchParams(location.search).get("token") || "";
+  const reply = await fetch("/report", { method: "POST",
+    headers: { "Content-Type": "application/json", "X-SuperGLM-Editor-Token": token },
+    body: JSON.stringify({ report }) });
+  const { checkScene } = await import("/assets/chart/check_plots.js");
+  const frame = document.getElementById("checkFrame");
+  const highlight = document.getElementById("checkHighlight").getAttribute("aria-checked") === "true";
+  const scene = checkScene(report, await reply.json(), { width: frame.clientWidth, height: frame.clientHeight },
+    { compare: false, highlight, domain: window.__superglmTest.checkZoom()[report] ?? null });
+  const svg = frame.querySelector("svg.check-plot");
+  const round = (v) => String(Math.round(v * 100) / 100);
+  return {
+    kept: svg === window.__plotBefore,
+    paths: [...svg.querySelectorAll(":scope > path")].map((p) => [p.getAttribute("class"), p.getAttribute("d")]),
+    layers: scene.layers.map((l) => [`check-${l.role}`, l.d]),
+    texts: [...svg.querySelectorAll(":scope > text")].map((t) => [t.getAttribute("x"), t.getAttribute("y"), t.textContent]),
+    labels: scene.labels.map((l) => [round(l.x), round(l.y), l.text]),
+  };
+}"""
+
+
+def test_a_zoom_writes_the_plot_in_place_as_its_scene_draws_it(checks_page):
+    with checks_page() as page:
+        _open_check(page, "check_qq")
+        page.evaluate(
+            "() => { window.__plotBefore = document.querySelector('#checkFrame svg.check-plot'); }"
+        )
+        _zoom_qq(page, steps=4)
+        drawn = page.evaluate(_PLOT_AGAINST_SCENE, "check_qq")
+        assert drawn["kept"]
+        assert drawn["paths"] == drawn["layers"]
+        assert drawn["texts"] == drawn["labels"]
+        page.locator("#checkHome").click()
+        page.wait_for_function("() => !window.__superglmTest.checkZoom().check_qq")
+        drawn = page.evaluate(_PLOT_AGAINST_SCENE, "check_qq")
+        assert drawn["kept"]
+        assert drawn["paths"] == drawn["layers"]
+        assert drawn["texts"] == drawn["labels"]

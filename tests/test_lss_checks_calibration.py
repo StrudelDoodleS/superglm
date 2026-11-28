@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import tracemalloc
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
@@ -23,7 +24,7 @@ from scipy import stats
 
 from superglm import Categorical, Spline, SuperLSS
 from superglm._frame import as_eager_frame
-from superglm.distributional import Predictor
+from superglm.distributional import Predictor, posterior
 from superglm.distributional.checks.binned import (
     BinnedCheck,
     BinnedCheck2D,
@@ -816,6 +817,82 @@ def test_simulated_variance_requires_two_draws_but_analytic_does_not():
         n_draws=1,
     )
     assert np.all(np.isfinite(result.ratio_se))
+
+
+class _CountedNormalLikeFamily(_WeightedNormalLikeFamily):
+    """The weighted normal-like family, recording how many cells each quantile call reads."""
+
+    def __init__(self) -> None:
+        self.cells: list[int] = []
+
+    def quantile(self, p: NDArray, theta: NDArray) -> NDArray:
+        self.cells.append(len(p))
+        return super().quantile(p, theta)
+
+    def quantile_prior_weighted(self, p: NDArray, theta: NDArray, weights: NDArray) -> NDArray:
+        self.cells.append(len(p))
+        return super().quantile_prior_weighted(p, theta, weights)
+
+
+@pytest.mark.parametrize("weighted", [False, True])
+def test_a_simulated_row_variance_read_in_blocks_is_the_variance_of_every_draw(
+    weighted, monkeypatch
+):
+    """43 rows read seven at a time, the last block one row wide: every quantile call reads at
+    most seven rows of draws, the draws are the ones drawn whole, and each row's variance is
+    ``np.var`` of every draw, bit for bit. Mutation checks: drawing each block's uniforms on its
+    own moves the draws; ``np.var`` of each block moves the one-row block's variance."""
+    rng = np.random.default_rng(11)
+    rows = 43
+    frame = pd.DataFrame({"mu": rng.uniform(2.0, 4.0, rows), "var": rng.uniform(0.5, 1.5, rows)})
+    weights = rng.uniform(0.5, 2.0, rows) if weighted else None
+    family = _CountedNormalLikeFamily()
+    fitted = _StubFitted(family)
+    options = {"seed": 3, "weights": weights}
+    whole = posterior.posterior_predictive(
+        fitted, frame, 64, parameter_uncertainty=False, **options
+    )
+    assert family.cells == [64 * rows]
+
+    family.cells.clear()
+    monkeypatch.setattr(posterior, "_QUANTILE_CELLS", 7 * 64)
+    blocked = posterior.posterior_predictive(
+        fitted, frame, 64, parameter_uncertainty=False, **options
+    )
+    variance = posterior._predictive_variance(fitted, frame, 64, **options)
+
+    assert family.cells == 2 * ([7 * 64] * 6 + [64])
+    assert np.array_equal(blocked, whole)
+    assert np.array_equal(variance, np.var(whole, axis=0, ddof=1))
+
+
+def test_a_simulated_row_variance_holds_one_chunk_of_draws_whatever_the_rows(monkeypatch):
+    """Actual over expected on 20,000 and on 40,000 rows, each row's variance simulated from
+    200 draws in chunks of 1,000 rows. The extra rows add their own arrays, measured at about
+    70 bytes a row, never their draws: one draw matrix alone is 1,600 bytes a row. Mutation
+    check: reading the variance from every row's draws at once adds about 3,200 bytes a row."""
+    monkeypatch.setattr(posterior, "_CHUNK_BYTES", 8 * 200 * 2 * 1_000)
+    rng = np.random.default_rng(12)
+
+    def traced_peak(rows: int) -> int:
+        frame = pd.DataFrame(
+            {"mu": rng.uniform(2.0, 4.0, rows), "var": rng.uniform(0.5, 1.5, rows)}
+        )
+        response = frame["mu"].to_numpy() + rng.standard_normal(rows)
+        covariate = rng.uniform(0.0, 1.0, rows)
+        tracemalloc.start()
+        try:
+            result = actual_expected_check(
+                _StubFitted(_NormalLikeFamily()), frame, response, covariate, name="x", n_bins=4
+            )
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert result.variance_law == "draws" and np.all(result.ratio_se > 0.0)
+        return peak
+
+    smaller, larger = traced_peak(20_000), traced_peak(40_000)
+    assert larger - smaller < 20_000 * 400
 
 
 @pytest.mark.parametrize("change", ["X", "offset", "weights", "fit"])

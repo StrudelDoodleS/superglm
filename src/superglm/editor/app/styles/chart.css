@@ -289,6 +289,8 @@
 }
 /* In Knots mode the chart takes the arrow keys, so it takes focus. */
 #chart:focus { outline: none; }
+/* The chart the wheel works on (views/chart_focus.js): a slight border inside its box. */
+#chart.is-wheel-active { outline: 1px solid color-mix(in srgb, var(--focus) 50%, transparent); outline-offset: -1px; }
 #chart:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 /* A term that takes evenly spaced knots only: nothing on the axis moves by
    hand, and the hover text says why. */

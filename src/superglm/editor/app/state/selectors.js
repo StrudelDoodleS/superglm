@@ -1,11 +1,12 @@
 // @ts-check
-import { isReportName } from "../api/contracts.js";
-import { OVERVIEW_REPORTS } from "./assess.js";
+import { isCheckReport, isReportName } from "../api/contracts.js";
+import { overviewReports } from "./assess.js";
 
 /** @typedef {import('../api/contracts.js').EditorState} EditorState */
 /** @typedef {import('../api/contracts.js').EvidencePanel} EvidencePanel */
 /** @typedef {import('../api/contracts.js').EvidenceState} EvidenceState */
 /** @typedef {import('../api/contracts.js').ReportName} ReportName */
+/** @typedef {import('../api/contracts.js').CheckReport} CheckReport */
 
 /** @type {number[]} */
 const EMPTY_SELECTION = [];
@@ -49,6 +50,22 @@ export function selectRenderableTerm(state) {
 
 /** @type {readonly import('../api/contracts.js').PendingStep[]} */
 const NO_PENDING = Object.freeze([]);
+
+/** @type {readonly CheckReport[]} */
+const NO_CHECKS = Object.freeze([]);
+
+/**
+ * The checks the model in force offers, as the snapshot names them: none before the first
+ * snapshot, for a SuperGLM, or by a name this page does not know.
+ * @param {EditorState} state
+ * @returns {readonly CheckReport[]}
+ */
+export function selectOfferedChecks(state) {
+  // The snapshot is the server's word, so its list is read as unknown until each name is checked.
+  const checks = /** @type {unknown} */ (selectSnapshot(state)?.checks);
+  if (!Array.isArray(checks) || checks.length === 0) return NO_CHECKS;
+  return checks.every(isCheckReport) ? checks : checks.filter(isCheckReport);
+}
 
 /**
  * The structural changes waiting for Refit, oldest first.
@@ -117,9 +134,9 @@ export function selectReportNeedsAsk(state, panel) {
  */
 export function selectVisibleEvidencePanels(state, { summaryCommitted = false } = {}) {
   const view = state.view.activeView;
-  // A report shows its own evidence, the overview the reports its cards read; the Explain
-  // tab asks for its own risks and shows none.
-  if (view === "assess") return [...OVERVIEW_REPORTS];
+  // A report or check shows its own evidence, the overview the reports its cards read and
+  // each check the model offers; the Explain tab asks for its own risks and shows none.
+  if (view === "assess") return overviewReports(selectOfferedChecks(state));
   if (view !== "editor") return isReportName(view) ? [view] : [];
   // A panel whose tool the session does not offer is never requested.
   const off = state.remote.snapshot?.unavailable ?? {};

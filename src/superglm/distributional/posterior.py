@@ -70,6 +70,9 @@ Quantity = str | tuple[Any, ...] | Callable[[NDArray], NDArray]
 
 #: Natural-parameter scratch per row chunk stays under this many bytes.
 _CHUNK_BYTES = 256_000_000
+#: A quantile function is asked at most this many predictive cells at a time; its scratch is
+#: elementwise, so this bounds it whatever the chunk.
+_QUANTILE_CELLS = 1 << 16
 #: Errors a replay of the fit's own derivatives may legitimately raise; a
 #: TypeError, AttributeError or LookupError is a defect and propagates.
 _REPLAY_FAILURES = (RuntimeError, ValueError, ArithmeticError)
@@ -712,12 +715,17 @@ def _posterior_symmetric_matrix(matrix: NDArray) -> NDArray:
 
 
 def _posterior_covariance_factor(matrix: NDArray) -> NDArray:
-    """A PSD root checked in diagonal power-of-two coordinates.
+    """The draw factor ``D S``, ``S`` the principal square root of ``G = D^-1 V D^-1``.
 
-    Positive eigenvalues are kept; a negative mode is clipped only if the
-    factor reconstructs the covariance within ``gamma_(4n+8)`` times
-    ``max(||G||_F, || |F| |F.T| ||_F)`` (two length-n products plus root and
-    bound formation), an admission check rather than an eigensolver guarantee.
+    ``D`` is the exact power-of-two scaling of the variances. The PSD square root
+    is unique (Higham, *Functions of Matrices*, 2008, Thm 1.29), so it ignores the
+    eigenvectors' signs and bases that differ between LAPACK builds: one seed draws
+    alike on every platform, to rounding where ``G`` is definite. A null eigenvalue's
+    rounding sign can still differ between builds, and the root turns that into about
+    ``sqrt(u ||G||)`` along its direction. Every positive eigenvalue is kept, however
+    small: a mode near ``u ||G||`` can carry the whole variance of a prediction, as on
+    a nearly constant input. A negative mode is clipped only if the factor reconstructs
+    ``G`` within ``gamma_(6n+8)`` times ``max(||G||_F, || |S| |S'| ||_F)``.
     """
     resolved = _posterior_symmetric_matrix(matrix)
     diagonal = np.diag(resolved)
@@ -732,7 +740,7 @@ def _posterior_covariance_factor(matrix: NDArray) -> NDArray:
     try:
         scaled, scaling_error, powers = _binary_congruence(resolved[np.ix_(active, active)])
         values, vectors = np.linalg.eigh(scaled)
-        root = vectors * np.sqrt(np.maximum(values, 0.0))
+        root = (vectors * np.sqrt(np.maximum(values, 0.0))) @ vectors.T
         with np.errstate(over="ignore", under="ignore", invalid="ignore"):
             original_root = np.ldexp(root, powers[:, None])
             restored = np.ldexp(original_root, -powers[:, None])
@@ -750,7 +758,7 @@ def _posterior_covariance_factor(matrix: NDArray) -> NDArray:
             _norm_upper(scaled),
             _norm_upper(_positive_product(np.abs(root), np.abs(root.T))),
         )
-        target = _gamma(4 * len(active) + 8) * operation_scale
+        target = _gamma(6 * len(active) + 8) * operation_scale
         if not error <= target:
             raise ValueError(
                 "the posterior covariance is not positive semidefinite at arithmetic resolution; "
@@ -815,7 +823,7 @@ def posterior_draws(
     covariance: CovarianceKind = "fixed",
     seed: int = 42,
 ) -> PosteriorDraws:
-    """Draw coefficients from ``N(beta_hat, V)`` with a checked eigen square root.
+    """Draw coefficients from ``N(beta_hat, V)`` with a checked principal square root.
 
     ``beta_hat`` is what the model predicts with; after a hand edit that is the
     edit, with the fit's ``V``.
@@ -824,7 +832,12 @@ def posterior_draws(
     mode is clipped only when a bounded reconstruction shows the covariance
     agrees at arithmetic resolution, otherwise it is an error. One
     ``default_rng(seed)`` stream serves every draw, so results never depend
-    on a later pushforward's row chunking.
+    on a later pushforward's row chunking. The square root is unique, so
+    whatever basis its eigensolver returns, one seed draws the same coefficients
+    on every platform: to rounding where ``V`` is definite, and to about
+    ``sqrt(u ||G||)`` of each coefficient's standard deviation along a null
+    direction, whose eigenvalue LAPACK builds may round to either side of zero.
+    ``G`` is ``V`` scaled to unit-order variances by powers of two.
     """
     count = _posterior_draw_count(n_draws)
     matrix, resolved = _resolved_posterior_covariance(fitted, covariance)
@@ -1306,10 +1319,11 @@ def _theta_blocks(
     offsets: Mapping[str, NDArray] | None,
     chunk_rows: int,
 ) -> Generator[tuple[slice, NDArray[np.float64], NDArray[np.bool_]], None, None]:
-    """Yield ``(row_slice, theta, outside)``, each flattened to ``(draws * rows, k)``.
+    """Yield ``(row_slice, theta, outside)``: ``theta`` is ``(draws, rows, k)``, and
+    ``outside`` ``(rows, k)`` marks a parameter with no value at some draw.
 
-    ``theta`` holds a stand-in where ``outside`` marks a cell with no value
-    (``_posterior_blocks``).
+    ``theta`` holds a stand-in there (``_posterior_blocks``). Plug-in blocks are read-only
+    broadcasts of one row each.
     """
     if parameter_uncertainty:
         # A row with no value at the fitted coefficients has none in its draws either. This
@@ -1319,17 +1333,117 @@ def _theta_blocks(
         for rows, block, outside in _posterior_blocks(
             fitted, frame, draws, offsets=offsets, chunk_rows=chunk_rows, name_levels=False
         ):
-            outside |= at_fit[rows][None, :, :]
-            yield rows, block.reshape(-1, block.shape[2]), outside.reshape(-1, block.shape[2])
+            yield rows, block, outside.any(axis=0) | at_fit[rows]
         return
     theta, outside = fitted._predicted_parameters(frame, offsets, warn=False)
     for start in range(0, len(theta), chunk_rows):
-        stop = min(start + chunk_rows, len(theta))
-        yield (
-            slice(start, stop),
-            np.tile(theta[start:stop], (n_draws, 1)),
-            np.tile(outside[start:stop], (n_draws, 1)),
+        rows = slice(start, min(start + chunk_rows, len(theta)))
+        shape = (n_draws, rows.stop - start, theta.shape[1])
+        yield rows, np.broadcast_to(theta[rows], shape), outside[rows]
+
+
+def _predictive_inputs(
+    fitted: Any, X: FrameLike | EagerFrame, n_draws: int, weights: NDArray | None
+) -> tuple[EagerFrame, NDArray[np.float64] | None, int]:
+    """Validate ``posterior_predictive``'s inputs: ``(frame, row weights, draws)``."""
+    require_scalar_response(fitted.family, "posterior_predictive")
+    frame = as_eager_frame(X)
+    row_weights = _prior_weight_law(weights, len(frame))
+    family = fitted.family
+    if row_weights is None:
+        if not isinstance(family, DistributionFunctionFamily):
+            raise NotImplementedError(
+                "predictive draws need a family with a quantile function; this one has none"
+            )
+    elif not isinstance(family, PriorWeightedDistributionFunctionFamily):
+        raise NotImplementedError(_PRIOR_WEIGHT_REFUSAL.format(family=type(family).__name__))
+    count = int(n_draws)
+    if count < 1:
+        raise ValueError("n_draws must be at least 1")
+    return frame, row_weights, count
+
+
+@dataclass
+class _NoValueRows:
+    """Rows with no value of a parameter, and which parameters lost one."""
+
+    rows: NDArray[np.bool_]
+    parameters: NDArray[np.bool_]
+
+
+def _predictive_blocks(
+    fitted: Any,
+    frame: EagerFrame,
+    count: int,
+    *,
+    row_weights: NDArray[np.float64] | None,
+    no_value: _NoValueRows,
+    stop_at_no_value: bool,
+    parameter_uncertainty: bool,
+    covariance: CovarianceKind,
+    seed: int,
+    offsets: Mapping[str, NDArray] | None,
+    chunk_rows: int,
+) -> Generator[tuple[slice, slice, NDArray[np.float64]], None, None]:
+    """Yield ``(chunk, block, responses)``, ``(draws, rows)`` blocks of each chunk of
+    ``_theta_blocks``. A chunk draws its uniforms whole, draw-major, so no response depends
+    on the blocks. Rows with no value are recorded in ``no_value`` and read NaN;
+    ``stop_at_no_value`` skips every chunk from the first one with such a row.
+    """
+    # The coefficient draws consume ``seed`` directly; the uniforms take an
+    # independent child of the same seed, so both are reproducible and neither
+    # reuses the other's stream.
+    uniform_rng = np.random.default_rng(np.random.SeedSequence(seed).spawn(2)[1])
+    for chunk, theta, outside in _theta_blocks(
+        fitted,
+        frame,
+        n_draws=count,
+        parameter_uncertainty=parameter_uncertainty,
+        covariance=covariance,
+        seed=seed,
+        offsets=offsets,
+        chunk_rows=chunk_rows,
+    ):
+        lost = outside.any(axis=1)
+        if np.any(lost):
+            no_value.rows[chunk] = lost
+            no_value.parameters |= outside.any(axis=0)
+        if stop_at_no_value and np.any(no_value.rows):
+            continue
+        probabilities = uniform_rng.uniform(
+            _PROBABILITY_MARGIN, 1.0 - _PROBABILITY_MARGIN, size=(count, len(lost))
         )
+        weights = None if row_weights is None else row_weights[chunk]
+        for block, simulated in _quantile_blocks(fitted.family, probabilities, theta, weights):
+            if not np.all(np.isfinite(simulated[:, ~lost[block]])):
+                raise ValueError("non-finite predictive draws cannot be represented or reduced")
+            simulated[:, lost[block]] = np.nan
+            yield chunk, slice(chunk.start + block.start, chunk.start + block.stop), simulated
+
+
+def _quantile_blocks(
+    family: Any,
+    probabilities: NDArray[np.float64],
+    theta: NDArray[np.float64],
+    weights: NDArray[np.float64] | None,
+) -> Generator[tuple[slice, NDArray[np.float64]], None, None]:
+    """Yield ``(columns, responses)`` of one chunk, at most ``_QUANTILE_CELLS`` cells each.
+
+    Levels, parameters and weights all flatten draw-major, so every simulated row is drawn
+    on its own law.
+    """
+    count, width = probabilities.shape
+    step = max(1, _QUANTILE_CELLS // count)
+    for start in range(0, width, step):
+        columns = slice(start, min(start + step, width))
+        levels = probabilities[:, columns].reshape(-1)
+        flat = theta[:, columns].reshape(-1, theta.shape[2])
+        drawn = (
+            family.quantile(levels, flat)
+            if weights is None
+            else family.quantile_prior_weighted(levels, flat, np.tile(weights[columns], count))
+        )
+        yield columns, np.array(drawn, dtype=np.float64).reshape(count, -1)
 
 
 def posterior_predictive(
@@ -1364,84 +1478,54 @@ def posterior_predictive(
     predictive draws: its column reads NaN, with one warning, and a ``reduce``,
     which cannot leave it out, refuses it with ``NoPredictedMeanError``.
     """
-    require_scalar_response(fitted.family, "posterior_predictive")
-    frame = as_eager_frame(X)
-    row_weights = _prior_weight_law(weights, len(frame))
-    family = fitted.family
-    if row_weights is None:
-        if not isinstance(family, DistributionFunctionFamily):
-            raise NotImplementedError(
-                "predictive draws need a family with a quantile function; this one has none"
-            )
-    elif not isinstance(family, PriorWeightedDistributionFunctionFamily):
-        raise NotImplementedError(_PRIOR_WEIGHT_REFUSAL.format(family=type(family).__name__))
-    count = int(n_draws)
-    if count < 1:
-        raise ValueError("n_draws must be at least 1")
+    frame, row_weights, count = _predictive_inputs(fitted, X, n_draws, weights)
     combine = _resolved_reduce(reduce)
-
-    rows_per_chunk = _resolved_chunk_rows(
-        chunk_rows, n_draws=count, n_parameters=len(fitted.layout.predictors)
+    no_value = _NoValueRows(
+        np.zeros(len(frame), dtype=bool), np.zeros(len(fitted.layout.predictors), dtype=bool)
     )
-    # The coefficient draws consume ``seed`` directly; the uniforms take an
-    # independent child of the same seed, so both are reproducible and neither
-    # reuses the other's stream.
-    uniform_rng = np.random.default_rng(np.random.SeedSequence(seed).spawn(2)[1])
-
     pieces: list[NDArray[np.float64]] = []
-    no_value = np.zeros(len(frame), dtype=bool)
-    lost_parameters = np.zeros(len(fitted.layout.predictors), dtype=bool)
-    for rows, theta, outside in _theta_blocks(
+    held: list[NDArray[np.float64]] = []
+    for chunk, block, simulated in _predictive_blocks(
         fitted,
         frame,
-        n_draws=count,
+        count,
+        row_weights=row_weights,
+        no_value=no_value,
+        # A reduction cannot leave a row out, so it is refused below and the rest of the frame
+        # is only read for the rows it names.
+        stop_at_no_value=combine is not None,
         parameter_uncertainty=parameter_uncertainty,
         covariance=covariance,
         seed=seed,
         offsets=offsets,
-        chunk_rows=rows_per_chunk,
+        chunk_rows=_resolved_chunk_rows(
+            chunk_rows, n_draws=count, n_parameters=len(fitted.layout.predictors)
+        ),
     ):
-        width = rows.stop - rows.start
-        lost = outside.any(axis=1).reshape(count, width).any(axis=0)
-        if np.any(lost):
-            no_value[rows] = lost
-            lost_parameters |= outside.any(axis=0)
-        if combine is not None and np.any(no_value):
-            # Refused below; the rest of the frame is only read for the rows it names.
-            continue
-        probabilities = uniform_rng.uniform(
-            _PROBABILITY_MARGIN, 1.0 - _PROBABILITY_MARGIN, size=(count, width)
-        )
-        # ``theta`` arrives draw-major, so the chunk's own weights tile in the
-        # same order and every simulated row is drawn on its own law.
-        levels = probabilities.reshape(-1)
-        drawn = (
-            family.quantile(levels, theta)
-            if row_weights is None
-            else family.quantile_prior_weighted(levels, theta, np.tile(row_weights[rows], count))
-        )
-        simulated = np.array(drawn, dtype=np.float64).reshape(count, width)
-        if not np.all(np.isfinite(simulated[:, ~lost])):
-            raise ValueError("non-finite predictive draws cannot be represented or reduced")
         if combine is None:
-            simulated[:, lost] = np.nan
             pieces.append(simulated)
             continue
+        # A reduction sees each chunk whole, so its rounding does not depend on the blocks.
+        held.append(simulated)
+        if block.stop < chunk.stop:
+            continue
+        whole = held[0] if len(held) == 1 else np.concatenate(held, axis=1)
+        held = []
         with np.errstate(over="ignore", invalid="ignore"):
-            piece = np.asarray(combine(simulated))
+            piece = np.asarray(combine(whole))
         if piece.ndim not in (1, 2) or piece.shape[0] != count:
             raise ValueError("reduce must return one row per posterior draw")
         if not np.all(np.isfinite(piece)):
             raise ValueError("Predictive reduction produced non-finite values")
         pieces.append(piece)
 
-    if np.any(no_value):
+    if np.any(no_value.rows):
         if combine is not None:
-            raise _no_value_error(fitted, no_value, lost_parameters, "the reduced draws")
+            raise _no_value_error(fitted, no_value.rows, no_value.parameters, "the reduced draws")
         _warn_no_posterior_value(
             fitted,
-            no_value,
-            lost_parameters,
+            no_value.rows,
+            no_value.parameters,
             "their predictive draws are NaN",
             draws=bool(parameter_uncertainty),
         )
@@ -1461,6 +1545,68 @@ def posterior_predictive(
             "or a (draws, columns) block; it returned neither on every chunk"
         )
     return np.concatenate(pieces, axis=1)
+
+
+def _draw_order_variance(simulated: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Each column's ``ddof=1`` variance, its draws summed in draw order.
+
+    ``np.var`` sums a block one or two columns wide in another order, so a column's
+    value would depend on its block; this order is ``np.var``'s on a wider one.
+    """
+    total = np.zeros(simulated.shape[1], dtype=np.float64)
+    for draw in simulated:
+        total += draw
+    mean = total / len(simulated)
+    spread = np.zeros_like(total)
+    for draw in simulated:
+        deviation = draw - mean
+        spread += deviation * deviation
+    return spread / (len(simulated) - 1)
+
+
+def _predictive_variance(
+    fitted: Any,
+    X: FrameLike | EagerFrame,
+    n_draws: int,
+    *,
+    offsets: Mapping[str, NDArray] | None = None,
+    seed: int = 42,
+    weights: NDArray | None = None,
+) -> NDArray[np.float64]:
+    """Each row's variance over ``posterior_predictive(..., parameter_uncertainty=False)``'s
+    draws, read block by block, so only one block of draws is held. A row with no value reads
+    NaN, with the same warning.
+    """
+    frame, row_weights, count = _predictive_inputs(fitted, X, n_draws, weights)
+    no_value = _NoValueRows(
+        np.zeros(len(frame), dtype=bool), np.zeros(len(fitted.layout.predictors), dtype=bool)
+    )
+    variance = np.empty(len(frame), dtype=np.float64)
+    for _, block, simulated in _predictive_blocks(
+        fitted,
+        frame,
+        count,
+        row_weights=row_weights,
+        no_value=no_value,
+        stop_at_no_value=False,
+        parameter_uncertainty=False,
+        covariance="fixed",
+        seed=seed,
+        offsets=offsets,
+        chunk_rows=_resolved_chunk_rows(
+            None, n_draws=count, n_parameters=len(fitted.layout.predictors)
+        ),
+    ):
+        variance[block] = _draw_order_variance(simulated)
+    if np.any(no_value.rows):
+        _warn_no_posterior_value(
+            fitted,
+            no_value.rows,
+            no_value.parameters,
+            "their predictive draws are NaN",
+            draws=False,
+        )
+    return variance
 
 
 def simultaneous_critical_value(

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from dataclasses import replace
 from types import MappingProxyType
 from typing import Any
 
@@ -194,6 +195,8 @@ def follow_training_rows(
         offset_parameters=lss.parameter_names_,
     )
     assert followed is not None
+    if notice is None and followed.n_obs == train.n_obs:
+        followed = replace(followed, rows_id=train.rows_id)  # the same rows, read again
     return followed, None if notice is None else notice.format(n=followed.n_obs)
 
 

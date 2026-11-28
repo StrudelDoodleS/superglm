@@ -1,6 +1,13 @@
 // @ts-check
 
-import { HELP_SECTIONS, OPERATION_HELP, STRUCTURE_HELP, TOOL_HELP } from "./help_content.js";
+import {
+  CHECK_HELP,
+  CONTROL_HELP,
+  HELP_SECTIONS,
+  OPERATION_HELP,
+  STRUCTURE_HELP,
+  TOOL_HELP,
+} from "./help_content.js";
 
 /**
  * Render the shared editor help catalog into the inspector Help pane.
@@ -22,7 +29,7 @@ function sectionNode(section) {
 
   const list = document.createElement("dl");
   for (const key of section.keys || []) {
-    const entry = TOOL_HELP[key] || OPERATION_HELP[key] || STRUCTURE_HELP[key];
+    const entry = TOOL_HELP[key] || OPERATION_HELP[key] || STRUCTURE_HELP[key] || CHECK_HELP[key] || CONTROL_HELP[key];
     if (!entry) continue;
     const term = document.createElement("dt");
     term.textContent = entry.shortcut ? `${entry.title} (${entry.shortcut})` : entry.title;

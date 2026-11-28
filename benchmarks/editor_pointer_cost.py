@@ -1,15 +1,18 @@
 """Main-thread cost per pointer move in the browser editor, old source tree against new.
 
     uv run python benchmarks/editor_pointer_cost.py \\
-        --tree old=.claude/worktrees/stage1-base --tree new=. --out FILE
+        --tree old=.claude/worktrees/stage1-base --tree new=. \\
+        [--check-bundle saved.joblib] --out FILE
 
-Each tree is served from its own subprocess, with ``PYTHONPATH=<tree>/src:<head>``
-and this interpreter, so only the editor's source differs between the two. Both
-servers open the same session, ``tests.editor.assess_table.poisson_cv_session()``
-from this head, and one headless Chromium drives them.
+Each tree is served from its own subprocesses, with ``PYTHONPATH=<tree>/src:<head>``
+and this interpreter, so only the editor's source differs between the two. Every
+tree serves the same two sessions from this head: ``poisson_cv_session()`` from
+``tests.editor.assess_table``, and for the check plots a SuperLSS session, the
+saved bundle ``--check-bundle`` (``bundle_session``) or else
+``pareto_lss_session()``. One headless Chromium drives them.
 
 A run opens a fresh page on one tree, sets the CPU slowdown with
-``Emulation.setCPUThrottlingRate`` and measures four scenarios. The cost of a
+``Emulation.setCPUThrottlingRate`` and measures seven scenarios. The cost of a
 scenario is the change in ``Performance.getMetrics`` ``TaskDuration``, the
 renderer main thread's busy time, over its gestures:
 
@@ -17,6 +20,11 @@ renderer main thread's busy time, over its gestures:
 - hovering across the fold legend of the Cross-validation report, 120 moves;
 - hovering across the Assess overview cards, 120 moves (a page with no overview
   reads "—");
+- hovering across a check's large view on the SuperLSS session, 60 moves over the
+  Q-Q plot, then 60 over Actual over expected (a page with no checks reads "—");
+- zooming the Q-Q plot, once clicked, with 20 wheel steps in and 20 out, each let draw
+  before the next, as ms per step; then, zoomed in, panning it with a 60-move drag, as
+  ms per move (a page with no check zoom reads "—");
 - switching Validation and Cross-validation 20 times after each has been visited
   once, as ms per switch, with the ``/report`` requests those switches send.
 
@@ -50,6 +58,9 @@ from tests.editor.assess_table import open_report, wait_for_report  # noqa: E402
 
 MOVES = 120
 SWITCHES = 20
+WHEEL_STEPS = 40
+PAN_MOVES = 60
+PAN_ZOOM_STEPS = 6
 BUDGET_MS = 16.7
 VIEWPORT = {"width": 1278, "height": 860}
 DRAG_TERM = "region"
@@ -59,16 +70,22 @@ SCENARIOS = (
     ("drag", "Point drag, Editor chart (Move tool)", "ms/move"),
     ("legend", "Hover across the Cross-validation fold legend", "ms/move"),
     ("cards", "Hover across the Assess overview cards", "ms/move"),
+    ("check", "Hover across a check plot (Q-Q, then A/E)", "ms/move"),
+    ("zoom_wheel", "Zoom a check plot (Q-Q), per wheel step", "ms/step"),
+    ("zoom_pan", "Pan a zoomed check plot (Q-Q), per drag move", "ms/move"),
     ("switch", "Switch Validation ↔ Cross-validation", "ms/switch"),
 )
 
-# Fit the session, print the URL and the superglm it imported, serve until stdin closes.
+CHECK_PLOTS = ("check_qq", "check_ae")
+# Build the session named on the command line, print the URL and the superglm it imported,
+# serve until stdin closes.
 _SERVE = """
 import sys
 import superglm
-from tests.editor.assess_table import poisson_cv_session
+from tests.editor import assess_table
 
-widget = poisson_cv_session().widget(mode="server")
+builder, *args = sys.argv[1:]
+widget = getattr(assess_table, builder)(*args).widget(mode="server")
 print("URL", widget.app_url, superglm.__file__, flush=True)
 sys.stdin.read()
 widget.close()
@@ -76,11 +93,12 @@ widget.close()
 
 
 @contextmanager
-def serve(tree: Path) -> Iterator[str]:
-    """Serve ``tree``'s editor on the shared session; yield the page URL."""
+def serve(tree: Path, session: list[str]) -> Iterator[str]:
+    """Serve ``tree``'s editor on ``session``, a builder in ``assess_table`` and its
+    arguments; yield the page URL."""
     env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(tree / "src"), str(HEAD)]))
     process = subprocess.Popen(
-        [sys.executable, "-c", _SERVE],
+        [sys.executable, "-c", _SERVE, *session],
         cwd=HEAD,
         env=env,
         stdin=subprocess.PIPE,
@@ -156,16 +174,16 @@ def centre(box: dict[str, float]) -> tuple[float, float]:
     return box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
 
 
-def hover_cost(page, cdp, points: list[tuple[float, float]]) -> float:
-    """Main-thread ms per move over ``MOVES`` pointer moves along ``points``."""
-    path = sweep(points, MOVES)
+def hover_cost(page, cdp, points: list[tuple[float, float]], moves: int = MOVES) -> float:
+    """Main-thread ms per move over ``moves`` pointer moves along ``points``."""
+    path = sweep(points, moves)
     page.mouse.move(*path[0])
     settle(page)
     before = task_seconds(cdp)
     for x, y in path:
         page.mouse.move(x, y)
     settle(page)
-    return (task_seconds(cdp) - before) * 1000.0 / MOVES
+    return (task_seconds(cdp) - before) * 1000.0 / moves
 
 
 def measure_legend(page, cdp) -> float:
@@ -196,6 +214,72 @@ def measure_cards(page, cdp) -> float | None:
     ).first.wait_for(state="detached")
     cards.first.scroll_into_view_if_needed()
     return hover_cost(page, cdp, [centre(card.bounding_box()) for card in cards.all()])
+
+
+def open_check(page, name: str) -> None:
+    """Open check ``name`` from the Assess list and wait until its plot is drawn."""
+    page.locator(f'#assessList [data-assess-entry="{name}"]').click()
+    page.locator(f'#checkPanel[data-report="{name}"]').wait_for(state="visible")
+    page.locator('#checkFrame[aria-busy="false"][data-freshness="current"] svg').first.wait_for(
+        state="visible"
+    )
+    settle(page)
+
+
+def plot_diagonal(page) -> list[tuple[float, float]]:
+    """Bottom left to top right of the part of the check's plot the frame shows, inset 5%."""
+    frame = page.locator("#checkFrame").bounding_box()
+    plot = page.locator("#checkFrame svg").first.bounding_box()
+    left, top = max(frame["x"], plot["x"]), max(frame["y"], plot["y"])
+    right = min(frame["x"] + frame["width"], plot["x"] + plot["width"])
+    bottom = min(frame["y"] + frame["height"], plot["y"] + plot["height"])
+    dx, dy = 0.05 * (right - left), 0.05 * (bottom - top)
+    return [(left + dx, bottom - dy), (right - dx, top + dy)]
+
+
+def measure_check(page, cdp) -> float | None:
+    """ms per move over ``MOVES`` moves: half over the Q-Q plot, half over A/E."""
+    if page.locator(f'[data-assess-entry="{CHECK_PLOTS[0]}"]').count() == 0:
+        return None
+    if page.locator("#assessView").is_hidden():
+        page.locator("#assessTab").click()
+    half = MOVES // len(CHECK_PLOTS)
+    costs = []
+    for name in CHECK_PLOTS:
+        open_check(page, name)
+        costs.append(hover_cost(page, cdp, plot_diagonal(page), moves=half))
+        page.mouse.move(0, 0)
+    return statistics.mean(costs)
+
+
+def measure_zoom(page, cdp) -> tuple[float | None, float | None]:
+    """ms per wheel step zooming the Q-Q plot in and out, and per move of a drag panning it."""
+    if page.locator(f'[data-assess-entry="{CHECK_PLOTS[0]}"]').count() == 0:
+        return None, None
+    if page.locator("#assessView").is_hidden():
+        page.locator("#assessTab").click()
+    open_check(page, CHECK_PLOTS[0])
+    if page.locator("#checkHome").count() == 0:
+        return None, None
+    x, y = centre(page.locator("#checkFrame svg").first.bounding_box())
+    # A click makes the plot the chart the wheel works on.
+    page.mouse.click(x, y)
+    settle(page)
+    before = task_seconds(cdp)
+    for step in range(WHEEL_STEPS):
+        page.mouse.wheel(0, -100 if step < WHEEL_STEPS // 2 else 100)
+        settle(page)
+    wheel = (task_seconds(cdp) - before) * 1000.0 / WHEEL_STEPS
+    for _ in range(PAN_ZOOM_STEPS):
+        page.mouse.wheel(0, -100)
+        settle(page)
+    page.mouse.move(x, y)
+    page.mouse.down()
+    pan = hover_cost(page, cdp, [(x - 60, y - 30), (x + 60, y + 30)], moves=PAN_MOVES)
+    page.mouse.up()
+    page.locator("#checkHome").click()
+    settle(page)
+    return wheel, pan
 
 
 def measure_switch(page, cdp) -> tuple[float, int]:
@@ -266,24 +350,45 @@ def open_page(browser, url: str):
     return page
 
 
-def run_once(browser, url: str, rate: float) -> dict[str, float | int | None]:
-    """One fresh page on ``url`` at CPU slowdown ``rate``: every scenario's cost."""
+@contextmanager
+def throttled(page, rate: float):
+    """A CDP session on ``page`` with metrics on and the CPU slowed by ``rate``."""
     with ExitStack() as resources:
-        page = open_page(browser, url)
         resources.callback(page.close)
         cdp = page.context.new_cdp_session(page)
         resources.callback(cdp.detach)
         cdp.send("Performance.enable")
         cdp.send("Emulation.setCPUThrottlingRate", {"rate": rate})
+        yield cdp
+        cdp.send("Emulation.setCPUThrottlingRate", {"rate": 1})
+
+
+def open_check_page(browser, url: str):
+    page = browser.new_page(viewport=VIEWPORT)
+    page.goto(f"{url}&test=1", wait_until="domcontentloaded")
+    page.locator("#chart path.edited").first.wait_for()
+    return page
+
+
+def run_once(browser, urls: dict[str, str], rate: float) -> dict[str, float | int | None]:
+    """Fresh pages on one tree's ``urls`` at CPU slowdown ``rate``: every scenario's cost."""
+    page = open_page(browser, urls["glm"])
+    with throttled(page, rate) as cdp:
         legend = measure_legend(page, cdp)
         cards = measure_cards(page, cdp)
         switch, reports = measure_switch(page, cdp)
         drag, drags = measure_drag(page, cdp)
-        cdp.send("Emulation.setCPUThrottlingRate", {"rate": 1})
+    page = open_check_page(browser, urls["check"])
+    with throttled(page, rate) as cdp:
+        check = measure_check(page, cdp)
+        zoom_wheel, zoom_pan = measure_zoom(page, cdp)
     return {
         "drag": drag,
         "legend": legend,
         "cards": cards,
+        "check": check,
+        "zoom_wheel": zoom_wheel,
+        "zoom_pan": zoom_pan,
         "switch": switch,
         "reports": reports,
         "drags": drags,
@@ -308,7 +413,9 @@ def _fmt(value: float | None) -> str:
     return MISSING if value is None else f"{value:.2f}"
 
 
-def table(results: dict[float, dict[str, list[dict]]], shas: dict[str, str], pairs: int) -> str:
+def table(
+    results: dict[float, dict[str, list[dict]]], shas: dict[str, str], pairs: int, check: str
+) -> str:
     lines = [
         "| Scenario | CPU | old ms/move | new ms/move | old-vs-old drift | budget 16.7 |",
         "|---|---|---|---|---|---|",
@@ -317,7 +424,7 @@ def table(results: dict[float, dict[str, list[dict]]], shas: dict[str, str], pai
         for rate, runs in results.items():
             old, new, again = runs["old"], runs["new"], runs["old again"]
             new_median = _median(new, key)
-            if unit != "ms/move":
+            if unit == "ms/switch":
                 within = "n/a, one click"
             elif new_median is None:
                 within = MISSING
@@ -345,7 +452,8 @@ def table(results: dict[float, dict[str, list[dict]]], shas: dict[str, str], pai
         "",
         f"Old tree {shas['old']}, new tree {shas['new']}, driver head {shas['head']}; "
         f"{pairs} old/new/old runs per CPU rate, {MOVES} moves per hover or drag, "
-        f"{SWITCHES} switches. Main-thread `TaskDuration` only, in headless Chromium's "
+        f"{SWITCHES} switches, {WHEEL_STEPS} wheel steps and a {PAN_MOVES}-move pan; "
+        f"the check plots on `{check}`. Main-thread `TaskDuration` only, in headless Chromium's "
         "software renderer: raster and GPU work are not measured."
         + ("" if drags == 0 else f" The cancelled drags still sent {drags} `/drag` requests."),
     ]
@@ -376,9 +484,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--rates", type=float, nargs="+", default=[1.0, 4.0], help="CPU slowdowns to run at"
     )
+    parser.add_argument(
+        "--check-bundle",
+        metavar="PATH",
+        help="a saved SuperLSS {model, train, validation, cv} bundle for the check plots",
+    )
     parser.add_argument("--out", metavar="PATH", help="also write the table here as Markdown")
     args = parser.parse_args(argv)
     trees = dict(args.tree)
+    sessions = {
+        "glm": ["poisson_cv_session"],
+        "check": (
+            ["bundle_session", str(Path(args.check_bundle).expanduser().resolve())]
+            if args.check_bundle
+            else ["pareto_lss_session"]
+        ),
+    }
     if set(trees) != {"old", "new"}:
         parser.error("give both --tree old=PATH and --tree new=PATH")
 
@@ -387,7 +508,13 @@ def main(argv: list[str] | None = None) -> int:
     shas = {name: head_sha(tree) for name, tree in trees.items()} | {"head": head_sha(HEAD)}
     results: dict[float, dict[str, list[dict]]] = {}
     with ExitStack() as resources:
-        urls = {name: resources.enter_context(serve(tree)) for name, tree in trees.items()}
+        urls = {
+            name: {
+                kind: resources.enter_context(serve(tree, session))
+                for kind, session in sessions.items()
+            }
+            for name, tree in trees.items()
+        }
         playwright = resources.enter_context(sync_playwright())
         browser = playwright.chromium.launch(headless=True)
         resources.callback(browser.close)
@@ -398,7 +525,7 @@ def main(argv: list[str] | None = None) -> int:
                     runs[side].append(run_once(browser, urls[tree], rate))
                 print(f"{rate:g}x: pair {pair + 1} of {args.pairs} done", file=sys.stderr)
             results[rate] = runs
-    text = table(results, shas, args.pairs)
+    text = table(results, shas, args.pairs, " ".join(sessions["check"]))
     print(text, end="")
     if args.out:
         out = Path(args.out).expanduser()

@@ -24,7 +24,8 @@ export const TOOL_HELP = Object.freeze({
   }),
   zoom: Object.freeze({
     title: "Zoom",
-    body: "Drag a box or use the mouse wheel to zoom. In other tools, hold Ctrl or Cmd with the wheel, or pinch.",
+    body: "Drag a box or use the mouse wheel to zoom. In other tools, click a chart and the wheel zooms it; click "
+      + "outside and the wheel scrolls the page. Ctrl or Cmd with the wheel, or a pinch, zooms at any time.",
     shortcut: "Z",
   }),
   handles: Object.freeze({
@@ -182,6 +183,53 @@ export const STRUCTURE_HELP = Object.freeze({
   }),
 });
 
+// Every check's Help ends with what orange means and which rows a check reads.
+const CHECKS_END = "Orange marks a check with something outside its band. Checks read the validation rows, "
+  + "else the training rows. On validation rows the band allows for the uncertainty in the fitted parameters, "
+  + "unless its split line says they are taken as exact; on the training rows it takes them as exact, so a "
+  + "validation split is the sharper test. On validation rows a flag also shows estimates too noisy for the "
+  + "rows they were fitted on.";
+// And how to zoom it, with the Editor chart's gestures.
+const CHECK_ZOOM = "Click the chart and the wheel zooms it; click outside and the wheel scrolls the page. Ctrl or "
+  + "Cmd with the wheel, or a pinch, zooms at any time. Shift and drag: zoom to a box. Drag: pan. Double-click or "
+  + "Home: reset.";
+
+/**
+ * Each check's Help, under its list label.
+ * @type {Readonly<Record<string, Readonly<HelpEntry>>>}
+ */
+export const CHECK_HELP = Object.freeze({
+  check_qq: Object.freeze({
+    title: "Q-Q plot",
+    body: "Each point is a sorted quantile residual against the value it would have if each row's predicted "
+      + "distribution were right. The band holds for every point at once, so a point outside is evidence that "
+      + "the model misses these rows. A curve above the band at the top end means larger values come more often "
+      + "than the model allows. Band: equal local levels (Aldor-Noiman et al. 2013; Weine, McPeek and Abney "
+      + `2023). ${CHECKS_END} ${CHECK_ZOOM}`,
+  }),
+  check_pit: Object.freeze({
+    title: "PIT histogram",
+    body: "Each observed value is placed at its own predicted distribution's cumulative probability, and the 20 "
+      + "bars count them. A model that fits gives flat bars. A hump means its predicted distributions are too "
+      + "wide, a U too narrow, a slope a shifted Mean, and one end alone a tail. The band holds for all 20 bars "
+      + `at once. ${CHECKS_END} ${CHECK_ZOOM}`,
+  }),
+  check_ae: Object.freeze({
+    title: "Actual over expected",
+    body: "Observed total over predicted total, for each band of predicted Mean and each group of every input. "
+      + "1 is on target. Each interval comes from the predicted distribution's own variance, and all of them "
+      + "hold at once, so a group outside its interval is evidence. With more inputs than the frame holds, the "
+      + "view runs past its foot, which fades; clicked, the wheel scrolls it, and Ctrl or Cmd with the wheel zooms "
+      + `it. ${CHECKS_END} ${CHECK_ZOOM}`,
+  }),
+  check_calibration: Object.freeze({
+    title: "Quantile calibration",
+    body: "For each predicted quantile, the share of rows above it against the share that should be. The 99% "
+      + "quantile should be exceeded by 1% of rows. The band is exact binomial and holds for all 11 quantiles "
+      + `at once. ${CHECKS_END} ${CHECK_ZOOM}`,
+  }),
+});
+
 /** @type {Readonly<Record<string, Readonly<HelpEntry>>>} */
 export const CONTROL_HELP = Object.freeze({
   level: Object.freeze({
@@ -195,6 +243,16 @@ export const CONTROL_HELP = Object.freeze({
   new_window: Object.freeze({
     title: "Open in new window",
     body: "Show this view in a second browser window, for another monitor. It follows every change made here.",
+  }),
+  compare_original: Object.freeze({
+    title: "Compare with the fit",
+    body: "Draws the model as fitted in grey beside the model as edited in blue, on every check. "
+      + "It changes only what is drawn.",
+  }),
+  highlight_outside: Object.freeze({
+    title: "Highlight outside the band",
+    body: "Colours the points, bars and groups that lie outside their band. The count on each card is the same "
+      + "either way.",
   }),
 });
 
@@ -345,7 +403,7 @@ export const HELP_SECTIONS = Object.freeze([
     title: "Navigation",
     items: Object.freeze([
       "Ctrl or Cmd with the mouse wheel, or a pinch: zoom",
-      "Mouse wheel alone: scrolls when there is more below the chart, otherwise zooms",
+      "Click a chart and the wheel zooms it; click outside and the wheel scrolls the page",
       "Shift-drag or middle-drag: pan",
       "Home: reset zoom",
     ]),
@@ -385,6 +443,16 @@ export const HELP_SECTIONS = Object.freeze([
       "Below 1086 pixels wide the list shows its icons only; hover over or focus one for its name.",
       `${CONTROL_HELP.new_window.title}: ${CONTROL_HELP.new_window.body}`,
       "Inside a notebook cell it is not offered: the page reaches Python through the notebook, which a second window cannot.",
+    ]),
+  }),
+  Object.freeze({
+    title: "Checks",
+    keys: Object.freeze([
+      "check_qq", "check_pit", "check_ae", "check_calibration", "compare_original", "highlight_outside",
+    ]),
+    items: Object.freeze([
+      "Hover over a check's plot to read out the nearest point. With the plot focused, the arrow keys step from point to point, + and - zoom about its middle, and 0 shows it whole.",
+      "Hover over or focus the icon by a check's title to read its entry here.",
     ]),
   }),
   Object.freeze({
@@ -438,8 +506,16 @@ export function helpForElement(element) {
     return OPERATION_HELP[operation];
   }
 
+  // A check's Help icon shows the check's own entry.
+  const check = element.dataset.helpCheck;
+  if (check && CHECK_HELP[check]) return CHECK_HELP[check];
+
+  // A disabled control's own reason outranks its help, as for tools.
   const control = element.dataset.helpControl;
-  if (control && CONTROL_HELP[control]) return CONTROL_HELP[control];
+  if (control && CONTROL_HELP[control]) {
+    const disabled = element.getAttribute("aria-disabled") === "true" || element.hasAttribute("disabled");
+    if (!(disabled && element.dataset.popoverBody)) return CONTROL_HELP[control];
+  }
 
   const title = element.dataset.popoverTitle;
   if (!title) return null;

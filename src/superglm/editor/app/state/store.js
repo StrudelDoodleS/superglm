@@ -1,5 +1,5 @@
 // @ts-check
-import { EVIDENCE_PANELS, REPORT_NAMES, createEmptyEvidenceState } from "../api/contracts.js";
+import { EVIDENCE_PANELS, REPORT_NAMES, REPORT_VIEWS, createEmptyEvidenceState } from "../api/contracts.js";
 import { defineMachine } from "./machine.js";
 import { createRiskProfiles } from "./risk.js";
 import { selectActiveTermName } from "./selectors.js";
@@ -27,6 +27,9 @@ export function createInitialEditorState(snapshot = null) {
       freeLevels: null,
       showFreeLevels: false,
       showUnsmoothed: false,
+      compareOriginal: false,
+      highlightOutside: false,
+      checkViewport: {},
       risks: createRiskProfiles(),
       unsmoothed: {},
       summaryLevelDisplay: "expanded",
@@ -239,7 +242,7 @@ function invalidatePriorEvidence(state, revision) {
  * Whether two snapshots wait for different changes. Undo and Redo of a
  * waiting change keep the model revision, so this is how a report that shows
  * the waiting list (the Cross-validation tab's chip and Run CV's reason)
- * learns it is out of date.
+ * learns it is out of date. A check reads only the model in force, so it stays.
  *
  * @param {EditorSnapshot|null} previous @param {EditorSnapshot} next
  */
@@ -339,7 +342,7 @@ export function commitRemote(state, snapshot) {
   const modelRequest = previousRevision !== undefined && previousRevision !== snapshot.model_revision
     ? invalidatePriorEvidence(state, snapshot.model_revision)
     : waitingListChanged(state.remote.snapshot, snapshot)
-      ? lapseReports(state).request
+      ? lapseReports(state, REPORT_VIEWS).request
       : state.request;
   // Whatever response carries it, a snapshot whose job results moved lapses the job reports.
   const request = jobResultsMoved(state.remote.snapshot, snapshot)
@@ -399,6 +402,8 @@ function describesSnapshot(snapshot, revision, inForce) {
 /**
  * What happens to an evidence panel. `ask` sends a request, which the panel then waits for;
  * `answer` and `fail` end the request they name by its `sequence` and by what it asked about;
+ * `defer` ends one the check lane gave away to another window's check while the page no longer
+ * shows the panel, which is asked again once it is shown;
  * `lapse` is a snapshot the panel no longer describes, by a new `revision` (a panel already at
  * that revision keeps its state) or, with none, by what moved at the same revision (a waiting
  * list, a finished job), which supersedes any request in flight; `install` puts in a
@@ -407,6 +412,7 @@ function describesSnapshot(snapshot, revision, inForce) {
  *     retry:{path:string, payload:Record<string, unknown>}}
  *   |{type:'answer', revision:number, inForce:string|null, sequence:number, payload:unknown}
  *   |{type:'fail', revision:number, sequence:number, error:unknown}
+ *   |{type:'defer', revision:number, sequence:number}
  *   |{type:'lapse', revision?:number}
  *   |{type:'install', revision:number, inForce:string|null, payload:unknown}} EvidenceEvent
  */
@@ -416,7 +422,9 @@ function describesSnapshot(snapshot, revision, inForce) {
  * that shows an earlier payload `stale` with that payload kept (`fail_kept`). An answer lands
  * only while the panel waits for it, `updating`, or after the snapshot moved under it, `stale`:
  * an edit and its undo put back the model it was asked about. A panel `current` from a
- * structural change's summary takes no answer from the request that change overtook.
+ * structural change's summary takes no answer from the request that change overtook. A request
+ * the check lane gave away is no failure: it is asked again while the page shows the panel, and
+ * `defer` leaves it `stale`, with nothing to Retry, once it does not.
  */
 export const EVIDENCE = defineMachine({
   name: "evidence",
@@ -425,7 +433,7 @@ export const EVIDENCE = defineMachine({
     idle: { ask: "updating", install: "current" },
     updating: {
       ask: "updating", answer: "current", fail: "error", fail_kept: "stale", lapse: "stale",
-      install: "current"
+      defer: "stale", install: "current"
     },
     current: { ask: "updating", lapse: "stale", install: "current" },
     stale: {
@@ -494,6 +502,11 @@ export function moveEvidence(evidence, event, snapshot) {
         return evidence;
       }
       return { ...evidence, status: target, error: String(event.error) };
+    case "defer":
+      if (event.sequence !== evidence.sequence || event.revision !== snapshot?.model_revision) {
+        return evidence;
+      }
+      return { ...evidence, status: target, error: null };
     case "lapse":
       if (event.revision !== undefined && evidence.revision === event.revision) return evidence;
       // At the same revision a request in flight was asked about what moved, so its answer is
@@ -567,4 +580,14 @@ export function completeEvidence(state, panel, revision, sequence, payload, inFo
  */
 export function failEvidence(state, panel, revision, sequence, error) {
   return movePanel(state, panel, { type: "fail", revision, sequence, error });
+}
+
+/**
+ * End the request `sequence`, which the check lane gave away, with nothing failed: the panel
+ * holds what it held, and is asked again once shown.
+ * @param {EditorState} state @param {EvidencePanel} panel
+ * @param {number} revision the revision the request was made at @param {number} sequence
+ */
+export function deferEvidence(state, panel, revision, sequence) {
+  return movePanel(state, panel, { type: "defer", revision, sequence });
 }

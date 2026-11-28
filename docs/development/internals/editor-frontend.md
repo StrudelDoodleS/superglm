@@ -39,9 +39,10 @@ asset.
 - semantic `model_revision` and manual-edit `edit_epoch`.
 
 `EditorWidget` in `src/superglm/editor/widget.py` owns the per-widget mutation lock, transition
-assembly, materialized edited-model publication, scalar evaluation cache, evidence coordinator, and
-local server lifetime. `payloads.py` converts confirmed session state into detached JSON-safe
-dictionaries.
+assembly, materialized edited-model publication, scalar evaluation cache, two evidence lanes — the
+Editor's (`_evidence`, for edit materialisation and scores) and one for check jobs
+(`_check_evidence`), so the Editor never waits behind a check — and local server lifetime.
+`payloads.py` converts confirmed session state into detached JSON-safe dictionaries.
 
 `session.py` keeps its public methods short and delegates to focused modules of module-level
 functions that take the session as their first argument:

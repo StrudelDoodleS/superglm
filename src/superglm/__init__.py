@@ -169,6 +169,15 @@ if _typing.TYPE_CHECKING:
     )
     from superglm.sklearn import SuperGLMClassifier, SuperGLMRegressor
     from superglm.solvers.irls_direct import StructuredSolverError
+    from superglm.stats.bands import (
+        UniformBand,
+        band_at_level,
+        binomial_cell_level,
+        bonferroni_binomial_band,
+        equal_local_levels_band,
+        monte_carlo_level,
+        order_statistic_level,
+    )
     from superglm.stats.davies import psum_chisq, satterthwaite
     from superglm.stats.model_tests import (
         DispersionTestResult,
@@ -331,6 +340,15 @@ _LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
     ),
     "superglm.sklearn": ("SuperGLMClassifier", "SuperGLMRegressor"),
     "superglm.solvers.irls_direct": ("StructuredSolverError",),
+    "superglm.stats.bands": (
+        "UniformBand",
+        "band_at_level",
+        "binomial_cell_level",
+        "bonferroni_binomial_band",
+        "equal_local_levels_band",
+        "monte_carlo_level",
+        "order_statistic_level",
+    ),
     "superglm.stats.davies": ("psum_chisq", "satterthwaite"),
     "superglm.stats.model_tests": (
         "DispersionTestResult",
@@ -594,6 +612,13 @@ __all__ = [
     "psum_chisq",
     "satterthwaite",
     "wood_test_smooth",
+    "UniformBand",
+    "band_at_level",
+    "binomial_cell_level",
+    "bonferroni_binomial_band",
+    "equal_local_levels_band",
+    "monte_carlo_level",
+    "order_statistic_level",
     "n_knots_from_k",
     "TermInference",
     "InteractionInference",

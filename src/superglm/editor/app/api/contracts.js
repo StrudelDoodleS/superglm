@@ -5,7 +5,9 @@
 /** @typedef {'chart'|'table'} TermView */
 /** @typedef {'idle'|'running'|'error'} MutationStatus */
 /** @typedef {'idle'|'updating'|'current'|'stale'|'error'} EvidenceStatus */
-/** @typedef {'validation'|'cv'|'final'|'diagnose'} ReportName */
+/** @typedef {'validation'|'cv'|'final'|'diagnose'} ReportView a report drawn by renderReport */
+/** @typedef {'check_pit'|'check_ae'|'check_calibration'|'check_qq'} CheckReport a check, drawn by its own view */
+/** @typedef {ReportView|CheckReport} ReportName every panel asked through /report */
 /** @typedef {'metrics'|'summary'|ReportName} EvidencePanel */
 /** @typedef {'expanded'|'grouped'} SummaryLevelDisplay */
 /**
@@ -479,6 +481,30 @@
  * @property {{min_log10:number, max_log10:number, clipped_below:boolean}|null} amount_axis
  */
 /**
+ * One model's answer to a check. An unavailable body carries only the first five fields, with
+ * `reason` saying why; an available one adds the check's own statistics.
+ * @typedef {{available:boolean, reason:string|null, flagged:boolean, outside:number, cells:number}
+ *   & Record<string, unknown>} CheckBody
+ */
+/**
+ * A check's /report payload: the model in force (`edited`) and, when it differs from the fit,
+ * the fitted model (`original`), both on `split`, which is null for a session with no rows to read.
+ * A request the check lane gave away to another check while its model is still in force is
+ * answered `{status:"displaced", model_revision, request_sequence, in_force}`, which the page asks
+ * again (state/actions.js).
+ * @typedef {Object} CheckPayload
+ * @property {CheckReport} report
+ * @property {boolean} available
+ * @property {string|null} reason
+ * @property {boolean} compares_edit
+ * @property {{name:string, label:string, n_obs:number, rows_id:number}|null} split `rows_id` names
+ *   its rows, which another set under the same name and size does not share
+ * @property {{edited:CheckBody, original:CheckBody|null}} models
+ * @property {number} [model_revision]
+ * @property {number|null} [request_sequence]
+ * @property {string|null} [in_force]
+ */
+/**
  * What Undo and Redo would take next, edits and structural steps alike; null
  * when there is nothing.
  * @typedef {Object} UndoRedo
@@ -509,6 +535,7 @@
  *   failed or cancelled: it moves when a job ends
  * @property {number} [fit_token] changes only when the fitted model in force is replaced
  * @property {Record<string, string>} [unavailable] SuperLSS sessions only: the reason for each session tool that is off
+ * @property {CheckReport[]} [checks] the checks the model's family supports; none for a SuperGLM
  */
 /**
  * @typedef {Object} StructuralTransitionTiming
@@ -564,6 +591,13 @@
  * @property {boolean} showFreeLevels Free levels is on; turned off, the comparison
  *   is kept, so turning it on again for the same term and fit draws it at once
  * @property {boolean} showUnsmoothed the Unsmoothed toggle, off until turned on
+ * @property {boolean} compareOriginal Compare with the fit: the checks draw the fitted model
+ *   beside the edited one; off until turned on
+ * @property {boolean} highlightOutside Highlight outside the band: the checks colour what left
+ *   its band; off until turned on, and it moves no count or flag
+ * @property {Partial<Record<CheckReport, import('../chart/check_zoom.js').Viewport>>} checkViewport
+ *   each zoomed check's viewport, kept for the session and drawn only on the rows it was made
+ *   on (chart/check_zoom.js); a check not in it is drawn whole
  * @property {RiskProfiles} risks the Explain tab's risks (SuperLSS sessions)
  * @property {Record<string, UnsmoothedEntry>} unsmoothed each term's latest line
  *   or refusal, drawn while its fit is the one in force
@@ -700,9 +734,19 @@
  * {ok:false, skipped?:boolean, error:Error}} StructuralActionResult
  */
 
-/** The reports, each with its own evidence, in the order the page lists them. */
-export const REPORT_NAMES = Object.freeze(
+/** The reports renderReport draws, in the order the page lists them. */
+export const REPORT_VIEWS = Object.freeze(
   /** @type {const} */ (["validation", "cv", "final", "diagnose"])
+);
+
+/** The checks, in the order the overview asks them: cheapest first. */
+export const CHECK_REPORTS = Object.freeze(
+  /** @type {const} */ (["check_pit", "check_ae", "check_calibration", "check_qq"])
+);
+
+/** Every panel asked through /report, each with its own evidence. */
+export const REPORT_NAMES = Object.freeze(
+  /** @type {const} */ ([...REPORT_VIEWS, ...CHECK_REPORTS])
 );
 
 export const EVIDENCE_PANELS = Object.freeze(
@@ -712,6 +756,16 @@ export const EVIDENCE_PANELS = Object.freeze(
 /** @param {unknown} value @returns {value is ReportName} */
 export function isReportName(value) {
   return typeof value === "string" && /** @type {readonly string[]} */ (REPORT_NAMES).includes(value);
+}
+
+/** @param {unknown} value @returns {value is ReportView} */
+export function isReportView(value) {
+  return typeof value === "string" && /** @type {readonly string[]} */ (REPORT_VIEWS).includes(value);
+}
+
+/** @param {unknown} value @returns {value is CheckReport} */
+export function isCheckReport(value) {
+  return typeof value === "string" && /** @type {readonly string[]} */ (CHECK_REPORTS).includes(value);
 }
 
 /** @returns {EvidenceState} */

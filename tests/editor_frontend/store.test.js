@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CHECK_REPORTS,
   EVIDENCE_PANELS,
   REPORT_NAMES,
+  REPORT_VIEWS,
   createEmptyEvidenceState
 } from "../../src/superglm/editor/app/api/contracts.js";
 import * as selectors from "../../src/superglm/editor/app/state/selectors.js";
@@ -39,6 +41,7 @@ const {
   selectVisibleEvidencePanels,
   selectModelRevision,
   selectMutation,
+  selectOfferedChecks,
   selectPendingSteps,
   selectRenderableTerm,
   selectReportNeedsAsk,
@@ -379,6 +382,7 @@ const EVIDENCE_EVENTS = /** @type {Record<string, EvidenceEvent>} */ ({
   answer: { type: "answer", revision: 3, inForce: "fit-a", sequence: 1, payload: { value: "new" } },
   fail: { type: "fail", revision: 3, sequence: 1, error: "offline" },
   fail_kept: { type: "fail", revision: 3, sequence: 1, error: "offline" },
+  defer: { type: "defer", revision: 3, sequence: 1 },
   lapse: { type: "lapse", revision: 4 },
   install: { type: "install", revision: 3, inForce: "fit-a", payload: { value: "installed" } }
 });
@@ -435,6 +439,9 @@ test("an evidence answer or failure about another request, model or revision mov
   // A failure lands only at the revision it was asked at, even with its model back in force.
   assert.strictEqual(moveEvidence(updating, failure, undone), updating);
   assert.strictEqual(moveEvidence(updating, { ...failure, sequence: 0 }, snapshot(3)), updating);
+  // So does a request the check lane gave away.
+  assert.strictEqual(moveEvidence(updating, { type: "defer", revision: 3, sequence: 0 }, snapshot(3)), updating);
+  assert.strictEqual(moveEvidence(updating, { type: "defer", revision: 3, sequence: 1 }, later), updating);
   assert.equal(moveEvidence(updating, failure, snapshot(3)).status, "stale");
   // A panel already at the new revision does not lapse.
   assert.strictEqual(moveEvidence(updating, { type: "lapse", revision: 3 }, snapshot(3)), updating);
@@ -476,11 +483,12 @@ test("a change to the waiting list at one revision marks only the reports stale"
 
   const committed = commitRemote(state, waiting);
 
-  for (const name of REPORT_NAMES) {
+  for (const name of REPORT_VIEWS) {
     assert.equal(committed.request.evidence[name].status, "stale");
     assert.equal(selectEvidenceNeedsRefresh(committed, name), true);
   }
-  for (const panel of /** @type {EvidencePanel[]} */ (["metrics", "summary"])) {
+  // A check reads only the model in force, which a waiting change leaves as it was.
+  for (const panel of /** @type {EvidencePanel[]} */ (["metrics", "summary", ...CHECK_REPORTS])) {
     assert.equal(committed.request.evidence[panel].status, "current");
   }
   // The same waiting list again leaves the report as it is.
@@ -489,7 +497,7 @@ test("a change to the waiting list at one revision marks only the reports stale"
     { ...waiting }
   );
   assert.deepEqual(REPORT_NAMES.map((name) => again.request.evidence[name].status),
-    ["current", "current", "current", "current"]);
+    REPORT_NAMES.map(() => "current"));
 });
 
 const RETRY = { path: "/report", payload: {} };
@@ -515,7 +523,7 @@ test("each report keeps its own evidence, and a new revision lapses each", () =>
   );
   const next = commitRemote(state, snapshot(1));
   assert.deepEqual(REPORT_NAMES.map((name) => next.request.evidence[name].status),
-    ["stale", "stale", "idle", "idle"]);
+    ["stale", "stale", "idle", "idle", "idle", "idle", "idle", "idle"]);
 });
 
 test("a finished job lapses Cross-validation, Final fit and Smoothing search", () => {
@@ -523,7 +531,7 @@ test("a finished job lapses Cross-validation, Final fit and Smoothing search", (
   REPORT_NAMES.forEach((name, i) => { state = answered(state, name, 0, i + 1); });
   const lapsed = lapseReports(state, ["cv", "final", "diagnose"]);
   assert.deepEqual(REPORT_NAMES.map((name) => lapsed.request.evidence[name].status),
-    ["current", "stale", "stale", "stale"]);
+    ["current", "stale", "stale", "stale", "current", "current", "current", "current"]);
   assert.equal(lapseReports(state, []), state);
 });
 
@@ -851,6 +859,7 @@ test("state modules expose only their requested public symbols", () => {
     "completeEvidence",
     "createEditorStore",
     "createInitialEditorState",
+    "deferEvidence",
     "failEvidence",
     "jobResultsKey",
     "jobResultsMoved",
@@ -872,6 +881,7 @@ test("state modules expose only their requested public symbols", () => {
     "selectGroupDisplayMode",
     "selectModelRevision",
     "selectMutation",
+    "selectOfferedChecks",
     "selectPendingSteps",
     "selectRenderableTerm",
     "selectReportNeedsAsk",
@@ -914,4 +924,48 @@ test("an evidence panel whose tool the session does not offer is never requested
   const onlySummary = createInitialEditorState({ ...offered, unavailable: { summary: "No summary here." } });
   assert.deepEqual(selectVisibleEvidencePanels(onlySummary), ["metrics"]);
   assert.deepEqual(selectVisibleEvidencePanels(patchView(state, { activeView: "validation" })), ["validation"]);
+});
+
+/**
+ * `state` with each of `names` answered for its model.
+ * @param {EditorState} state
+ * @param {readonly import('../../src/superglm/editor/app/api/contracts.js').ReportName[]} names
+ */
+function withCurrentEvidence(state, names) {
+  const revision = state.remote.snapshot?.model_revision ?? 0;
+  return names.reduce((next, name, i) => answered(next, name, revision, i + 1), state);
+}
+
+test("a waiting change lapses the report views and leaves each check current", () => {
+  const state = withCurrentEvidence(createInitialEditorState(snapshot()), ["cv", "check_qq"]);
+  const next = commitRemote(state, {
+    ...snapshot(),
+    pending: [{ id: "s1", operation: "collapse", term: "x", label: "Collapse", params: {}, note: null, time: 0 }]
+  });
+  assert.equal(next.request.evidence.cv.status, "stale");
+  assert.equal(next.request.evidence.check_qq.status, "current");
+  // A new model lapses the checks as well.
+  assert.equal(commitRemote(state, snapshot(1)).request.evidence.check_qq.status, "stale");
+});
+
+test("an open check asks its own report, and the overview its offered checks", () => {
+  const state = { ...createInitialEditorState({ ...snapshot(), checks: ["check_qq", "check_ae"] }) };
+  assert.deepEqual(selectVisibleEvidencePanels(patchView(state, { activeView: "check_ae" })), ["check_ae"]);
+  assert.deepEqual(selectVisibleEvidencePanels(patchView(state, { activeView: "assess" })),
+    ["validation", "cv", "diagnose", "check_ae", "check_qq"]);
+  assert.equal(state.view.compareOriginal, false);
+  assert.equal(state.view.highlightOutside, false);
+});
+
+test("the offered checks are the snapshot's, and none before a snapshot or for a SuperGLM", () => {
+  const offered = createInitialEditorState({ ...snapshot(), checks: ["check_pit", "check_qq"] });
+  assert.deepEqual(selectOfferedChecks(offered), ["check_pit", "check_qq"]);
+  assert.strictEqual(selectOfferedChecks(offered), selectOfferedChecks(offered));
+  assert.deepEqual(selectOfferedChecks(createInitialEditorState(snapshot())), []);
+  assert.deepEqual(selectOfferedChecks(createInitialEditorState()), []);
+  // A name this page does not know is not a check it can ask.
+  const unknown = createInitialEditorState({ ...snapshot(), checks: /** @type {any} */ (["check_qq", "check_new"]) });
+  assert.deepEqual(selectOfferedChecks(unknown), ["check_qq"]);
+  assert.deepEqual(selectVisibleEvidencePanels(patchView(createInitialEditorState(snapshot()), { activeView: "assess" })),
+    ["validation", "cv", "diagnose"]);
 });

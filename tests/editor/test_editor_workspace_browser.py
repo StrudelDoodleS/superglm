@@ -192,8 +192,14 @@ def test_selection_noop_empty_box_preserves_chart_without_posting(open_editor_pa
         assert selection_dom_is_unchanged(page)
         assert {mutation["type"] for mutation in mutations} >= {"added", "removed"}
         # Only the brush comes and goes; the lens that shows the points near
-        # the pointer toggles a class on circles that are already drawn.
-        assert {mutation["className"] for mutation in mutations} <= {"brush", "point", "point near"}
+        # the pointer toggles a class on circles that are already drawn, and the
+        # press makes the chart the one the wheel works on, which marks the chart.
+        assert {mutation["className"] for mutation in mutations} <= {
+            "brush",
+            "point",
+            "point near",
+            "is-wheel-active",
+        }
         assert {
             mutation["className"] for mutation in mutations if mutation["type"] != "attribute"
         } == {"brush"}
@@ -1303,6 +1309,8 @@ def test_a_zoom_leaves_out_the_hidden_points_until_the_wheel_rests(open_editor_p
         page.locator("#chart .point-layer[data-dense='true']").wait_for(state="attached")
         points = "document.querySelectorAll('#chart circle.point').length"
         drawn = page.evaluate(points)
+        # A click in the chart's corner makes it the chart a plain wheel zooms.
+        page.locator("#chart").click(position={"x": 4, "y": 4})
         chart = page.locator("#chart").bounding_box()
         page.mouse.move(chart["x"] + chart["width"] / 2, chart["y"] + chart["height"] / 2)
         page.mouse.wheel(0, -100)
