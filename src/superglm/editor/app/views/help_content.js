@@ -217,7 +217,9 @@ export const CHECK_HELP = Object.freeze({
     title: "Actual over expected",
     body: "Observed total over predicted total, for each band of predicted Mean and each group of every input. "
       + "1 is on target. Each interval comes from the predicted distribution's own variance, and all of them "
-      + `hold at once, so a group outside its interval is evidence. ${CHECKS_END} ${CHECK_ZOOM}`,
+      + "hold at once, so a group outside its interval is evidence. With more inputs than the frame holds, the "
+      + "view runs past its foot, which fades; clicked, the wheel scrolls it, and Ctrl or Cmd with the wheel zooms "
+      + `it. ${CHECKS_END} ${CHECK_ZOOM}`,
   }),
   check_calibration: Object.freeze({
     title: "Quantile calibration",

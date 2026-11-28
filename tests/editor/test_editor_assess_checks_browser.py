@@ -1059,7 +1059,8 @@ def test_the_keys_zoom_a_focused_check_and_0_shows_it_whole(checks_page):
 
 def test_a_tall_check_scrolls_its_frame_only_while_active(chromium_browser):
     """At 640 px high six A/E panels scroll in their frame: a plain wheel scrolls the frame only
-    once it is clicked, and Ctrl with the wheel zooms it."""
+    once it is clicked, and Ctrl with the wheel zooms it. Before it is clicked, its foot fades,
+    which shows there is more below; clicked, its scrollbar shows it instead."""
     widget = _many_inputs_session().widget()
     try:
         page = chromium_browser.new_page(viewport={"width": 1278, "height": 640})
@@ -1069,6 +1070,8 @@ def test_a_tall_check_scrolls_its_frame_only_while_active(chromium_browser):
             _open_check(page, "check_ae")
             frame = page.locator("#checkFrame")
             assert frame.evaluate("f => f.scrollHeight > f.clientHeight")
+            assert frame.get_attribute("data-overflow") == "below"
+            assert frame.evaluate("f => getComputedStyle(f).maskImage") != "none"
             box = frame.bounding_box()
             page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
             page.mouse.wheel(0, 200)
@@ -1077,8 +1080,13 @@ def test_a_tall_check_scrolls_its_frame_only_while_active(chromium_browser):
             )
             assert frame.evaluate("f => f.scrollTop") == 0
             page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            assert frame.evaluate("f => getComputedStyle(f).maskImage") == "none"
             page.mouse.wheel(0, 200)
             page.wait_for_function("() => document.getElementById('checkFrame').scrollTop > 0")
+            # Scrolled, the frame says it has more of its plot above.
+            page.wait_for_function(
+                "() => (document.getElementById('checkFrame').dataset.overflow || '').includes('above')"
+            )
             assert page.evaluate(_ZOOM) == {}
             before = page.evaluate(_TICKS)[1]
             assert page.evaluate(_CHECK_WHEEL, [True, -100]) is True

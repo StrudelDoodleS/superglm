@@ -200,3 +200,22 @@ test("opening another check lets the wheel go, and the same check drawn again ke
   assert.ok(!m.focus.isActive(m.frame), "a closed check lets it go");
   m.drawing.destroy();
 });
+
+test("a frame whose plot runs past an edge says which, as it scrolls and as it is drawn again", () => {
+  const m = mounted({ height: 200 });
+  m.draw("check_ae");
+  assert.ok(m.scene().height > 200);
+  assert.equal(m.frame.dataset.overflow, "below");
+  m.dom.scrollTo(80);
+  assert.equal(m.frame.dataset.overflow, "above below");
+  m.dom.scrollTo(m.frame.scrollHeight - 200);
+  assert.equal(m.frame.dataset.overflow, "above");
+  // A plot that fits the frame says nothing, nor does a message.
+  m.draw("check_qq", { width: 820, height: 200 });
+  assert.equal(m.frame.dataset.overflow, undefined);
+  m.draw("check_ae", { width: 820, height: 200 });
+  assert.equal(m.frame.dataset.overflow, "below");
+  m.drawing.draw("check_ae", null, { ...VIEW, width: 820, height: 200 });
+  assert.equal(m.frame.dataset.overflow, undefined);
+  m.drawing.destroy();
+});

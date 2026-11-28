@@ -7,6 +7,10 @@
  * the readout hears that the same check was drawn again, or that it was closed or another opened
  * (assess_check.js); and the wheel focus hears which check the frame now draws (chart_focus.js).
  * A zoom draws the same plot again in place, which keeps the gesture making it.
+ *
+ * A frame whose plot runs past its foot, or was scrolled down, says so: `data-overflow` names
+ * the edges with more of the plot beyond them, which an inactive frame, one the wheel does not
+ * scroll, fades (assess.css).
  */
 
 import { defineMachine } from "../state/machine.js";
@@ -87,12 +91,24 @@ export function bindCheckDrawing(nodes, { focus, onZoom }) {
     const report = value.state === "closed" ? null : value.report;
     if (event !== "zoom") {
       gestures.cancel();
+      markOverflow();
       focus.drawn(frame, report);
     }
     if (before.state !== "closed" && before.report === report) readout.redraw();
     else readout.close();
   }
 
+  // The edges of the frame with more of the plot beyond them, on the frame. Its one writer.
+  function markOverflow() {
+    const above = drawing.state === "plot" && frame.scrollTop > 0;
+    const below = drawing.state === "plot" && frame.scrollTop + frame.clientHeight < frame.scrollHeight - 1;
+    const value = above && below ? "above below" : above ? "above" : below ? "below" : "";
+    if ((frame.dataset.overflow ?? "") === value) return;
+    if (value) frame.dataset.overflow = value;
+    else delete frame.dataset.overflow;
+  }
+
+  frame.addEventListener("scroll", markOverflow, { passive: true });
   return {
     draw(report, payload, options) {
       const drawn = renderCheckView(nodes, report, payload, options);
@@ -114,6 +130,7 @@ export function bindCheckDrawing(nodes, { focus, onZoom }) {
     reset: gestures.reset,
     cancel: gestures.cancel,
     destroy() {
+      frame.removeEventListener("scroll", markOverflow);
       gestures.destroy();
       readout.destroy();
     },

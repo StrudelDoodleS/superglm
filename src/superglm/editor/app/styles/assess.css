@@ -380,6 +380,24 @@
   overflow-y: auto;
 }
 
+/* An inactive frame with more of its plot beyond an edge fades at that edge, so it shows there
+   is more to scroll to before it takes the wheel (views/check_drawing.js); the active frame's
+   scrollbar says so itself. */
+.check-frame:not(.is-wheel-active)[data-overflow="below"] {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 36px), rgb(0 0 0 / 0.15));
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 36px), rgb(0 0 0 / 0.15));
+}
+
+.check-frame:not(.is-wheel-active)[data-overflow="above"] {
+  -webkit-mask-image: linear-gradient(to top, #000 calc(100% - 36px), rgb(0 0 0 / 0.15));
+  mask-image: linear-gradient(to top, #000 calc(100% - 36px), rgb(0 0 0 / 0.15));
+}
+
+.check-frame:not(.is-wheel-active)[data-overflow="above below"] {
+  -webkit-mask-image: linear-gradient(to bottom, rgb(0 0 0 / 0.15), #000 36px, #000 calc(100% - 36px), rgb(0 0 0 / 0.15));
+  mask-image: linear-gradient(to bottom, rgb(0 0 0 / 0.15), #000 36px, #000 calc(100% - 36px), rgb(0 0 0 / 0.15));
+}
+
 /* The point the keys stepped to, said to a screen reader alone (views/assess_check.js). */
 .check-readout-live {
   position: absolute;

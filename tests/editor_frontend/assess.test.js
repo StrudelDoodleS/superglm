@@ -140,7 +140,8 @@ test("each check has its Help entry ending the same way, and each switch its own
       + "and one end alone a tail. The band holds for all 20 bars at once.",
     check_ae: "Observed total over predicted total, for each band of predicted Mean and each group of every input. 1 is on target. "
       + "Each interval comes from the predicted distribution's own variance, and all of them hold at once, so a group outside its "
-      + "interval is evidence.",
+      + "interval is evidence. With more inputs than the frame holds, the view runs past its foot, which fades; clicked, the "
+      + "wheel scrolls it, and Ctrl or Cmd with the wheel zooms it.",
     check_calibration: "For each predicted quantile, the share of rows above it against the share that should be. "
       + "The 99% quantile should be exceeded by 1% of rows. The band is exact binomial and holds for all 11 quantiles at once.",
     compare_original: "Draws the model as fitted in grey beside the model as edited in blue, on every check. It changes only what is drawn.",
