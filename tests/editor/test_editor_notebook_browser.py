@@ -442,5 +442,9 @@ def test_assess_offers_no_second_window_in_a_notebook_cell(
     with _notebook_editor(chromium_browser, curve_session, monkeypatch) as (_page, frame, _w, _v):
         frame.locator("#assessTab").click()
         frame.locator("#assessOverview").wait_for()
-        assert frame.locator("[data-assess-window]").count() == 2
+        # Open in new window sits on the overview, the report view and the check view; a
+        # notebook cell hides each one, whether its view is open or not.
+        assert frame.locator("[data-assess-window]").count() == 3
+        assert frame.locator("[data-assess-window][hidden]").count() == 3
+        assert frame.locator("#checkPanel [data-assess-window][hidden]").count() == 1
         assert frame.locator("[data-assess-window]:visible").count() == 0
