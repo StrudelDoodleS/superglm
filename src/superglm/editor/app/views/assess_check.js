@@ -30,7 +30,11 @@ import { defineMachine } from "../state/machine.js";
  *   frame:HTMLElement, live?:HTMLElement|null}} CheckNodes
  */
 /** @typedef {{value: string, note: string, flagged: boolean}} CheckFace */
-/** @typedef {{live: boolean, checked: boolean, body: string}} CompareSwitch */
+/**
+ * Compare with the fit's control: whether it can be turned, whether it is on, and its help.
+ * @typedef {'hidden'|'asFitted'|'waitingForComparison'|'comparisonUnavailable'|'ready'} CompareState
+ * @typedef {{state: CompareState, disabled: boolean, checked: boolean, body: string}} CompareSwitch
+ */
 
 const MISSING = "—";
 /** A card's thumbnail box, which `.assess-card-plot` holds at this size. */
@@ -38,6 +42,24 @@ export const THUMB_BOX = Object.freeze({ width: 160, height: 62, thumb: true });
 const NO_EDIT = "The model is as fitted; there is no edit to compare.";
 const COMPARES = "Draws the model as fitted in grey beside the model as edited in blue, on every check. "
   + "It changes only what is drawn.";
+/**
+ * Each state of Compare with the fit, with whether it is disabled and its help, together: hidden
+ * where no check is offered; as fitted where the model in force is the fit; waiting while the
+ * edited model's checks are still being asked; unavailable where none of them has the fit to
+ * draw beside the edit, failed included; and ready.
+ * @type {Readonly<Record<CompareState, Readonly<{disabled: boolean, body: string}>>>}
+ */
+export const COMPARE_CONTROL = Object.freeze({
+  hidden: Object.freeze({ disabled: true, body: COMPARES }),
+  asFitted: Object.freeze({ disabled: true, body: NO_EDIT }),
+  waitingForComparison: Object.freeze({
+    disabled: true, body: "Waiting for the edited model's answer; the comparison is ready once it has loaded.",
+  }),
+  comparisonUnavailable: Object.freeze({
+    disabled: true, body: "No check shown has the model as fitted to draw beside the edit.",
+  }),
+  ready: Object.freeze({ disabled: false, body: COMPARES }),
+});
 
 /** @param {unknown} value a ratio, to 2 decimals */
 const ratioText = (value) => (typeof value === "number" && Number.isFinite(value) ? value.toFixed(2) : MISSING);
@@ -148,27 +170,47 @@ export function differsFromFit(snapshot) {
 }
 
 /**
- * Compare with the fit: live while the model in force differs from the fit and an offered check
- * has the fitted model beside it, and on when the analyst turned it on while it is live. A payload
- * kept from an edit since undone draws no fit. Its popover says what it draws, or why it is off.
+ * Whether `payload` draws the fit beside the edit: it compares an edit, and both models have an
+ * answer.
+ * @param {CheckPayload|null} payload
+ */
+const comparable = (payload) => Boolean(payload?.compares_edit && answered(payload) && payload.models.original?.available);
+
+/**
+ * Whether a check's evidence is still to be answered: never asked, being asked, or lapsed with
+ * nothing failed, which the page asks again.
+ * @param {EvidenceState} evidence
+ */
+const stillAsked = ({ status, error }) => status === "idle" || status === "updating" || (status === "stale" && error === null);
+
+/**
+ * Compare with the fit, derived from the snapshot and the offered checks' evidence
+ * (`COMPARE_CONTROL`): ready while the model in force differs from the fit and an offered check
+ * draws the fit beside it, and on when the analyst turned it on while ready. A payload kept from
+ * an edit since undone draws no fit. The on/off preference is the store's alone.
  * @param {Readonly<Record<CheckReport, EvidenceState>>} evidence @param {readonly CheckReport[]} offered
  * @param {boolean} compareOriginal @param {EditorSnapshot|null} snapshot
  * @returns {CompareSwitch}
  */
 export function compareSwitch(evidence, offered, compareOriginal, snapshot) {
-  const live = differsFromFit(snapshot) && offered.some((name) => Boolean(checkPayload(evidence[name])?.compares_edit));
-  return { live, checked: live && compareOriginal, body: live ? COMPARES : NO_EDIT };
+  /** @type {CompareState} */
+  let state = "comparisonUnavailable";
+  if (offered.length === 0) state = "hidden";
+  else if (!differsFromFit(snapshot)) state = "asFitted";
+  else if (offered.some((name) => comparable(checkPayload(evidence[name])))) state = "ready";
+  else if (offered.some((name) => stillAsked(evidence[name]))) state = "waitingForComparison";
+  return { state, ...COMPARE_CONTROL[state], checked: state === "ready" && compareOriginal };
 }
 
 /**
- * Write the switch's state onto its button; a model that offers no check hides it.
- * @param {HTMLElement} button @param {CompareSwitch} state @param {boolean} shown
+ * Write the switch's state onto its button: hidden, disabled, on, and its help.
+ * @param {HTMLElement} button @param {CompareSwitch} control
  */
-export function renderCompareSwitch(button, state, shown) {
-  button.hidden = !shown;
-  button.setAttribute("aria-checked", String(state.checked));
-  button.setAttribute("aria-disabled", String(!state.live));
-  button.dataset.popoverBody = state.body;
+export function renderCompareSwitch(button, control) {
+  button.hidden = control.state === "hidden";
+  button.setAttribute("aria-checked", String(control.checked));
+  button.setAttribute("aria-disabled", String(control.disabled));
+  button.dataset.popoverBody = control.body;
 }
 
 /**

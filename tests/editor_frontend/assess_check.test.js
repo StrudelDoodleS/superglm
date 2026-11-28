@@ -10,6 +10,7 @@ import { createInitialEditorState } from "../../src/superglm/editor/app/state/st
 import { checkScene, nearestMark } from "../../src/superglm/editor/app/chart/check_plots.js";
 import {
   CHECK_READOUT,
+  COMPARE_CONTROL,
   bindCheckHover,
   checkFace,
   compareSwitch,
@@ -109,28 +110,68 @@ function editedSnapshot() {
   return { ...held, terms: { x: { ...held.terms.x, edited: true } } };
 }
 
-test("Compare with the fit is live only when an offered check compares an edit", () => {
+const COMPARES = "Draws the model as fitted in grey beside the model as edited in blue, on every check. "
+  + "It changes only what is drawn.";
+
+test("Compare with the fit is ready only when an offered check draws the fit beside an edit", () => {
   const calm = compareSwitch(evidenceFrom(FIXTURE.calm), CHECK_REPORTS, true, snapshot());
-  assert.deepEqual(calm, { live: false, checked: false, body: "The model is as fitted; there is no edit to compare." });
+  assert.deepEqual(calm,
+    { state: "asFitted", disabled: true, checked: false, body: "The model is as fitted; there is no edit to compare." });
   const edited = evidenceFrom(FIXTURE.edited);
-  assert.deepEqual(compareSwitch(edited, CHECK_REPORTS, false, editedSnapshot()), {
-    live: true, checked: false,
-    body: "Draws the model as fitted in grey beside the model as edited in blue, on every check. It changes only what is drawn."
-  });
+  assert.deepEqual(compareSwitch(edited, CHECK_REPORTS, false, editedSnapshot()),
+    { state: "ready", disabled: false, checked: false, body: COMPARES });
   assert.equal(compareSwitch(edited, CHECK_REPORTS, true, editedSnapshot()).checked, true);
   // A model a structural step replaced differs from the fit with no hand edit.
-  assert.equal(compareSwitch(edited, CHECK_REPORTS, true, { ...snapshot(), in_force_is_original: false }).live, true);
-  // A model offering no checks has nothing to compare, whatever the evidence holds.
-  assert.equal(compareSwitch(edited, [], true, editedSnapshot()).live, false);
-  assert.deepEqual(neutralCopy(compareSwitch(edited, CHECK_REPORTS, true, editedSnapshot()).body), []);
+  assert.equal(compareSwitch(edited, CHECK_REPORTS, true, { ...snapshot(), in_force_is_original: false }).state, "ready");
+  // A model offering no checks hides the switch, whatever the evidence holds.
+  assert.equal(compareSwitch(edited, [], true, editedSnapshot()).state, "hidden");
+  for (const evidence of [edited, evidenceFrom(FIXTURE.calm)]) {
+    assert.deepEqual(neutralCopy(compareSwitch(evidence, CHECK_REPORTS, true, editedSnapshot()).body), []);
+  }
 });
 
 test("after Undo, Compare is off while the checks still hold the edited model's payloads", () => {
   // The model in force is the fit again; the evidence kept from the edit still draws the fit.
   const kept = evidenceFrom(FIXTURE.edited);
   assert.deepEqual(compareSwitch(kept, CHECK_REPORTS, true, snapshot()),
-    { live: false, checked: false, body: "The model is as fitted; there is no edit to compare." });
-  assert.equal(compareSwitch(kept, CHECK_REPORTS, true, null).live, false);
+    { state: "asFitted", disabled: true, checked: false, body: "The model is as fitted; there is no edit to compare." });
+  assert.equal(compareSwitch(kept, CHECK_REPORTS, true, null).state, "asFitted");
+});
+
+test("right after an edit, Compare waits for the edited model's check instead of saying there is no edit", () => {
+  // The check holds its answer for the model as fitted while it is asked again for the edit.
+  const asked = Object.fromEntries(Object.entries(evidenceFrom(FIXTURE.calm)).map(([name, evidence]) =>
+    [name, CHECK_REPORTS.includes(name) ? { ...evidence, status: "updating" } : evidence]));
+  const waiting = compareSwitch(asked, ["check_qq"], true, editedSnapshot());
+  assert.equal(waiting.state, "waitingForComparison");
+  assert.equal(waiting.disabled, true);
+  assert.equal(waiting.checked, false);
+  assert.notEqual(waiting.body, "The model is as fitted; there is no edit to compare.");
+  // A check never answered yet waits too; one lapsed and not yet asked again as well.
+  const empty = createInitialEditorState(snapshot()).request.evidence;
+  assert.equal(compareSwitch(empty, ["check_qq"], true, editedSnapshot()).state, "waitingForComparison");
+  const lapsed = { ...asked, check_qq: { ...asked.check_qq, status: "stale", error: null } };
+  assert.equal(compareSwitch(lapsed, ["check_qq"], true, editedSnapshot()).state, "waitingForComparison");
+});
+
+test("Compare says there is no comparison when the edit's check failed or the fit has no answer", () => {
+  const calm = evidenceFrom(FIXTURE.calm);
+  const failed = { ...calm, check_qq: { ...calm.check_qq, status: "stale", error: "offline" } };
+  const unavailable = compareSwitch(failed, ["check_qq"], true, editedSnapshot());
+  assert.equal(unavailable.state, "comparisonUnavailable");
+  assert.equal(unavailable.disabled, true);
+  // `compares_edit` alone is no comparison: the fitted model must have an answer to draw.
+  const edited = evidenceFrom(FIXTURE.edited);
+  const qq = FIXTURE.edited.check_qq;
+  const noFit = { ...qq, models: { ...qq.models, original: { ...qq.models.original, available: false, reason: "No rows." } } };
+  const answered = { ...edited, check_qq: { ...edited.check_qq, payload: noFit } };
+  assert.equal(compareSwitch(answered, ["check_qq"], true, editedSnapshot()).state, "comparisonUnavailable");
+  const bodies = new Set(["hidden", "asFitted", "waitingForComparison", "comparisonUnavailable", "ready"]
+    .map((state) => COMPARE_CONTROL[state].body));
+  assert.equal(bodies.size, 4);
+  for (const [state, control] of Object.entries(COMPARE_CONTROL)) {
+    assert.equal(control.disabled, state !== "ready", state);
+  }
 });
 
 const VIEW = { compare: false, highlight: true, width: 820, height: 520 };

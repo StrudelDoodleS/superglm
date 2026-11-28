@@ -1295,7 +1295,7 @@ function renderOverview() {
   const offered = selectOfferedChecks(state);
   const evidence = state.request.evidence;
   const compare = compareSwitch(evidence, offered, state.view.compareOriginal, state.remote.snapshot);
-  renderCompareSwitch(overviewCompare, compare, offered.length > 0);
+  renderCompareSwitch(overviewCompare, compare);
   const highlight = state.view.highlightOutside;
   renderHighlightSwitch(overviewHighlight, highlight, offered.length > 0);
   drawOverview(assessCards, overviewGroups(evidence, { offered, compare: compare.checked, highlight }));
@@ -1324,7 +1324,7 @@ function renderCheckPanel() {
   const shown = selectOfferedChecks(state).includes(activeView) ? [activeView] : [];
   const evidence = state.request.evidence[activeView];
   const compare = compareSwitch(state.request.evidence, shown, state.view.compareOriginal, state.remote.snapshot);
-  renderCompareSwitch(checkCompare, compare, shown.length > 0);
+  renderCompareSwitch(checkCompare, compare);
   const highlight = state.view.highlightOutside;
   renderHighlightSwitch(checkHighlight, highlight, shown.length > 0);
   checkHome.hidden = shown.length === 0;

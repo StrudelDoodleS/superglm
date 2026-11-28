@@ -83,6 +83,7 @@ _WATCH_FRAME = """() => {
     { subtree: true, attributes: true, childList: true, characterData: true });
 }"""
 _NO_EDIT = "The model is as fitted; there is no edit to compare."
+_WAITING = "Waiting for the edited model's answer; the comparison is ready once it has loaded."
 
 
 def _calm_session():
@@ -512,6 +513,34 @@ def test_compare_draws_the_fit_without_asking_python(checks_page, choose_feature
         assert page.locator("#checkFrame path.check-original").count() == 0
         assert page.locator("#checkLegend").is_hidden()
         assert asked == []
+
+
+def test_compare_waits_for_the_edited_models_check_after_an_edit(checks_page, choose_feature):
+    """Right after an edit, while the open check is asked again about it, Compare is off and
+    its popover says the edit's answer is loading, not that there is no edit; once the answer
+    lands it is live. Fails on the unfixed page, whose popover said the model is as fitted.
+    """
+    with checks_page() as page:
+        _open_check(page, "check_ae")
+        held = hold_requests(page, "**/report")
+        _average_mean_x(page, choose_feature)
+        # The overview's first report is held, and the check waits its turn behind it.
+        page.locator("#assessTab").click()
+        held.wait(1)
+        page.locator('#assessList [data-assess-entry="check_ae"]').click()
+        page.locator('#checkPanel[data-report="check_ae"]').wait_for(state="visible")
+        switch = page.locator("#checkCompare")
+        assert switch.get_attribute("aria-disabled") == "true"
+        switch.hover()
+        page.wait_for_function(
+            "text => document.querySelector('#uiPopover [data-popover-description]')?.textContent === text",
+            arg=_WAITING,
+        )
+        page.mouse.move(2, 2)
+        page.unroute("**/report")
+        for route in held:
+            route.continue_()
+        page.locator('#checkCompare[aria-disabled="false"]').wait_for()
 
 
 def test_compare_is_off_and_disabled_after_undo(checks_page, choose_feature):
