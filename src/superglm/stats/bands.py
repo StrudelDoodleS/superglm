@@ -119,12 +119,23 @@ class UniformBand:
 
 
 def _bounds(n: int, eta: float) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    """The ``eta / 2`` and ``1 - eta / 2`` quantiles of ``Beta(i, n + 1 - i)``, ``i = 1..n``."""
+    """The ``eta / 2`` and ``1 - eta / 2`` quantiles of ``Beta(i, n + 1 - i)``, ``i = 1..n``.
+
+    SciPy's inverse can return NaN deep in a tail at a level float64 still holds. Such an
+    edge is found in logs by ``_log_beta_quantile``, an upper one as one minus the lower edge
+    of ``Beta(n + 1 - i, i)``; below ``1 / e`` every such quantile lies below its mean.
+    """
     import scipy.linalg
     from scipy import special
 
     i = np.arange(1, n + 1, dtype=np.float64)
-    return special.betaincinv(i, n + 1 - i, eta / 2.0), special.betainccinv(i, n + 1 - i, eta / 2.0)
+    lower = special.betaincinv(i, n + 1 - i, eta / 2.0)
+    upper = special.betainccinv(i, n + 1 - i, eta / 2.0)
+    if 0.0 < eta / 2.0 < math.exp(-1.0):
+        log_p, low, high = math.log(eta / 2.0), ~np.isfinite(lower), ~np.isfinite(upper)
+        lower[low] = np.exp(_log_beta_quantile(i[low], n + 1.0 - i[low], log_p))
+        upper[high] = -np.expm1(_log_beta_quantile(n + 1.0 - i[high], i[high], log_p))
+    return lower, upper
 
 
 def _global_level(lower: NDArray[np.float64], upper: NDArray[np.float64]) -> float:
@@ -426,36 +437,39 @@ def _log_beta_tail_levels(u: NDArray[np.float64], i: NDArray[np.float64], n: int
     return _logs(levels, deep_log)
 
 
-def _log_band_lower(n: int, log_level: float) -> NDArray[np.float64]:
-    """The natural log of each lower edge of the band at local level ``exp(log_level)``: the
-    ``exp(log_level) / 2`` quantile of ``Beta(i, n + 1 - i)``, ``i = 1..n``. The upper edges are
-    one minus the lower ones reversed, ``1 - lower_{n + 1 - i}``.
+def _log_beta_quantile(a: NDArray, b: NDArray, log_p: float) -> NDArray[np.float64]:
+    """``log x`` with ``log I_x(a, b) = log_p``, for a quantile below the mean of ``Beta(a, b)``.
 
-    Newton's method in ``t = log x``. ``log X`` has density proportional to
-    ``e^{i t} (1 - e^t)^{n - i}``, which is log-concave, so ``log I_{e^t}(i, n + 1 - i)`` is concave
-    (Bagnoli and Bergstrom 2005, theorem 1). Its slope is ``F / y``, with ``F`` the continued
-    fraction. ``I_x(a, b) <= x^a / (a B(a, b))``, so the first step starts at or below the root,
-    and every step after it rises to the root without passing it. A step below ``sqrt(eps)``
-    relative leaves an error of about its square.
+    Newton's method in ``t = log x``. ``log X`` has a log-concave density, so ``log I_{e^t}`` is
+    concave (Bagnoli and Bergstrom 2005, theorem 1), with slope ``F / y``, ``F`` the continued
+    fraction. ``I_x(a, b) <= x^a / (a B(a, b))``, so the first step starts at or below the root
+    and every later one rises to it. A step below ``sqrt(eps)`` relative leaves an error of
+    about its square.
     """
     import scipy.linalg
     from scipy import special
 
-    i = np.arange(1, n + 1, dtype=np.float64)
-    b = n + 1.0 - i
-    target = log_level - math.log(2.0)
-    t = (target + np.log(i) + special.betaln(i, b)) / i
+    t = (log_p + np.log(a) + special.betaln(a, b)) / a
     live = np.flatnonzero(np.isfinite(t))
     for _ in range(_NEWTON_STEPS):
         if not live.size:
             break
         start = t[live]
         y = -np.expm1(start)
-        log_tail, fraction = _log_fraction(i[live], b[live], np.exp(start), y, start, np.log(y))
-        step = (target - log_tail) * y / fraction
+        log_tail, fraction = _log_fraction(a[live], b[live], np.exp(start), y, start, np.log(y))
+        step = (log_p - log_tail) * y / fraction
         t[live] = start + step
         live = live[np.abs(step) > math.sqrt(_EPS) * np.maximum(1.0, np.abs(start))]
     return t
+
+
+def _log_band_lower(n: int, log_level: float) -> NDArray[np.float64]:
+    """The natural log of each lower edge of the band at local level ``exp(log_level)``: the
+    ``exp(log_level) / 2`` quantile of ``Beta(i, n + 1 - i)``, ``i = 1..n``. The upper edges are
+    one minus the lower ones reversed, ``1 - lower_{n + 1 - i}``.
+    """
+    i = np.arange(1, n + 1, dtype=np.float64)
+    return _log_beta_quantile(i, n + 1.0 - i, log_level - math.log(2.0))
 
 
 def _order_statistic_levels(

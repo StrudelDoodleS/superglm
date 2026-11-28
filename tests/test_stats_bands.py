@@ -617,3 +617,23 @@ def test_a_level_of_minus_infinity_holds_every_value():
     assert np.all(band.lower == 0.0) and np.all(band.upper == 1.0) and band.local_level == 0.0
     (lower,), (upper,) = bonferroni_binomial_band([12], [0.3], cut=-np.inf, log=True)
     assert (lower, upper) == (0.0, 12.0)
+
+
+def test_an_edge_scipy_cannot_invert_at_a_representable_level_is_found_in_logs():
+    """At local level ``e^-400``, which float64 holds, SciPy's inverse returns NaN for the lower
+    edges of ranks 3 and 4 of 20 and the upper edges of ranks 17 and 18, and no point compares
+    beyond a NaN. Each such edge is found in logs: every lower edge's tail equals half the level
+    to a 60-digit oracle's reading, the upper edges mirror the lower, and a sample whose
+    statistic is below the level crosses the band. Mutation check: without the repair in
+    ``_bounds`` the edges are NaN and the sample crosses nothing."""
+    n, level = 20, math.exp(-400.0)
+    band = band_at_level(n, level)
+    assert np.all(np.isfinite(band.lower)) and np.all(np.isfinite(band.upper))
+    tails = [log_beta_tail(i, n + 1 - i, band.lower[i - 1]) for i in range(1, n + 1)]
+    # A rank-i tail's relative error is about i times the edge's rounding.
+    np.testing.assert_allclose(tails, math.log(level / 2.0), rtol=0, atol=64 * n * _U)
+    np.testing.assert_allclose(band.upper, 1.0 - band.lower[::-1], rtol=0, atol=4 * _U)
+    u = band.median.copy()
+    u[:3] = [1e-100, 1e-70, 1e-65]
+    assert order_statistic_level(u) < band.local_level
+    assert np.any((u < band.lower) | (u > band.upper))
