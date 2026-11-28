@@ -11,9 +11,11 @@
  * Every gesture queues its input for the next animation frame, bound to the scene it was given
  * on; that frame composes all of it into one domain and hands it to `onZoom` once, and the view
  * draws the check again at it, asking Python for nothing. Input queued on a scene no longer on
- * screen (another check opened, the check drawn afresh) is dropped, and `reset` and `cancel` drop
- * it too. While the wheel turns, and through a drag, the gesture is busy and the hover readout
- * waits; `onRest` says when it may come back.
+ * screen is dropped. A drag belongs to the pointer that began it: another pointer's moves,
+ * release, cancel or capture loss move nothing. The check drawn afresh, closed or shown whole
+ * (`cancel`, `reset`) ends every gesture: its queued input, its drag with the drag's box, cursor
+ * and pointer capture, and the wheel's turn. While the wheel turns, and through a drag, the
+ * gesture is busy; `onStart` says when it becomes busy and `onRest` when it is no longer.
  */
 
 import { ZOOM_IN, ZOOM_OUT, isWhole, panBy, stepZoom, zoomAbout, zoomToBox } from "../chart/check_zoom.js";
@@ -29,34 +31,53 @@ import { defineMachine } from "../state/machine.js";
  * @property {() => boolean} isActive whether the wheel works on this frame
  * @property {(domain: Domain|null) => void} onZoom draw the check on screen at `domain`, or whole
  *   for null
- * @property {() => void} [onRest] the wheel has come to rest, or a drag has ended
+ * @property {() => void} [onStart] a gesture has begun: the wheel turns or a drag runs
+ * @property {() => void} [onRest] no gesture runs any longer: the wheel is at rest and no drag runs
  */
 /**
  * The input of one animation frame, on the scene it was given on: a drag's latest pan from where
- * it began, a box let go, the wheel's ticks as one factor about where the last one was, the keys'
- * steps, and whether a drag ended.
+ * it began, a box let go, the wheel's ticks as one factor about where the last one was, and the
+ * keys' steps.
  * @typedef {{scene: Scene, pan: {zoom: ZoomFrame, from: Point, to: Point}|null,
- *   box: {from: Point, to: Point}|null, factor: number, at: Point, step: number, rest: boolean}} Queued
+ *   box: {from: Point, to: Point}|null, factor: number, at: Point, step: number}} Queued
  */
 /**
- * A drag under way: a pan, from `from` on the zoom frame `zoom`, last at `last`; or a box from
- * `start`, drawn as `node`.
- * @typedef {{kind: 'pan', zoom: ZoomFrame, from: Point, last: Point}
- *   | {kind: 'box', start: Point, node: SVGRectElement}} Drag
+ * A drag under way, by the pointer `pointerId`: a pan, from `from` on the zoom frame `zoom`, last
+ * at `last`; or a box from `start`, drawn as `node`.
+ * @typedef {{kind: 'pan', pointerId: number, zoom: ZoomFrame, from: Point, last: Point}
+ *   | {kind: 'box', pointerId: number, start: Point, node: SVGRectElement}} Drag
  */
 
-/** A drag on a check: none, a pan, or a box. A press during a drag starts nothing. */
+/**
+ * A drag on a check: none, a pan, or a box. A press during a drag starts nothing. A drag is
+ * released by its pointer, its last move drawn, or dropped, drawing nothing more: cancelled or
+ * its capture lost, or its check drawn afresh, closed or shown whole.
+ */
 export const CHECK_DRAG = defineMachine({
   name: "check drag",
   initial: "idle",
   moves: {
     idle: { pan: "panning", box: "boxing" },
-    panning: { end: "idle" },
-    boxing: { end: "idle" },
+    panning: { release: "idle", drop: "idle" },
+    boxing: { release: "idle", drop: "idle" },
+  },
+});
+
+/**
+ * The wheel on a check: still, or turning until it has been at rest for `WHEEL_REST_MS`; it
+ * stops at once when its check is drawn afresh, closed or shown whole.
+ */
+export const CHECK_WHEEL = defineMachine({
+  name: "check wheel",
+  initial: "still",
+  moves: {
+    still: { turn: "turning" },
+    turning: { turn: "turning", rest: "still", stop: "still" },
   },
 });
 
 /** @typedef {'idle'|'panning'|'boxing'} DragState */
+/** @typedef {'still'|'turning'} WheelState */
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 /** @type {Readonly<Record<string, number>>} */
@@ -68,33 +89,69 @@ const WHEEL_REST_MS = 160;
  * Bind zoom and pan to the check in `frame`.
  * @param {HTMLElement} frame @param {CheckZoomOptions} options
  * @returns {{busy(): boolean, reset(): void, cancel(): void, destroy(): void}} `busy` while the
- *   wheel turns or a drag runs; `reset` shows the check whole; `cancel` drops what is queued
+ *   wheel turns or a drag runs; `reset` shows the check whole; `cancel` ends every gesture, as
+ *   the check drawn afresh or closed does
  */
-export function bindCheckZoom(frame, { getScene, isActive, onZoom, onRest }) {
+export function bindCheckZoom(frame, { getScene, isActive, onZoom, onStart, onRest }) {
   let frameId = 0;
   /** @type {Queued|null} */
   let queued = null;
-  /** @type {ReturnType<typeof setTimeout>|0} */
-  let turning = 0;
   /** @type {DragState} */
   let dragState = CHECK_DRAG.initial;
   /** @type {Drag|null} what the drag under way carries; null while idle */
   let drag = null;
+  /** @type {WheelState} */
+  let wheelState = CHECK_WHEEL.initial;
+  /** @type {ReturnType<typeof setTimeout>|0} the turning wheel's rest timer; 0 while still */
+  let turning = 0;
+
+  const busy = () => dragState !== "idle" || wheelState !== "still";
+
+  /** Say so when a move made the gesture busy, or left it at rest. @param {boolean} was busy before it */
+  function announce(was) {
+    const now = busy();
+    if (now !== was) (now ? onStart : onRest)?.();
+  }
 
   /**
-   * The one writer of the drag: `pan` or `box` begins one, carrying `payload`, and `end` lets
-   * it go, taking its box off the plot. An event the state does not take changes nothing.
-   * @param {'pan'|'box'|'end'} event @param {Drag|null} payload @returns {boolean} whether it moved
+   * The one writer of the drag: `pan` or `box` begins one, carrying `payload`, with its pointer
+   * captured, and `release` or `drop` lets it go, taking its box off the plot and its capture
+   * back. Its cursor and its box are this function's alone. An event the state does not take
+   * changes nothing.
+   * @param {'pan'|'box'|'release'|'drop'} event @param {Drag|null} payload
    */
   function moveDrag(event, payload) {
     const next = CHECK_DRAG.next(dragState, event);
-    if (next === null) return false;
-    if (drag?.kind === "box") drag.node.remove();
+    if (next === null) return;
+    const was = busy();
+    if (drag) {
+      if (drag.kind === "box") drag.node.remove();
+      if (frame.hasPointerCapture?.(drag.pointerId)) frame.releasePointerCapture(drag.pointerId);
+    }
     if (next === "panning") frame.dataset.panning = "true";
     else delete frame.dataset.panning;
     dragState = next;
     drag = payload;
-    return true;
+    if (drag) {
+      if (drag.kind === "box") frame.querySelector("svg")?.append(drag.node);
+      frame.setPointerCapture?.(drag.pointerId);
+    }
+    announce(was);
+  }
+
+  /**
+   * The one writer of the wheel: each `turn` sets its rest timer afresh, and `rest`, when the
+   * timer fires, or `stop` clears it.
+   * @param {'turn'|'rest'|'stop'} event
+   */
+  function moveWheel(event) {
+    const next = CHECK_WHEEL.next(wheelState, event);
+    if (next === null) return;
+    const was = busy();
+    clearTimeout(turning);
+    turning = next === "turning" ? setTimeout(() => moveWheel("rest"), WHEEL_REST_MS) : 0;
+    wheelState = next;
+    announce(was);
   }
 
   /** The pointer in the scene's px: the svg's box moves with the frame's scroll. @param {MouseEvent} event @returns {Point|null} */
@@ -112,7 +169,7 @@ export function bindCheckZoom(frame, { getScene, isActive, onZoom, onRest }) {
    * @param {Scene} scene @returns {Queued}
    */
   function queue(scene) {
-    if (queued?.scene !== scene) queued = { scene, pan: null, box: null, factor: 1, at: { x: 0, y: 0 }, step: 1, rest: false };
+    if (queued?.scene !== scene) queued = { scene, pan: null, box: null, factor: 1, at: { x: 0, y: 0 }, step: 1 };
     if (!frameId) frameId = requestAnimationFrame(onFrame);
     return queued;
   }
@@ -140,20 +197,15 @@ export function bindCheckZoom(frame, { getScene, isActive, onZoom, onRest }) {
       drag.zoom = getScene()?.zoom ?? drag.zoom;
       drag.from = drag.last;
     }
-    if (input.rest) onRest?.();
   }
 
-  /** The drag ended; `rest` says the readout may come back now rather than after a frame. @param {boolean} rest */
-  function endDrag(rest) {
-    if (moveDrag("end", null) && rest) onRest?.();
-  }
-
-  // What is queued, and any drag, dropped.
+  // Every gesture ended: what is queued dropped, any drag dropped, and the wheel stopped.
   function cancel() {
     if (frameId) cancelAnimationFrame(frameId);
     frameId = 0;
     queued = null;
-    endDrag(false);
+    moveDrag("drop", null);
+    moveWheel("stop");
   }
 
   // The check whole again, at once, and nothing queued left to move it.
@@ -175,11 +227,7 @@ export function bindCheckZoom(frame, { getScene, isActive, onZoom, onRest }) {
     const input = queue(scene);
     input.factor *= event.deltaY < 0 ? ZOOM_IN : ZOOM_OUT;
     input.at = point;
-    clearTimeout(turning);
-    turning = setTimeout(() => {
-      turning = 0;
-      onRest?.();
-    }, WHEEL_REST_MS);
+    moveWheel("turn");
   }
 
   /** @param {Point} to */
@@ -198,25 +246,25 @@ export function bindCheckZoom(frame, { getScene, isActive, onZoom, onRest }) {
     const point = event.button === 0 ? scenePoint(event) : null;
     const begin = event.shiftKey ? "box" : "pan";
     if (!zoom || !point || CHECK_DRAG.next(dragState, begin) === null) return;
+    const { pointerId } = event;
     if (begin === "box") {
       event.preventDefault();
       const node = /** @type {SVGRectElement} */ (frame.ownerDocument.createElementNS(SVG_NS, "rect"));
       node.setAttribute("class", "check-zoom-box");
-      frame.querySelector("svg")?.append(node);
-      moveDrag("box", { kind: "box", start: point, node });
+      moveDrag("box", { kind: "box", pointerId, start: point, node });
       drawBox(point);
     } else if (!isWhole(zoom.domain, zoom.base)) {
       // The press is left to focus the plot; the plot's text cannot be selected (assess.css).
-      moveDrag("pan", { kind: "pan", zoom, from: point, last: point });
-    } else {
-      return;
+      moveDrag("pan", { kind: "pan", pointerId, zoom, from: point, last: point });
     }
-    frame.setPointerCapture?.(event.pointerId);
   }
+
+  /** @param {PointerEvent} event whether it is the drag's own pointer's */
+  const ofDrag = (event) => drag !== null && event.pointerId === drag.pointerId;
 
   /** @param {PointerEvent} event */
   function onPointerMove(event) {
-    if (!drag) return;
+    if (!drag || !ofDrag(event)) return;
     const point = scenePoint(event);
     const scene = getScene();
     if (!point || !scene) return;
@@ -230,25 +278,25 @@ export function bindCheckZoom(frame, { getScene, isActive, onZoom, onRest }) {
 
   /** @param {PointerEvent} event */
   function onPointerUp(event) {
+    if (!drag || !ofDrag(event)) return;
     const point = scenePoint(event);
     const scene = getScene();
-    if (!drag || !point || !scene) {
-      endDrag(true);
-      return;
-    }
     // Let go, the drag's last move is drawn in the next frame with anything else queued.
-    const input = queue(scene);
-    if (drag.kind === "box") input.box = { from: drag.start, to: point };
-    else input.pan = { zoom: drag.zoom, from: drag.from, to: point };
-    input.rest = true;
-    endDrag(false);
+    if (point && scene) {
+      const input = queue(scene);
+      if (drag.kind === "box") input.box = { from: drag.start, to: point };
+      else input.pan = { zoom: drag.zoom, from: drag.from, to: point };
+    }
+    moveDrag("release", null);
   }
 
   // A drag the browser took away (a cancel, or capture lost before a release) moves nothing more:
   // its queued pan goes with it. After a release the drag has already ended, and its pan stays.
-  const onDragLost = () => {
-    if (drag?.kind === "pan" && queued) queued.pan = null;
-    endDrag(true);
+  /** @param {PointerEvent} event */
+  const onDragLost = (event) => {
+    if (!drag || !ofDrag(event)) return;
+    if (drag.kind === "pan" && queued) queued.pan = null;
+    moveDrag("drop", null);
   };
 
   function onDoubleClick() {
@@ -280,13 +328,11 @@ export function bindCheckZoom(frame, { getScene, isActive, onZoom, onRest }) {
   frame.addEventListener("dblclick", onDoubleClick);
   frame.addEventListener("keydown", onKeyDown);
   return {
-    busy: () => dragState !== "idle" || Boolean(turning),
+    busy,
     reset,
     cancel,
     destroy() {
       cancel();
-      clearTimeout(turning);
-      turning = 0;
       frame.removeEventListener("wheel", onWheel);
       frame.removeEventListener("pointerdown", onPointerDown);
       frame.removeEventListener("pointermove", onPointerMove);

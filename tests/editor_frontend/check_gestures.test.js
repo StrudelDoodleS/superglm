@@ -5,7 +5,7 @@ import test from "node:test";
 
 import { checkScene } from "../../src/superglm/editor/app/chart/check_plots.js";
 import { ZOOM_IN, panBy, zoomAbout, zoomToBox } from "../../src/superglm/editor/app/chart/check_zoom.js";
-import { CHECK_DRAG, bindCheckZoom } from "../../src/superglm/editor/app/views/check_gestures.js";
+import { CHECK_DRAG, CHECK_WHEEL, bindCheckZoom } from "../../src/superglm/editor/app/views/check_gestures.js";
 import { CHECK_FIXTURE as FIXTURE } from "./check_evidence.js";
 
 const BOX = { width: 820, height: 520 };
@@ -25,18 +25,26 @@ class FakeTarget {
 /**
  * The check view as main.js wires it: the open check, its zoom kept per check, and the scene
  * drawn again, at once, whenever a zoom is published. The svg sits at the page's origin at the
- * scene's size, so client px are scene px.
+ * scene's size, so client px are scene px. The frame holds the pointers it captured, and the
+ * svg the boxes appended to it until they are removed.
  */
-function checkView(open = "check_qq") {
+function checkView(open = "check_qq", { onStart, onRest } = {}) {
   const frames = [];
   globalThis.requestAnimationFrame = (callback) => frames.push(callback);
   globalThis.cancelAnimationFrame = (id) => { frames[id - 1] = null; };
-  const svg = { getBoundingClientRect: () => ({ left: 0, top: 0, width: BOX.width, height: BOX.height }), append() {} };
+  const boxes = new Set();
+  const svg = {
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: BOX.width, height: BOX.height }),
+    append: (node) => boxes.add(node),
+  };
+  const captured = new Set();
   const frame = Object.assign(new FakeTarget(), {
     scrollHeight: BOX.height, clientHeight: BOX.height, dataset: {},
     querySelector: (selector) => (selector === "svg" ? svg : null),
-    setPointerCapture() {},
-    ownerDocument: { createElementNS: () => ({ setAttribute() {}, remove() {} }) },
+    setPointerCapture: (id) => captured.add(id),
+    hasPointerCapture: (id) => captured.has(id),
+    releasePointerCapture: (id) => captured.delete(id),
+    ownerDocument: { createElementNS: () => { const node = { setAttribute() {}, remove: () => boxes.delete(node) }; return node; } },
   });
   const view = { open, zooms: {}, published: [] };
   const draw = () => {
@@ -53,16 +61,19 @@ function checkView(open = "check_qq") {
       if (domain === null) delete view.zooms[view.open];
       draw();
     },
+    onStart,
+    onRest,
   });
   return {
-    view, gestures, draw,
+    view, gestures, draw, frame, captured, boxes,
     zoomTo(domain) { view.zooms[view.open] = domain; draw(); },
     openCheck(name) { view.open = name; draw(); },
     wheel: (x, y, deltaY = -100) => frame.dispatch("wheel", { deltaY, deltaMode: 0, ctrlKey: true, clientX: x, clientY: y }),
-    down: (x, y, shiftKey = false) => frame.dispatch("pointerdown", { button: 0, pointerId: 1, clientX: x, clientY: y, shiftKey }),
-    move: (x, y) => frame.dispatch("pointermove", { clientX: x, clientY: y }),
-    up: (x, y) => frame.dispatch("pointerup", { clientX: x, clientY: y }),
-    lose: (type) => frame.dispatch(type, { pointerId: 1 }),
+    down: (x, y, shiftKey = false, pointerId = 1) =>
+      frame.dispatch("pointerdown", { button: 0, pointerId, clientX: x, clientY: y, shiftKey }),
+    move: (x, y, pointerId = 1) => frame.dispatch("pointermove", { pointerId, clientX: x, clientY: y }),
+    up: (x, y, pointerId = 1) => frame.dispatch("pointerup", { pointerId, clientX: x, clientY: y }),
+    lose: (type, pointerId = 1) => frame.dispatch(type, { pointerId }),
     key: (key) => frame.dispatch("keydown", { key }),
     dblclick: () => frame.dispatch("dblclick"),
     flushFrame() { for (const callback of frames.splice(0)) callback?.(0); },
@@ -93,21 +104,106 @@ test("a pan and a wheel turned in one frame publish one domain, the two composed
   assert.ok(Math.abs(width(page.view.published[1]) - width(page.view.published[0])) < 1e-12);
 });
 
-test("the drag table: a pan or a box begins from idle, ends back there, and nothing else moves", () => {
+/** Every state of `machine` against every event it takes anywhere, with where each leads. */
+const walk = (machine) => machine.states.flatMap((state) => machine.events.map((event) => [state, event, machine.next(state, event)]));
+
+test("the drag table: a pan or a box begins from idle, is released or dropped back there, and nothing else moves", () => {
   assert.deepEqual([...CHECK_DRAG.states], ["idle", "panning", "boxing"]);
   assert.equal(CHECK_DRAG.initial, "idle");
-  const walked = CHECK_DRAG.states.flatMap((state) => CHECK_DRAG.events.map((event) => [state, event, CHECK_DRAG.next(state, event)]));
-  assert.deepEqual(walked, [
+  assert.deepEqual(walk(CHECK_DRAG), [
     ["idle", "pan", "panning"],
     ["idle", "box", "boxing"],
-    ["idle", "end", null],
+    ["idle", "release", null],
+    ["idle", "drop", null],
     ["panning", "pan", null],
     ["panning", "box", null],
-    ["panning", "end", "idle"],
+    ["panning", "release", "idle"],
+    ["panning", "drop", "idle"],
     ["boxing", "pan", null],
     ["boxing", "box", null],
-    ["boxing", "end", "idle"],
+    ["boxing", "release", "idle"],
+    ["boxing", "drop", "idle"],
   ]);
+});
+
+test("the wheel table: a turn sets it turning, and it comes to rest or is stopped", () => {
+  assert.equal(CHECK_WHEEL.initial, "still");
+  assert.deepEqual(walk(CHECK_WHEEL), [
+    ["still", "turn", "turning"],
+    ["still", "rest", null],
+    ["still", "stop", null],
+    ["turning", "turn", "turning"],
+    ["turning", "rest", "still"],
+    ["turning", "stop", "still"],
+  ]);
+});
+
+test("a drag belongs to the pointer that began it: another pointer's move, release, cancel or capture loss moves nothing", () => {
+  const page = checkView();
+  page.zoomTo(zoomAbout(page.view.scene.zoom, { x: 400, y: 260 }, ZOOM_IN ** 4));
+  const zoomed = page.view.scene.zoom;
+  page.down(400, 260);
+  // A second contact's press starts nothing, and its move pans nothing.
+  page.down(300, 200, false, 2);
+  page.move(500, 200, 2);
+  page.flushFrame();
+  assert.deepEqual(page.view.published, []);
+  for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) {
+    page.frame.dispatch(type, { pointerId: 2, clientX: 300, clientY: 200 });
+    assert.equal(page.gestures.busy(), true, type);
+    assert.equal(page.frame.dataset.panning, "true", type);
+    assert.ok(page.captured.has(1), type);
+  }
+  page.move(440, 240);
+  page.up(450, 240);
+  page.flushFrame();
+  assert.deepEqual(page.view.published, [panBy(zoomed, { x: 400, y: 260 }, { x: 450, y: 240 })]);
+  assert.equal(page.gestures.busy(), false);
+});
+
+test("cancel ends a drag: its box comes off the plot, its cursor and capture go, and its release moves nothing", () => {
+  for (const shiftKey of [false, true]) {
+    const page = checkView();
+    page.zoomTo(zoomAbout(page.view.scene.zoom, { x: 400, y: 260 }, ZOOM_IN ** 4));
+    page.down(400, 260, shiftKey);
+    page.move(460, 300);
+    assert.ok(page.captured.has(1));
+    assert.equal(page.boxes.size, shiftKey ? 1 : 0);
+    page.gestures.cancel();
+    assert.equal(page.boxes.size, 0, "the box is off the plot");
+    assert.ok(!page.captured.has(1), "the capture is let go");
+    assert.equal(page.frame.dataset.panning, undefined);
+    page.move(480, 300);
+    page.up(480, 300);
+    page.flushFrame();
+    assert.deepEqual(page.view.published, [], `shift ${shiftKey}`);
+  }
+});
+
+test("cancel stops a turning wheel at once, and onStart and onRest bracket every gesture", () => {
+  const said = [];
+  const page = checkView("check_qq", { onStart: () => said.push("start"), onRest: () => said.push("rest") });
+  page.wheel(400, 260);
+  page.wheel(400, 260);
+  assert.equal(page.gestures.busy(), true);
+  page.gestures.cancel();
+  assert.equal(page.gestures.busy(), false, "a cancelled wheel is still at once, not after its rest");
+  assert.deepEqual(said, ["start", "rest"]);
+  // A drag: busy from its press to its release, and a wheel turned during it starts nothing more.
+  page.zoomTo(zoomAbout(page.view.scene.zoom, { x: 400, y: 260 }, ZOOM_IN ** 4));
+  page.down(400, 260);
+  page.wheel(400, 260);
+  page.up(420, 260);
+  assert.deepEqual(said, ["start", "rest", "start"], "the wheel still turns after the release");
+  page.gestures.cancel();
+  assert.deepEqual(said, ["start", "rest", "start", "rest"]);
+  // A press that begins no drag, on a check shown whole, is no gesture.
+  page.gestures.reset();
+  page.flushFrame();
+  page.down(400, 260);
+  page.up(400, 260);
+  assert.deepEqual(said, ["start", "rest", "start", "rest"]);
+  page.gestures.destroy();
 });
 
 test("a press during a pan starts no box: the pan goes on and its release publishes it", () => {
