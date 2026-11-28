@@ -17,9 +17,9 @@ import {
 } from "../../src/superglm/editor/app/chart/check_zoom.js";
 
 const RECT = { left: 50, top: 30, right: 850, bottom: 430 };
-/** A Q-Q's frame: one plot, both axes on [0, 10], kept to one range. */
+/** A Q-Q's frame: one plot, both axes on [0, 10]. */
 const square = (domain = { x: [0, 10], y: [0, 10] }) => ({
-  base: { x: [0, 10], y: [0, 10] }, domain, square: true,
+  base: { x: [0, 10], y: [0, 10] }, domain,
   plots: [{ rect: RECT, x: [RECT.left, RECT.right], y: [RECT.bottom, RECT.top] }],
 });
 /** An A/E's frame: two panels sharing y on [0.5, 2], x not zoomed. */
@@ -27,7 +27,7 @@ const panels = (domain = { x: null, y: [0.5, 2] }) => {
   const upper = { left: 50, top: 30, right: 400, bottom: 200 };
   const lower = { left: 50, top: 260, right: 400, bottom: 430 };
   return {
-    base: { x: null, y: [0.5, 2] }, domain, square: false,
+    base: { x: null, y: [0.5, 2] }, domain,
     plots: [upper, lower].map((rect) => ({ rect, x: null, y: [rect.bottom, rect.top] })),
   };
 };
@@ -65,13 +65,13 @@ test("a zoom stops at a 200th of the whole and never leaves it", () => {
   close(once.x[1] - once.x[0], 10 / 200, 1e-12);
 });
 
-test("a box zooms to its corners' values; on the Q-Q to its wider side, and a tiny box to nothing", () => {
+test("a box zooms to exactly its corners' values on each axis, and a tiny box to nothing", () => {
   const frame = square();
-  // 200 px by 50 px: x spans 2.5 to 5 (800 px is 10), y 2.5 to 3.75 (400 px is 10).
+  // 200 px by 50 px: x spans 2.5 to 5 (800 px is 10), y 2.5 to 3.75 (400 px is 10). The Q-Q's
+  // two axes take the box's own ranges, not one square range.
   const next = zoomToBox(frame, { x: 250, y: 330 }, { x: 450, y: 280 });
   close(next.x[0], 2.5); close(next.x[1], 5);
-  // y takes x's wider range about the box's middle.
-  close(next.y[1] - next.y[0], 2.5); close((next.y[0] + next.y[1]) / 2, 3.125);
+  close(next.y[0], 2.5); close(next.y[1], 3.75);
   assert.deepEqual(zoomToBox(frame, { x: 250, y: 330 }, { x: 255, y: 230 }), null);
   // A box past the plot is cut to it.
   const cut = zoomToBox(frame, { x: 650, y: 130 }, { x: 2000, y: -500 });

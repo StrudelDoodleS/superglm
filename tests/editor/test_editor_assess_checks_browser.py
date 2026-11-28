@@ -807,6 +807,17 @@ def _x_map(page):
     return lambda client: v0 + (client - left - p0) * (v1 - v0) / (p1 - p0)
 
 
+def _y_map(page):
+    """The Q-Q's y value at a client px, read from two of its drawn y ticks."""
+    ticks = page.locator('#checkFrame text.check-tick[text-anchor="end"]').evaluate_all(
+        "ts => ts.map((t) => [Number(t.getAttribute('y')) - 4,"
+        " Number(t.textContent.replace(/,/g, ''))])"
+    )
+    (p0, v0), (p1, v1) = ticks[0], ticks[-1]
+    top = _plot_box(page)["y"]
+    return lambda client: v0 + (client - top - p0) * (v1 - v0) / (p1 - p0)
+
+
 def _zoom_qq(page, steps: int = 3) -> None:
     for _ in range(steps):
         assert page.evaluate(_CHECK_WHEEL, [True, -100]) is True
@@ -832,6 +843,7 @@ def test_shift_and_a_drag_zoom_to_the_box(checks_page):
         _open_check(page, "check_qq")
         box = _plot_box(page)
         value = _x_map(page)
+        y_value = _y_map(page)
         start = (box["x"] + box["width"] * 0.5, box["y"] + box["height"] * 0.45)
         end = (box["x"] + box["width"] * 0.8, box["y"] + box["height"] * 0.3)
         asked = _report_requests(page)
@@ -844,13 +856,17 @@ def test_shift_and_a_drag_zoom_to_the_box(checks_page):
         page.keyboard.up("Shift")
         page.wait_for_function("() => Boolean(window.__superglmTest.checkZoom().check_qq)")
         zoom = page.evaluate(_ZOOM)["check_qq"]
-        # The box is wider than tall in values, so x is the box's and y takes its width.
+        # The box is wider than tall in values: each axis takes exactly the box's own range.
         expected = (value(start[0]), value(end[0]))
         assert abs(zoom["x"][0] - expected[0]) < 0.01 * (expected[1] - expected[0])
         assert abs(zoom["x"][1] - expected[1]) < 0.01 * (expected[1] - expected[0])
-        assert abs((zoom["y"][1] - zoom["y"][0]) - (zoom["x"][1] - zoom["x"][0])) < 1e-9
-        xs = page.evaluate(_TICKS)[0]
+        expected_y = (y_value(start[1]), y_value(end[1]))
+        assert abs(zoom["y"][0] - expected_y[0]) < 0.01 * (expected_y[1] - expected_y[0])
+        assert abs(zoom["y"][1] - expected_y[1]) < 0.01 * (expected_y[1] - expected_y[0])
+        assert zoom["x"][1] - zoom["x"][0] > 1.2 * (zoom["y"][1] - zoom["y"][0])
+        xs, ys = page.evaluate(_TICKS)
         assert expected[0] - 1e-6 <= min(xs) and max(xs) <= expected[1] + 1e-6
+        assert expected_y[0] - 1e-6 <= min(ys) and max(ys) <= expected_y[1] + 1e-6
         assert page.locator("#checkFrame rect.check-zoom-box").count() == 0
         assert asked == []
 

@@ -33,6 +33,16 @@ const axesOf = (zoom) => (zoom.base.x ? ["x", "y"] : ["y"]);
 const widthOf = (range) => range[1] - range[0];
 
 /**
+ * The px `plot` spans along `axis`, low then high: its domain's ends where the axis zooms, else
+ * its rect's. Quantile calibration keeps its zero row out of the y span.
+ * @param {Plot} plot @param {Axis} axis @returns {[number, number]}
+ */
+function pxSpan(plot, axis) {
+  const ends = plot[axis] ?? (axis === "x" ? [plot.rect.left, plot.rect.right] : [plot.rect.bottom, plot.rect.top]);
+  return [Math.min(...ends), Math.max(...ends)];
+}
+
+/**
  * `range` moved, not cut, to lie inside `whole`, and no wider than it; a range that is not one
  * is the whole.
  * @param {[number, number]} range @param {[number, number]} whole @returns {[number, number]}
@@ -94,7 +104,7 @@ function valueAt(plot, domain, axis, px) {
 
 /**
  * The domain after zooming by `factor` about `point`, which keeps its value; below 1 zooms in.
- * Every axis takes the same factor, so the Q-Q's two axes keep one range. A zoom that would make
+ * Every axis takes the same factor, so a Q-Q drawn with one range on both axes keeps it. A zoom that would make
  * an axis narrower than a 200th of its whole stops there.
  * @param {ZoomFrame} zoom @param {Point} point @param {number} factor @returns {Domain|null}
  */
@@ -126,38 +136,37 @@ export function zoomAbout(zoom, point, factor) {
  * @param {ZoomFrame} zoom @param {number} factor @returns {Domain|null}
  */
 export function stepZoom(zoom, factor) {
-  const { rect } = zoom.plots[0];
-  return zoomAbout(zoom, { x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 }, factor);
+  const [x, y] = /** @type {Axis[]} */ (["x", "y"]).map((axis) => {
+    const [lo, hi] = pxSpan(zoom.plots[0], axis);
+    return (lo + hi) / 2;
+  });
+  return zoomAbout(zoom, { x, y }, factor);
 }
 
 /**
- * The domain a box from `a` to `b` zooms to, the box cut to the plot `a` lies in. A box narrower
- * than 8 px along an axis the scene zooms leaves the domain as it is. On the Q-Q both axes take
- * the box's wider range, about its middle, so they keep one range.
+ * The domain a box from `a` to `b` zooms to, the box cut to the plot `a` lies in: each axis the
+ * scene zooms takes exactly the box's range along it, so a Q-Q box wider than it is tall gives x
+ * a wider range than y. A box narrower than 8 px along an axis the scene zooms leaves the domain
+ * as it is.
  * @param {ZoomFrame} zoom @param {Point} a @param {Point} b @returns {Domain|null}
  */
 export function zoomToBox(zoom, a, b) {
-  const { base, domain, square } = zoom;
+  const { base, domain } = zoom;
   const plot = plotAt(zoom, a);
   const axes = axesOf(zoom);
   /** @param {Axis} axis @param {number} px */
-  const inPlot = (axis, px) => (axis === "x"
-    ? Math.min(plot.rect.right, Math.max(plot.rect.left, px))
-    : Math.min(plot.rect.bottom, Math.max(plot.rect.top, px)));
+  const inPlot = (axis, px) => {
+    const [lo, hi] = pxSpan(plot, axis);
+    return Math.min(hi, Math.max(lo, px));
+  };
   if (axes.some((axis) => Math.abs(inPlot(axis, b[axis]) - inPlot(axis, a[axis])) < BOX_MIN_PX)) return settle(domain, zoom);
-  /** @type {Record<Axis, [number, number]>} */
-  const ranges = { x: [0, 0], y: [0, 0] };
-  for (const axis of axes) {
-    const ends = [a[axis], b[axis]].map((px) => valueAt(plot, domain, axis, inPlot(axis, px)));
-    ranges[axis] = [Math.min(...ends), Math.max(...ends)];
-  }
-  const common = square ? Math.max(...axes.map((axis) => widthOf(ranges[axis]))) : 0;
   /** @type {Domain} */
   const next = { ...domain };
   for (const axis of axes) {
     const whole = /** @type {[number, number]} */ (base[axis]);
-    const middle = (ranges[axis][0] + ranges[axis][1]) / 2;
-    const width = Math.max(square ? common : widthOf(ranges[axis]), NARROWEST * widthOf(whole));
+    const ends = [a[axis], b[axis]].map((px) => valueAt(plot, domain, axis, inPlot(axis, px)));
+    const middle = (ends[0] + ends[1]) / 2;
+    const width = Math.max(Math.abs(ends[1] - ends[0]), NARROWEST * widthOf(whole));
     next[axis] = fitAxis([middle - width / 2, middle + width / 2], whole);
   }
   return settle(next, zoom);

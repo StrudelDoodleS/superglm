@@ -7,12 +7,13 @@ import { CHECK_REPORTS } from "../../src/superglm/editor/app/api/contracts.js";
 import { countText } from "../../src/superglm/editor/app/reports.js";
 import { fmt, fmtCount } from "../../src/superglm/editor/app/format.js";
 import { createInitialEditorState } from "../../src/superglm/editor/app/state/store.js";
-import { nearestMark } from "../../src/superglm/editor/app/chart/check_plots.js";
+import { checkScene, nearestMark } from "../../src/superglm/editor/app/chart/check_plots.js";
 import {
   bindCheckHover,
   checkFace,
   compareSwitch,
   flaggedChecks,
+  redrawCheckPlot,
   renderCheckView,
   splitLine
 } from "../../src/superglm/editor/app/views/assess_check.js";
@@ -423,6 +424,30 @@ test("compared, a fitted body that draws nothing is not named in the split line"
   Object.assign(payload.models.edited, { level_source: "known", n_draws: 0, level_note: note });
   renderCheckView(dom.nodes, "check_ae", payload, { ...VIEW, compare: true });
   assert.match(dom.nodes.split.innerHTML, />parameters taken as exact<\/span>$/);
+});
+
+test("compared, the legend and split line stay as they are whatever a zoom shows of the fit", () => {
+  const note = "The band treats the fitted parameters as exact, because the fit could not be simulated.";
+  const payload = structuredClone(FIXTURE.edited.check_qq);
+  Object.assign(payload.models.original, { level_source: "known", n_draws: 0, level_note: note });
+  const options = { ...VIEW, compare: true };
+  // A corner of the plot off the diagonal, where no fitted point lies.
+  const { base } = checkScene("check_qq", payload, VIEW, options).zoom;
+  const w = base.x[1] - base.x[0];
+  const corner = { x: [base.x[0], base.x[0] + 0.05 * w], y: [base.y[1] - 0.05 * w, base.y[1]] };
+  const dom = fakeFrame();
+  const zoomed = renderCheckView(dom.nodes, "check_qq", payload, { ...options, domain: corner });
+  assert.ok(!zoomed.layers.some((l) => l.role === "original"));
+  assert.equal(dom.nodes.legend.hidden, false);
+  assert.match(dom.nodes.split.innerHTML, />parameters taken as exact \(as fitted\)<\/span>$/);
+  // Shown whole again, the fitted points return under the same legend.
+  const whole = redrawCheckPlot(dom.nodes.frame, "check_qq", payload, { ...options, domain: null });
+  assert.ok(whole.layers.some((l) => l.role === "original"));
+  assert.equal(dom.nodes.legend.hidden, false);
+  // And the full render, whole, agrees with the zoomed one.
+  renderCheckView(dom.nodes, "check_qq", payload, options);
+  assert.equal(dom.nodes.legend.hidden, false);
+  assert.match(dom.nodes.split.innerHTML, />parameters taken as exact \(as fitted\)<\/span>$/);
 });
 
 /** Where the readout's text sits in the scene, by the fake's text metrics, and its lines. */

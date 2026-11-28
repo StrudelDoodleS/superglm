@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { CHECK_REPORTS } from "../../src/superglm/editor/app/api/contracts.js";
 import { checkScene, nearestMark, sceneMarkup } from "../../src/superglm/editor/app/chart/check_plots.js";
+import { ZOOM_IN, zoomAbout, zoomToBox } from "../../src/superglm/editor/app/chart/check_zoom.js";
 import { neutralCopy } from "./neutral_copy.js";
 
 const FIXTURE = JSON.parse(readFileSync(new URL("./fixtures/assess_checks.json", import.meta.url)));
@@ -433,8 +434,10 @@ test("with a domain, every drawn mark lies inside it, and the ticks cover it", (
     const ticks = ticksOf(scene);
     const plot = scene.zoom.plots[0];
     // At least two ticks on each zoomed axis, every one inside the domain, and none more than a
-    // tick step from either end of it.
-    const ys = ticks.y.filter((l) => l.y - 4 >= plot.rect.top - 0.02 && l.y - 4 <= plot.rect.bottom + 0.02)
+    // tick step from either end of it. The y axis spans the plot's y px, which leave out
+    // quantile calibration's zero row.
+    const [yLo, yHi] = [Math.min(...plot.y), Math.max(...plot.y)];
+    const ys = ticks.y.filter((l) => l.y - 4 >= yLo - 0.02 && l.y - 4 <= yHi + 0.02)
       .map((l) => valueAt(scene, plot, "y", l.y - 4));
     assert.ok(ys.length >= 2, `${report}: y ticks ${ys}`);
     const [y0, y1] = domain.y;
@@ -465,6 +468,32 @@ test("a zoomed Q-Q draws the points inside its domain and keeps y = x as the dia
   // Zoomed off the diagonal, there is none to draw.
   const off = { x: [whole.zoom.base.x[0], whole.zoom.base.x[0] + 0.1], y: [whole.zoom.base.y[1] - 0.1, whole.zoom.base.y[1]] };
   assert.equal(layer(checkScene("check_qq", payload, BOX, { compare: false, highlight: true, domain: off }), "reference"), undefined);
+});
+
+test("a Q-Q box wider than it is tall zooms to exactly that box, and y = x stays drawn true", () => {
+  const payload = FIXTURE.wrong.check_qq;
+  const opts = { compare: false, highlight: true };
+  const whole = checkScene("check_qq", payload, BOX, opts);
+  const plot = whole.zoom.plots[0];
+  const { rect } = plot;
+  // A box 60% of the plot wide and 20% of it tall, about the middle.
+  const [a, b] = [{ x: rect.left + 0.2 * (rect.right - rect.left), y: rect.top + 0.4 * (rect.bottom - rect.top) },
+    { x: rect.left + 0.8 * (rect.right - rect.left), y: rect.top + 0.6 * (rect.bottom - rect.top) }];
+  const domain = zoomToBox(whole.zoom, a, b);
+  for (const axis of ["x", "y"]) {
+    const ends = [valueAt(whole, plot, axis, a[axis]), valueAt(whole, plot, axis, b[axis])].sort((p, q) => p - q);
+    near(domain[axis][0], ends[0], 1e-9); near(domain[axis][1], ends[1], 1e-9);
+  }
+  assert.ok(domain.x[1] - domain.x[0] > 2.5 * (domain.y[1] - domain.y[0]));
+  // Drawn at it, the diagonal is still the line y = x in values, at whatever angle it now has.
+  const scene = checkScene("check_qq", payload, BOX, { ...opts, domain });
+  assert.deepEqual(scene.zoom.domain, domain);
+  const ends = absolutePoints(layer(scene, "reference").d);
+  assert.equal(ends.length, 2);
+  for (const [x, y] of ends) near(valueAt(scene, plot, "x", x), valueAt(scene, plot, "y", y), 0.01 * (domain.y[1] - domain.y[0]));
+  // A wheel zoom still narrows both axes by one factor.
+  const wheeled = zoomAbout(scene.zoom, { x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 }, ZOOM_IN);
+  for (const axis of ["x", "y"]) near((wheeled[axis][1] - wheeled[axis][0]) / (domain[axis][1] - domain[axis][0]), ZOOM_IN, 1e-9);
 });
 
 test("A/E's panels share one zoomed y domain", () => {
@@ -517,4 +546,28 @@ test("a zoomed quantile calibration keeps its zero row at the foot", () => {
   const { rect } = scene.zoom.plots[0];
   assert.ok(scene.marks.some((m) => m.y === rect.bottom && m.text.includes("exceeded by 0%")));
   assert.ok(scene.labels.some((l) => l.text === "0" && l.y - 4 === rect.bottom));
+});
+
+test("with a zero row, a wheel keeps the share under the pointer, and the reference stays out of the row", () => {
+  const payload = structuredClone(FIXTURE.wrong.check_calibration);
+  payload.models.edited.quantiles.realised_exceedance[0] = 0;
+  const opts = { compare: false, highlight: false };
+  const whole = checkScene("check_calibration", payload, BOX, opts);
+  const { rect } = whole.zoom.plots[0];
+  // The zero row is the plot's last 24 px; the shares' axis runs from above it to the top.
+  const foot = rect.bottom - 24;
+  assert.deepEqual(whole.zoom.plots[0].y, [foot, rect.top]);
+  // A wheel at a point with a positive share leaves that point where it was.
+  const mark = whole.marks.find((m) => m.text.includes("Quantile 75%"));
+  const zoomed = checkScene("check_calibration", payload, BOX, { ...opts, domain: zoomAbout(whole.zoom, mark, ZOOM_IN ** 3) });
+  const same = zoomed.marks.find((m) => m.text === mark.text);
+  near(same.x, mark.x, 0.02); near(same.y, mark.y, 0.02);
+  // Zoomed above the least expected share, the reference is cut at the shares' foot.
+  const domain = part(whole.zoom.base, 0, 1);
+  domain.y = part(whole.zoom.base, 0.5, 0.9).y;
+  const cut = checkScene("check_calibration", payload, BOX, { ...opts, domain });
+  const ys = absolutePoints(layer(cut, "reference").d).map(([, y]) => y);
+  assert.ok(ys.length > 0);
+  for (const y of ys) assert.ok(y <= foot + 0.011, `reference at ${y}, in the zero row below ${foot}`);
+  near(Math.max(...ys), foot);
 });

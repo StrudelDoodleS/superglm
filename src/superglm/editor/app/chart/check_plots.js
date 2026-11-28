@@ -42,14 +42,15 @@ import { niceTicks } from "./fan.js";
  * @typedef {{rect:Rect, x:[number, number]|null, y:[number, number]}} Plot
  */
 /**
- * What a zoom reads from a scene: its whole domain, the one drawn, its plots (one per A/E panel,
- * all at the one domain), and whether its two axes keep one range (the Q-Q's, so y = x stays the
- * diagonal).
- * @typedef {{base:Domain, domain:Domain, plots:Plot[], square:boolean}} ZoomFrame
+ * What a zoom reads from a scene: its whole domain, the one drawn, and its plots (one per A/E
+ * panel, all at the one domain).
+ * @typedef {{base:Domain, domain:Domain, plots:Plot[]}} ZoomFrame
  */
 /**
+ * A scene, and whether it draws the fitted model beside the edit: `fitted` says the fit is
+ * compared and has something to draw on the whole plot, whatever part of it a zoom shows.
  * @typedef {{width:number, height:number, layers:Layer[], labels:Label[], marks:Mark[],
- *   zoom?:ZoomFrame|null}} Scene
+ *   zoom?:ZoomFrame|null, fitted?:boolean}} Scene
  */
 /** @typedef {{width:number, height:number, thumb?:boolean}} Box */
 /**
@@ -169,11 +170,12 @@ function emptyParts() {
 
 /**
  * @param {Box} box @param {Parts} parts @param {Label[]} labels @param {Mark[]} marks
- * @param {ZoomFrame|null} zoom @returns {Scene}
+ * @param {ZoomFrame|null} zoom @param {boolean} fitted whether the fit has a series to draw
+ * @returns {Scene}
  */
-function finish(box, parts, labels, marks, zoom) {
+function finish(box, parts, labels, marks, zoom, fitted) {
   const layers = ROLES.filter((role) => parts[role].length > 0).map((role) => ({ role, d: parts[role].join(" ") }));
-  return { width: box.width, height: box.height, layers, labels: box.thumb ? [] : labels, marks, zoom };
+  return { width: box.width, height: box.height, layers, labels: box.thumb ? [] : labels, marks, zoom, fitted };
 }
 
 /** @param {Rect} rect @param {number} x @param {number} y whether px (x, y) lies in `rect` */
@@ -247,9 +249,14 @@ function tickTexts(values, write = fmt) {
   return values.map((v) => v.toFixed(digits));
 }
 
-/** @param {Rect} rect @param {Domain} base @param {Domain} domain @param {boolean} square @returns {ZoomFrame} */
-const zoomFrame = (rect, base, domain, square) => ({
-  base, domain, square, plots: [{ rect, x: [rect.left, rect.right], y: [rect.bottom, rect.top] }]
+/**
+ * A one-plot scene's zoom frame; `y` is the px its domain's y ends sit at, the plot's foot and
+ * top unless a row at the foot is kept out of the domain.
+ * @param {Rect} rect @param {Domain} base @param {Domain} domain @param {[number, number]} [y]
+ * @returns {ZoomFrame}
+ */
+const zoomFrame = (rect, base, domain, y = [rect.bottom, rect.top]) => ({
+  base, domain, plots: [{ rect, x: [rect.left, rect.right], y }]
 });
 
 /**
@@ -351,7 +358,8 @@ function qqScene(editedBody, originalBody, box, { highlight, domain: asked }) {
   for (const i of shown) values.push(edited.theoretical[i], edited.observed[i]);
   if (original) for (const i of shownOriginal) values.push(original.theoretical[i], original.observed[i]);
   // One range for both axes, so y = x is the plot's diagonal; the points fill it, and the
-  // band's flared ends are clipped to it. A zoom keeps the two ranges alike.
+  // band's flared ends are clipped to it. A zoom may give the two axes different ranges, and
+  // y = x is then drawn at the angle they give it.
   const [lo, hi] = span(values, QQ_PAD_SHARE);
   const rect = plotRect(box);
   /** @type {Domain} */
@@ -370,9 +378,11 @@ function qqScene(editedBody, originalBody, box, { highlight, domain: asked }) {
   if (band.length > 0) parts.band.push(`${polyline(band)} Z`);
   const diagonal = clipPolyline([[sx(lo), sy(lo)], [sx(hi), sy(hi)]], rect);
   if (diagonal) parts.reference.push(diagonal);
-  for (const i of shownOriginal) {
-    const [x, y] = [sx(original.theoretical[i]), sy(original.observed[i])];
-    if (within(rect, x, y)) parts.original.push(dot(x, y, r));
+  if (original) {
+    for (const i of shownOriginal) {
+      const [x, y] = [sx(original.theoretical[i]), sy(original.observed[i])];
+      if (within(rect, x, y)) parts.original.push(dot(x, y, r));
+    }
   }
   for (const i of shown) {
     const x = sx(edited.theoretical[i]);
@@ -395,7 +405,7 @@ function qqScene(editedBody, originalBody, box, { highlight, domain: asked }) {
     frame(parts, labels, rect, xs.map((v, i) => [sx(v), xText[i]]), ys.map((v, i) => [sy(v), yText[i]]),
       { x: "Expected residual", y: "Observed residual", xGrid: true });
   }
-  return finish(box, parts, labels, marks, zoomFrame(rect, base, domain, true));
+  return finish(box, parts, labels, marks, zoomFrame(rect, base, domain), shownOriginal.length > 0);
 }
 
 /**
@@ -463,7 +473,7 @@ function pitScene(editedBody, originalBody, box, { highlight, domain: asked }) {
     frame(parts, labels, rect, xs.map((v, i) => [sx(v), xText[i]]), ys.map((v, i) => [sy(v), yText[i]]),
       { x: "Cumulative probability", y: "Count over expected", xGrid: false });
   }
-  return finish(box, parts, labels, marks, zoomFrame(rect, base, domain, false));
+  return finish(box, parts, labels, marks, zoomFrame(rect, base, domain), original !== null && original.counts.length > 0);
 }
 
 /** @param {AETable} table @param {number} i */
@@ -600,7 +610,8 @@ function aeScene(editedBody, originalBody, box, { highlight, domain: asked }) {
   }
   labels.push({ x: 8, y: MARGIN.top - 14, text: "Actual over expected", anchor: "start", axis: true });
   marks.sort((a, b) => a.x - b.x);
-  return finish({ ...box, height }, parts, labels, marks, { base, domain, plots, square: false });
+  const fitted = pairs.some(({ original: t }) => t !== null && t.ratio.some((_, i) => aeDrawn(t, i)));
+  return finish({ ...box, height }, parts, labels, marks, { base, domain, plots }, fitted);
 }
 
 /**
@@ -653,7 +664,10 @@ function calibrationScene(editedBody, originalBody, box, { highlight, domain: as
     ...[...indices].reverse().map((i) => /** @type {[number, number]} */ ([xAt(i), y(edited.band_lower[i])]))
   ], rect);
   if (band.length > 0) parts.band.push(`${polyline(band)} Z`);
-  const reference = clipPolyline(indices.map((i) => [xAt(i), y(q.expected[i])]), rect);
+  // The shares' own part of the plot, above the zero row: the reference and a zoom's gestures
+  // read it, so neither reaches into the row.
+  const shareRect = { ...rect, bottom: shareFoot };
+  const reference = clipPolyline(indices.map((i) => [xAt(i), y(q.expected[i])]), shareRect);
   if (reference) parts.reference.push(reference);
   // Both models' points sit at their quantile; the style alone tells them apart.
   if (original) {
@@ -686,7 +700,8 @@ function calibrationScene(editedBody, originalBody, box, { highlight, domain: as
     frame(parts, labels, rect, columns.map((i) => [xAt(i), fmtPercent(q.p[i])]), rows,
       { x: "Predicted quantile", y: "Share of rows above", xGrid: false });
   }
-  return finish(box, parts, labels, marks, zoomFrame(rect, base, domain, false));
+  const fitted = original !== null && original.quantiles.realised_exceedance.some((v) => v >= 0);
+  return finish(box, parts, labels, marks, zoomFrame(rect, base, domain, [shareFoot, rect.top]), fitted);
 }
 
 /** @type {Record<CheckReport, (edited: CheckBody, original: CheckBody|null, box: Box, draw: Draw) => Scene>} */
@@ -703,7 +718,7 @@ const SCENES = { check_qq: qqScene, check_pit: pitScene, check_ae: aeScene, chec
  */
 export function checkScene(report, payload, box, options) {
   const { edited, original } = payload.models;
-  if (!payload.available || !edited.available) return finish(box, emptyParts(), [], [], null);
+  if (!payload.available || !edited.available) return finish(box, emptyParts(), [], [], null, false);
   return SCENES[report](edited, options.compare && original?.available ? original : null, box,
     { highlight: options.highlight, domain: options.domain ?? null });
 }

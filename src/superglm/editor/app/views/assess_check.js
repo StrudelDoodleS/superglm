@@ -205,7 +205,8 @@ const levelNote = (body) => (body?.available && typeof body.level_note === "stri
  * A check's split line: the rows it reads, and on a held-out split whose band took the fitted
  * parameters as exact, the marker that says so and its sentence. When the scene draws a fitted
  * series beside the edit and only one of the two fell back, the marker names it, and when both
- * fell back for different reasons its sentence gives each. A fit that draws nothing does not count.
+ * fell back for different reasons its sentence gives each. A fit with nothing to draw on the
+ * whole plot does not count; one a zoom happens to leave out of view does.
  * @param {CheckPayload|null} payload @param {boolean} fitDrawn whether the scene draws the fit
  * @returns {{text: string, level: string|null, note: string|null}}
  */
@@ -243,8 +244,9 @@ export function renderCheckView(nodes, report, payload, { compare, highlight, do
   nodes.help.setAttribute("aria-label", `About the ${label}`);
   const scene = payload === null || answered(payload) === null ? null
     : checkScene(report, payload, { width, height }, { compare, highlight, domain });
-  // As the legend does, the split line counts the fit only when the scene draws a fitted series.
-  const fitDrawn = scene !== null && scene.layers.some((layer) => layer.role === "original");
+  // As the legend does, the split line counts the fit when the scene has a fitted series to draw:
+  // compared, available and drawable on the whole plot, so a zoom never changes either.
+  const fitDrawn = scene?.fitted === true;
   const line = splitLine(payload, fitDrawn);
   nodes.split.innerHTML = escapeHTML(line.text) + (line.level === null || line.note === null ? ""
     : ` · <span class="check-level" tabindex="0" data-popover-title="${LEVEL_TITLE}"`
@@ -268,7 +270,8 @@ export function renderCheckView(nodes, report, payload, { compare, highlight, do
 
 /**
  * Draw the plot renderCheckView drew again at another domain, and nothing else: a zoom's
- * redraw, which leaves the heading, split line, legend and switches as they are.
+ * redraw, which leaves the heading, split line, legend and switches as they are. They read
+ * `Scene.fitted`, which a domain does not change.
  * @param {HTMLElement} frame @param {CheckReport} report @param {CheckPayload} payload
  * @param {SceneOptions & {width: number, height: number}} options
  * @returns {Scene}
