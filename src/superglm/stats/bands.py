@@ -118,24 +118,62 @@ class UniformBand:
     alpha: float
 
 
-def _bounds(n: int, eta: float) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+def _bounds(
+    n: int, eta: float, *, repair: bool = True
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """The ``eta / 2`` and ``1 - eta / 2`` quantiles of ``Beta(i, n + 1 - i)``, ``i = 1..n``.
 
-    SciPy's inverse can return NaN deep in a tail at a level float64 still holds. Such an
-    edge is found in logs by ``_log_beta_quantile``, an upper one as one minus the lower edge
-    of ``Beta(n + 1 - i, i)``; below ``1 / e`` every such quantile lies below its mean.
+    Deep in a tail SciPy's inverse can miss at a level float64 still holds, with NaN or a far
+    finite edge. So with ``repair``, below ``1 / e``, where each quantile lies below its mean,
+    a lower edge whose own tail misses ``eta / 2`` by more than ``_tail_slack`` is found in
+    logs by ``_log_beta_quantile``. SciPy's upper edge of rank ``i`` is one minus its lower edge
+    of rank ``n + 1 - i``, so it is replaced where that one is.
     """
     import scipy.linalg
     from scipy import special
 
     i = np.arange(1, n + 1, dtype=np.float64)
-    lower = special.betaincinv(i, n + 1 - i, eta / 2.0)
-    upper = special.betainccinv(i, n + 1 - i, eta / 2.0)
-    if 0.0 < eta / 2.0 < math.exp(-1.0):
-        log_p, low, high = math.log(eta / 2.0), ~np.isfinite(lower), ~np.isfinite(upper)
-        lower[low] = np.exp(_log_beta_quantile(i[low], n + 1.0 - i[low], log_p))
-        upper[high] = -np.expm1(_log_beta_quantile(n + 1.0 - i[high], i[high], log_p))
+    b = n + 1.0 - i
+    lower = special.betaincinv(i, b, eta / 2.0)
+    upper = special.betainccinv(i, b, eta / 2.0)
+    if repair and 0.0 < eta / 2.0 < math.exp(-1.0):
+        log_p = math.log(eta / 2.0)
+        # A NaN edge compares false, so it is missed too.
+        missed = ~(np.abs(_log_lower_tail(i, b, lower) - log_p) <= _tail_slack(i, b, lower, log_p))
+        log_lower = np.full(n, np.nan)
+        log_lower[missed] = _log_beta_quantile(i[missed], b[missed], log_p)
+        lower[missed] = np.exp(log_lower[missed])
+        mirrored = missed[::-1]
+        upper[mirrored] = -np.expm1(log_lower[::-1][mirrored])
     return lower, upper
+
+
+def _log_lower_tail(a: NDArray, b: NDArray, x: NDArray) -> NDArray[np.float64]:
+    """``log I_x(a, b)`` for ``x`` below the mean: SciPy's tail, in logs by
+    ``_log_fraction`` below ``_LOG_BELOW``; NaN where ``x`` is."""
+    import scipy.linalg
+    from scipy import special
+
+    def deep_log(deep: NDArray[np.bool_]) -> NDArray:
+        xd = x[deep]
+        return _log_fraction(a[deep], b[deep], xd, 1.0 - xd, np.log(xd), np.log1p(-xd))[0]
+
+    return _logs(special.betainc(a, b, x), deep_log)
+
+
+def _tail_slack(a: NDArray, b: NDArray, x: NDArray, log_p: float) -> NDArray[np.float64]:
+    """How far a log tail read at an edge ``x`` may sit from ``log_p`` and still be its quantile:
+    ``2^10 u`` times the log tail's rounding scale, ``a |log x| + b |log y| + (a + b) log(a + b)
+    + |log p|``. A rounding of ``x`` moves the log tail by about ``a`` times its relative size,
+    within that scale; a missed inverse moves it by orders more."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        scale = (
+            a * np.maximum(1.0, np.abs(np.log(x)))
+            + b * np.abs(np.log1p(-x))
+            + (a + b) * np.log(a + b)
+            + abs(log_p)
+        )
+    return 2.0**10 * _U * scale
 
 
 def _global_level(lower: NDArray[np.float64], upper: NDArray[np.float64]) -> float:
@@ -349,6 +387,8 @@ _LEAST_NORMAL = float(np.finfo(np.float64).tiny)
 #: edge sits at, is still a normal float.
 _LOG_BELOW = 2.0 * _LEAST_NORMAL
 _EPS = float(np.finfo(np.float64).eps)
+#: The unit roundoff ``u``, the relative error of one rounding.
+_U = _EPS / 2.0
 #: Terms of the continued fraction at most. Below the mean it converges within about 80 terms
 #: in float64 (Boost.Math's measurement); below float64's range, within a handful.
 _FRACTION_TERMS = 100
@@ -519,7 +559,8 @@ def _order_statistic_levels(
 
     else:
         cut = math.exp(target) if log else target
-        lower, upper = _bounds(n, min(1.0, 2.0 * cut))
+        # An edge is trusted only by its own tail, so a missed inverse costs a read, not a level.
+        lower, upper = _bounds(n, min(1.0, 2.0 * cut), repair=False)
         trusted = _edge_levels(lower, upper, i, n) >= _EDGE_MARGIN * cut
 
         def inside(block: NDArray[np.float64]) -> NDArray[np.bool_]:

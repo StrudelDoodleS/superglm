@@ -637,3 +637,25 @@ def test_an_edge_scipy_cannot_invert_at_a_representable_level_is_found_in_logs()
     u[:3] = [1e-100, 1e-70, 1e-65]
     assert order_statistic_level(u) < band.local_level
     assert np.any((u < band.lower) | (u > band.upper))
+
+
+def test_a_finite_edge_scipy_misses_deep_in_a_tail_is_found_again():
+    """At local level ``e^-700``, still a normal float, SciPy's inverse returns 6.93e-6 for the
+    lower edge of rank 63 of 100, whose quantile is 5.40e-6, so a sample inside the band crossed
+    it. Each lower edge is checked by its own tail, read forward, and a missed one is found in
+    logs: every lower edge's tail equals half the level to a 60-digit oracle's reading, the upper
+    edges mirror the lower, and a sample whose statistic is above the level crosses nothing.
+    Mutation check: without the forward check the rank-63 edge stays at 6.93e-6 and the sample
+    crosses."""
+    n = 100
+    band = band_at_level(n, -700.0, log=True)
+    tails = [log_beta_tail(i, n + 1 - i, band.lower[i - 1]) for i in range(1, n + 1)]
+    # SciPy's tails this deep are good to about 1e-10 relative, where its path and the log path
+    # meet, so an edge it keeps is good to that: far finer than any point a decision reads.
+    np.testing.assert_allclose(tails, -700.0 - math.log(2.0), rtol=0, atol=1e-9)
+    assert band.lower[62] == pytest.approx(5.40357e-6, rel=1e-5)
+    np.testing.assert_allclose(band.upper, 1.0 - band.lower[::-1], rtol=0, atol=4 * _U)
+    u = band.median.copy()
+    u[:63] = np.linspace(5.9e-6, 6e-6, 63)
+    assert order_statistic_level(u, log=True) > -700.0
+    assert not np.any((u < band.lower) | (u > band.upper))
