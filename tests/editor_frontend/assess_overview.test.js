@@ -7,6 +7,7 @@ import { CHECK_REPORTS } from "../../src/superglm/editor/app/api/contracts.js";
 import { createInitialEditorState } from "../../src/superglm/editor/app/state/store.js";
 import {
   cvCard,
+  drawOverview,
   finalCard,
   overviewCards,
   overviewGroups,
@@ -215,13 +216,17 @@ test("a number from an earlier report says so in words, in sight where its updat
   assert.deepEqual(face(card(evidence.validation)), ["—", "Loading report...", "", false]);
 });
 
-test("the card's markup carries its marker, clipped unless it is shown", () => {
+test("a card shows its marker, clipped unless it is shown", () => {
   const evidence = createInitialEditorState(snapshot(0)).request.evidence;
   const failed = { ...evidence.validation, status: "stale", payload: LSS_VALIDATION, error: "offline" };
   const updating = { ...evidence.cv, status: "updating", payload: LSS_CV };
-  const markup = overviewMarkup(overviewGroups({ ...evidence, validation: failed, cv: updating }));
-  assert.match(markup, /data-card="validation"[^]*?<span class="assess-card-marker" data-shown="true">Earlier result<\/span><span class="assess-card-note">Update failed\. offline<\/span>/);
-  assert.match(markup, /data-card="cv"[^]*?<span class="assess-card-marker" data-shown="false">Earlier result, updating<\/span>/);
+  const { root } = fakeCards();
+  drawOverview(root, overviewGroups({ ...evidence, validation: failed, cv: updating }));
+  const part = (id, name) => root.querySelector(`[data-card="${id}"]`).querySelector(`.assess-card-${name}`);
+  assert.deepEqual([part("validation", "marker").textContent, part("validation", "marker").dataset.shown,
+    part("validation", "note").textContent], ["Earlier result", "true", "Update failed. offline"]);
+  assert.deepEqual([part("cv", "marker").textContent, part("cv", "marker").dataset.shown],
+    ["Earlier result, updating", "false"]);
 });
 
 /** The page's evidence with every check of `reports` current, the reports still loading. */
@@ -250,10 +255,13 @@ test("a flagged card is marked, and its thumbnail adds the fit only when compare
   assert.deepEqual(cards.filter((card) => card.flagged).map((card) => card.id),
     CHECK_REPORTS.filter((name) => FIXTURE.wrong[name].models.edited.flagged).sort((a, b) =>
       cards.findIndex((c) => c.id === a) - cards.findIndex((c) => c.id === b)));
-  const markup = overviewMarkup(wrong);
-  assert.match(markup, /data-card="check_qq"[^>]*data-flagged="true"/);
-  assert.match(markup, /data-card="validation"[^>]*data-flagged="false"/);
-  assert.match(markup, /data-card="check_qq"[^]*?<span class="assess-card-plot" aria-hidden="true"><svg class="check-plot"/);
+  const { root, plot } = fakeCards();
+  drawOverview(root, wrong);
+  const node = (id) => root.querySelector(`[data-card="${id}"]`);
+  assert.equal(node("check_qq").dataset.flagged, "true");
+  assert.equal(node("validation").dataset.flagged, "false");
+  assert.ok(plot("check_qq").innerHTML.startsWith('<svg class="check-plot"'));
+  assert.match(overviewMarkup(wrong), /data-card="check_qq"[^]*?<span class="assess-card-plot" aria-hidden="true"><\/span>/);
   const edited = evidenceFrom(FIXTURE.edited);
   const thumb = (compare) => overviewGroups(edited, { offered: [...CHECK_REPORTS], compare })
     .flatMap((g) => g.cards).filter((card) => card.thumbnail);
@@ -296,4 +304,58 @@ test("a check card waits, says it failed, and keeps an earlier result as a repor
   assert.deepEqual([failed.note, failed.marker, failed.markerShown, failed.flagged],
     ["Update failed. offline", "Earlier result", true, true]);
   assert.equal(card({ status: "updating" }).marker, "Earlier result, updating");
+});
+
+// The overview's cards on a minimal tree: the markup written is read back into one node per card,
+// holding the parts it has, and every write to a part is counted.
+class CardPart {
+  constructor(name, writes) { this.name = name; this.writes = writes; this.html = ""; this.text = ""; this.dataset = {}; }
+  get innerHTML() { return this.html; }
+  set innerHTML(value) { this.writes.push(this.name); this.html = value; }
+  get textContent() { return this.text; }
+  set textContent(value) { this.text = value; }
+}
+function fakeCards() {
+  const writes = [];
+  let cards = [];
+  const root = {
+    set innerHTML(markup) {
+      writes.push("build");
+      cards = markup.split('<button class="assess-card"').slice(1).map((piece) => {
+        const node = new CardPart("card", writes);
+        node.dataset.card = /data-card="([^"]+)"/.exec(piece)[1];
+        const parts = new Map(["assess-card-plot", "assess-card-value", "assess-card-marker", "assess-card-note"]
+          .filter((name) => piece.includes(`class="${name}"`)).map((name) => [`.${name}`, new CardPart(name, writes)]));
+        const plot = parts.get(".assess-card-plot");
+        if (plot) plot.html = /<span class="assess-card-plot"[^>]*>(.*?)<\/span><span class="assess-card-value"/.exec(piece)[1];
+        node.querySelector = (selector) => parts.get(selector) ?? null;
+        return node;
+      });
+    },
+    querySelectorAll: (selector) => (selector === "[data-card]" ? cards : []),
+    querySelector: (selector) => cards.find((card) => selector === `[data-card="${card.dataset.card}"]`) ?? null,
+  };
+  globalThis.HTMLElement = CardPart;
+  const plot = (id) => root.querySelector(`[data-card="${id}"]`)?.querySelector(".assess-card-plot") ?? null;
+  return { root, writes, plot };
+}
+
+test("each check card holds its plot for good, and its one renderer draws what lands in it", () => {
+  const { root, writes, plot } = fakeCards();
+  const offered = ["check_qq"];
+  const loading = overviewGroups(createInitialEditorState(snapshot(0)).request.evidence, { offered, compare: false });
+  // A check not yet answered draws nothing in its plot, a cleanup's placeholder or none.
+  for (const group of loading) for (const card of group.cards) card.thumbnail = "";
+  drawOverview(root, loading);
+  assert.notEqual(plot("check_qq"), null);
+  assert.equal(plot("validation"), null);
+  const answered = overviewGroups(evidenceFrom(FIXTURE.calm), { offered, compare: false });
+  writes.length = 0;
+  drawOverview(root, answered);
+  assert.ok(plot("check_qq").innerHTML.startsWith('<svg class="check-plot"'));
+  assert.deepEqual(writes, ["assess-card-plot"]);
+  // The same drawing again writes nothing; the cards were built once.
+  writes.length = 0;
+  drawOverview(root, overviewGroups(evidenceFrom(FIXTURE.calm), { offered, compare: false }));
+  assert.deepEqual(writes, []);
 });

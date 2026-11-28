@@ -46,7 +46,7 @@ const MISSING = "—";
 const EARLIER = "Earlier result";
 /** @type {OverviewOptions} */
 const NO_CHECKS = Object.freeze({ offered: Object.freeze([]), compare: false });
-/** The thumbnail each check card's plot holds now, so a redraw writes only one that moved. */
+/** The thumbnail each check card's plot was last drawn from, so a redraw writes only one that moved. */
 /** @type {WeakMap<Element, string>} */
 const DRAWN_PLOTS = new WeakMap();
 
@@ -197,20 +197,47 @@ export function overviewCards(evidence, { offered, compare, highlight = false } 
   return ASSESS_GROUPS.flatMap((group) => carded(group, offered).map((entry) => overviewCard(entry, evidence, options)));
 }
 
-/** @param {CardModel} card */
+/**
+ * A card as built: its title, and the parts its renderer (`renderCard`) writes, empty. A check
+ * card's plot is its own for as long as the card is, whatever it draws.
+ * @param {CardModel} card
+ */
 function cardMarkup(card) {
-  const plot = card.thumbnail ? `<span class="assess-card-plot" aria-hidden="true">${card.thumbnail}</span>` : "";
-  return `<button class="assess-card" type="button" data-card="${card.id}" data-freshness="${card.freshness}"` +
-    ` data-flagged="${card.flagged}">` +
+  const plot = isCheckReport(card.id) ? '<span class="assess-card-plot" aria-hidden="true"></span>' : "";
+  return `<button class="assess-card" type="button" data-card="${card.id}">` +
     `<span class="assess-card-title"><span class="assess-flag" aria-hidden="true"></span>${escapeHTML(card.title)}</span>` +
     plot +
-    `<span class="assess-card-value">${escapeHTML(card.value)}</span>` +
-    `<span class="assess-card-marker" data-shown="${card.markerShown}">${escapeHTML(card.marker)}</span>` +
-    `<span class="assess-card-note">${escapeHTML(card.note)}</span></button>`;
+    '<span class="assess-card-value"></span><span class="assess-card-marker"></span><span class="assess-card-note"></span>' +
+    "</button>";
 }
 
 /**
- * The overview's cards, a section per group under its heading.
+ * Write `card` onto its node, the one writer of what a built card shows: its freshness, its flag,
+ * its thumbnail, which it writes only when the drawing moved, its number, marker and note.
+ * @param {HTMLElement} node @param {CardModel} card
+ */
+function renderCard(node, card) {
+  node.dataset.freshness = card.freshness;
+  node.dataset.flagged = String(card.flagged);
+  const plot = node.querySelector(".assess-card-plot");
+  if (plot && DRAWN_PLOTS.get(plot) !== card.thumbnail) {
+    plot.innerHTML = card.thumbnail;
+    DRAWN_PLOTS.set(plot, card.thumbnail);
+  }
+  const value = node.querySelector(".assess-card-value");
+  const marker = node.querySelector(".assess-card-marker");
+  const note = node.querySelector(".assess-card-note");
+  if (value) value.textContent = card.value;
+  if (marker instanceof HTMLElement) {
+    marker.textContent = card.marker;
+    marker.dataset.shown = String(card.markerShown);
+  }
+  if (note) note.textContent = card.note;
+}
+
+/**
+ * The overview's cards as built, a section per group under its heading; each card's renderer
+ * then writes what it shows.
  * @param {CardGroup[]} groups
  * @returns {string}
  */
@@ -223,39 +250,19 @@ export function overviewMarkup(groups) {
 }
 
 /**
- * Draw the cards into `root`: built when the set of cards changes, else each card's value,
- * marker, note, freshness, flag and thumbnail written in place, so a card being pressed or
- * holding focus stays the same element while another report lands.
+ * Draw the cards into `root`: built when the set of cards changes, and each card then written in
+ * place by its renderer, so a card being pressed or holding focus stays the same element while
+ * another report lands.
  * @param {HTMLElement} root
  * @param {CardGroup[]} groups
  */
 export function drawOverview(root, groups) {
   const cards = groups.flatMap((group) => group.cards);
   const drawn = Array.from(root.querySelectorAll("[data-card]"), (node) => node instanceof HTMLElement ? node.dataset.card : "");
-  if (drawn.join() !== cards.map((card) => card.id).join()) {
-    root.innerHTML = overviewMarkup(groups);
-    for (const plot of root.querySelectorAll(".assess-card-plot")) DRAWN_PLOTS.set(plot, plot.innerHTML);
-    return;
-  }
+  if (drawn.join() !== cards.map((card) => card.id).join()) root.innerHTML = overviewMarkup(groups);
   for (const card of cards) {
     const node = root.querySelector(`[data-card="${card.id}"]`);
-    if (!(node instanceof HTMLElement)) continue;
-    node.dataset.freshness = card.freshness;
-    node.dataset.flagged = String(card.flagged);
-    const plot = node.querySelector(".assess-card-plot");
-    if (plot && DRAWN_PLOTS.get(plot) !== card.thumbnail) {
-      plot.innerHTML = card.thumbnail;
-      DRAWN_PLOTS.set(plot, card.thumbnail);
-    }
-    const value = node.querySelector(".assess-card-value");
-    const marker = node.querySelector(".assess-card-marker");
-    const note = node.querySelector(".assess-card-note");
-    if (value) value.textContent = card.value;
-    if (marker instanceof HTMLElement) {
-      marker.textContent = card.marker;
-      marker.dataset.shown = String(card.markerShown);
-    }
-    if (note) note.textContent = card.note;
+    if (node instanceof HTMLElement) renderCard(node, card);
   }
 }
 
