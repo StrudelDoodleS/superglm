@@ -62,6 +62,7 @@ function checkView(open = "check_qq") {
     down: (x, y, shiftKey = false) => frame.dispatch("pointerdown", { button: 0, pointerId: 1, clientX: x, clientY: y, shiftKey }),
     move: (x, y) => frame.dispatch("pointermove", { clientX: x, clientY: y }),
     up: (x, y) => frame.dispatch("pointerup", { clientX: x, clientY: y }),
+    lose: (type) => frame.dispatch(type, { pointerId: 1 }),
     key: (key) => frame.dispatch("keydown", { key }),
     dblclick: () => frame.dispatch("dblclick"),
     flushFrame() { for (const callback of frames.splice(0)) callback?.(0); },
@@ -115,6 +116,31 @@ test("letting go of a pan or a box publishes in the next frame, never at once", 
   page.flushFrame();
   assert.equal(page.view.published.length, 3);
   assert.deepEqual(page.view.published[2], zoomToBox(before, { x: 300, y: 200 }, { x: 500, y: 300 }));
+});
+
+test("a pan cancelled or losing its pointer moves nothing, and a release's own capture loss keeps it", () => {
+  for (const type of ["pointercancel", "lostpointercapture"]) {
+    const page = checkView();
+    page.zoomTo(zoomAbout(page.view.scene.zoom, { x: 400, y: 260 }, ZOOM_IN ** 4));
+    const zoomed = page.view.zooms.check_qq;
+    page.down(400, 260);
+    page.move(440, 240);
+    page.lose(type);
+    page.flushFrame();
+    assert.deepEqual(page.view.published, [], type);
+    assert.deepEqual(page.view.zooms.check_qq, zoomed, type);
+    assert.equal(page.gestures.busy(), false, type);
+  }
+  // A browser releases capture after every pointerup; the release's pan is still drawn.
+  const page = checkView();
+  page.zoomTo(zoomAbout(page.view.scene.zoom, { x: 400, y: 260 }, ZOOM_IN ** 4));
+  const zoomed = page.view.scene.zoom;
+  page.down(400, 260);
+  page.move(440, 240);
+  page.up(450, 240);
+  page.lose("lostpointercapture");
+  page.flushFrame();
+  assert.deepEqual(page.view.published, [panBy(zoomed, { x: 400, y: 260 }, { x: 450, y: 240 })]);
 });
 
 test("a queued wheel belongs to its check: opening another, Home, a double-click or 0 drops it", () => {

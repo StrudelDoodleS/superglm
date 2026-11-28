@@ -102,7 +102,7 @@ export function bindCheckZoom(frame, { getScene, isActive, onZoom, onRest }) {
     if (input.box) move(zoomToBox(zoom, input.box.from, input.box.to));
     if (input.factor !== 1) move(zoomAbout(zoom, input.at, input.factor));
     if (input.step !== 1) move(stepZoom(zoom, input.step));
-    onZoom(isWhole(zoom.domain, zoom.base) ? null : zoom.domain);
+    if (input.pan || input.box || input.factor !== 1 || input.step !== 1) onZoom(isWhole(zoom.domain, zoom.base) ? null : zoom.domain);
     // A drag under way pans on from what this frame drew, so a zoom made during it is kept.
     if (drag?.kind === "pan" && (input.box || input.factor !== 1 || input.step !== 1)) {
       drag.zoom = getScene()?.zoom ?? drag.zoom;
@@ -216,7 +216,12 @@ export function bindCheckZoom(frame, { getScene, isActive, onZoom, onRest }) {
     endDrag(false);
   }
 
-  const onDragLost = () => endDrag(true);
+  // A drag the browser took away (a cancel, or capture lost before a release) moves nothing more:
+  // its queued pan goes with it. After a release the drag has already ended, and its pan stays.
+  const onDragLost = () => {
+    if (drag?.kind === "pan" && queued) queued.pan = null;
+    endDrag(true);
+  };
 
   function onDoubleClick() {
     if (getScene()?.zoom) reset();
@@ -254,7 +259,7 @@ export function bindCheckZoom(frame, { getScene, isActive, onZoom, onRest }) {
       cancel();
       clearTimeout(turning);
       turning = 0;
-      frame.removeEventListener("wheel", onWheel, wheelOptions);
+      frame.removeEventListener("wheel", onWheel);
       frame.removeEventListener("pointerdown", onPointerDown);
       frame.removeEventListener("pointermove", onPointerMove);
       frame.removeEventListener("pointerup", onPointerUp);
