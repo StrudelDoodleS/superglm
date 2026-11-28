@@ -357,7 +357,8 @@ const historyFrame = document.getElementById("historyFrame");
 const statusNode = document.getElementById("status");
 const uiPopover = document.getElementById("uiPopover");
 if (!uiPopover) throw new Error("Editor popover element is missing");
-bindPopovers({ root: document, popover: uiPopover });
+// The one owner of the popover: a renderer that writes over anchors tells it (`anchorUpdated`).
+const popovers = bindPopovers({ root: document, popover: uiPopover });
 
 let buildProgress = null;
 let buildFrame = null;
@@ -1299,6 +1300,7 @@ function renderOverview() {
   const highlight = state.view.highlightOutside;
   renderHighlightSwitch(overviewHighlight, highlight, offered.length > 0);
   drawOverview(assessCards, overviewGroups(evidence, { offered, compare: compare.checked, highlight }));
+  popovers.anchorUpdated();
 }
 
 function checkFrameSize() {
@@ -1318,6 +1320,7 @@ function renderCheckPanel() {
   const activeView = state.view.activeView;
   if (!isCheckReport(activeView) || checkPanel.hidden) {
     checkDrawing.close();
+    popovers.anchorUpdated();
     return;
   }
   // The switch reads the check on screen: only it is asked again after an edit or an Undo here.
@@ -1344,6 +1347,7 @@ function renderCheckPanel() {
     stale: "Check may be stale.",
     error: "Check unavailable."
   });
+  popovers.anchorUpdated();
 }
 
 function renderChartWorkspace() {

@@ -1,5 +1,6 @@
 // @ts-check
 
+import { defineMachine } from "../state/machine.js";
 import { helpForElement } from "./help_content.js";
 
 export const TOOLTIP_SHOW_DELAY_MS = 350;
@@ -10,12 +11,29 @@ export const TOOLTIP_SWITCH_WINDOW_MS = 300;
 /** @typedef {(timer: number) => void} ClearTimer */
 /** @typedef {HTMLElement|SVGElement} PopoverTarget */
 
+/**
+ * A popover's lifecycle: `closed`; `pending`, its show delay running; `open`; and `recent`, closed
+ * a moment ago, so that reaching another target shows its help at once. `due` is the show delay
+ * ending and `lapse` the switch window; `update` is its anchor written under it, which reads an
+ * open popover's help again.
+ */
+export const POPOVER = defineMachine({
+  name: "popover",
+  initial: "closed",
+  moves: {
+    closed: { enter: "pending", focus: "open" },
+    pending: { enter: "pending", focus: "open", due: "open", leave: "closed", escape: "closed" },
+    open: { enter: "open", focus: "open", update: "open", leave: "recent", escape: "closed" },
+    recent: { enter: "open", focus: "open", lapse: "closed", escape: "closed" },
+  },
+});
+
 export class PopoverDelay {
   /**
    * @param {object} options
    * @param {SetTimer} options.setTimer
    * @param {ClearTimer} options.clearTimer
-   * @param {() => void} options.onShow
+   * @param {() => void} options.onShow write the help, at opening and at each update while open
    * @param {() => void} options.onHide
    */
   constructor({ setTimer, clearTimer, onShow, onHide }) {
@@ -23,66 +41,62 @@ export class PopoverDelay {
     this.clearTimer = clearTimer;
     this.onShow = onShow;
     this.onHide = onHide;
+    /** @type {'closed'|'pending'|'open'|'recent'} */
+    this.state = POPOVER.initial;
+    // The timer of `pending` (the show delay) or of `recent` (the switch window).
     /** @type {number | null} */
     this.timer = null;
-    /** @type {number | null} */
-    this.switchTimer = null;
-    this.visible = false;
+  }
+
+  get visible() {
+    return this.state === "open";
   }
 
   pointerEnter() {
-    this.cancel();
-    if (this.switchTimer !== null) {
-      this.show();
-      return;
-    }
-    this.timer = this.setTimer(() => this.show(), TOOLTIP_SHOW_DELAY_MS);
+    this.move("enter");
   }
 
   pointerLeave() {
-    this.cancel();
-    this.hide();
+    this.move("leave");
   }
 
   focus() {
-    this.cancel();
-    this.show();
+    this.move("focus");
   }
 
   /** Close on purpose: the next tooltip waits its delay. */
   escape() {
-    this.cancel();
-    this.hide();
-    this.endSwitch();
+    this.move("escape");
   }
 
-  show() {
-    this.timer = null;
-    this.endSwitch();
-    if (this.visible) return;
-    this.visible = true;
-    this.onShow();
+  /** The anchor was written under the help: an open popover reads it again. */
+  update() {
+    this.move("update");
   }
 
-  hide() {
-    if (!this.visible) return;
-    this.visible = false;
-    this.onHide();
-    this.switchTimer = this.setTimer(() => {
-      this.switchTimer = null;
-    }, TOOLTIP_SWITCH_WINDOW_MS);
-  }
-
-  endSwitch() {
-    if (this.switchTimer === null) return;
-    this.clearTimer(this.switchTimer);
-    this.switchTimer = null;
-  }
-
-  cancel() {
-    if (this.timer === null) return;
-    this.clearTimer(this.timer);
-    this.timer = null;
+  /**
+   * The one writer of the state, its timer and the help shown: `event` makes its move in the
+   * table, if it is one. The state's timer ends with it, and a pending popover entered again
+   * waits its delay afresh.
+   * @param {'enter'|'focus'|'leave'|'escape'|'due'|'lapse'|'update'} event
+   */
+  move(event) {
+    const from = this.state;
+    const to = POPOVER.next(from, event);
+    if (to === null) return;
+    if (this.timer !== null && (to !== from || event === "enter")) {
+      this.clearTimer(this.timer);
+      this.timer = null;
+    }
+    this.state = to;
+    if (to === "pending" && this.timer === null) {
+      this.timer = this.setTimer(() => { this.timer = null; this.move("due"); }, TOOLTIP_SHOW_DELAY_MS);
+    }
+    if (to === "recent") {
+      this.timer = this.setTimer(() => { this.timer = null; this.move("lapse"); }, TOOLTIP_SWITCH_WINDOW_MS);
+    }
+    if (to === "open" && (from !== "open" || event === "update")) this.onShow();
+    if (from === "open" && to !== "open") this.onHide();
   }
 }
 
@@ -254,8 +268,28 @@ export function bindPopovers({ root, popover }) {
   root.addEventListener("click", onClick);
   root.addEventListener("keydown", onKeyDown);
 
+  /** Whether `node` is drawn: on the page, and neither it nor an ancestor hidden. @param {PopoverTarget} node */
+  const drawn = (node) => node.isConnected && !node.closest("[hidden]");
+
+  /**
+   * A renderer wrote over anchors: help open on an anchor still drawn reads it again and is
+   * placed again beside it, and help whose anchor left the page, or was hidden, closes.
+   */
+  function anchorUpdated() {
+    if (!target) return;
+    if (drawn(target)) {
+      if (helpForElement(target)) delay.update();
+      else syncTarget(false);
+      return;
+    }
+    if (hoveredTarget === target) hoveredTarget = null;
+    if (focusedTarget === target) focusedTarget = null;
+    syncTarget(false);
+  }
+
   return Object.freeze({
     close: dismiss,
+    anchorUpdated,
     isOpen: () => !popover.hidden,
     destroy: () => {
       dismiss();

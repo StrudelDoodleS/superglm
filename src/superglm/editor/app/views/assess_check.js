@@ -224,6 +224,10 @@ export function renderHighlightSwitch(button, checked, shown) {
 }
 
 const SVG_NS = "http://www.w3.org/2000/svg";
+// Each split line's markup as last written: a redraw of the same note keeps its element, and the
+// keyboard focus and the popover on it.
+/** @type {WeakMap<Element, string>} */
+const SPLIT_WRITTEN = new WeakMap();
 // What the split line adds when a held-out split's band takes the fitted parameters as exact,
 // and the model it names when only one of the two drawn fell back.
 const LEVEL_TEXT = "parameters taken as exact";
@@ -292,9 +296,13 @@ export function renderCheckView(nodes, report, payload, { compare, highlight, do
   // compared, available and drawable on the whole plot, so a zoom never changes either.
   const fitDrawn = scene?.fitted === true;
   const line = splitLine(payload, fitDrawn);
-  nodes.split.innerHTML = escapeHTML(line.text) + (line.level === null || line.note === null ? ""
+  const split = escapeHTML(line.text) + (line.level === null || line.note === null ? ""
     : ` · <span class="check-level" tabindex="0" data-popover-title="${LEVEL_TITLE}"`
       + ` data-popover-body="${escapeHTML(line.note)}">${line.level}</span>`);
+  if (SPLIT_WRITTEN.get(nodes.split) !== split) {
+    nodes.split.innerHTML = split;
+    SPLIT_WRITTEN.set(nodes.split, split);
+  }
   const { frame } = nodes;
   frame.dataset.zoomed = String(scene !== null && domain !== null);
   if (payload === null || scene === null) {

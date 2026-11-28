@@ -381,6 +381,22 @@ test("the view is headed by the check's label, with its split and rows beside it
   assert.deepEqual(splitLine({ ...FIXTURE.calm.check_qq, split: null }, false), { text: "", level: null, note: null });
 });
 
+test("a redraw that writes the same split note keeps its element, and the focus on it", () => {
+  const payload = structuredClone(FIXTURE.calm.check_pit);
+  const note = "The band treats the fitted parameters as exact, because these rows could not be simulated.";
+  Object.assign(payload.models.edited, { level_source: "known", n_draws: 0, level_note: note });
+  const dom = fakeFrame();
+  renderCheckView(dom.nodes, "check_pit", payload, VIEW);
+  const writes = dom.recordWrites();
+  // A resize draws the same check at another size.
+  renderCheckView(dom.nodes, "check_pit", payload, { ...VIEW, width: 700 });
+  assert.deepEqual(writes().filter(({ node }) => node === dom.nodes.split).map(({ what }) => what), []);
+  // Another note is written.
+  payload.models.edited.level_note = "Another reason.";
+  renderCheckView(dom.nodes, "check_pit", payload, VIEW);
+  assert.match(dom.nodes.split.innerHTML, /data-popover-body="Another reason\."/);
+});
+
 test("a held-out split whose level was not simulated says its parameters are taken as exact", () => {
   const payload = structuredClone(FIXTURE.calm.check_pit);
   const note = "The band treats the fitted parameters as exact, because these rows could not be simulated.";

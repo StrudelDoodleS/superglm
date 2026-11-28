@@ -84,6 +84,10 @@ _WATCH_FRAME = """() => {
 }"""
 _NO_EDIT = "The model is as fitted; there is no edit to compare."
 _WAITING = "Waiting for the edited model's answer; the comparison is ready once it has loaded."
+_COMPARES = (
+    "Draws the model as fitted in grey beside the model as edited in blue, on every check. "
+    "It changes only what is drawn."
+)
 
 
 def _calm_session():
@@ -518,7 +522,8 @@ def test_compare_draws_the_fit_without_asking_python(checks_page, choose_feature
 def test_compare_waits_for_the_edited_models_check_after_an_edit(checks_page, choose_feature):
     """Right after an edit, while the open check is asked again about it, Compare is off and
     its popover says the edit's answer is loading, not that there is no edit; once the answer
-    lands it is live. Fails on the unfixed page, whose popover said the model is as fitted.
+    lands it is live, and the popover still open under the pointer says what it draws. Fails on
+    the unfixed page, whose popover said the model is as fitted, and kept that once live.
     """
     with checks_page() as page:
         _open_check(page, "check_ae")
@@ -536,11 +541,15 @@ def test_compare_waits_for_the_edited_models_check_after_an_edit(checks_page, ch
             "text => document.querySelector('#uiPopover [data-popover-description]')?.textContent === text",
             arg=_WAITING,
         )
-        page.mouse.move(2, 2)
         page.unroute("**/report")
         for route in held:
             route.continue_()
         page.locator('#checkCompare[aria-disabled="false"]').wait_for()
+        page.wait_for_function(
+            "text => document.querySelector('#uiPopover [data-popover-description]')?.textContent === text",
+            arg=_COMPARES,
+        )
+        assert page.locator("#uiPopover").is_visible()
 
 
 def test_compare_is_off_and_disabled_after_undo(checks_page, choose_feature):
