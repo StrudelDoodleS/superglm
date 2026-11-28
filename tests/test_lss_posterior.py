@@ -881,8 +881,10 @@ def test_one_seed_draws_the_same_coefficients_whatever_basis_the_eigensolver_pic
     np.testing.assert_allclose(other, drawn, rtol=0, atol=bound)
 
 
+@pytest.mark.pins_behaviour
 def test_a_small_positive_mode_keeps_the_prediction_variance_it_carries() -> None:
-    """On a nearly constant input the location's two coefficients are tied, and the covariance's
+    """Pins that the draw factor keeps every positive mode, as the parent's factor did. On a
+    nearly constant input the location's two coefficients are tied, and the covariance's
     smallest scaled mode, a few ``u ||G||``, is all the variance of the location at the data.
     A Gaussian location and scale are orthogonal at the fit, so that variance is
     ``sigma_hat^2 / n`` at the input's mean, with ``sigma_hat^2`` the mean squared residual.
