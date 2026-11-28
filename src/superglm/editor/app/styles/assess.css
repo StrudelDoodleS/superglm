@@ -345,6 +345,21 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* The Help icon by a check's title: hovered or focused, it shows the check's Help entry. */
+.check-help {
+  display: inline-grid;
+  place-items: center;
+  align-self: center;
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  cursor: help;
+}
+
+.check-help:hover,
+.check-help:focus-visible {
+  color: var(--text);
+}
+
 .check-level {
   text-decoration: underline dotted;
   text-underline-offset: 3px;

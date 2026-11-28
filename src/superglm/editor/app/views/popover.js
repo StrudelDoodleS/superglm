@@ -123,7 +123,7 @@ export function bindPopovers({ root, popover }) {
   function candidate(node) {
     if (!(node instanceof Element)) return null;
     const closest = node.closest(
-      "[data-tool], [data-help-operation], [data-help-control], [data-popover-title]",
+      "[data-tool], [data-help-operation], [data-help-control], [data-help-check], [data-popover-title]",
     );
     if (closest instanceof HTMLElement) return closest;
     return typeof SVGElement !== "undefined" && closest instanceof SVGElement ? closest : null;

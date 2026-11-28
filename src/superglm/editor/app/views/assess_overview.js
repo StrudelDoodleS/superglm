@@ -26,7 +26,11 @@ import { verdictParts } from "./diagnose_tab.js";
 /** @typedef {import('../api/contracts.js').CVReportPayload} CVReportPayload */
 /** @typedef {import('./diagnose_tab.js').DiagnosePayload} DiagnosePayload */
 /** @typedef {import('../state/assess.js').AssessEntry} AssessEntry */
-/** What the overview draws: the checks the model offers, and whether to draw the fit beside an edit. @typedef {{offered: readonly CheckReport[], compare: boolean}} OverviewOptions */
+/**
+ * What the overview draws: the checks the model offers, whether to draw the fit beside an edit,
+ * and whether to colour what left a band (off unless given).
+ * @typedef {{offered: readonly CheckReport[], compare: boolean, highlight?: boolean}} OverviewOptions
+ */
 /**
  * The parts of a validation report a card reads.
  * @typedef {{name?: string, n_obs?: number, available?: boolean, error?: string,
@@ -145,10 +149,10 @@ function cardFace(id, payload) {
  * An entry's card. Final fit reads the cv report, whose `final_fit` says whether one ran; a
  * check reads its own payload and draws its thumbnail.
  * @param {Readonly<AssessEntry>} entry @param {Record<ReportName, EvidenceState>} evidence
- * @param {boolean} compare
+ * @param {import('../chart/check_plots.js').SceneOptions} options
  * @returns {CardModel}
  */
-function overviewCard(entry, evidence, compare) {
+function overviewCard(entry, evidence, options) {
   const { id } = entry;
   const { status, payload, error } = evidence[id === "final" ? "cv" : id];
   const card = { id, title: entry.label, freshness: status, marker: "", markerShown: false, thumbnail: "", flagged: false };
@@ -156,7 +160,7 @@ function overviewCard(entry, evidence, compare) {
   let face;
   if (isCheckReport(id)) {
     const check = checkPayload(evidence[id]);
-    card.thumbnail = checkThumbnail(id, check, compare);
+    card.thumbnail = checkThumbnail(id, check, options);
     face = checkFace(id, check, status);
     if (check === null) return { ...card, ...face };
   } else if (payload === null) {
@@ -188,8 +192,9 @@ function carded(group, offered) {
  * @param {OverviewOptions} [options]
  * @returns {CardModel[]}
  */
-export function overviewCards(evidence, { offered, compare } = NO_CHECKS) {
-  return ASSESS_GROUPS.flatMap((group) => carded(group, offered).map((entry) => overviewCard(entry, evidence, compare)));
+export function overviewCards(evidence, { offered, compare, highlight = false } = NO_CHECKS) {
+  const options = { compare, highlight };
+  return ASSESS_GROUPS.flatMap((group) => carded(group, offered).map((entry) => overviewCard(entry, evidence, options)));
 }
 
 /** @param {CardModel} card */
@@ -260,10 +265,11 @@ export function drawOverview(root, groups) {
  * @param {OverviewOptions} [options]
  * @returns {CardGroup[]}
  */
-export function overviewGroups(evidence, { offered, compare } = NO_CHECKS) {
+export function overviewGroups(evidence, { offered, compare, highlight = false } = NO_CHECKS) {
+  const options = { compare, highlight };
   return ASSESS_GROUPS.map((group) => ({
     name: group.name,
-    cards: carded(group, offered).map((entry) => overviewCard(entry, evidence, compare)),
+    cards: carded(group, offered).map((entry) => overviewCard(entry, evidence, options)),
   })).filter((group) => group.cards.length > 0);
 }
 

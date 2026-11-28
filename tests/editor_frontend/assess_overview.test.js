@@ -261,6 +261,29 @@ test("a flagged card is marked, and its thumbnail adds the fit only when compare
   assert.ok(thumb(true).every((card) => card.thumbnail.includes('class="check-original"')));
 });
 
+test("Highlight outside the band moves a thumbnail's colours, never a card's flag or count", () => {
+  const offered = [...CHECK_REPORTS];
+  for (const fixture of [FIXTURE.wrong, FIXTURE.wrong_mean]) {
+    const cards = (highlight) => overviewGroups(evidenceFrom(fixture), { offered, compare: false, highlight })
+      .flatMap((g) => g.cards).filter((card) => card.thumbnail);
+    const [off, on] = [cards(false), cards(true)];
+    for (const [i, card] of off.entries()) {
+      const flagged = fixture[card.id].models.edited.flagged;
+      assert.deepEqual([card.flagged, card.value, card.note], [on[i].flagged, on[i].value, on[i].note], card.id);
+      assert.equal(card.flagged, flagged, card.id);
+      assert.ok(!card.thumbnail.includes("check-outside"), card.id);
+      // A/E's thumbnail draws the predicted-Mean bands alone, and a group may leave elsewhere.
+      if (on[i].thumbnail.includes('class="check-outside"')) assert.ok(flagged, card.id);
+    }
+  }
+  const wrong = overviewGroups(evidenceFrom(FIXTURE.wrong), { offered, compare: false, highlight: true })
+    .flatMap((g) => g.cards).filter((card) => card.thumbnail.includes('class="check-outside"'));
+  assert.deepEqual(wrong.map((card) => card.id).sort(), ["check_calibration", "check_pit", "check_qq"]);
+  // Off unless given, as the view flag is.
+  const plain = overviewGroups(evidenceFrom(FIXTURE.wrong), { offered, compare: false }).flatMap((g) => g.cards);
+  assert.ok(plain.every((card) => !card.thumbnail.includes("check-outside")));
+});
+
 test("a check card waits, says it failed, and keeps an earlier result as a report card does", () => {
   const evidence = evidenceFrom(FIXTURE.wrong);
   const card = (state) => overviewGroups({ ...evidence, check_pit: { ...evidence.check_pit, ...state } },

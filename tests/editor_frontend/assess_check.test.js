@@ -207,7 +207,7 @@ class FakeNode {
 function fakeFrame({ width = 820, height = 520 } = {}) {
   const log = [];
   const node = (tag) => new FakeNode(tag, log);
-  const nodes = { title: node("h2"), split: node("span"), legend: node("div"), frame: node("div") };
+  const nodes = { title: node("h2"), help: node("span"), split: node("span"), legend: node("div"), frame: node("div") };
   nodes.frame.clientWidth = width; nodes.frame.clientHeight = height;
   nodes.frame.rect = { left: 0, top: 0, width, height };
   const frames = [];
@@ -228,7 +228,7 @@ function fakeFrame({ width = 820, height = 520 } = {}) {
   };
 }
 
-const VIEW = { compare: false, width: 820, height: 520 };
+const VIEW = { compare: false, highlight: true, width: 820, height: 520 };
 
 test("hover moves only the readout", () => {
   const dom = fakeFrame();
@@ -302,6 +302,12 @@ test("the view is headed by the check's label, with its split and rows beside it
   const dom = fakeFrame();
   const scene = renderCheckView(dom.nodes, "check_qq", FIXTURE.calm.check_qq, VIEW);
   assert.equal(dom.nodes.title.textContent, "Q-Q plot");
+  // The Help icon beside the title names the check whose entry it shows.
+  assert.equal(dom.nodes.help.dataset.helpCheck, "check_qq");
+  assert.equal(dom.nodes.help.getAttribute("aria-label"), "About the Q-Q plot");
+  renderCheckView(dom.nodes, "check_ae", FIXTURE.calm.check_ae, VIEW);
+  assert.equal(dom.nodes.help.dataset.helpCheck, "check_ae");
+  renderCheckView(dom.nodes, "check_qq", FIXTURE.calm.check_qq, VIEW);
   assert.equal(dom.nodes.split.innerHTML, "Validation, 200 rows");
   const points = scene.layers.filter((l) => l.role === "edited" || l.role === "outside")
     .reduce((sum, l) => sum + (l.d.match(/M/g) ?? []).length, 0);

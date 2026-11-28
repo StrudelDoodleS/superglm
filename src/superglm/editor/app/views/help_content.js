@@ -241,6 +241,11 @@ export const CONTROL_HELP = Object.freeze({
     body: "Draws the model as fitted in grey beside the model as edited in blue, on every check. "
       + "It changes only what is drawn.",
   }),
+  highlight_outside: Object.freeze({
+    title: "Highlight outside the band",
+    body: "Colours the points, bars and groups that lie outside their band. The count on each card is the same "
+      + "either way.",
+  }),
 });
 
 /**
@@ -434,9 +439,12 @@ export const HELP_SECTIONS = Object.freeze([
   }),
   Object.freeze({
     title: "Checks",
-    keys: Object.freeze(["check_qq", "check_pit", "check_ae", "check_calibration", "compare_original"]),
+    keys: Object.freeze([
+      "check_qq", "check_pit", "check_ae", "check_calibration", "compare_original", "highlight_outside",
+    ]),
     items: Object.freeze([
       "Hover over a check's plot to read out the nearest point. With the plot focused, the arrow keys step from point to point.",
+      "Hover over or focus the icon by a check's title to read its entry here.",
     ]),
   }),
   Object.freeze({
@@ -489,6 +497,10 @@ export function helpForElement(element) {
   if (operation && OPERATION_HELP[operation] && !element.dataset.popoverBody) {
     return OPERATION_HELP[operation];
   }
+
+  // A check's Help icon shows the check's own entry.
+  const check = element.dataset.helpCheck;
+  if (check && CHECK_HELP[check]) return CHECK_HELP[check];
 
   // A disabled control's own reason outranks its help, as for tools.
   const control = element.dataset.helpControl;

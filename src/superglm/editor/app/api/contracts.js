@@ -589,6 +589,8 @@
  * @property {boolean} showUnsmoothed the Unsmoothed toggle, off until turned on
  * @property {boolean} compareOriginal Compare with the fit: the checks draw the fitted model
  *   beside the edited one; off until turned on
+ * @property {boolean} highlightOutside Highlight outside the band: the checks colour what left
+ *   its band; off until turned on, and it moves no count or flag
  * @property {RiskProfiles} risks the Explain tab's risks (SuperLSS sessions)
  * @property {Record<string, UnsmoothedEntry>} unsmoothed each term's latest line
  *   or refusal, drawn while its fit is the one in force

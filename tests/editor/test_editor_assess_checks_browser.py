@@ -11,7 +11,15 @@ import pandas as pd
 import pytest
 from tests.editor._editor_waits import hold_requests, wait_for_editor_idle
 from tests.editor.assess_table import bare_glm_session, open_report, wait_for_report
-from tests.test_editor_checks import GROUPS, LAMBDA, SEED, _calm_case, _session, _wrong_case
+from tests.test_editor_checks import (
+    GROUPS,
+    LAMBDA,
+    SEED,
+    _calm_case,
+    _session,
+    _wrong_case,
+    _wrong_mean_case,
+)
 
 from superglm import GammaLS, SuperLSS, cat, s
 from superglm.editor import EditorSession
@@ -144,6 +152,11 @@ def _wrong_session():
     return _session(_wrong_case())
 
 
+def _wrong_mean_session():
+    """Gamma amounts under a Mean without ``g``, read on 1,000 validation rows: A/E flags."""
+    return _session(_wrong_mean_case())
+
+
 def _edited_session():
     """The same fit with ``mean:x`` flattened, so each check has the fit beside the edit."""
     session = _wrong_session()
@@ -213,15 +226,26 @@ def test_the_overview_draws_a_thumbnail_and_the_payloads_number_for_each_check(c
             assert card.locator(".assess-card-note").inner_text() == face["note"]
 
 
-def test_a_flagged_check_is_orange_on_its_card_and_in_the_list(checks_page):
-    with checks_page() as page:
+@pytest.mark.parametrize(
+    ("build", "expected"),
+    [
+        # The wrong family leaves the Q-Q, PIT and quantile bands.
+        (_wrong_session, {"check_qq", "check_pit", "check_calibration"}),
+        # The wrong Mean leaves two of A/E's intervals, and nothing else.
+        (_wrong_mean_session, {"check_ae"}),
+        # The calm fit stays inside every band, A/E's intervals included.
+        (_calm_session, set()),
+    ],
+    ids=["wrong", "wrong_mean", "calm"],
+)
+def test_a_flagged_check_is_orange_on_its_card_and_in_the_list(checks_page, build, expected):
+    with checks_page(build) as page:
         _open_overview(page)
         _wait_for_checks(page)
         orange = page.evaluate(_TOKEN_COLOUR, "--orange")
         orange_text = page.evaluate(_TOKEN_COLOUR, "--orange-text")
         flagged = {name for name in CHECKS if page.evaluate(_FACE_FROM_REPORT, name)["flagged"]}
-        # The wrong family leaves the Q-Q, PIT and quantile bands; A/E stays inside.
-        assert flagged == {"check_qq", "check_pit", "check_calibration"}
+        assert flagged == expected
         for name in CHECKS:
             card = page.locator(f'#assessCards [data-card="{name}"]')
             row = page.locator(f'#assessList [data-assess-entry="{name}"]')
@@ -541,6 +565,101 @@ def test_compare_is_off_and_disabled_after_undo(checks_page, choose_feature):
         page.locator('#checkFrame[data-freshness="stale"]').wait_for()
         assert page.locator("#checkRetry").is_visible()
         assert_off()
+
+
+def test_the_icon_by_a_checks_title_shows_its_help_entry(checks_page):
+    """Hovered or focused, the icon shows the check's entry as the Help pane gives it; a click
+    opens nothing and asks Python for nothing."""
+    with checks_page(_calm_session) as page:
+        _open_check(page, "check_pit")
+        icon = page.locator("#checkHelp")
+        assert icon.get_attribute("data-help-check") == "check_pit"
+        assert icon.get_attribute("aria-label") == "About the PIT histogram"
+        entry = page.evaluate(
+            """() => { const term = [...document.querySelectorAll("#helpPane dt")]
+                .find((dt) => dt.textContent === "PIT histogram");
+              return [term?.textContent, term?.nextElementSibling?.textContent]; }"""
+        )
+        assert entry[1] and entry[1].startswith("Each observed value is placed")
+        asked = _report_requests(page)
+        popover = page.locator("#uiPopover")
+        heading = popover.locator("[data-popover-heading]")
+        description = popover.locator("[data-popover-description]")
+        icon.hover()
+        popover.wait_for(state="visible")
+        assert [heading.inner_text(), description.inner_text()] == entry
+        page.mouse.move(2, 2)
+        popover.wait_for(state="hidden")
+        # The keyboard reaches it too.
+        page.locator('[data-assess-entry="check_pit"]').focus()
+        for _ in range(30):
+            page.keyboard.press("Tab")
+            if page.evaluate("document.activeElement?.id") == "checkHelp":
+                break
+        popover.wait_for(state="visible")
+        assert [heading.inner_text(), description.inner_text()] == entry
+        icon.click()
+        assert page.locator('[data-assess-entry="check_pit"][aria-current="true"]').count() == 1
+        assert page.locator("#checkPanel").is_visible() and page.locator("#helpPane").is_hidden()
+        assert asked == []
+
+
+def test_highlight_outside_the_band_colours_without_asking_python(checks_page):
+    """Off at first, what left a band is drawn as the rest of the edit; on, in orange. The
+    cards' flags and counts stay as they are, and nothing is asked."""
+    with checks_page() as page:
+        _open_overview(page)
+        _wait_for_checks(page)
+        switch = page.locator("#overviewHighlight")
+        assert switch.get_attribute("role") == "switch"
+        assert switch.inner_text().strip() == "Highlight outside the band"
+        assert switch.get_attribute("aria-checked") == "false"
+        assert page.locator("#assessCards path.check-outside").count() == 0
+
+        def faces() -> list[list[str | None]]:
+            return [
+                [
+                    page.locator(f'#assessCards [data-card="{name}"]').get_attribute(
+                        "data-flagged"
+                    ),
+                    page.locator(
+                        f'#assessCards [data-card="{name}"] .assess-card-value'
+                    ).inner_text(),
+                    page.locator(f'#assessList [data-assess-entry="{name}"]').get_attribute(
+                        "aria-label"
+                    ),
+                ]
+                for name in CHECKS
+            ]
+
+        before = faces()
+        asked = _report_requests(page)
+        switch.hover()
+        popover = page.locator("#uiPopover")
+        popover.wait_for(state="visible")
+        assert popover.locator("[data-popover-description]").inner_text() == (
+            "Colours the points, bars and groups that lie outside their band. "
+            "The count on each card is the same either way."
+        )
+        switch.click()
+        assert switch.get_attribute("aria-checked") == "true"
+        assert page.locator("#assessCards path.check-outside").count() == 3
+        assert faces() == before
+        # One flag: the large view's switch reads it too.
+        _open_check(page, "check_qq")
+        check_switch = page.locator("#checkHighlight")
+        assert check_switch.get_attribute("aria-checked") == "true"
+        assert page.locator("#checkFrame path.check-outside").count() == 1
+        count = "paths => paths.reduce((sum, p) => sum + (p.getAttribute('d').match(/M/g) || []).length, 0)"
+        drawn = page.locator("#checkFrame path:is(.check-edited, .check-outside)").evaluate_all(
+            count
+        )
+        check_switch.click()
+        assert check_switch.get_attribute("aria-checked") == "false"
+        assert page.locator("#checkFrame path.check-outside").count() == 0
+        assert page.locator("#checkFrame path.check-edited").evaluate_all(count) == drawn
+        assert page.locator("#checkFrame path.check-band").count() == 1
+        assert asked == []
 
 
 def test_hovering_a_check_changes_nothing_outside_its_readout(checks_page):

@@ -124,10 +124,10 @@ const helpEntry = (id) => CHECK_HELP[id] ?? CONTROL_HELP[id];
 const helpText = (id) => `${helpEntry(id).title} ${helpEntry(id).body}`;
 
 test("Help for every check is in neutral words", () => {
-  for (const id of [...CHECK_REPORTS, "compare_original"]) assert.deepEqual(neutralCopy(helpText(id)), [], id);
+  for (const id of [...CHECK_REPORTS, "compare_original", "highlight_outside"]) assert.deepEqual(neutralCopy(helpText(id)), [], id);
 });
 
-test("each check has its Help entry ending the same way, and Compare with the fit its own two sentences", () => {
+test("each check has its Help entry ending the same way, and each switch its own two sentences", () => {
   const bodies = {
     check_qq: "Each point is a sorted quantile residual against the value it would have if each row's predicted distribution were right. "
       + "The band holds for every point at once: a model that fits leaves it about 5% of the time, so one point outside is evidence. "
@@ -142,17 +142,20 @@ test("each check has its Help entry ending the same way, and Compare with the fi
     check_calibration: "For each predicted quantile, the share of rows above it against the share that should be. "
       + "The 99% quantile should be exceeded by 1% of rows. The band is exact binomial and holds for all 11 quantiles at once.",
     compare_original: "Draws the model as fitted in grey beside the model as edited in blue, on every check. It changes only what is drawn.",
+    highlight_outside: "Colours the points, bars and groups that lie outside their band. The count on each card is the same either way.",
   };
   const titles = { check_qq: "Q-Q plot", check_pit: "PIT histogram", check_ae: "Actual over expected",
-    check_calibration: "Quantile calibration", compare_original: "Compare with the fit" };
+    check_calibration: "Quantile calibration", compare_original: "Compare with the fit",
+    highlight_outside: "Highlight outside the band" };
   for (const [id, body] of Object.entries(bodies)) {
-    const ending = id === "compare_original" ? "" : ` ${SHARED_ENDING}`;
+    const ending = id in CONTROL_HELP ? "" : ` ${SHARED_ENDING}`;
     assert.deepEqual({ ...helpEntry(id) }, { title: titles[id], body: `${body}${ending}` }, id);
   }
   // Each Help title is the entry's list label.
   for (const entry of ASSESS_GROUPS.slice(1).flatMap((group) => group.entries)) assert.equal(CHECK_HELP[entry.id].title, entry.label);
   const section = HELP_SECTIONS.find((s) => s.title === "Checks");
-  assert.deepEqual(section?.keys, ["check_qq", "check_pit", "check_ae", "check_calibration", "compare_original"]);
+  assert.deepEqual(section?.keys,
+    ["check_qq", "check_pit", "check_ae", "check_calibration", "compare_original", "highlight_outside"]);
   assert.deepEqual(neutralCopy(JSON.stringify(section)), []);
 });
 
@@ -161,6 +164,19 @@ class FakeHelpElement {
   getAttribute(name) { return this.attributes[name] ?? null; }
   hasAttribute(name) { return name in this.attributes; }
 }
+
+test("the icon by a check's title shows that check's Help entry, as the Help pane gives it", () => {
+  const previous = globalThis.HTMLElement;
+  globalThis.HTMLElement = FakeHelpElement;
+  try {
+    for (const report of CHECK_REPORTS) {
+      assert.equal(helpForElement(new FakeHelpElement({ helpCheck: report })), CHECK_HELP[report], report);
+    }
+    assert.equal(helpForElement(new FakeHelpElement({ helpCheck: "validation" })), null);
+  } finally {
+    globalThis.HTMLElement = previous;
+  }
+});
 
 test("a disabled control's own reason outranks its Help, as a tool's does", () => {
   const previous = globalThis.HTMLElement;

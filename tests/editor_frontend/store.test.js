@@ -949,6 +949,7 @@ test("an open check asks its own report, and the overview its offered checks", (
   assert.deepEqual(selectVisibleEvidencePanels(patchView(state, { activeView: "assess" })),
     ["validation", "cv", "diagnose", "check_ae", "check_qq"]);
   assert.equal(state.view.compareOriginal, false);
+  assert.equal(state.view.highlightOutside, false);
 });
 
 test("the offered checks are the snapshot's, and none before a snapshot or for a SuperGLM", () => {

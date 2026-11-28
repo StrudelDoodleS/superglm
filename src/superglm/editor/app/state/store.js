@@ -28,6 +28,7 @@ export function createInitialEditorState(snapshot = null) {
       showFreeLevels: false,
       showUnsmoothed: false,
       compareOriginal: false,
+      highlightOutside: false,
       risks: createRiskProfiles(),
       unsmoothed: {},
       summaryLevelDisplay: "expanded",

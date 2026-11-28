@@ -34,7 +34,7 @@ const near = (actual, expected, tol = 0.011) => assert.ok(Math.abs(actual - expe
 
 test("the Q-Q scene puts each drawn point at its residual and keeps y = x on the diagonal", () => {
   const payload = FIXTURE.calm.check_qq, body = payload.models.edited;
-  const scene = checkScene("check_qq", payload, BOX, { compare: false });
+  const scene = checkScene("check_qq", payload, BOX, { compare: false, highlight: true });
   assert.equal(scene.marks.length, body.index.length);
   const [a, b] = [scene.marks[0], scene.marks.at(-1)];
   const sx = (b.x - a.x) / (body.theoretical.at(-1) - body.theoretical[0]);
@@ -60,8 +60,8 @@ test("the Q-Q axes span the points with a 5% margin, and the band is clipped to 
   const values = [...body.theoretical, ...body.observed];
   const [lo, hi] = [Math.min(...values), Math.max(...values)];
   const pad = (hi - lo) * 0.05;
-  const plain = checkScene("check_qq", calm, BOX, { compare: false });
-  for (const scene of [plain, checkScene("check_qq", wide, BOX, { compare: false })]) {
+  const plain = checkScene("check_qq", calm, BOX, { compare: false, highlight: true });
+  for (const scene of [plain, checkScene("check_qq", wide, BOX, { compare: false, highlight: true })]) {
     // The diagonal runs corner to corner of the plot: its ends are the range's.
     const [left, bottom, right, top] = subpaths(layer(scene, "reference").d)[0];
     const sx = affine(lo - pad, left, hi + pad, right);
@@ -78,20 +78,52 @@ test("the Q-Q axes span the points with a 5% margin, and the band is clipped to 
 });
 
 test("a flagged Q-Q draws its outside points in their own role", () => {
-  const scene = checkScene("check_qq", FIXTURE.wrong.check_qq, BOX, { compare: false });
+  const scene = checkScene("check_qq", FIXTURE.wrong.check_qq, BOX, { compare: false, highlight: true });
   const outside = layer(scene, "outside");
   assert.equal((outside.d.match(/M/g) ?? []).length, FIXTURE.wrong.check_qq.models.edited.outside);
   // 912 points drawn, 556 of them outside the band.
   assert.equal((layer(scene, "edited").d.match(/M/g) ?? []).length, 912 - 556);
 });
 
+test("a wrong Mean flags actual over expected, its groups outside drawn in their own role", () => {
+  const payload = FIXTURE.wrong_mean.check_ae, body = payload.models.edited;
+  assert.ok(body.flagged && body.outside === 2);
+  const scene = checkScene("check_ae", payload, BOX, { compare: false, highlight: true });
+  assert.equal(subpaths(layer(scene, "outside").d).length, body.outside);
+  // Each group outside lies wholly above 1 or wholly below it, one of each.
+  const sides = body.tables.flatMap((t) => t.ratio.map((_, i) => (t.lower[i] > 1 ? 1 : t.upper[i] < 1 ? -1 : 0)));
+  assert.deepEqual(sides.filter(Boolean).sort(), [-1, 1]);
+});
+
+test("Highlight outside the band off draws what left a band as the rest of the edit", () => {
+  const cases = { check_qq: FIXTURE.wrong, check_pit: FIXTURE.wrong, check_calibration: FIXTURE.wrong, check_ae: FIXTURE.wrong_mean };
+  for (const [report, fixture] of Object.entries(cases)) {
+    const payload = fixture[report];
+    assert.ok(payload.models.edited.outside > 0, report);
+    for (const box of [BOX, THUMB]) {
+      const on = checkScene(report, payload, box, { compare: false, highlight: true });
+      const off = checkScene(report, payload, box, { compare: false, highlight: false });
+      const count = (scene, role) => (layer(scene, role) ? subpaths(layer(scene, role).d).length : 0);
+      assert.equal(count(off, "outside"), 0, report);
+      // A/E's thumbnail draws the predicted-Mean bands alone, where a wrong Mean by group leaves none.
+      if (!box.thumb) assert.ok(count(on, "outside") > 0, report);
+      assert.equal(count(off, "edited"), count(on, "edited") + count(on, "outside"), report);
+      // Everything else, the band and A/E's intervals among it, is drawn the same either way.
+      for (const role of ["band", "reference", "interval", "weight", "grid"]) {
+        assert.equal(layer(off, role)?.d, layer(on, role)?.d, `${report} ${role}`);
+      }
+      assert.deepEqual(off.marks, on.marks, report);
+    }
+  }
+});
+
 test("compare draws the model as fitted only when the payload has it", () => {
   const edited = FIXTURE.edited.check_ae;
-  assert.ok(checkScene("check_ae", edited, BOX, { compare: true }).layers.some((l) => l.role === "original"));
-  assert.ok(!checkScene("check_ae", edited, BOX, { compare: false }).layers.some((l) => l.role === "original"));
-  assert.ok(!checkScene("check_ae", FIXTURE.calm.check_ae, BOX, { compare: true }).layers.some((l) => l.role === "original"));
+  assert.ok(checkScene("check_ae", edited, BOX, { compare: true, highlight: true }).layers.some((l) => l.role === "original"));
+  assert.ok(!checkScene("check_ae", edited, BOX, { compare: false, highlight: true }).layers.some((l) => l.role === "original"));
+  assert.ok(!checkScene("check_ae", FIXTURE.calm.check_ae, BOX, { compare: true, highlight: true }).layers.some((l) => l.role === "original"));
   for (const report of CHECK_REPORTS) {
-    assert.ok(layer(checkScene(report, FIXTURE.edited[report], BOX, { compare: true }), "original"), report);
+    assert.ok(layer(checkScene(report, FIXTURE.edited[report], BOX, { compare: true, highlight: true }), "original"), report);
   }
 });
 
@@ -99,7 +131,7 @@ test("PIT bars read count over expected against the band", () => {
   // The wrong case: 1000 rows in 20 bins, 50 expected in each, and a band of 28 to 76 values.
   const payload = FIXTURE.wrong.check_pit, body = payload.models.edited;
   assert.equal(body.expected, 1000 / 20);
-  const scene = checkScene("check_pit", payload, BOX, { compare: false });
+  const scene = checkScene("check_pit", payload, BOX, { compare: false, highlight: true });
   // Bin 1 holds 9 values, 9 / 50 = 0.18 of expected; bin 5 holds 85, 85 / 50 = 1.7.
   const y = affine(9 / 50, scene.marks[0].y, 85 / 50, scene.marks[4].y);
   const bars = ["edited", "outside"].flatMap((role) => subpaths(layer(scene, role).d)).sort((p, q) => p[0] - q[0]);
@@ -120,7 +152,7 @@ test("A/E draws a panel per table with its interval around each ratio", () => {
   const payload = FIXTURE.edited.check_ae, tables = payload.models.edited.tables;
   // Band 1 of predicted Mean: 36.36 actual over 34.49 expected is 1.054, interval 0.714 to 1.394.
   assert.ok(Math.abs(tables[0].actual[0] / tables[0].expected[0] - tables[0].ratio[0]) < 1e-12);
-  const scene = checkScene("check_ae", payload, BOX, { compare: false });
+  const scene = checkScene("check_ae", payload, BOX, { compare: false, highlight: true });
   const references = subpaths(layer(scene, "reference").d);
   const intervals = subpaths(layer(scene, "interval").d);
   assert.equal(references.length, tables.length);
@@ -158,7 +190,7 @@ test("A/E compare draws every band of both models when they bin predicted Mean d
     fitted.upper[kf - 1] = 3;
     payload.models.edited.tables = [firstGroups(band, ke)];
     payload.models.original.tables = [fitted];
-    const scene = checkScene("check_ae", payload, BOX, { compare: true });
+    const scene = checkScene("check_ae", payload, BOX, { compare: true, highlight: true });
     const [left, , right] = subpaths(layer(scene, "reference").d)[0];
     const top = scene.labels.find((l) => l.text === "Predicted Mean").y + 8;
     const bottom = subpaths(layer(scene, "weight").d)[0][1];
@@ -194,7 +226,7 @@ test("A/E keeps each panel 120 px tall when there are many inputs, and the view 
   const payload = structuredClone(FIXTURE.edited.check_ae);
   const [band, input] = payload.models.edited.tables;
   payload.models.edited.tables = [band, ...Array.from({ length: 16 }, (_, j) => ({ ...input, covariate: `x${j + 1}` }))];
-  const scene = checkScene("check_ae", payload, BOX, { compare: false });
+  const scene = checkScene("check_ae", payload, BOX, { compare: false, highlight: true });
   assert.ok(scene.height > BOX.height, String(scene.height));
   assert.ok(sceneMarkup(scene).startsWith(`<svg class="check-plot" viewBox="0 0 820 ${scene.height}"`));
   // A panel's group names sit 16 px below its plot and its title 8 px above; the title is
@@ -214,12 +246,12 @@ test("A/E keeps each panel 120 px tall when there are many inputs, and the view 
     for (const [, y] of absolutePoints(d)) if (y !== null) assert.ok(y <= scene.height, String(y));
   }
   // The thumbnail is still the predicted-Mean bands alone.
-  assert.equal(subpaths(layer(checkScene("check_ae", payload, THUMB, { compare: false }), "reference").d).length, 1);
+  assert.equal(subpaths(layer(checkScene("check_ae", payload, THUMB, { compare: false, highlight: true }), "reference").d).length, 1);
 });
 
 test("quantile calibration reads shares on a log axis against 1 - p", () => {
   const payload = FIXTURE.wrong.check_calibration, body = payload.models.edited, q = body.quantiles;
-  const scene = checkScene("check_calibration", payload, BOX, { compare: false });
+  const scene = checkScene("check_calibration", payload, BOX, { compare: false, highlight: true });
   assert.equal(scene.marks.length, 11);
   const step = scene.marks[1].x - scene.marks[0].x;
   for (const [i, mark] of scene.marks.entries()) near(mark.x, scene.marks[0].x + i * step, 1e-6);
@@ -240,7 +272,7 @@ test("on 20 rows every positive share keeps its log, and a zero share sits on it
   q.realised_exceedance = [1, 0.95, 0.9, 0.75, 0.5, 0.25, 0.1, 0.05, 0.05, 0, 0];
   body.band_lower = [0.85, 0.75, 0.7, 0.55, 0.3, 0.1, 0, 0, 0, 0, 0];
   body.band_upper = [1, 1, 1, 0.95, 0.7, 0.45, 0.25, 0.15, 0.1, 0.05, 0.05];
-  const scene = checkScene("check_calibration", payload, BOX, { compare: false });
+  const scene = checkScene("check_calibration", payload, BOX, { compare: false, highlight: true });
   const reference = subpaths(layer(scene, "reference").d)[0];
   const at = (i) => reference[2 * i + 1];
   // 2.5%, 1% and 0.5% expected above the three top quantiles: three heights, a step apart by
@@ -260,7 +292,7 @@ test("on 20 rows every positive share keeps its log, and a zero share sits on it
 
 test("compare keeps both models' quantile points at their quantile, inside the band", () => {
   const payload = FIXTURE.edited.check_calibration, q = payload.models.edited.quantiles;
-  const scene = checkScene("check_calibration", payload, BOX, { compare: true });
+  const scene = checkScene("check_calibration", payload, BOX, { compare: true, highlight: true });
   const columns = q.p.map((p) => scene.labels.find((l) => l.text === `${Math.round(p * 1000) / 10}%` && l.anchor === "middle").x);
   const band = absolutePoints(layer(scene, "band").d).map(([x]) => x).filter((x) => x !== null);
   const [left, right] = [Math.min(...band), Math.max(...band)];
@@ -276,7 +308,7 @@ test("compare keeps both models' quantile points at their quantile, inside the b
 
 test("each readout says what its point is, in the stated form", () => {
   const calm = FIXTURE.calm;
-  const first = (report) => checkScene(report, calm[report], BOX, { compare: false }).marks;
+  const first = (report) => checkScene(report, calm[report], BOX, { compare: false, highlight: true }).marks;
   assert.equal(first("check_qq")[0].text, "Rank 1 of 200 · expected -2.7 · observed -2.91 · band -4.84 to -1.71");
   assert.equal(first("check_pit")[0].text, "0 to 0.05 · 10 values · band 2 to 21");
   const ae = first("check_ae").map((m) => m.text);
@@ -287,7 +319,7 @@ test("each readout says what its point is, in the stated form", () => {
 
 test("a thumbnail has no text, at most 60 Q-Q points, and stays in its box", () => {
   for (const report of CHECK_REPORTS) {
-    const scene = checkScene(report, FIXTURE.wrong[report], THUMB, { compare: false });
+    const scene = checkScene(report, FIXTURE.wrong[report], THUMB, { compare: false, highlight: true });
     const markup = sceneMarkup(scene);
     assert.ok(!/<text/.test(markup), report);
     assert.ok(markup.startsWith('<svg class="check-plot" viewBox="0 0 160 62" width="160" height="62">'), report);
@@ -298,17 +330,17 @@ test("a thumbnail has no text, at most 60 Q-Q points, and stays in its box", () 
       }
     }
   }
-  const qq = checkScene("check_qq", FIXTURE.wrong.check_qq, THUMB, { compare: false });
+  const qq = checkScene("check_qq", FIXTURE.wrong.check_qq, THUMB, { compare: false, highlight: true });
   const count = (role) => (layer(qq, role)?.d.match(/M/g) ?? []).length;
   assert.ok(count("edited") + count("outside") <= 60);
   assert.equal(count("outside"), 20);
   // Compared, the two models share the one budget of 60 points.
-  const both = checkScene("check_qq", FIXTURE.edited.check_qq, THUMB, { compare: true });
+  const both = checkScene("check_qq", FIXTURE.edited.check_qq, THUMB, { compare: true, highlight: true });
   const drawn = (role) => (layer(both, role)?.d.match(/M/g) ?? []).length;
   assert.ok(drawn("original") > 0);
   assert.ok(drawn("edited") + drawn("outside") + drawn("original") <= 60, String(drawn("original")));
   // The thumbnail of A/E is its predicted-Mean bands alone.
-  const ae = checkScene("check_ae", FIXTURE.wrong.check_ae, THUMB, { compare: false });
+  const ae = checkScene("check_ae", FIXTURE.wrong.check_ae, THUMB, { compare: false, highlight: true });
   assert.equal(subpaths(layer(ae, "reference").d).length, 1);
   assert.equal(ae.marks.length, 10);
 });
@@ -316,7 +348,7 @@ test("a thumbnail has no text, at most 60 Q-Q points, and stays in its box", () 
 test("the markup draws one path per layer, escaped labels and an empty hidden readout", () => {
   const payload = structuredClone(FIXTURE.calm.check_ae);
   payload.models.edited.tables[2].levels = ["a<b", "b", "c"];
-  const scene = checkScene("check_ae", payload, BOX, { compare: false });
+  const scene = checkScene("check_ae", payload, BOX, { compare: false, highlight: true });
   const markup = sceneMarkup(scene);
   assert.ok(markup.startsWith('<svg class="check-plot" viewBox="0 0 820 520"'));
   assert.equal((markup.match(/<path /g) ?? []).length, scene.layers.length);
@@ -328,12 +360,12 @@ test("the markup draws one path per layer, escaped labels and an empty hidden re
 test("an unavailable check draws nothing", () => {
   const body = { available: false, reason: "No rows.", flagged: false, outside: 0, cells: 0 };
   const payload = { ...FIXTURE.calm.check_qq, available: false, models: { edited: body, original: null } };
-  const scene = checkScene("check_qq", payload, BOX, { compare: true });
+  const scene = checkScene("check_qq", payload, BOX, { compare: true, highlight: true });
   assert.deepEqual([scene.layers, scene.labels, scene.marks], [[], [], []]);
 });
 
 test("nearestMark is the closest mark by x, or in the plane when given y", () => {
-  const marks = checkScene("check_qq", FIXTURE.calm.check_qq, BOX, { compare: false }).marks;
+  const marks = checkScene("check_qq", FIXTURE.calm.check_qq, BOX, { compare: false, highlight: true }).marks;
   let seed = 7; const random = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
   for (let i = 0; i < 200; i++) {
     const x = random() * BOX.width;
@@ -341,7 +373,7 @@ test("nearestMark is the closest mark by x, or in the plane when given y", () =>
     assert.equal(Math.abs(marks[nearestMark(marks, x)].x - x), Math.abs(marks[brute].x - x));
   }
   // A/E's panels stack two rows: in the plane, the nearest is the mark under the pointer.
-  const grid = checkScene("check_ae", FIXTURE.wrong.check_ae, BOX, { compare: false }).marks;
+  const grid = checkScene("check_ae", FIXTURE.wrong.check_ae, BOX, { compare: false, highlight: true }).marks;
   const distance = (m, x, y) => Math.hypot(m.x - x, m.y - y);
   for (let i = 0; i < 200; i++) {
     const [x, y] = [random() * BOX.width, random() * BOX.height];
@@ -353,7 +385,7 @@ test("nearestMark is the closest mark by x, or in the plane when given y", () =>
 
 test("axis titles and readouts use neutral words", () => {
   for (const report of CHECK_REPORTS) {
-    const scene = checkScene(report, FIXTURE.edited[report], BOX, { compare: true });
+    const scene = checkScene(report, FIXTURE.edited[report], BOX, { compare: true, highlight: true });
     assert.deepEqual(neutralCopy([...scene.labels.map((l) => l.text), ...scene.marks.map((m) => m.text)].join(" ")), []);
   }
 });

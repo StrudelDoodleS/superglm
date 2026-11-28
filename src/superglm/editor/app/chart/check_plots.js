@@ -2,7 +2,9 @@
 /**
  * The four checks' plots as scenes: pure functions from one check payload to the paths, labels
  * and hover targets of an SVG. Each role is one path, so the stylesheet alone colours a scene
- * (`check-{role}`), and a card's thumbnail and the large view are drawn by the same code.
+ * (`check-{role}`), and a card's thumbnail and the large view are drawn by the same code. What
+ * lies outside its band takes the `outside` role only while Highlight outside the band is on;
+ * off, it is drawn as the rest of the edit is, and the band shows where it lies.
  */
 
 import { escapeHTML, fmt, fmtCount, fmtPercent } from "../format.js";
@@ -26,6 +28,11 @@ import { niceTicks } from "./fan.js";
  */
 /** @typedef {{width:number, height:number, layers:Layer[], labels:Label[], marks:Mark[]}} Scene */
 /** @typedef {{width:number, height:number, thumb?:boolean}} Box */
+/**
+ * What a scene draws beside the edit: the fitted model when `compare`, and what lies outside its
+ * band in its own role when `highlight`.
+ * @typedef {{compare:boolean, highlight:boolean}} SceneOptions
+ */
 /** @typedef {{left:number, top:number, right:number, bottom:number}} Rect */
 /** @typedef {Record<Role, string[]>} Parts */
 
@@ -221,8 +228,11 @@ function qqShown(s, box, budget) {
   return [...outside, ...inside].sort((a, b) => a - b);
 }
 
-/** @param {CheckBody} editedBody @param {CheckBody|null} originalBody @param {Box} box @returns {Scene} */
-function qqScene(editedBody, originalBody, box) {
+/**
+ * @param {CheckBody} editedBody @param {CheckBody|null} originalBody @param {Box} box
+ * @param {boolean} highlight @returns {Scene}
+ */
+function qqScene(editedBody, originalBody, box, highlight) {
   const edited = /** @type {QQStats} */ (/** @type {unknown} */ (editedBody));
   const original = originalBody && /** @type {QQStats} */ (/** @type {unknown} */ (originalBody));
   const budget = original ? THUMB_QQ_POINTS / 2 : THUMB_QQ_POINTS;
@@ -251,7 +261,7 @@ function qqScene(editedBody, originalBody, box) {
   for (const i of shown) {
     const x = sx(edited.theoretical[i]);
     const y = sy(edited.observed[i]);
-    parts[qqOutside(edited, i) ? "outside" : "edited"].push(dot(x, y, r));
+    parts[highlight && qqOutside(edited, i) ? "outside" : "edited"].push(dot(x, y, r));
     marks.push({
       x,
       y,
@@ -269,8 +279,11 @@ function qqScene(editedBody, originalBody, box) {
   return finish(box, parts, labels, marks);
 }
 
-/** @param {CheckBody} editedBody @param {CheckBody|null} originalBody @param {Box} box @returns {Scene} */
-function pitScene(editedBody, originalBody, box) {
+/**
+ * @param {CheckBody} editedBody @param {CheckBody|null} originalBody @param {Box} box
+ * @param {boolean} highlight @returns {Scene}
+ */
+function pitScene(editedBody, originalBody, box, highlight) {
   const edited = /** @type {PITStats} */ (/** @type {unknown} */ (editedBody));
   const original = originalBody && /** @type {PITStats} */ (/** @type {unknown} */ (originalBody));
   const share = (/** @type {PITStats} */ s, /** @type {number} */ i) => s.counts[i] / s.expected;
@@ -301,7 +314,7 @@ function pitScene(editedBody, originalBody, box) {
     }
     const y = sy(share(edited, i));
     const outside = count < edited.band_lower || count > edited.band_upper;
-    parts[outside ? "outside" : "edited"].push(bar(start, right - gap, sy(0), y));
+    parts[highlight && outside ? "outside" : "edited"].push(bar(start, right - gap, sy(0), y));
     marks.push({
       x: (left + right) / 2,
       y,
@@ -342,8 +355,9 @@ const aeDrawn = (table, i) => [table.ratio[i], table.lower[i], table.upper[i]].e
  * with its interval; the fitted model's beside it when compared.
  * @param {Parts} parts @param {Label[]} labels @param {Mark[]} marks @param {Rect} rect
  * @param {[number, number]} domain @param {AETable} table @param {AETable|null} original @param {Box} box
+ * @param {boolean} highlight
  */
-function aePanel(parts, labels, marks, rect, domain, table, original, box) {
+function aePanel(parts, labels, marks, rect, domain, table, original, box, highlight) {
   const sy = linear(domain[0], domain[1], rect.bottom, rect.top);
   const k = table.ratio.length;
   const slot = (rect.right - rect.left) / k;
@@ -372,7 +386,7 @@ function aePanel(parts, labels, marks, rect, domain, table, original, box) {
     const y = sy(table.ratio[i]);
     const outside = table.lower[i] > 1 || table.upper[i] < 1;
     parts.interval.push(vline(x, sy(table.lower[i]), sy(table.upper[i])));
-    parts[outside ? "outside" : "edited"].push(dot(x, y, r));
+    parts[highlight && outside ? "outside" : "edited"].push(dot(x, y, r));
     const group = aeGroup(table, i);
     const values = ` · ${fmt(table.ratio[i])} · interval ${fmt(table.lower[i])} to ${fmt(table.upper[i])}`
       + ` · ${fmtCount(table.n[i])} rows`;
@@ -395,8 +409,11 @@ function aePanel(parts, labels, marks, rect, domain, table, original, box) {
   labels.push({ x: rect.left, y: rect.top - 8, text: title, anchor: "start", axis: true });
 }
 
-/** @param {CheckBody} editedBody @param {CheckBody|null} originalBody @param {Box} box @returns {Scene} */
-function aeScene(editedBody, originalBody, box) {
+/**
+ * @param {CheckBody} editedBody @param {CheckBody|null} originalBody @param {Box} box
+ * @param {boolean} highlight @returns {Scene}
+ */
+function aeScene(editedBody, originalBody, box, highlight) {
   const edited = /** @type {AEStats} */ (/** @type {unknown} */ (editedBody));
   const original = originalBody && /** @type {AEStats} */ (/** @type {unknown} */ (originalBody));
   // A thumbnail draws the predicted-Mean bands alone.
@@ -430,15 +447,18 @@ function aeScene(editedBody, originalBody, box) {
     const rect = box.thumb
       ? outer
       : { left: left + PANEL_MARGIN.left, top: top + PANEL_MARGIN.top, right: left + cellW, bottom: top + cellH - PANEL_MARGIN.bottom };
-    aePanel(parts, labels, marks, rect, domain, table, fitted, box);
+    aePanel(parts, labels, marks, rect, domain, table, fitted, box, highlight);
   }
   labels.push({ x: 8, y: MARGIN.top - 14, text: "Actual over expected", anchor: "start", axis: true });
   marks.sort((a, b) => a.x - b.x);
   return finish({ ...box, height }, parts, labels, marks);
 }
 
-/** @param {CheckBody} editedBody @param {CheckBody|null} originalBody @param {Box} box @returns {Scene} */
-function calibrationScene(editedBody, originalBody, box) {
+/**
+ * @param {CheckBody} editedBody @param {CheckBody|null} originalBody @param {Box} box
+ * @param {boolean} highlight @returns {Scene}
+ */
+function calibrationScene(editedBody, originalBody, box, highlight) {
   const edited = /** @type {CalibrationStats} */ (/** @type {unknown} */ (editedBody));
   const original = originalBody && /** @type {CalibrationStats} */ (/** @type {unknown} */ (originalBody));
   const q = edited.quantiles;
@@ -468,7 +488,7 @@ function calibrationScene(editedBody, originalBody, box) {
     const realised = q.realised_exceedance[i];
     const outside = realised < edited.band_lower[i] || realised > edited.band_upper[i];
     const x = xAt(i);
-    parts[outside ? "outside" : "edited"].push(dot(x, y(realised), r));
+    parts[highlight && outside ? "outside" : "edited"].push(dot(x, y(realised), r));
     marks.push({
       x,
       y: y(realised),
@@ -489,20 +509,21 @@ function calibrationScene(editedBody, originalBody, box) {
   return finish(box, parts, labels, marks);
 }
 
-/** @type {Record<CheckReport, (edited: CheckBody, original: CheckBody|null, box: Box) => Scene>} */
+/** @type {Record<CheckReport, (edited: CheckBody, original: CheckBody|null, box: Box, highlight: boolean) => Scene>} */
 const SCENES = { check_qq: qqScene, check_pit: pitScene, check_ae: aeScene, check_calibration: calibrationScene };
 
 /**
- * A check's plot as a scene in `box`: the edited model, and with `compare` the fitted model when
- * the payload carries it. An unavailable check is an empty scene. A thumbnail has no labels.
+ * A check's plot as a scene in `box`: the edited model, with `compare` the fitted model when the
+ * payload carries it, and with `highlight` what lies outside its band in the `outside` role. An
+ * unavailable check is an empty scene. A thumbnail has no labels.
  * @param {CheckReport} report @param {CheckPayload} payload @param {Box} box
- * @param {{compare:boolean}} options
+ * @param {SceneOptions} options
  * @returns {Scene}
  */
 export function checkScene(report, payload, box, options) {
   const { edited, original } = payload.models;
   if (!payload.available || !edited.available) return finish(box, emptyParts(), [], []);
-  return SCENES[report](edited, options.compare && original?.available ? original : null, box);
+  return SCENES[report](edited, options.compare && original?.available ? original : null, box, options.highlight);
 }
 
 /**

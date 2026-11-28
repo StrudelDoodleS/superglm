@@ -20,10 +20,12 @@ import { assessEntry } from "../state/assess.js";
 /** @typedef {import('../chart/check_plots.js').CalibrationStats} CalibrationStats */
 /** @typedef {import('../chart/check_plots.js').Scene} Scene */
 /** @typedef {import('../chart/check_plots.js').Mark} Mark */
+/** @typedef {import('../chart/check_plots.js').SceneOptions} SceneOptions */
 /**
- * The large view's nodes: its heading, the split line beside it, the legend chips, and the frame
- * the plot is drawn in.
- * @typedef {{title:HTMLElement, split:HTMLElement, legend:HTMLElement, frame:HTMLElement}} CheckNodes
+ * The large view's nodes: its heading, the Help icon beside it, the split line, the legend
+ * chips, and the frame the plot is drawn in.
+ * @typedef {{title:HTMLElement, help:HTMLElement, split:HTMLElement, legend:HTMLElement,
+ *   frame:HTMLElement}} CheckNodes
  */
 /** @typedef {{value: string, note: string, flagged: boolean}} CheckFace */
 /** @typedef {{live: boolean, checked: boolean, body: string}} CompareSwitch */
@@ -116,12 +118,12 @@ export function checkPayload(evidence) {
 
 /**
  * A card's thumbnail: the check's scene at the card's size, an empty plot until it is answered.
- * @param {CheckReport} report @param {CheckPayload|null} payload @param {boolean} compare
+ * @param {CheckReport} report @param {CheckPayload|null} payload @param {SceneOptions} options
  * @returns {string}
  */
-export function checkThumbnail(report, payload, compare) {
+export function checkThumbnail(report, payload, options) {
   if (payload === null) return sceneMarkup({ ...THUMB_BOX, layers: [], labels: [], marks: [] });
-  return sceneMarkup(checkScene(report, payload, THUMB_BOX, { compare }));
+  return sceneMarkup(checkScene(report, payload, THUMB_BOX, options));
 }
 
 /**
@@ -165,6 +167,16 @@ export function renderCompareSwitch(button, state, shown) {
   button.setAttribute("aria-checked", String(state.checked));
   button.setAttribute("aria-disabled", String(!state.live));
   button.dataset.popoverBody = state.body;
+}
+
+/**
+ * Write Highlight outside the band's state onto its button; a model that offers no check hides
+ * it. It is always live: it changes only how the plots colour what left a band.
+ * @param {HTMLElement} button @param {boolean} checked @param {boolean} shown
+ */
+export function renderHighlightSwitch(button, checked, shown) {
+  button.hidden = !shown;
+  button.setAttribute("aria-checked", String(checked));
 }
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -216,18 +228,21 @@ export function splitLine(payload, fitDrawn) {
 }
 
 /**
- * Draw a check large: its label, its split line, the legend when the fit is drawn beside the
- * edit, and the plot at `width` by `height` (a taller A/E grows past it, and the frame scrolls).
- * A check with no answer for this model says why in the frame. The svg is written once per call.
+ * Draw a check large: its label and its Help icon, its split line, the legend when the fit is
+ * drawn beside the edit, and the plot at `width` by `height` (a taller A/E grows past it, and the
+ * frame scrolls). A check with no answer for this model says why in the frame. The svg is
+ * written once per call.
  * @param {CheckNodes} nodes @param {CheckReport} report @param {CheckPayload|null} payload
- * @param {{compare: boolean, width: number, height: number}} options
+ * @param {SceneOptions & {width: number, height: number}} options
  * @returns {Scene|null} the scene drawn, whose marks the hover reads; null when none is
  */
-export function renderCheckView(nodes, report, payload, { compare, width, height }) {
+export function renderCheckView(nodes, report, payload, { compare, highlight, width, height }) {
   const label = assessEntry(report)?.label ?? "";
   nodes.title.textContent = label;
+  nodes.help.dataset.helpCheck = report;
+  nodes.help.setAttribute("aria-label", `About the ${label}`);
   const scene = payload === null || answered(payload) === null ? null
-    : checkScene(report, payload, { width, height }, { compare });
+    : checkScene(report, payload, { width, height }, { compare, highlight });
   // As the legend does, the split line counts the fit only when the scene draws a fitted series.
   const fitDrawn = scene !== null && scene.layers.some((layer) => layer.role === "original");
   const line = splitLine(payload, fitDrawn);

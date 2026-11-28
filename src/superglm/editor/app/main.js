@@ -84,7 +84,8 @@ import {
   differsFromFit,
   flaggedChecks,
   renderCheckView,
-  renderCompareSwitch
+  renderCompareSwitch,
+  renderHighlightSwitch
 } from "./views/assess_check.js";
 import {
   placeTermViewToggle,
@@ -200,13 +201,16 @@ const assessRows = document.getElementById("assessRows");
 const assessOverview = document.getElementById("assessOverview");
 const assessCards = document.getElementById("assessCards");
 const overviewCompare = document.getElementById("overviewCompare");
+const overviewHighlight = document.getElementById("overviewHighlight");
 const checkPanel = document.getElementById("checkPanel");
 const checkFreshness = document.getElementById("checkFreshness");
 const checkRetry = document.getElementById("checkRetry");
 const checkCompare = document.getElementById("checkCompare");
+const checkHighlight = document.getElementById("checkHighlight");
 const checkFrame = document.getElementById("checkFrame");
 const checkNodes = Object.freeze({
   title: document.getElementById("checkTitle"),
+  help: document.getElementById("checkHelp"),
   split: document.getElementById("checkSplit"),
   legend: document.getElementById("checkLegend"),
   frame: checkFrame
@@ -1284,7 +1288,9 @@ function renderOverview() {
   const evidence = state.request.evidence;
   const compare = compareSwitch(evidence, offered, state.view.compareOriginal, state.remote.snapshot);
   renderCompareSwitch(overviewCompare, compare, offered.length > 0);
-  drawOverview(assessCards, overviewGroups(evidence, { offered, compare: compare.checked }));
+  const highlight = state.view.highlightOutside;
+  renderHighlightSwitch(overviewHighlight, highlight, offered.length > 0);
+  drawOverview(assessCards, overviewGroups(evidence, { offered, compare: compare.checked, highlight }));
 }
 
 // The check open large, as drawn: its scene, which the hover reads, and the frame size it was
@@ -1306,6 +1312,8 @@ function renderCheckPanel() {
   const evidence = state.request.evidence[activeView];
   const compare = compareSwitch(state.request.evidence, shown, state.view.compareOriginal, state.remote.snapshot);
   renderCompareSwitch(checkCompare, compare, shown.length > 0);
+  const highlight = state.view.highlightOutside;
+  renderHighlightSwitch(checkHighlight, highlight, shown.length > 0);
   checkPanel.dataset.report = activeView;
   checkFrame.setAttribute("aria-busy", evidence.status === "updating" ? "true" : "false");
   checkFrame.dataset.freshness = evidence.status;
@@ -1313,7 +1321,7 @@ function renderCheckPanel() {
   const { width, height } = checkFrameSize();
   checkDrawnAt = `${width}x${height}`;
   checkView = renderCheckView(checkNodes, activeView, payload?.report === activeView ? payload : null,
-    { compare: compare.checked, width, height });
+    { compare: compare.checked, highlight, width, height });
   renderEvidenceFreshness(evidence, {
     statusNode: checkFreshness,
     retryButton: checkRetry,
@@ -2701,6 +2709,13 @@ for (const button of [overviewCompare, checkCompare]) {
     actions.patchView({ compareOriginal: !store.getState().view.compareOriginal });
   });
 }
+// Highlight outside the band colours what left a band; it asks Python for nothing, and the
+// flags and counts stay as they are. The large view's switch is the same one view flag.
+for (const button of [overviewHighlight, checkHighlight]) {
+  button.addEventListener("click", () => {
+    actions.patchView({ highlightOutside: !store.getState().view.highlightOutside });
+  });
+}
 bindCheckHover(checkFrame, () => checkView);
 // A new size redraws the open check at it, from the evidence the page holds.
 new ResizeObserver(() => {
@@ -3014,11 +3029,12 @@ store.subscribe(
   (next, previous) => next.evidence === previous.evidence
 );
 // The cards redraw when the evidence of a report or offered check they read moves, the offer
-// changes, Compare with the fit is turned, or the model in force comes to differ from the fit or
-// stops differing.
+// changes, Compare with the fit or Highlight outside the band is turned, or the model in force
+// comes to differ from the fit or stops differing.
 store.subscribe(
   (state) => [
     state.view.compareOriginal,
+    state.view.highlightOutside,
     differsFromFit(state.remote.snapshot),
     selectOfferedChecks(state).join(),
     ...overviewReports(selectOfferedChecks(state)).map((name) => state.request.evidence[name])
@@ -3026,12 +3042,13 @@ store.subscribe(
   renderOverview,
   (next, previous) => next.length === previous.length && next.every((item, index) => item === previous[index])
 );
-// The open check redraws when its evidence moves, the offer changes, the switch is turned, or
+// The open check redraws when its evidence moves, the offer changes, a switch is turned, or
 // the model in force comes to differ from the fit or stops differing.
 store.subscribe(
   (state) => [
     state.view.activeView,
     state.view.compareOriginal,
+    state.view.highlightOutside,
     differsFromFit(state.remote.snapshot),
     selectOfferedChecks(state).join(),
     isCheckReport(state.view.activeView) ? state.request.evidence[state.view.activeView] : null
