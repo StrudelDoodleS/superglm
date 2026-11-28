@@ -9,6 +9,7 @@ import json
 import math
 import threading
 import tracemalloc
+import warnings
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -22,11 +23,13 @@ from superglm import (
     GammaLS,
     GaussianLS,
     GeneralizedParetoLSS,
+    LomaxLSS,
     NegativeBinomialLS,
     Spline,
     SuperGLM,
     SuperLSS,
     TweedieLSS,
+    bind_predictor,
     cat,
     s,
     ti,
@@ -527,6 +530,57 @@ def test_a_law_without_finite_variance_has_no_ae_interval(heavy_gpd):
         )
         assert body["available"] and body["level_source"] == "simulated"
         assert body["n_draws"] == 99 and body["local_level"] == replicates.levels[report]
+
+
+def test_integer_category_labels_are_grouped_by_level():
+    """A categorical input labelled 0 and 1 is grouped by level, as string labels are: the two
+    groups, one held out at half its prediction and one at about five and a half times it, are
+    each outside, with the same tables either way. Mutation check: grouping the raw integer
+    column cuts it into numeric ranges, merges both levels and finds none outside."""
+    family = GaussianLS()
+    g = np.repeat([0, 1], [360, 40])
+    y = 10.0 + np.random.default_rng(123).normal(size=400)
+    held_g = np.repeat([0, 1], [180, 20])
+    held_y = np.where(held_g == 0, 5.0, 55.0)
+    bodies = []
+    for labels in (g, g.astype(str)):
+        held_labels = held_g if labels.dtype.kind == "i" else held_g.astype(str)
+        lss = SuperLSS(family, family.location(cat("g")), family.scale()).fit(
+            pd.DataFrame({"g": labels}), y
+        )
+        held = _validation(pd.DataFrame({"g": held_labels}), held_y)
+        bodies.append(check_body("check_ae", lss, held, inputs=["g"]))
+    integer, string = bodies
+    tables = {table["covariate"]: table for table in integer["tables"]}
+    assert tables["g"]["levels"] == ["0", "1"]
+    assert np.all(
+        (np.asarray(tables["g"]["lower"]) > 1.0) | (np.asarray(tables["g"]["upper"]) < 1.0)
+    )
+    assert integer["flagged"] and integer["outside"] == string["outside"]
+    assert [t["levels"] for t in integer["tables"]] == [t["levels"] for t in string["tables"]]
+
+
+def test_an_infinite_predicted_mean_has_no_expected_total():
+    """An intercept-only Lomax fit whose shape is below one predicts an infinite Mean on every
+    row, so actual over expected has no expected total: it answers unavailable with the page's
+    sentence. Mutation check: without that answer, binning the infinite means raises
+    ``ValueError`` and the report fails."""
+    family = LomaxLSS()
+    y = np.random.default_rng(123).pareto(0.65, 240)
+    X = pd.DataFrame({"x": np.zeros(240)})
+    predictors = [bind_predictor(family, parameter.name) for parameter in family.parameters]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        lss = SuperLSS(family, *predictors).fit(X.iloc[:200], y[:200])
+    held = _validation(X.iloc[200:].reset_index(drop=True), y[200:])
+    assert check_body("check_ae", lss, held, inputs=[]) == {
+        "available": False,
+        "reason": "The predicted distribution has no finite Mean at these parameters, "
+        "so actual over expected has no expected total.",
+        "flagged": False,
+        "outside": 0,
+        "cells": 0,
+    }
 
 
 def test_a_total_too_large_to_represent_has_no_ratio():

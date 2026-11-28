@@ -87,6 +87,9 @@ from superglm.editor.errors import no_quote_message
 from superglm.editor.evaluation import EvaluationDataset
 from superglm.editor.lss.validation import lss_split_reason
 from superglm.editor.lss.view import LSSModelView, column_of, is_lss, lss_key
+from superglm.features.categorical import Categorical
+from superglm.features.ordered_categorical import OrderedCategorical
+from superglm.features.random_effect import RandomEffect
 from superglm.model.base import NoPredictedMeanError
 from superglm.stats.bands import (
     _LOG_BELOW,
@@ -144,6 +147,10 @@ _NO_VARIANCE_LAW = (
 _TOTAL_TOO_LARGE = (
     "A group's observed or predicted total is too large to represent, so actual over expected "
     "has no ratio. Rescale the response and refit."
+)
+_NO_FINITE_MEAN = (
+    "The predicted distribution has no finite Mean at these parameters, "
+    "so actual over expected has no expected total."
 )
 _NO_VARIANCE = (
     "The predicted distribution has no finite variance at these parameters, "
@@ -359,6 +366,12 @@ def _calibration_body(
     return _answered(body, outside=outside, cells=len(QUANTILE_GRID))
 
 
+def _ae_covariate(column: NDArray, levelled: bool) -> NDArray:
+    """``column`` as actual over expected groups it: by level, as objects, where the fit reads
+    it as levels, so integer labels sort as numbers and are never cut into ranges."""
+    return np.asarray(column, dtype=object) if levelled else column
+
+
 def _ae_bins(values: NDArray, positions: NDArray[np.intp]) -> int:
     """``AE_BINS``, or fewer for a numeric covariate with fewer distinct retained values.
 
@@ -412,9 +425,20 @@ def _ae_tables(fitted, dataset: EvaluationDataset, y, inputs: Sequence[str]) -> 
     theta = fitted.parameters_from_eta(fitted.predict_eta(rows.frame, offsets=rows.offsets))
     band = np.full(len(y), np.nan)
     band[rows.positions] = fitted.family.default_prediction(theta)
+    if not np.all(np.isfinite(band[rows.positions])):
+        raise CheckUnavailable(_NO_FINITE_MEAN)
+    # A column the fit reads as levels is grouped by level, whatever its dtype.
+    levelled = {
+        name
+        for predictor in fitted.compiled_predictors
+        for name, spec in predictor.compiled.specs.items()
+        if isinstance(spec, Categorical | OrderedCategorical | RandomEffect)
+    }
     frame = as_eager_frame(dataset.X)
     covariates = [(band, "predicted Mean", "band")] + [
-        (frame.column_array(name), name, "input") for name in inputs if name in frame.columns
+        (_ae_covariate(frame.column_array(name), name in levelled), name, "input")
+        for name in inputs
+        if name in frame.columns
     ]
     return [
         _ae_table(fitted, dataset, y, covariate, rows.positions, name, by)
