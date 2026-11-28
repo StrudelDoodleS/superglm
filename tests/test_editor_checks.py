@@ -21,6 +21,7 @@ from superglm import (
     GammaLS,
     GaussianLS,
     GeneralizedParetoLSS,
+    NegativeBinomialLS,
     Spline,
     SuperGLM,
     SuperLSS,
@@ -406,6 +407,38 @@ def test_a_law_without_finite_variance_has_no_ae_interval(heavy_gpd):
         )
         assert body["available"] and body["level_source"] == "simulated"
         assert body["n_draws"] == 99 and body["local_level"] == replicates.levels[report]
+
+
+def test_a_family_without_a_predicted_variance_offers_no_ae():
+    """An intercept-only NegativeBinomialLS names a Mean but has neither a variance nor a
+    quantile function, so actual over expected has no interval: it is not offered, and asked
+    for, it is unavailable with the page's sentence, on the widget's lane as by the body.
+    Mutation check: without the capability test in ``_unsupported`` the variance fallback
+    raises ``NotImplementedError`` and the report fails."""
+    family = NegativeBinomialLS()
+    X = pd.DataFrame({"x": np.arange(100.0)})
+    y = np.random.default_rng(123).negative_binomial(2, 0.3, 100).astype(np.float64)
+    lss = SuperLSS(family, family.mean(), family.theta()).fit(X.iloc[:80], y[:80])
+    held = X.iloc[80:].reset_index(drop=True)
+    unavailable = {
+        "available": False,
+        "reason": "This model's family has no predicted variance, "
+        "so actual over expected has no interval.",
+        "flagged": False,
+        "outside": 0,
+        "cells": 0,
+    }
+    assert offered_checks(lss) == []
+    assert check_body("check_ae", lss, _validation(held, y[80:]), inputs=[]) == unavailable
+    session = EditorSession.from_model(
+        lss, train_data=(X.iloc[:80], y[:80]), validation_data=(held, y[80:])
+    )
+    try:
+        widget = session.widget()
+        assert widget._state()["checks"] == []
+        assert _ask(widget, "check_ae")["models"]["edited"] == unavailable
+    finally:
+        _close_widgets(session)
 
 
 @pytest.mark.parametrize(

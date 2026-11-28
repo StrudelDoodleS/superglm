@@ -69,6 +69,7 @@ from superglm.distributional.family import (
     AtomFamily,
     DefaultPredictionFamily,
     DistributionFunctionFamily,
+    VarianceFamily,
 )
 from superglm.distributional.posterior import PosteriorDraws, posterior_draws, posterior_parameters
 from superglm.distributional.residuals import (
@@ -133,6 +134,9 @@ _LABELS = {
 }
 _NOT_LSS = "This check is available for SuperLSS models."
 _NO_MEAN = "This model's family names no predicted Mean, so it has no actual over expected."
+_NO_VARIANCE_LAW = (
+    "This model's family has no predicted variance, so actual over expected has no interval."
+)
 _NO_VARIANCE = (
     "The predicted distribution has no finite variance at these parameters, "
     "so actual over expected has no interval."
@@ -168,6 +172,10 @@ def _unsupported(report: str, family: Any) -> str | None:
     if report == "check_ae":
         if response_spec(family).shape or not isinstance(family, DefaultPredictionFamily):
             return _NO_MEAN
+        # Its interval reads each row's predicted variance: the family's own, or simulated
+        # through its quantile function.
+        if not isinstance(family, VarianceFamily | DistributionFunctionFamily):
+            return _NO_VARIANCE_LAW
         return None
     if response_spec(family).shape or not isinstance(family, DistributionFunctionFamily):
         return f"This model's family has no distribution function, so it has no {_LABELS[report]}."
