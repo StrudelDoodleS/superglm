@@ -61,10 +61,15 @@ import { niceTicks } from "./fan.js";
 /** @typedef {Record<Role, string[]>} Parts */
 
 /**
- * @typedef {{theoretical:number[], observed:number[], band_lower:number[], band_upper:number[],
- *   index:number[], n:number}} QQStats
+ * A band's edges as sent: JSON has no infinity, so an edge the band leaves open is null (see
+ * `openBelow` and `openAbove`).
+ * @typedef {{theoretical:number[], observed:number[], band_lower:Array<number|null>,
+ *   band_upper:Array<number|null>, index:number[], n:number}} QQStats
  */
-/** @typedef {{counts:number[], edges:number[], expected:number, band_lower:number, band_upper:number}} PITStats */
+/**
+ * @typedef {{counts:number[], edges:number[], expected:number, band_lower:number|null,
+ *   band_upper:number|null}} PITStats
+ */
 /**
  * @typedef {{covariate:string, by:string, levels:string[]|null, ratio:number[], lower:number[],
  *   upper:number[], n:number[], weight:number[]}} AETable
@@ -72,8 +77,22 @@ import { niceTicks } from "./fan.js";
 /** @typedef {{tables:AETable[]}} AEStats */
 /**
  * @typedef {{quantiles:{p:number[], expected:number[], realised_exceedance:number[], n:number[]},
- *   band_lower:number[], band_upper:number[]}} CalibrationStats
+ *   band_lower:Array<number|null>, band_upper:Array<number|null>}} CalibrationStats
  */
+
+/**
+ * A band's lower edge, -Infinity where the band is open below: JSON has no infinity, so an
+ * infinite edge arrives as null.
+ * @param {number|null} v @returns {number}
+ */
+const openBelow = (v) => v ?? -Infinity;
+/** A band's upper edge, +Infinity where the band is open above. @param {number|null} v @returns {number} */
+const openAbove = (v) => v ?? Infinity;
+/**
+ * A band edge's readout: its value as `write` gives it, or the infinity of an open edge.
+ * @param {number} v @param {(v: number) => string} [write] @returns {string}
+ */
+const edgeText = (v, write = fmt) => (Number.isFinite(v) ? write(v) : v < 0 ? "−∞" : "∞");
 
 /** The order the layers are painted in: the ground first, the points over everything. */
 const ROLES = /** @type {const} */ (
@@ -322,7 +341,7 @@ function clipPolygon(points, rect) {
 }
 
 /** @param {QQStats} s @param {number} i */
-const qqOutside = (s, i) => s.observed[i] < s.band_lower[i] || s.observed[i] > s.band_upper[i];
+const qqOutside = (s, i) => s.observed[i] < openBelow(s.band_lower[i]) || s.observed[i] > openAbove(s.band_upper[i]);
 
 /**
  * The positions of a Q-Q body's points a scene draws: all of them, or for a thumbnail up to a
@@ -372,9 +391,14 @@ function qqScene(editedBody, originalBody, box, { highlight, domain: asked }) {
   const parts = emptyParts();
   /** @type {Mark[]} */
   const marks = [];
-  /** @type {(bound: number[]) => (i: number) => [number, number]} */
-  const along = (bound) => (i) => [sx(edited.theoretical[i]), sy(bound[i])];
-  const band = clipPolygon([...shown.map(along(edited.band_upper)), ...[...shown].reverse().map(along(edited.band_lower))], rect);
+  // An open edge is drawn at the plot's boundary, so the band reaches the edge of the view.
+  const edgeY = (/** @type {number} */ v) => (v === Infinity ? rect.top : v === -Infinity ? rect.bottom : sy(v));
+  /** @type {(bound: Array<number|null>, open: (v: number|null) => number) => (i: number) => [number, number]} */
+  const along = (bound, open) => (i) => [sx(edited.theoretical[i]), edgeY(open(bound[i]))];
+  const band = clipPolygon([
+    ...shown.map(along(edited.band_upper, openAbove)),
+    ...[...shown].reverse().map(along(edited.band_lower, openBelow))
+  ], rect);
   if (band.length > 0) parts.band.push(`${polyline(band)} Z`);
   const diagonal = clipPolyline([[sx(lo), sy(lo)], [sx(hi), sy(hi)]], rect);
   if (diagonal) parts.reference.push(diagonal);
@@ -393,7 +417,8 @@ function qqScene(editedBody, originalBody, box, { highlight, domain: asked }) {
       x,
       y,
       text: `Rank ${fmtCount(edited.index[i] + 1)} of ${fmtCount(edited.n)} · expected ${fmt(edited.theoretical[i])}`
-        + ` · observed ${fmt(edited.observed[i])} · band ${fmt(edited.band_lower[i])} to ${fmt(edited.band_upper[i])}`
+        + ` · observed ${fmt(edited.observed[i])} · band ${edgeText(openBelow(edited.band_lower[i]))}`
+        + ` to ${edgeText(openAbove(edited.band_upper[i]))}`
     });
   }
   /** @type {Label[]} */
@@ -416,8 +441,9 @@ function pitScene(editedBody, originalBody, box, { highlight, domain: asked }) {
   const edited = /** @type {PITStats} */ (/** @type {unknown} */ (editedBody));
   const original = originalBody && /** @type {PITStats} */ (/** @type {unknown} */ (originalBody));
   const share = (/** @type {PITStats} */ s, /** @type {number} */ i) => s.counts[i] / s.expected;
-  const lower = edited.band_lower / edited.expected;
-  const upper = edited.band_upper / edited.expected;
+  const [bandLower, bandUpper] = [openBelow(edited.band_lower), openAbove(edited.band_upper)];
+  const lower = bandLower / edited.expected;
+  const upper = bandUpper / edited.expected;
   const heights = [...edited.counts.keys()].map((i) => share(edited, i));
   if (original) heights.push(...original.counts.map((_, i) => share(original, i)));
   const [, top] = span([0, 1, upper, ...heights]);
@@ -452,7 +478,7 @@ function pitScene(editedBody, originalBody, box, { highlight, domain: asked }) {
       draw("original", start, middle, share(original, i));
       start = middle;
     }
-    const outside = count < edited.band_lower || count > edited.band_upper;
+    const outside = count < bandLower || count > bandUpper;
     const cut = draw(highlight && outside ? "outside" : "edited", start, right - gap, share(edited, i));
     // A bar is read out at the middle of the part of its bin in view, at its top or the plot's.
     const [inLeft, inRight] = [Math.max(left, rect.left), Math.min(right, rect.right)];
@@ -461,7 +487,7 @@ function pitScene(editedBody, originalBody, box, { highlight, domain: asked }) {
       x: (inLeft + inRight) / 2,
       y: cut.top,
       text: `${fmt(edges[i])} to ${fmt(edges[i + 1])} · ${fmtCount(count)} values`
-        + ` · band ${fmtCount(edited.band_lower)} to ${fmtCount(edited.band_upper)}`
+        + ` · band ${edgeText(bandLower, fmtCount)} to ${edgeText(bandUpper, fmtCount)}`
     });
   }
   /** @type {Label[]} */
@@ -635,7 +661,9 @@ function calibrationScene(editedBody, originalBody, box, { highlight, domain: as
   const edited = /** @type {CalibrationStats} */ (/** @type {unknown} */ (editedBody));
   const original = originalBody && /** @type {CalibrationStats} */ (/** @type {unknown} */ (originalBody));
   const q = edited.quantiles;
-  const shares = [...edited.band_lower, ...edited.band_upper, ...q.realised_exceedance, ...q.expected];
+  const bandLower = edited.band_lower.map(openBelow);
+  const bandUpper = edited.band_upper.map(openAbove);
+  const shares = [...bandLower, ...bandUpper, ...q.realised_exceedance, ...q.expected];
   if (original) shares.push(...original.quantiles.realised_exceedance);
   const [lo, hi] = span(shares.filter((v) => v > 0).map(Math.log10));
   const rect = plotRect(box);
@@ -659,9 +687,11 @@ function calibrationScene(editedBody, originalBody, box, { highlight, domain: as
   /** @type {Mark[]} */
   const marks = [];
   const indices = [...q.p.keys()];
+  // An open edge is drawn at the plot's boundary: above at the top, below at the foot.
+  const edgeY = (/** @type {number} */ v) => (v === Infinity ? rect.top : y(Math.max(v, 0)));
   const band = clipPolygon([
-    ...indices.map((i) => /** @type {[number, number]} */ ([xAt(i), y(edited.band_upper[i])])),
-    ...[...indices].reverse().map((i) => /** @type {[number, number]} */ ([xAt(i), y(edited.band_lower[i])]))
+    ...indices.map((i) => /** @type {[number, number]} */ ([xAt(i), edgeY(bandUpper[i])])),
+    ...[...indices].reverse().map((i) => /** @type {[number, number]} */ ([xAt(i), edgeY(bandLower[i])]))
   ], rect);
   if (band.length > 0) parts.band.push(`${polyline(band)} Z`);
   // The shares' own part of the plot, above the zero row: the reference and a zoom's gestures
@@ -678,7 +708,7 @@ function calibrationScene(editedBody, originalBody, box, { highlight, domain: as
   }
   for (const i of indices) {
     const realised = q.realised_exceedance[i];
-    const outside = realised < edited.band_lower[i] || realised > edited.band_upper[i];
+    const outside = realised < bandLower[i] || realised > bandUpper[i];
     const x = xAt(i);
     if (!inView(x, realised)) continue;
     parts[highlight && outside ? "outside" : "edited"].push(dot(x, y(realised), r));
@@ -686,7 +716,7 @@ function calibrationScene(editedBody, originalBody, box, { highlight, domain: as
       x,
       y: y(realised),
       text: `Quantile ${fmtPercent(q.p[i])} · exceeded by ${fmtPercent(realised)}`
-        + ` · band ${fmtPercent(edited.band_lower[i])} to ${fmtPercent(edited.band_upper[i])}`
+        + ` · band ${edgeText(bandLower[i], fmtPercent)} to ${edgeText(bandUpper[i], fmtPercent)}`
     });
   }
   /** @type {Label[]} */

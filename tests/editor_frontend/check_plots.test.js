@@ -318,6 +318,51 @@ test("each readout says what its point is, in the stated form", () => {
   assert.equal(first("check_calibration")[0].text, "Quantile 1% · exceeded by 99% · band 96% to 100%");
 });
 
+test("a band edge sent as null is open: the band reaches the plot's edge and no point leaves it there", () => {
+  // JSON has no infinity, so a body sends an edge its band leaves open as null.
+  const options = { compare: false, highlight: true };
+  const qq = structuredClone(FIXTURE.calm.check_qq), body = qq.models.edited;
+  const last = body.index.length - 1;
+  const open = [0, 1, 2, 3, 4];
+  for (const k of open) {
+    body.band_lower[k] = null;
+    body.band_upper[last - k] = null;
+  }
+  const scene = checkScene("check_qq", qq, BOX, options);
+  // The diagonal runs corner to corner of the plot, the same rectangle in every large view.
+  const [, bottom, , top] = subpaths(layer(scene, "reference").d)[0];
+  const reaches = (path, x, y) => absolutePoints(path.d).some(
+    ([px, py]) => px !== null && py !== null && Math.abs(px - x) < 0.011 && Math.abs(py - y) < 0.011
+  );
+  for (const k of open) {
+    assert.ok(reaches(layer(scene, "band"), scene.marks[k].x, bottom), `lower edge at point ${k}`);
+    assert.ok(reaches(layer(scene, "band"), scene.marks[last - k].x, top), `upper edge at point ${last - k}`);
+  }
+  assert.equal(body.outside, 0);
+  assert.equal(layer(scene, "outside"), undefined);
+  assert.equal(layer(scene, "edited").d.match(/M/g).length, body.index.length);
+  assert.equal(scene.marks[0].text, "Rank 1 of 200 · expected -2.7 · observed -2.91 · band −∞ to -1.71");
+  assert.match(scene.marks[last].text, / · band \d\.\d+ to ∞$/);
+  assert.equal(layer(checkScene("check_qq", qq, THUMB, options), "outside"), undefined);
+
+  const calibration = structuredClone(FIXTURE.calm.check_calibration), shares = calibration.models.edited;
+  const end = shares.band_upper.length - 1;
+  shares.band_upper[0] = null;
+  shares.band_lower[end] = null;
+  const cal = checkScene("check_calibration", calibration, BOX, options);
+  assert.equal(layer(cal, "outside"), undefined);
+  assert.ok(reaches(layer(cal, "band"), cal.marks[0].x, top), "open upper edge at the first quantile");
+  assert.ok(reaches(layer(cal, "band"), cal.marks[end].x, bottom), "open lower edge at the last quantile");
+  assert.equal(cal.marks[0].text, "Quantile 1% · exceeded by 99% · band 96% to ∞");
+
+  const pit = structuredClone(FIXTURE.calm.check_pit);
+  pit.models.edited.band_upper = null;
+  const bars = checkScene("check_pit", pit, BOX, options);
+  assert.equal(layer(bars, "outside"), undefined);
+  near(subpaths(layer(bars, "band").d)[0][1], top);
+  assert.equal(bars.marks[0].text, "0 to 0.05 · 10 values · band 2 to ∞");
+});
+
 test("a thumbnail has no text, at most 60 Q-Q points, and stays in its box", () => {
   for (const report of CHECK_REPORTS) {
     const scene = checkScene(report, FIXTURE.wrong[report], THUMB, { compare: false, highlight: true });

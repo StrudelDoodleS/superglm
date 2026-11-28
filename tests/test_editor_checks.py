@@ -791,6 +791,32 @@ def test_the_qq_body_keeps_every_point_outside_the_band():
     assert set(outside.tolist()) <= set(body["index"])
 
 
+def test_a_held_out_qq_band_left_open_counts_its_edge_as_infinite():
+    """An intercept-only GaussianLS fitted on 10 rows and read on 2,000: the fit's own noise
+    puts the local level near 1e-130, so the top order statistics' upper Beta quantiles round
+    to 1 and their normal-scale edges are infinite, sent as ``null``. ``outside`` counts them as
+    infinite, as a count from SciPy's law does; read as 0 they would put points outside."""
+    rng = np.random.default_rng(0)
+    y = rng.standard_normal(2_010)
+    X = pd.DataFrame({"x": np.zeros(2_010)})
+    family = GaussianLS()
+    lss = SuperLSS(family, family.location(), family.scale()).fit(X.iloc[:10], y[:10])
+    held = _validation(X.iloc[10:].reset_index(drop=True), y[10:])
+    body = check_body("check_qq", lss, held, inputs=[])
+    json.dumps(body, allow_nan=False)
+    assert body["level_source"] == "simulated" and body["n"] == 2_000
+    theta = lss.predict_parameters(held.X)
+    z = np.sort((held.y - theta["location"].to_numpy()) / theta["scale"].to_numpy())
+    band = band_at_level(2_000, body["local_level"])
+    lower, upper = special.ndtri(band.lower), special.ndtri(band.upper)
+    assert np.isposinf(upper).any()
+    assert body["outside"] == int(np.sum((z < lower) | (z > upper)))
+    sent_upper = np.array([0.0 if v is None else v for v in body["band_upper"]])
+    observed = np.asarray(body["observed"])
+    assert None in body["band_upper"]
+    assert np.sum(observed > sent_upper) > body["outside"]
+
+
 def test_offered_checks_and_inputs(calm, poisson_glm):
     assert offered_checks(calm.lss) == list(CHECK_REPORTS) and offered_checks(poisson_glm) == []
     assert check_inputs(calm.lss, ["mean:x", "mean:g", "scale:g"]) == ["x", "g"]
