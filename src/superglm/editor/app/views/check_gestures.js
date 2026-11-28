@@ -17,6 +17,7 @@
  */
 
 import { ZOOM_IN, ZOOM_OUT, isWhole, panBy, stepZoom, zoomAbout, zoomToBox } from "../chart/check_zoom.js";
+import { defineMachine } from "../state/machine.js";
 
 /** @typedef {import('../chart/check_plots.js').Scene} Scene */
 /** @typedef {import('../chart/check_plots.js').Domain} Domain */
@@ -44,6 +45,19 @@ import { ZOOM_IN, ZOOM_OUT, isWhole, panBy, stepZoom, zoomAbout, zoomToBox } fro
  *   | {kind: 'box', start: Point, node: SVGRectElement}} Drag
  */
 
+/** A drag on a check: none, a pan, or a box. A press during a drag starts nothing. */
+export const CHECK_DRAG = defineMachine({
+  name: "check drag",
+  initial: "idle",
+  moves: {
+    idle: { pan: "panning", box: "boxing" },
+    panning: { end: "idle" },
+    boxing: { end: "idle" },
+  },
+});
+
+/** @typedef {'idle'|'panning'|'boxing'} DragState */
+
 const SVG_NS = "http://www.w3.org/2000/svg";
 /** @type {Readonly<Record<string, number>>} */
 const KEY_ZOOM = Object.freeze({ "+": ZOOM_IN, "=": ZOOM_IN, "-": ZOOM_OUT, _: ZOOM_OUT });
@@ -62,8 +76,26 @@ export function bindCheckZoom(frame, { getScene, isActive, onZoom, onRest }) {
   let queued = null;
   /** @type {ReturnType<typeof setTimeout>|0} */
   let turning = 0;
-  /** @type {Drag|null} */
+  /** @type {DragState} */
+  let dragState = CHECK_DRAG.initial;
+  /** @type {Drag|null} what the drag under way carries; null while idle */
   let drag = null;
+
+  /**
+   * The one writer of the drag: `pan` or `box` begins one, carrying `payload`, and `end` lets
+   * it go, taking its box off the plot. An event the state does not take changes nothing.
+   * @param {'pan'|'box'|'end'} event @param {Drag|null} payload @returns {boolean} whether it moved
+   */
+  function moveDrag(event, payload) {
+    const next = CHECK_DRAG.next(dragState, event);
+    if (next === null) return false;
+    if (drag?.kind === "box") drag.node.remove();
+    if (next === "panning") frame.dataset.panning = "true";
+    else delete frame.dataset.panning;
+    dragState = next;
+    drag = payload;
+    return true;
+  }
 
   /** The pointer in the scene's px: the svg's box moves with the frame's scroll. @param {MouseEvent} event @returns {Point|null} */
   function scenePoint(event) {
@@ -113,11 +145,7 @@ export function bindCheckZoom(frame, { getScene, isActive, onZoom, onRest }) {
 
   /** The drag ended; `rest` says the readout may come back now rather than after a frame. @param {boolean} rest */
   function endDrag(rest) {
-    if (!drag) return;
-    if (drag.kind === "box") drag.node.remove();
-    drag = null;
-    delete frame.dataset.panning;
-    if (rest) onRest?.();
+    if (moveDrag("end", null) && rest) onRest?.();
   }
 
   // What is queued, and any drag, dropped.
@@ -168,18 +196,18 @@ export function bindCheckZoom(frame, { getScene, isActive, onZoom, onRest }) {
   function onPointerDown(event) {
     const zoom = getScene()?.zoom;
     const point = event.button === 0 ? scenePoint(event) : null;
-    if (!zoom || !point) return;
-    if (event.shiftKey) {
+    const begin = event.shiftKey ? "box" : "pan";
+    if (!zoom || !point || CHECK_DRAG.next(dragState, begin) === null) return;
+    if (begin === "box") {
       event.preventDefault();
       const node = /** @type {SVGRectElement} */ (frame.ownerDocument.createElementNS(SVG_NS, "rect"));
       node.setAttribute("class", "check-zoom-box");
       frame.querySelector("svg")?.append(node);
-      drag = { kind: "box", start: point, node };
+      moveDrag("box", { kind: "box", start: point, node });
       drawBox(point);
     } else if (!isWhole(zoom.domain, zoom.base)) {
       // The press is left to focus the plot; the plot's text cannot be selected (assess.css).
-      drag = { kind: "pan", zoom, from: point, last: point };
-      frame.dataset.panning = "true";
+      moveDrag("pan", { kind: "pan", zoom, from: point, last: point });
     } else {
       return;
     }
@@ -252,7 +280,7 @@ export function bindCheckZoom(frame, { getScene, isActive, onZoom, onRest }) {
   frame.addEventListener("dblclick", onDoubleClick);
   frame.addEventListener("keydown", onKeyDown);
   return {
-    busy: () => Boolean(drag || turning),
+    busy: () => dragState !== "idle" || Boolean(turning),
     reset,
     cancel,
     destroy() {

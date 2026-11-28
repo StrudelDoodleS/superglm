@@ -5,7 +5,7 @@ import test from "node:test";
 
 import { checkScene } from "../../src/superglm/editor/app/chart/check_plots.js";
 import { ZOOM_IN, panBy, zoomAbout, zoomToBox } from "../../src/superglm/editor/app/chart/check_zoom.js";
-import { bindCheckZoom } from "../../src/superglm/editor/app/views/check_gestures.js";
+import { CHECK_DRAG, bindCheckZoom } from "../../src/superglm/editor/app/views/check_gestures.js";
 import { CHECK_FIXTURE as FIXTURE } from "./check_evidence.js";
 
 const BOX = { width: 820, height: 520 };
@@ -91,6 +91,37 @@ test("a pan and a wheel turned in one frame publish one domain, the two composed
   assert.equal(page.view.published.length, 2);
   const width = (d) => d.x[1] - d.x[0];
   assert.ok(Math.abs(width(page.view.published[1]) - width(page.view.published[0])) < 1e-12);
+});
+
+test("the drag table: a pan or a box begins from idle, ends back there, and nothing else moves", () => {
+  assert.deepEqual([...CHECK_DRAG.states], ["idle", "panning", "boxing"]);
+  assert.equal(CHECK_DRAG.initial, "idle");
+  const walked = CHECK_DRAG.states.flatMap((state) => CHECK_DRAG.events.map((event) => [state, event, CHECK_DRAG.next(state, event)]));
+  assert.deepEqual(walked, [
+    ["idle", "pan", "panning"],
+    ["idle", "box", "boxing"],
+    ["idle", "end", null],
+    ["panning", "pan", null],
+    ["panning", "box", null],
+    ["panning", "end", "idle"],
+    ["boxing", "pan", null],
+    ["boxing", "box", null],
+    ["boxing", "end", "idle"],
+  ]);
+});
+
+test("a press during a pan starts no box: the pan goes on and its release publishes it", () => {
+  const page = checkView();
+  page.zoomTo(zoomAbout(page.view.scene.zoom, { x: 400, y: 260 }, ZOOM_IN ** 4));
+  const before = page.view.scene.zoom;
+  page.down(400, 260);
+  const second = page.down(300, 200, true);
+  assert.equal(second.defaultPrevented, false);
+  page.move(440, 260);
+  page.up(440, 260);
+  page.flushFrame();
+  assert.deepEqual(page.view.published, [panBy(before, { x: 400, y: 260 }, { x: 440, y: 260 })]);
+  assert.equal(page.gestures.busy(), false);
 });
 
 test("letting go of a pan or a box publishes in the next frame, never at once", () => {
