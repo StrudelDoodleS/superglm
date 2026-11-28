@@ -58,7 +58,7 @@ from superglm.distributional.model import (
     _unvalidated_response_shape,
 )
 from superglm.distributional.offsets import take_prediction_replacements
-from superglm.distributional.posterior import posterior_predictive
+from superglm.distributional.posterior import _predictive_variance
 from superglm.distributional.residuals import (
     ResidualSet,
     _residual_rng,
@@ -467,16 +467,10 @@ def _row_variance(
         law = "draws"
     if n_draws < 2:
         raise ValueError("n_draws must be at least two to estimate variance by simulation")
-    draws = posterior_predictive(
-        fitted,
-        rows.frame,
-        n_draws,
-        parameter_uncertainty=False,
-        offsets=rows.offsets,
-        seed=seed,
-        weights=prior_law,
+    variance = _predictive_variance(
+        fitted, rows.frame, n_draws, offsets=rows.offsets, seed=seed, weights=prior_law
     )
-    return np.var(draws, axis=0, ddof=1), law
+    return variance, law
 
 
 def actual_expected_check(

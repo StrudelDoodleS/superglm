@@ -548,6 +548,9 @@ BOUNDARY_TESTS: dict[str, str | tuple[str, ...]] = {
     "distributional/posterior.py::_theta_blocks": (
         "test_lss_posterior.py::test_prior_weights_are_chunked_in_step_with_their_rows"
     ),
+    "distributional/posterior.py::_quantile_blocks": (
+        "test_lss_checks_calibration.py::test_a_simulated_row_variance_read_in_blocks_is_the_variance_of_every_draw"
+    ),
     "distributional/posterior.py::_posterior_blocks": (
         "test_lss_posterior.py::test_chunking_never_changes_the_pushforward"
     ),

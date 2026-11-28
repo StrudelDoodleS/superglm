@@ -624,13 +624,13 @@ def test_each_rows_variance_is_simulated_once_for_every_table(monkeypatch):
         name="train", label="Train", X=X.iloc[200:].reset_index(drop=True), y=y[200:]
     )
     drawn = []
-    library = calibration.posterior_predictive
+    library = calibration._predictive_variance
 
     def counted(*args, **kwargs):
         drawn.append(args[2])
         return library(*args, **kwargs)
 
-    monkeypatch.setattr(calibration, "posterior_predictive", counted)
+    monkeypatch.setattr(calibration, "_predictive_variance", counted)
     body = check_body("check_ae", lss, held, inputs=["x", "g"])
     assert body["available"] and [t["covariate"] for t in body["tables"]] == [
         "predicted Mean",
