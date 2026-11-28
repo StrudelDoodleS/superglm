@@ -12,7 +12,7 @@ saved bundle ``--check-bundle`` (``bundle_session``) or else
 ``pareto_lss_session()``. One headless Chromium drives them.
 
 A run opens a fresh page on one tree, sets the CPU slowdown with
-``Emulation.setCPUThrottlingRate`` and measures five scenarios. The cost of a
+``Emulation.setCPUThrottlingRate`` and measures seven scenarios. The cost of a
 scenario is the change in ``Performance.getMetrics`` ``TaskDuration``, the
 renderer main thread's busy time, over its gestures:
 
@@ -22,6 +22,9 @@ renderer main thread's busy time, over its gestures:
   reads "—");
 - hovering across a check's large view on the SuperLSS session, 60 moves over the
   Q-Q plot, then 60 over Actual over expected (a page with no checks reads "—");
+- zooming the Q-Q plot, once clicked, with 20 wheel steps in and 20 out, each let draw
+  before the next, as ms per step; then, zoomed in, panning it with a 60-move drag, as
+  ms per move (a page with no check zoom reads "—");
 - switching Validation and Cross-validation 20 times after each has been visited
   once, as ms per switch, with the ``/report`` requests those switches send.
 
@@ -55,6 +58,9 @@ from tests.editor.assess_table import open_report, wait_for_report  # noqa: E402
 
 MOVES = 120
 SWITCHES = 20
+WHEEL_STEPS = 40
+PAN_MOVES = 60
+PAN_ZOOM_STEPS = 6
 BUDGET_MS = 16.7
 VIEWPORT = {"width": 1278, "height": 860}
 DRAG_TERM = "region"
@@ -65,6 +71,8 @@ SCENARIOS = (
     ("legend", "Hover across the Cross-validation fold legend", "ms/move"),
     ("cards", "Hover across the Assess overview cards", "ms/move"),
     ("check", "Hover across a check plot (Q-Q, then A/E)", "ms/move"),
+    ("zoom_wheel", "Zoom a check plot (Q-Q), per wheel step", "ms/step"),
+    ("zoom_pan", "Pan a zoomed check plot (Q-Q), per drag move", "ms/move"),
     ("switch", "Switch Validation ↔ Cross-validation", "ms/switch"),
 )
 
@@ -244,6 +252,36 @@ def measure_check(page, cdp) -> float | None:
     return statistics.mean(costs)
 
 
+def measure_zoom(page, cdp) -> tuple[float | None, float | None]:
+    """ms per wheel step zooming the Q-Q plot in and out, and per move of a drag panning it."""
+    if page.locator(f'[data-assess-entry="{CHECK_PLOTS[0]}"]').count() == 0:
+        return None, None
+    if page.locator("#assessView").is_hidden():
+        page.locator("#assessTab").click()
+    open_check(page, CHECK_PLOTS[0])
+    if page.locator("#checkHome").count() == 0:
+        return None, None
+    x, y = centre(page.locator("#checkFrame svg").first.bounding_box())
+    # A click makes the plot the chart the wheel works on.
+    page.mouse.click(x, y)
+    settle(page)
+    before = task_seconds(cdp)
+    for step in range(WHEEL_STEPS):
+        page.mouse.wheel(0, -100 if step < WHEEL_STEPS // 2 else 100)
+        settle(page)
+    wheel = (task_seconds(cdp) - before) * 1000.0 / WHEEL_STEPS
+    for _ in range(PAN_ZOOM_STEPS):
+        page.mouse.wheel(0, -100)
+        settle(page)
+    page.mouse.move(x, y)
+    page.mouse.down()
+    pan = hover_cost(page, cdp, [(x - 60, y - 30), (x + 60, y + 30)], moves=PAN_MOVES)
+    page.mouse.up()
+    page.locator("#checkHome").click()
+    settle(page)
+    return wheel, pan
+
+
 def measure_switch(page, cdp) -> tuple[float, int]:
     """ms per switch, and the ``/report`` requests the switches sent."""
     for name in ("validation", "cv"):
@@ -343,11 +381,14 @@ def run_once(browser, urls: dict[str, str], rate: float) -> dict[str, float | in
     page = open_check_page(browser, urls["check"])
     with throttled(page, rate) as cdp:
         check = measure_check(page, cdp)
+        zoom_wheel, zoom_pan = measure_zoom(page, cdp)
     return {
         "drag": drag,
         "legend": legend,
         "cards": cards,
         "check": check,
+        "zoom_wheel": zoom_wheel,
+        "zoom_pan": zoom_pan,
         "switch": switch,
         "reports": reports,
         "drags": drags,
@@ -383,7 +424,7 @@ def table(
         for rate, runs in results.items():
             old, new, again = runs["old"], runs["new"], runs["old again"]
             new_median = _median(new, key)
-            if unit != "ms/move":
+            if unit == "ms/switch":
                 within = "n/a, one click"
             elif new_median is None:
                 within = MISSING
@@ -411,7 +452,8 @@ def table(
         "",
         f"Old tree {shas['old']}, new tree {shas['new']}, driver head {shas['head']}; "
         f"{pairs} old/new/old runs per CPU rate, {MOVES} moves per hover or drag, "
-        f"{SWITCHES} switches; the check plots on `{check}`. Main-thread `TaskDuration` only, in headless Chromium's "
+        f"{SWITCHES} switches, {WHEEL_STEPS} wheel steps and a {PAN_MOVES}-move pan; "
+        f"the check plots on `{check}`. Main-thread `TaskDuration` only, in headless Chromium's "
         "software renderer: raster and GPU work are not measured."
         + ("" if drags == 0 else f" The cancelled drags still sent {drags} `/drag` requests."),
     ]
