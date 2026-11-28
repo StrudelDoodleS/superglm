@@ -1,6 +1,7 @@
 """Simultaneous bands: the equal-local-levels Q-Q band and the Bonferroni binomial band."""
 
 import contextlib
+import math
 from fractions import Fraction
 from math import comb
 
@@ -17,6 +18,7 @@ from superglm.stats.bands import (
     monte_carlo_level,
     order_statistic_level,
 )
+from tests._beta_tail_oracle import log_beta_tail, mp
 
 
 def _escape_rate(lower, upper, n, sims, seed):
@@ -456,3 +458,141 @@ def test_the_cell_level_refuses_the_laws_the_band_refuses(trials, probability):
     with pytest.raises(ValueError, match="^binomial_cell_level: ") as cell:
         binomial_cell_level(1, trials, probability)
     assert str(cell.value).split(": ", 1)[1] == str(band.value).split(": ", 1)[1]
+
+
+_U = 2.0**-53
+#: Log tails each side of float64's least normal and least subnormal numbers, a normal one and
+#: one far below both.
+_LOG_TAILS = (
+    -700.0,
+    math.log(np.finfo(np.float64).tiny) + 0.1,
+    math.log(np.finfo(np.float64).tiny) - 0.1,
+    math.log(np.nextafter(0.0, 1.0)) + 0.1,
+    math.log(np.nextafter(0.0, 1.0)) - 0.1,
+    -5000.0,
+)
+
+
+def _log_tail_bound(a, b, log_x, log_y, log_tail):
+    """The log prefix's rounding: a few ``u`` times its terms, ``betaln``'s and the tail's own."""
+    terms = a * max(1.0, abs(log_x)) + b * abs(log_y) + (a + b) * math.log(a + b) + abs(log_tail)
+    return 8.0 * _U * terms
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        (1, 1),
+        (2, 3),
+        (3, 50),
+        (50, 3),
+        (40, 40),
+        (1, 1000),
+        (1000, 1),
+        (1000, 9000),
+        (5000, 5001),
+        (20000, 80001),
+    ],
+)
+def test_each_tail_reads_its_log_below_float64s_range_as_an_oracle_does(a, b):
+    """The ``a``-th of ``n = a + b - 1`` order statistics at its two band edges, for log tails
+    each side of float64's least normal and least subnormal numbers, against a 60-digit sum.
+
+    The lower edge solves ``I_x(a, b) = p``, the upper ``I_x(b, a) = p`` with ``x = 1 - u``.
+    Each edge's own tail, read at ``exp(t)`` to 60 digits, checks the inverse. The continued
+    fraction is read at the float ``x`` the edge rounds to. Below the least normal float, where
+    SciPy returns 0 or a subnormal, ``_log_beta_tail_levels`` is read at the float ``u`` of the
+    edge, from its own side of the mean. Mutation checks: dropping the fraction (``F = 1``),
+    reading the deep tail on the other side of the mean, or stopping Newton after one step, each
+    fails it.
+    """
+    n = a + b - 1
+    i = np.array([float(a)])
+    for log_tail in _LOG_TAILS:
+        log_lower = bands._log_band_lower(n, log_tail + math.log(2.0))
+        for (p, q), t, upper in (
+            ((a, b), log_lower[a - 1], False),
+            ((b, a), log_lower[n - a], True),
+        ):
+            bound = _log_tail_bound(p, q, t, math.log(-math.expm1(t)), log_tail)
+            with mp.workdps(60):
+                edge = mp.exp(mp.mpf(t))
+            assert abs(log_beta_tail(p, q, edge) - log_tail) <= bound, (log_tail, upper)
+            x = math.exp(t)
+            if x == 0.0:
+                continue
+            one = np.ones(1)
+            got = bands._log_fraction(
+                p * one, q * one, x * one, (1.0 - x) * one, math.log(x) * one, math.log1p(-x) * one
+            )[0][0]
+            assert abs(got - log_beta_tail(p, q, mp.mpf(x))) <= bound, (log_tail, upper, got)
+            u = -math.expm1(t) if upper else x
+            if log_tail >= math.log(np.finfo(np.float64).tiny) or not 0.0 < u < 1.0:
+                continue
+            with mp.workdps(60):
+                read_at = 1 - mp.mpf(u) if upper else mp.mpf(u)
+            got = bands._log_beta_tail_levels(np.array([u]), i, n)[0] - math.log(2.0)
+            assert abs(got - log_beta_tail(p, q, read_at)) <= bound, (log_tail, upper, got)
+
+
+@pytest.mark.parametrize(
+    ("count", "trials", "p", "side"),
+    [
+        (2000, 10_000, 0.5, "at_most"),
+        (8000, 10_000, 0.5, "at_least"),
+        (3, 1000, 0.6, "at_most"),
+        (900, 1000, 0.3, "at_least"),
+        (0, 20_000, 0.1, "at_most"),
+        (20_000, 20_000, 0.1, "at_least"),
+    ],
+)
+def test_a_cell_level_reads_its_log_below_float64s_range_as_an_oracle_does(count, trials, p, side):
+    """``P(X <= k) = I_{1-p}(n - k, k + 1)`` and ``P(X >= k) = I_p(k, n - k + 1)``, each below
+    float64's range, against a 60-digit sum. SciPy's tail is 0 at each. Mutation check: the
+    fraction read on the wrong side's parameters fails it."""
+    assert binomial_cell_level([count], [trials], [p]) == 0.0
+    if side == "at_most":
+        want = log_beta_tail(trials - count, count + 1, 1 - mp.mpf(p))
+        terms = (trials - count, count + 1, math.log1p(-p), math.log(p))
+    else:
+        want = log_beta_tail(count, trials - count + 1, mp.mpf(p))
+        terms = (count, trials - count + 1, math.log(p), math.log1p(-p))
+    got = binomial_cell_level([count], [trials], [p], log=True)
+    assert abs(got - want) <= _log_tail_bound(*terms, want), (got, want)
+
+
+@pytest.mark.parametrize("log_tail", _LOG_TAILS[1:5])
+def test_a_band_at_a_cut_below_float64s_range_holds_the_counts_whose_log_tails_reach_it(log_tail):
+    """Each bound of ``bonferroni_binomial_band(..., log=True)`` against the counts' 60-digit log
+    tails, at cuts each side of float64's least normal and least subnormal numbers.
+
+    The lower bound is the least count with ``log P(X <= k) >= cut``, the upper the least with
+    ``log P(X > k) < cut``. Mutation check: comparing SciPy's probabilities with ``exp(cut)``,
+    as the band without ``log`` does, puts every count inside and fails it.
+    """
+    trials, p = 4000, 0.3
+    (lower,), (upper,) = bonferroni_binomial_band([trials], [p], cut=log_tail, log=True)
+    lower, upper = int(lower), int(upper)
+
+    def at_most(k):
+        return log_beta_tail(trials - k, k + 1, 1 - mp.mpf(p))
+
+    def above(k):
+        return log_beta_tail(k + 1, trials - k, mp.mpf(p))
+
+    assert at_most(lower) >= log_tail > at_most(lower - 1)
+    assert above(upper) < log_tail <= above(upper - 1)
+
+
+def test_a_level_of_minus_infinity_holds_every_value():
+    """A statistic exactly zero has log ``-inf``. Barnard's rule reads ``-inf`` when that many
+    replicates tie there, no observed statistic lies below it, and the bands hold everything:
+    each edge is exactly 0 or 1, and every count from 0 to ``trials`` is in."""
+    assert order_statistic_level([0.0, 0.5, 0.75], log=True) == -np.inf
+    assert binomial_cell_level([3], [3], [0.0], log=True) == -np.inf
+    replicates = np.r_[np.full(5, -np.inf), np.linspace(-900.0, -1.0, 94)]
+    assert monte_carlo_level(replicates, alpha=0.05) == -np.inf
+    band = band_at_level(12, -np.inf, log=True)
+    assert np.all(band.lower == 0.0) and np.all(band.upper == 1.0) and band.local_level == 0.0
+    (lower,), (upper,) = bonferroni_binomial_band([12], [0.3], cut=-np.inf, log=True)
+    assert (lower, upper) == (0.0, 12.0)

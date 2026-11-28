@@ -68,6 +68,15 @@ Li and Huggins (2024). Each band has one statistic for it:
   ``bonferroni_binomial_band(..., cut=cut)``;
 
 and ``monte_carlo_level`` reads the level from replicates of either.
+
+With many rows far from their law these tails fall below float64's range, about ``1e-308``,
+and SciPy returns 0 for them, which would tie every such replicate at a level no point can
+fall below. So each statistic and band also takes ``log=True`` and works with natural logs.
+A tail SciPy returns below the least normal float is read in logs: the prefix
+``x^a (1 - x)^b / B(a, b)`` in logs over the continued fraction of DiDonato and Morris (1992,
+*ACM TOMS* 18(3), Algorithm 708), which converges within a few terms that far below the mean.
+A band edge at such a level comes from Newton's method on the concave log tail (Bagnoli and
+Bergstrom 2005, *Economic Theory* 26, theorem 1).
 """
 
 from __future__ import annotations
@@ -244,7 +253,9 @@ def equal_local_levels_band(n: int, *, alpha: float = 0.05) -> UniformBand:
     )
 
 
-def band_at_level(n: int, local_level: float, *, alpha: float = 0.05) -> UniformBand:
+def band_at_level(
+    n: int, local_level: float, *, alpha: float = 0.05, log: bool = False
+) -> UniformBand:
     """Return the equal-local-levels band for ``n`` order statistics at local level ``local_level``.
 
     Each order statistic lies between the ``local_level / 2`` and ``1 - local_level / 2``
@@ -253,21 +264,36 @@ def band_at_level(n: int, local_level: float, *, alpha: float = 0.05) -> Uniform
     ``monte_carlo_level`` reads it from replicates, and records ``alpha`` as the global level it
     stands for. At ``equal_local_levels_band(n, alpha=alpha).local_level`` it is that band.
 
+    With ``log``, ``local_level`` is the natural log of the local level, as Barnard's rule
+    reads it from ``order_statistic_level(..., log=True)``. Below twice the least normal float
+    each edge is found in logs, by Newton's method on the log tail. The band's arrays and its
+    ``local_level`` are then float64's roundings: an edge closer to 0 or 1 than float64 resolves
+    reads 0 or 1, and a level below its range reads 0.
+
     Raises
     ------
     ValueError
-        If ``n`` is below one, ``local_level`` lies outside ``[0, 1]``, or ``alpha`` outside
-        ``(0, 1)``.
+        If ``n`` is below one, ``local_level`` lies outside ``[0, 1]`` (with ``log``, outside
+        ``[-inf, 0]``), or ``alpha`` outside ``(0, 1)``.
     """
     points = operator.index(n)
     if points < 1:
         raise ValueError(f"band_at_level needs at least one point; got n={points}")
     eta, level = float(local_level), float(alpha)
-    if not 0.0 <= eta <= 1.0:
+    if log and not -math.inf <= eta <= 0.0:
+        raise ValueError(
+            f"band_at_level: a log local_level must lie in [-inf, 0]; got {local_level!r}"
+        )
+    if not log and not 0.0 <= eta <= 1.0:
         raise ValueError(f"band_at_level: local_level must lie in [0, 1]; got {local_level!r}")
     if not 0.0 < level < 1.0:
         raise ValueError(f"band_at_level: alpha must lie in (0, 1); got {alpha!r}")
-    lower, upper = _bounds(points, eta)
+    if log and eta < math.log(_LOG_BELOW):
+        log_lower = _log_band_lower(points, eta)
+        lower, upper, eta = np.exp(log_lower), -np.expm1(log_lower[::-1]), math.exp(eta)
+    else:
+        eta = math.exp(eta) if log else eta
+        lower, upper = _bounds(points, eta)
     lower.setflags(write=False)
     upper.setflags(write=False)
     return UniformBand(
@@ -308,10 +334,133 @@ _SCREEN_BLOCK = 16
 _EDGE_MARGIN = math.sqrt(2.0)
 #: The least positive normal float64. Below it SciPy's tails carry an absolute error.
 _LEAST_NORMAL = float(np.finfo(np.float64).tiny)
+#: A tail or level below this is read and carried in logs: half of it, the tail a Q-Q band's
+#: edge sits at, is still a normal float.
+_LOG_BELOW = 2.0 * _LEAST_NORMAL
+_EPS = float(np.finfo(np.float64).eps)
+#: Terms of the continued fraction at most. Below the mean it converges within about 80 terms
+#: in float64 (Boost.Math's measurement); below float64's range, within a handful.
+_FRACTION_TERMS = 100
+#: Newton steps of a log band edge at most: measured, at most 8 up to a million order statistics.
+_NEWTON_STEPS = 16
 
 
-def _order_statistic_levels(u_sorted: NDArray[np.float64], *, resolve: int) -> NDArray:
-    """Each row's equal-local-levels statistic, exact for at least its ``resolve`` smallest.
+def _log_fraction(
+    a: NDArray, b: NDArray, x: NDArray, y: NDArray, log_x: NDArray, log_y: NDArray
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """``log I_x(a, b)`` for whole ``a, b >= 1`` and ``x`` below the mean ``a / (a + b)``, with
+    ``y = 1 - x`` and both logs given, and the continued fraction's value ``F``.
+
+    ``I_x(a, b) = x^a y^b / (B(a, b) F)`` with ``F = beta_1 + alpha_2 / (beta_2 + ...)``, the
+    fraction of DiDonato and Morris (1992, ACM TOMS 18(3), Algorithm 708) as Boost.Math's
+    ``ibeta`` uses it, evaluated by the modified Lentz method (Thompson and Barnett 1986). Below
+    the mean every ``alpha`` is nonnegative and every ``beta`` positive, so no partial
+    denominator vanishes, and the fraction ends at ``b`` terms. The prefix stays in logs, where
+    it cannot underflow: its rounding is an absolute error in the log of at most a few ``u``
+    times ``a |log x| + b |log y| + |log B(a, b)|``, plus SciPy's ``betaln``, about
+    ``u (a + b) log(a + b)``; that is the relative error of the tail.
+    """
+    from scipy import special
+
+    f = a * (a * y - b * x + 1.0) / (a + 1.0)
+    c, d = f.copy(), np.zeros_like(f)
+    live = np.arange(f.size)
+    for m in range(1, _FRACTION_TERMS + 1):
+        am, bm, xm = a[live], b[live], x[live]
+        denom = am + 2.0 * m - 1.0
+        alpha = (m * (am + m - 1.0) / denom) * ((am + bm + m - 1.0) / denom) * (bm - m) * xm * xm
+        beta = (
+            m
+            + m * (bm - m) * xm / denom
+            + (am + m) * (am * y[live] - bm * xm + 1.0 + m * (2.0 - xm)) / (am + 2.0 * m + 1.0)
+        )
+        d[live] = 1.0 / (beta + alpha * d[live])
+        c[live] = beta + alpha / c[live]
+        step = c[live] * d[live]
+        f[live] *= step
+        live = live[np.abs(step - 1.0) > _EPS]
+        if not live.size:
+            break
+    with np.errstate(invalid="ignore"):
+        return a * log_x + b * log_y - special.betaln(a, b) - np.log(f), f
+
+
+def _logs(tails: NDArray, deep_log: Callable[[NDArray[np.bool_]], NDArray]) -> NDArray:
+    """The natural log of ``tails``; each below ``_LOG_BELOW`` is ``deep_log`` of its mask."""
+    tails = np.asarray(tails, dtype=np.float64)
+    logs = np.empty_like(tails)
+    with np.errstate(divide="ignore"):
+        np.log(tails, out=logs)
+    deep = tails < _LOG_BELOW
+    if np.any(deep):
+        logs[deep] = deep_log(deep)
+    return logs
+
+
+def _log_beta_tail_levels(u: NDArray[np.float64], i: NDArray[np.float64], n: int) -> NDArray:
+    """The natural log of ``_beta_tail_levels``.
+
+    A level below ``_LOG_BELOW`` is read again by ``_log_fraction``. Its lesser tail lies on
+    ``u``'s side of the mean ``i / (n + 1)``: ``Beta(i, n + 1 - i)`` is log-concave, so each
+    side of its mean has chance at least ``1 / e`` (Grünbaum 1960).
+    """
+    levels = _beta_tail_levels(u, i, n)
+    u, i = np.broadcast_arrays(np.asarray(u, dtype=np.float64), np.asarray(i, dtype=np.float64))
+
+    def deep_log(deep: NDArray[np.bool_]) -> NDArray:
+        ud, id_ = u[deep], i[deep]
+        below = ud <= id_ / (n + 1.0)
+        with np.errstate(divide="ignore"):
+            log_u, log1m_u = np.log(ud), np.log1p(-ud)
+        side = (
+            np.where(below, id_, n + 1.0 - id_),
+            np.where(below, n + 1.0 - id_, id_),
+            np.where(below, ud, 1.0 - ud),
+            np.where(below, 1.0 - ud, ud),
+            np.where(below, log_u, log1m_u),
+            np.where(below, log1m_u, log_u),
+        )
+        return math.log(2.0) + _log_fraction(*side)[0]
+
+    return _logs(levels, deep_log)
+
+
+def _log_band_lower(n: int, log_level: float) -> NDArray[np.float64]:
+    """The natural log of each lower edge of the band at local level ``exp(log_level)``: the
+    ``exp(log_level) / 2`` quantile of ``Beta(i, n + 1 - i)``, ``i = 1..n``. The upper edges are
+    one minus the lower ones reversed, ``1 - lower_{n + 1 - i}``.
+
+    Newton's method in ``t = log x``. ``log X`` has density proportional to
+    ``e^{i t} (1 - e^t)^{n - i}``, which is log-concave, so ``log I_{e^t}(i, n + 1 - i)`` is concave
+    (Bagnoli and Bergstrom 2005, theorem 1). Its slope is ``F / y``, with ``F`` the continued
+    fraction. ``I_x(a, b) <= x^a / (a B(a, b))``, so the first step starts at or below the root,
+    and every step after it rises to the root without passing it. A step below ``sqrt(eps)``
+    relative leaves an error of about its square.
+    """
+    from scipy import special
+
+    i = np.arange(1, n + 1, dtype=np.float64)
+    b = n + 1.0 - i
+    target = log_level - math.log(2.0)
+    t = (target + np.log(i) + special.betaln(i, b)) / i
+    live = np.flatnonzero(np.isfinite(t))
+    for _ in range(_NEWTON_STEPS):
+        if not live.size:
+            break
+        start = t[live]
+        y = -np.expm1(start)
+        log_tail, fraction = _log_fraction(i[live], b[live], np.exp(start), y, start, np.log(y))
+        step = (target - log_tail) * y / fraction
+        t[live] = start + step
+        live = live[np.abs(step) > math.sqrt(_EPS) * np.maximum(1.0, np.abs(start))]
+    return t
+
+
+def _order_statistic_levels(
+    u_sorted: NDArray[np.float64], *, resolve: int, log: bool = False
+) -> NDArray:
+    """Each row's equal-local-levels statistic, exact for at least its ``resolve`` smallest;
+    with ``log``, its natural log, exact below float64's range too.
 
     ``u_sorted`` is a ``(replicates, n)`` block of ascending rows. A screen reads each row's
     tails at its end points and its ``_SCREEN_POINTS`` largest standardised deviations, an
@@ -325,8 +474,9 @@ def _order_statistic_levels(u_sorted: NDArray[np.float64], *, resolve: int) -> N
     """
     count, n = u_sorted.shape
     i = np.arange(1, n + 1, dtype=np.float64)
+    tails = _log_beta_tail_levels if log else _beta_tail_levels
     if n <= 2 + _SCREEN_POINTS:
-        return np.min(_beta_tail_levels(u_sorted, i, n), axis=1)
+        return np.min(tails(u_sorted, i, n), axis=1)
     mean = i / (n + 1.0)
     sd = np.sqrt(i * (n + 1.0 - i) / ((n + 1.0) ** 2 * (n + 2.0)))
     bounds = np.empty(count)
@@ -342,25 +492,25 @@ def _order_statistic_levels(u_sorted: NDArray[np.float64], *, resolve: int) -> N
     if not target >= _LEAST_NORMAL:
         return np.concatenate(
             [
-                np.min(_beta_tail_levels(u_sorted[start : start + _SCREEN_BLOCK], i, n), axis=1)
+                np.min(tails(u_sorted[start : start + _SCREEN_BLOCK], i, n), axis=1)
                 for start in range(0, count, _SCREEN_BLOCK)
             ]
         )
     lower, upper = _bounds(n, min(1.0, 2.0 * target))
     trusted = _edge_levels(lower, upper, i, n) >= _EDGE_MARGIN * target
-    levels = np.full(count, np.nextafter(target, np.inf))
+    floor = np.nextafter(target, np.inf)
+    levels = np.full(count, math.log(floor) if log else floor)
     for start in range(0, count, _SCREEN_BLOCK):
         block = u_sorted[start : start + _SCREEN_BLOCK]
         rows, columns = np.nonzero(~((block >= lower) & (block <= upper) & trusted))
-        tails = _beta_tail_levels(block[rows, columns], i[columns], n)
         least = np.full(len(block), np.inf)
-        np.minimum.at(least, rows, tails)
-        exact = least <= target
+        np.minimum.at(least, rows, tails(block[rows, columns], i[columns], n))
+        exact = least <= (math.log(target) if log else target)
         levels[start : start + len(block)][exact] = least[exact]
     return levels
 
 
-def order_statistic_level(u_sorted: ArrayLike) -> float:
+def order_statistic_level(u_sorted: ArrayLike, *, log: bool = False) -> float:
     """Return the equal-local-levels statistic of ``n`` values sorted ascending.
 
     It is ``min_i 2 min(I_u(i, n + 1 - i), 1 - I_u(i, n + 1 - i))`` with ``I`` the
@@ -369,6 +519,11 @@ def order_statistic_level(u_sorted: ArrayLike) -> float:
     when this is below ``eta``, the decision Berk and Jones (1979) and Aldor-Noiman et al.
     (2013) make point by point. It is exact: every point whose tail could be the least is read
     (``_order_statistic_levels``).
+
+    With ``log`` it is the statistic's natural log. That stays exact where the statistic itself
+    falls below float64's range and returns 0, as it does for a few thousand values far from
+    their law. A tail below the least normal float is then read in logs, through DiDonato and
+    Morris's continued fraction (1992, Algorithm 708).
 
     Raises
     ------
@@ -382,7 +537,7 @@ def order_statistic_level(u_sorted: ArrayLike) -> float:
         raise ValueError("order_statistic_level: each value must be a probability in [0, 1]")
     if np.any(np.diff(values) < 0.0):
         raise ValueError("order_statistic_level: the values must be sorted ascending")
-    return float(_order_statistic_levels(values[None, :], resolve=1)[0])
+    return float(_order_statistic_levels(values[None, :], resolve=1, log=log)[0])
 
 
 def _monte_carlo_rank(replicates: int, alpha: float) -> int:
@@ -400,7 +555,10 @@ def monte_carlo_level(
     ``k``-th largest when ``larger_is_extreme``. An observed statistic exchangeable with the
     replicates falls strictly beyond it (below, or above) with chance ``k / (B + 1)``, at most
     ``alpha`` and exactly ``alpha`` when ``alpha (B + 1)`` is a whole number and the statistic
-    has no ties (Barnard 1963). At 99 replicates and 5% it is the 5th. ``alpha`` lies in
+    has no ties (Barnard 1963). Tied with it, an observed statistic is not beyond it, so ties
+    only make the test conservative. It reads ranks alone, so the statistics may be the natural
+    logs ``log=True`` gives, which keep their order below float64's range; the level is then
+    the log of the level. At 99 replicates and 5% it is the 5th. ``alpha`` lies in
     ``[1e-12, 0.5]``: from the least level ``bonferroni_binomial_band`` takes to one half, so
     the rank is at most ``(B + 1) / 2`` and names a replicate.
 
@@ -429,15 +587,17 @@ def monte_carlo_level(
     return float(ordered[-rank] if larger_is_extreme else ordered[rank - 1])
 
 
-def _monte_carlo_order_statistic_level(u_sorted: NDArray[np.float64], *, alpha: float) -> float:
+def _monte_carlo_order_statistic_level(
+    u_sorted: NDArray[np.float64], *, alpha: float, log: bool = False
+) -> float:
     """``monte_carlo_level`` of the equal-local-levels statistics of a ``(replicates, n)`` block,
-    each row one replicate's values sorted ascending.
+    each row one replicate's values sorted ascending; with ``log``, of their natural logs.
 
     It is exact: ``_order_statistic_levels`` resolves the rank Barnard's rule reads, and each
     row it leaves at a floor stands above every resolved one.
     """
     rank = _monte_carlo_rank(len(u_sorted), alpha)
-    levels = _order_statistic_levels(u_sorted, resolve=max(rank, 1))
+    levels = _order_statistic_levels(u_sorted, resolve=max(rank, 1), log=log)
     return monte_carlo_level(levels, alpha=alpha)
 
 
@@ -486,6 +646,7 @@ def bonferroni_binomial_band(
     *,
     alpha: float = 0.05,
     cut: float | None = None,
+    log: bool = False,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """Return count bounds for ``m`` binomial cells that hold for all cells at once.
 
@@ -504,12 +665,16 @@ def bonferroni_binomial_band(
     then the least count with ``P(X > upper) < cut``, and a count leaves the band exactly when
     its ``binomial_cell_level`` is below ``cut``.
 
+    With ``log``, ``cut`` is the natural log of the cut, as Barnard's rule reads it from
+    ``binomial_cell_level(..., log=True)``, and each tail is compared with it in logs, so a cut
+    below float64's range still decides every count.
+
     Raises
     ------
     ValueError
         If a count of trials is not a whole number from 0 to ``2**53 - 1``, a probability
-        lies outside ``[0, 1]``, ``alpha`` is below ``1e-12`` or not below 1, or ``cut`` lies
-        outside ``[0, 1]``.
+        lies outside ``[0, 1]``, ``alpha`` is below ``1e-12`` or not below 1, ``cut`` lies
+        outside ``[0, 1]`` (with ``log``, outside ``[-inf, 0]``), or ``log`` has no ``cut``.
     """
     import scipy.spatial
     from scipy import stats
@@ -520,7 +685,11 @@ def bonferroni_binomial_band(
             f"bonferroni_binomial_band: alpha must be at least 1e-12 and below 1; got {alpha!r}"
         )
     n_trials, p = _binomial_law("bonferroni_binomial_band", trials, probability)
-    if cut is not None and not 0.0 <= float(cut) <= 1.0:
+    if log and (cut is None or not -math.inf <= float(cut) <= 0.0):
+        raise ValueError(
+            f"bonferroni_binomial_band: a log cut must lie in [-inf, 0]; got cut={cut!r}"
+        )
+    if not log and cut is not None and not 0.0 <= float(cut) <= 1.0:
         raise ValueError(f"bonferroni_binomial_band: cut must lie in [0, 1]; got {cut!r}")
     if n_trials.size == 0:
         return np.zeros(n_trials.shape), np.zeros(n_trials.shape)
@@ -530,35 +699,87 @@ def bonferroni_binomial_band(
         upper = _least_count(n_trials, lambda k: stats.binom.sf(k, n_trials, p) <= tail)
         return lower, upper
     given = float(cut)
-    lower = _least_count(n_trials, lambda k: stats.binom.cdf(k, n_trials, p) >= given)
-    # ``P(X > k) < cut`` holds at ``trials`` for any positive cut; at cut 0 every count is in.
-    upper = _least_count(
-        n_trials, lambda k: (stats.binom.sf(k, n_trials, p) < given) | (k >= n_trials)
+    at_most, above = (
+        (_log_binomial_at_most, _log_binomial_above) if log else (stats.binom.cdf, stats.binom.sf)
     )
+    lower = _least_count(n_trials, lambda k: at_most(k, n_trials, p) >= given)
+    # ``P(X > k) < cut`` holds at ``trials`` for any positive cut; at cut 0 every count is in.
+    upper = _least_count(n_trials, lambda k: (above(k, n_trials, p) < given) | (k >= n_trials))
     return lower, upper
 
 
+def _log_binomial_at_most(k: NDArray, trials: NDArray, p: NDArray) -> NDArray[np.float64]:
+    """``log P(X <= k)`` for ``X ~ Binomial(trials, p)``: SciPy's tail, and below
+    ``_LOG_BELOW`` the continued fraction of ``I_{1-p}(trials - k, k + 1)``, its lower tail."""
+    from scipy import stats
+
+    k, trials, p = np.broadcast_arrays(*(np.asarray(v, dtype=np.float64) for v in (k, trials, p)))
+
+    def deep_log(deep: NDArray[np.bool_]) -> NDArray:
+        kd, nd, pd = k[deep], trials[deep], p[deep]
+        with np.errstate(divide="ignore"):
+            return _log_fraction(nd - kd, kd + 1.0, 1.0 - pd, pd, np.log1p(-pd), np.log(pd))[0]
+
+    return _logs(stats.binom.cdf(k, trials, p), deep_log)
+
+
+def _log_binomial_at_least(k: NDArray, trials: NDArray, p: NDArray) -> NDArray[np.float64]:
+    """``log P(X >= k)`` for ``X ~ Binomial(trials, p)``: SciPy's tail, and below
+    ``_LOG_BELOW`` the continued fraction of ``I_p(k, trials - k + 1)``; above ``trials`` the
+    chance is 0."""
+    from scipy import stats
+
+    k, trials, p = np.broadcast_arrays(*(np.asarray(v, dtype=np.float64) for v in (k, trials, p)))
+
+    def deep_log(deep: NDArray[np.bool_]) -> NDArray:
+        nd, pd = trials[deep], p[deep]
+        kd = np.minimum(k[deep], nd)
+        with np.errstate(divide="ignore"):
+            logs = _log_fraction(kd, nd - kd + 1.0, pd, 1.0 - pd, np.log(pd), np.log1p(-pd))[0]
+        return np.where(k[deep] > nd, -np.inf, logs)
+
+    return _logs(stats.binom.sf(k - 1.0, trials, p), deep_log)
+
+
+def _log_binomial_above(k: NDArray, trials: NDArray, p: NDArray) -> NDArray[np.float64]:
+    """``log P(X > k) = log P(X >= k + 1)``."""
+    return _log_binomial_at_least(np.asarray(k, dtype=np.float64) + 1.0, trials, p)
+
+
 def _binomial_cell_levels(
-    counts: ArrayLike, trials: ArrayLike, probability: ArrayLike
+    counts: ArrayLike, trials: ArrayLike, probability: ArrayLike, *, log: bool = False
 ) -> NDArray[np.float64]:
-    """``min(P(X <= k), P(X >= k))`` of every count, its least over the last axis."""
+    """``min(P(X <= k), P(X >= k))`` of every count, its least over the last axis; with
+    ``log``, its natural log, exact below float64's range too."""
     import scipy.spatial
     from scipy import stats
 
     k = np.asarray(counts, dtype=np.float64)
-    tails = np.minimum(
-        stats.binom.cdf(k, trials, probability), stats.binom.sf(k - 1.0, trials, probability)
-    )
+    if log:
+        tails = np.minimum(
+            _log_binomial_at_most(k, trials, probability),
+            _log_binomial_at_least(k, trials, probability),
+        )
+    else:
+        tails = np.minimum(
+            stats.binom.cdf(k, trials, probability), stats.binom.sf(k - 1.0, trials, probability)
+        )
     return np.min(tails, axis=-1)
 
 
-def binomial_cell_level(counts: ArrayLike, trials: ArrayLike, probability: ArrayLike) -> float:
+def binomial_cell_level(
+    counts: ArrayLike, trials: ArrayLike, probability: ArrayLike, *, log: bool = False
+) -> float:
     """Return the least one-sided binomial tail of ``m`` cell counts.
 
     Cell ``k``'s count is read against ``Binomial(trials[k], probability[k])`` by the lesser of
     ``P(X <= count)`` and ``P(X >= count)``; the statistic is the least over cells. A count
     leaves ``bonferroni_binomial_band(trials, probability, cut=c)`` exactly when its level is
     below ``c``, and with ``c = alpha / (2 m)`` that is the Bonferroni band's level.
+
+    With ``log`` it is the statistic's natural log. That stays exact where the statistic itself
+    falls below float64's range and returns 0, as it does for counts of a few thousand far from
+    their law, and it reaches ``bonferroni_binomial_band(..., cut=c, log=True)`` the same way.
 
     Raises
     ------
@@ -575,7 +796,7 @@ def binomial_cell_level(counts: ArrayLike, trials: ArrayLike, probability: Array
         raise ValueError(
             "binomial_cell_level: each count must be a whole number from 0 to its trials"
         )
-    return float(np.min(_binomial_cell_levels(k.ravel(), n_trials.ravel(), p.ravel())))
+    return float(np.min(_binomial_cell_levels(k.ravel(), n_trials.ravel(), p.ravel(), log=log)))
 
 
 __all__ = [
