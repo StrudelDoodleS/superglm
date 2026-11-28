@@ -141,6 +141,10 @@ _NO_MEAN = "This model's family names no predicted Mean, so it has no actual ove
 _NO_VARIANCE_LAW = (
     "This model's family has no predicted variance, so actual over expected has no interval."
 )
+_TOTAL_TOO_LARGE = (
+    "A group's observed or predicted total is too large to represent, so actual over expected "
+    "has no ratio. Rescale the response and refit."
+)
 _NO_VARIANCE = (
     "The predicted distribution has no finite variance at these parameters, "
     "so actual over expected has no interval."
@@ -426,10 +430,17 @@ def _ae_read(se: NDArray[np.float64]) -> NDArray[np.bool_]:
 def _ae_body(
     fitted, dataset: EvaluationDataset, y, inputs: Sequence[str], level: Callable[[], _Level]
 ) -> dict[str, Any]:
-    tables = [
-        {**table.check.to_json(), "by": table.by}
-        for table in _ae_tables(fitted, dataset, y, inputs)
-    ]
+    built = _ae_tables(fitted, dataset, y, inputs)
+    with np.errstate(over="ignore", invalid="ignore"):
+        actual = float(np.sum(built[0].check.actual))
+        expected = float(np.sum(built[0].check.expected))
+    overflowed = any(
+        np.isinf(t.check.actual).any() or np.isinf(t.check.expected).any() for t in built
+    )
+    # Finite responses can still sum past float64's range, and such a total has no ratio.
+    if overflowed or not (math.isfinite(actual) and math.isfinite(expected)):
+        return _unavailable(_TOTAL_TOO_LARGE)
+    tables = [{**table.check.to_json(), "by": table.by} for table in built]
     ratios = [np.asarray(t["ratio"], dtype=np.float64) for t in tables]
     errors = [np.asarray(t["ratio_se"], dtype=np.float64) for t in tables]
     # A cell is read when its SE is finite and positive, as the replicates' maximum reads it.
@@ -445,8 +456,6 @@ def _ae_body(
             half = np.where(_ae_read(se), np.nan if z is None else z * se, np.nan)
         table["lower"], table["upper"] = ratio - half, ratio + half
         outside += int(np.count_nonzero((ratio - half > 1.0) | (ratio + half < 1.0)))
-    actual = float(np.sum(tables[0]["actual"]))
-    expected = float(np.sum(tables[0]["expected"]))
     # A zero expected total has no ratio: NaN, as the library's grouped ratios, sent as null.
     ratio = actual / expected if expected != 0.0 else math.nan
     body = {

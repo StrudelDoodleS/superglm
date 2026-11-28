@@ -529,6 +529,28 @@ def test_a_law_without_finite_variance_has_no_ae_interval(heavy_gpd):
         assert body["n_draws"] == 99 and body["local_level"] == replicates.levels[report]
 
 
+def test_a_total_too_large_to_represent_has_no_ratio():
+    """Four held-out responses of 1e308 are each finite, but their total is not, so actual over
+    expected has no ratio and answers unavailable with the page's sentence. Mutation check:
+    without that answer the body reads its null total as available; summing the serialised
+    totals, as before, raised ``TypeError``."""
+    family = GaussianLS()
+    y = np.random.default_rng(123).normal(size=30)
+    lss = SuperLSS(family, family.location(), family.scale()).fit(
+        pd.DataFrame({"x": np.zeros(30)}), y
+    )
+    X, held = pd.DataFrame({"x": np.zeros(4)}), np.full(4, 1e308)
+    unavailable = {
+        "available": False,
+        "reason": "A group's observed or predicted total is too large to represent, so actual "
+        "over expected has no ratio. Rescale the response and refit.",
+        "flagged": False,
+        "outside": 0,
+        "cells": 0,
+    }
+    assert check_body("check_ae", lss, _validation(X, held), inputs=[]) == unavailable
+
+
 def test_a_family_without_a_predicted_variance_offers_no_ae():
     """An intercept-only NegativeBinomialLS names a Mean but has neither a variance nor a
     quantile function, so actual over expected has no interval: it is not offered, and asked
