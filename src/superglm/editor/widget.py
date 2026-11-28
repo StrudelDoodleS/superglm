@@ -259,7 +259,8 @@ class EditorWidget:
         # The checks' evidence, read and written only by check jobs, which the coordinator runs
         # one at a time. Each entry keeps the split it was read on, compared by identity, and
         # its model's ``_check_signature`` and inputs: the fitted model's body of each check on
-        # a split, and one simulation each for the fitted and the edited model on a split.
+        # a split, and on a split one simulation for the fitted model, which its hand edits read,
+        # and one for a refit in force.
         self._original_checks: dict[tuple[str, str], tuple[tuple[Any, ...], Any, dict]] = {}
         self._check_replicates: dict[
             tuple[str, str], tuple[tuple[Any, ...], Any, NullReplicates]
@@ -921,7 +922,9 @@ class EditorWidget:
 
         def compute_bodies() -> dict[str, Any]:
             fitted = _check_signature(reference)
-            replicates = self._check_replicates_for(edited, dataset, inputs, fitted=fitted)
+            replicates = self._check_replicates_for(
+                edited, reference, dataset, inputs, fitted=fitted
+            )
             bodies = {
                 "edited": check_body(report, edited, dataset, inputs=inputs, replicates=replicates),
                 "original": None,
@@ -953,11 +956,20 @@ class EditorWidget:
         }
 
     def _check_replicates_for(
-        self, model, dataset, inputs: tuple[str, ...], *, fitted: tuple[Any, ...]
+        self, model, reference, dataset, inputs: tuple[str, ...], *, fitted: tuple[Any, ...]
     ) -> NullReplicates:
-        """``model``'s one simulation on ``dataset``, shared by its four checks; ``fitted`` is the
-        fitted model's signature. Run only inside a check job."""
-        key = (_check_signature(model), inputs)
+        """``model``'s one simulation on ``dataset``, shared by its four checks; ``reference`` is
+        the fitted model and ``fitted`` its signature. Run only inside a check job.
+
+        A model with the fit's covariance, a hand edit of it, reads the fitted model's
+        simulation: the levels rest on the split, the design and that covariance, and an edit
+        moves none of them. Its bodies still read their own statistics against those levels. A
+        refit has a covariance of its own, and so a simulation of its own.
+        """
+        signature = _check_signature(model)
+        if signature[1:] == fitted[1:]:
+            model, signature = reference, fitted
+        key = (signature, inputs)
         for held, held_dataset, replicates in self._check_replicates.values():
             if held == key and held_dataset is dataset:
                 return replicates
@@ -974,7 +986,9 @@ class EditorWidget:
         held = self._original_checks.get((report, dataset.name))
         if held is not None and held[0] == (fitted, inputs) and held[1] is dataset:
             return held[2]
-        replicates = self._check_replicates_for(reference, dataset, inputs, fitted=fitted)
+        replicates = self._check_replicates_for(
+            reference, reference, dataset, inputs, fitted=fitted
+        )
         body = check_body(report, reference, dataset, inputs=inputs, replicates=replicates)
         self._original_checks[(report, dataset.name)] = ((fitted, inputs), dataset, body)
         return body

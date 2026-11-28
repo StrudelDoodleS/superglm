@@ -119,7 +119,8 @@ _FIT_ROWS = "train"
 #: Stream of the replicates' uniforms; the residuals' own streams are domains 0 to 5.
 _RESPONSE_STREAM = 6
 #: Rows simulated at once: the posterior pushforward and the responses hold this many rows of
-#: ``(draws, rows, parameters)`` floats at a time, and the transforms one ``(draws, n)`` array.
+#: ``(draws, rows, parameters)`` floats at a time; the transforms kept are one ``(draws, read)``
+#: array over the occurrences Q-Q and PIT read, at most the residual sampler's cap.
 _SIMULATION_ROWS = 1024
 #: Simulated uniforms lie strictly inside (0, 1) by this margin, as ``posterior_predictive``'s do.
 _PROBABILITY_MARGIN = 1.0e-12
@@ -310,7 +311,6 @@ def _calibration_body(
         band_lower, band_upper = low / trials, high / trials
     shares = table["realised_exceedance"].to_numpy(dtype=np.float64)
     outside = int(np.count_nonzero((shares < band_lower) | (shares > band_upper)))
-    coverage = payload.coverage[payload.coverage["group"] == "all"]
     body = {
         "quantiles": {
             name: table[name].to_numpy()
@@ -319,10 +319,6 @@ def _calibration_body(
         "band_lower": band_lower,
         "band_upper": band_upper,
         "local_level": cut,
-        "coverage": {
-            "level": coverage["level"].to_numpy(),
-            "realised": coverage["realised"].to_numpy(),
-        },
         "calibration_law": payload.calibration_law,
         **level.fields(),
     }
@@ -392,6 +388,11 @@ def _ae_tables(fitted, dataset: EvaluationDataset, y, inputs: Sequence[str]) -> 
     ]
 
 
+def _ae_read(se: NDArray[np.float64]) -> NDArray[np.bool_]:
+    """The cells actual over expected reads: those whose ratio has a finite, positive SE."""
+    return np.isfinite(se) & (se > 0.0)
+
+
 def _ae_body(
     fitted, dataset: EvaluationDataset, y, inputs: Sequence[str], level: Callable[[], _Level]
 ) -> dict[str, Any]:
@@ -401,15 +402,17 @@ def _ae_body(
     ]
     ratios = [np.asarray(t["ratio"], dtype=np.float64) for t in tables]
     errors = [np.asarray(t["ratio_se"], dtype=np.float64) for t in tables]
-    cells = int(sum(np.count_nonzero(np.isfinite(se)) for se in errors))
+    # A cell is read when its SE is finite and positive, as the replicates' maximum reads it.
+    cells = int(sum(np.count_nonzero(_ae_read(se)) for se in errors))
     found = level()
     z = found.value
     if z is None and cells:
         z = float(stats.norm.isf(CHECK_ALPHA / (2.0 * cells)))
     outside = 0
     for table, ratio, se in zip(tables, ratios, errors, strict=True):
+        # A cell that is not read has no interval, so the page draws nothing it does not count.
         with np.errstate(invalid="ignore"):
-            half = np.full(len(se), np.nan) if z is None else z * se
+            half = np.where(_ae_read(se), np.nan if z is None else z * se, np.nan)
         table["lower"], table["upper"] = ratio - half, ratio + half
         outside += int(np.count_nonzero((ratio - half > 1.0) | (ratio + half < 1.0)))
     actual = float(np.sum(tables[0]["actual"]))
@@ -560,9 +563,9 @@ class NullReplicates:
     ``note`` is the page's sentence for each check that keeps the known-parameter level on this
     split for want of a replicate: the fit's uncertainty could not be sampled, or these rows
     could not be simulated (for every check, for the checks a capped split's sample does not
-    reach, or for a check whose level could not be formed). It is ``None`` when every check that answers was simulated, when the
-    known level is the right one (the rows the model was fitted on), or when no check can
-    answer. Nothing simulated leaves ``n_draws`` 0.
+    reach, or for a check whose level could not be formed). It is ``None`` when every check
+    that answers was simulated, when the known level is the right one (the rows the model was
+    fitted on), or when no check can answer. Nothing simulated leaves ``n_draws`` 0.
     """
 
     levels: Mapping[str, float | None]
@@ -585,11 +588,11 @@ class _Split(NamedTuple):
     are the retained rows, of which Q-Q and PIT read ``read``, the rows ``replication_sample``
     selects (``None`` for all). Under other frequency weights they are the occurrences
     ``replication_sample`` selects, all read; ``per_occurrence`` marks them, each occurrence's
-    atom randomised on its own. ``complete`` says they are every occurrence that quantile calibration of the
-    response and actual over expected read. ``rows`` is each occurrence's retained row,
-    ``prior_law`` its prior weight where the row law carries one, and ``total_weights`` each
-    retained row's weight on one occurrence's response in an actual total: its prior weight, or
-    one under frequency weights.
+    atom randomised on its own. ``complete`` says they are every occurrence that quantile
+    calibration of the response and actual over expected read. ``rows`` is each occurrence's
+    retained row, ``prior_law`` its prior weight where the row law carries one, and
+    ``total_weights`` each retained row's weight on one occurrence's response in an actual
+    total: its prior weight, or one under frequency weights.
     """
 
     fitted: Any
@@ -791,7 +794,7 @@ def _ae_statistics(tables: list[_AETable], totals: NDArray) -> NDArray[np.float6
     """Per replicate, the largest ``|ratio - 1| / ratio_se`` over the cells with a positive SE."""
     expected = np.concatenate([table.check.expected for table in tables])
     se = np.concatenate([table.check.ratio_se for table in tables])
-    cells = np.isfinite(se) & (se > 0.0)
+    cells = _ae_read(se)
     if not np.any(cells):
         return None
     ratio = totals[:, cells] / expected[cells]
@@ -865,18 +868,24 @@ def _scores(
         or [np.zeros(split.residuals.n_rows, dtype=np.intp)]
     )
     width = max(int(starts[-1]), 1)
-    transforms = np.empty((count, occurrences))
+    # Only the occurrences Q-Q and PIT read are kept, in ``split.read``'s order: ``order`` sorts
+    # them by occurrence, so each block finds its own by a search.
+    chosen = np.arange(occurrences, dtype=np.intp) if split.read is None else split.read
+    order = np.argsort(chosen, kind="stable")
+    by_occurrence = chosen[order]
+    read = np.empty((count, len(chosen)))
     exceeded = np.zeros((count, grid.size), dtype=np.int64)
     totals = np.zeros((count, width))
     for span, responses in blocks:
         rows = split.rows[span]
-        transforms[:, span] = _transforms(split, span, responses, randomise)
+        lo, hi = np.searchsorted(by_occurrence, (span.start, span.stop))
+        transforms = _transforms(split, span, responses, randomise)
+        read[:, order[lo:hi]] = transforms[:, by_occurrence[lo:hi] - span.start]
         if thresholds is not None:
             exceeded += np.count_nonzero(responses[:, :, None] > thresholds[rows], axis=1)
         if tables:
             totals += _cell_totals(codes[rows], split.total_weights[rows] * responses, width)
 
-    read = transforms if split.read is None else transforms[:, split.read]
     # Binned as ``pit_payload`` bins the split, one replicate at a time.
     pit = np.stack([np.histogram(row, bins=PIT_BINS, range=(0.0, 1.0))[0] for row in read])
     calibration = None
@@ -956,13 +965,14 @@ def null_replicates(
     the levels are kept. ``inputs`` are the columns actual over expected groups by.
 
     The rows the model was fitted on (the split named ``"train"``) keep the known-parameter
-    bands, so nothing is simulated for them, nor for a model or split no check can answer. Where the posterior refuses its
-    draws, or the rows have no law a replicate can draw (truncated or censored rows, a draw
-    that leaves a parameter outside its link's domain, a family with no distribution
-    function), nothing is simulated and ``note`` says which. Beyond the residual sampler's cap
-    a frequency-weighted split draws the occurrences that sampler selects, the ones Q-Q, PIT
-    and a randomised quantile calibration read; quantile calibration of the response and actual
-    over expected read every occurrence, so they keep the known level and ``note`` says why.
+    bands, so nothing is simulated for them, nor for a model or split no check can answer.
+    Where the posterior refuses its draws, or the rows have no law a replicate can draw
+    (truncated or censored rows, a draw that leaves a parameter outside its link's domain, a
+    family with no distribution function), nothing is simulated and ``note`` says which.
+    Beyond the residual sampler's cap a frequency-weighted split draws the occurrences that
+    sampler selects, the ones Q-Q, PIT and a randomised quantile calibration read; quantile
+    calibration of the response and actual over expected read every occurrence, so they keep
+    the known level and ``note`` says why.
     """
     nothing = NullReplicates(levels={}, n_draws=0, seed=int(seed))
     lss = _lss(model)

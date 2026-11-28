@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import functools
 import json
 import threading
 import tracemalloc
@@ -88,11 +89,11 @@ def _validation(X, y, sample_weight=None) -> EvaluationDataset:
     )
 
 
-def _fitted_case(y_of, *, n_validation: int = 200, **kwargs) -> Case:
+def _fitted_case(y_of, *, n_validation: int = 200, spec=_gamma_spec) -> Case:
     rng = np.random.default_rng(SEED)
     X, mean, cv = _rows(600 + n_validation, rng)
     y = y_of(rng, mean, cv)
-    lss = _gamma_spec(**kwargs).fit(X.iloc[:600], y[:600], lambdas={"mean:x#wiggle": LAMBDA})
+    lss = spec().fit(X.iloc[:600], y[:600], lambdas={"mean:x#wiggle": LAMBDA})
     train = EvaluationDataset(
         name="train", label="Train", X=X.iloc[:600], y=y[:600], source="retained_fit_data"
     )
@@ -116,6 +117,21 @@ def _wrong_case() -> Case:
     )
 
 
+def _wrong_mean_case() -> Case:
+    """CALM's amounts under a Mean without ``g``, read on 1,000 rows.
+
+    Group b's Mean is 1.35 times the others', which the fit spreads over all three: on the
+    split b's actual over expected leaves its interval above 1 and a's below (measured), and
+    the distribution and calibration checks hold.
+    """
+    family = GammaLS()
+    return _fitted_case(
+        lambda rng, mean, cv: rng.gamma(1.0 / cv**2, mean * cv**2),
+        n_validation=1_000,
+        spec=lambda: SuperLSS(family, family.mean(s("x", k=6)), family.scale(cat("g"))),
+    )
+
+
 @pytest.fixture(scope="module")
 def calm() -> Case:
     return _calm_case()
@@ -124,6 +140,11 @@ def calm() -> Case:
 @pytest.fixture(scope="module")
 def wrong() -> Case:
     return _wrong_case()
+
+
+@pytest.fixture(scope="module")
+def wrong_mean() -> Case:
+    return _wrong_mean_case()
 
 
 @pytest.fixture(scope="module")
@@ -270,6 +291,8 @@ def test_the_pit_body_counts_each_bin_against_the_band_for_all_twenty(calm):
 
 def test_the_calibration_body_reads_each_quantile_against_its_binomial_band(calm):
     body = check_body("check_calibration", calm.lss, calm.validation, inputs=[])
+    # The page draws no coverage, so the body sends none.
+    assert "coverage" not in body
     _, mean, cv = _reference_u(calm.lss, calm.validation.X, calm.validation.y)
     y, n = calm.validation.y, len(calm.validation.y)
     for i, p in enumerate(QUANTILE_GRID):
@@ -306,23 +329,30 @@ def test_the_ae_body_sums_to_the_split_and_reads_its_interval_from_the_gamma_law
         )
 
 
-@pytest.mark.parametrize("name", ["calm", "wrong"])
-def test_the_ae_flag_counts_the_intervals_that_exclude_one(name, request):
-    """Mutation check: ``outside`` counts the intervals ratio -/+ z se that leave out 1, either side.
+@pytest.mark.parametrize(
+    ("name", "sides"), [("calm", set()), ("wrong", set()), ("wrong_mean", {-1, 1})]
+)
+def test_the_ae_flag_counts_the_intervals_that_exclude_one(name, sides, request):
+    """``outside`` counts the intervals ratio -/+ z se that leave out 1, on either side, at the
+    split's simulated ``z``.
 
-    WRONG's intervals leave 1 out on both sides, so a count of one side alone fails.
+    WRONG_MEAN's group b lies above its interval and group a below, so A/E flags; CALM's and
+    WRONG's right Mean leaves none out. Mutation check: a count of one side alone fails.
     """
     case = request.getfixturevalue(name)
     body = check_body("check_ae", case.lss, case.validation, inputs=["x", "g"])
     z = body["z"]
-    expected = 0
+    assert body["level_source"] == "simulated"
+    found = []
     for table in body["tables"]:
         for ratio, se, lower, upper in zip(
             table["ratio"], table["ratio_se"], table["lower"], table["upper"], strict=True
         ):
             assert lower == pytest.approx(ratio - z * se) and upper == pytest.approx(ratio + z * se)
-            expected += abs(ratio - 1.0) > z * se
-    assert body["outside"] == expected and body["flagged"] == (expected > 0)
+            if abs(ratio - 1.0) > z * se:
+                found.append(1 if ratio > 1.0 else -1)
+    assert set(found) == sides
+    assert body["outside"] == len(found) and body["flagged"] == bool(found)
     assert body["cells"] == sum(len(t["ratio_se"]) for t in body["tables"])
 
 
@@ -407,6 +437,34 @@ def test_an_error_that_is_not_about_variance_still_raises(calm, monkeypatch):
     monkeypatch.setattr(checks, "actual_expected_check", broken)
     with pytest.raises(ValueError, match="one value per row"):
         check_body("check_ae", calm.lss, calm.validation, inputs=[])
+
+
+def test_a_cell_without_spread_is_read_by_neither_the_count_nor_the_replicates(calm, monkeypatch):
+    """A cell whose ratio has a standard error of zero, at a ratio of 3: the body neither counts
+    it nor draws its interval, and the replicates' maximum skips it alike. Mutation check:
+    counting every cell with a finite SE in the body counts it, and flags it outside.
+    """
+    library = checks.actual_expected_check
+
+    def spreadless(*args, **kwargs):
+        table = library(*args, **kwargs)
+        if kwargs["name"] != "g":
+            return table
+        ratio, se = table.ratio.copy(), table.ratio_se.copy()
+        ratio[0], se[0] = 3.0, 0.0
+        return dataclasses.replace(table, ratio=ratio, ratio_se=se)
+
+    monkeypatch.setattr(checks, "actual_expected_check", spreadless)
+    body = check_body("check_ae", calm.lss, calm.validation, inputs=["x", "g"])
+    by_g = body["tables"][2]
+    assert by_g["ratio"][0] == 3.0 and by_g["lower"][0] is None and by_g["upper"][0] is None
+    assert body["cells"] == sum(len(t["ratio_se"]) for t in body["tables"]) - 1
+    assert body["outside"] == 0 and body["flagged"] is False
+    own = np.asarray(calm.validation.y, dtype=np.float64)
+    scored = checks._scored_replicates(
+        calm.lss, calm.validation, inputs=["x", "g"], responses=own[None, :]
+    )
+    assert scored.statistics["check_ae"][0] == pytest.approx(_ae_statistic(body), rel=1e-12)
 
 
 def test_a_split_of_five_rows_draws_every_check(calm):
@@ -539,6 +597,57 @@ def test_a_split_beyond_the_occurrence_cap_draws_the_sample_the_checks_read(calm
     pit = bodies["check_pit"]
     assert pit["n_rows"] == len(own) == _OCCURRENCE_CAP
     assert scored.counts[0].tolist() == pit["counts"]
+
+
+@pytest.mark.parametrize("name", ["calm", "zeros"])
+def test_a_capped_split_scores_the_sample_it_reads_across_blocks(name, request, monkeypatch):
+    """Under unit weights beyond the cap, a replicate keeps the transforms of the rows Q-Q and
+    PIT read, as the split's own sample selects them, each read from the block that holds it.
+
+    The cap is 50 rows and a block 64, so the sample spans four blocks. The split's own
+    responses, scored as a replicate, give its own transforms at the sample, an atom's
+    randomised from the stream every row draws. Mutation check: reading each block's columns
+    without its start fails it.
+    """
+    case = request.getfixturevalue(name)
+    monkeypatch.setattr(checks, "_SIMULATION_ROWS", 64)
+    monkeypatch.setattr(
+        checks, "replication_sample", functools.partial(replication_sample, max_rows=50)
+    )
+    own = np.asarray(case.validation.y, dtype=np.float64)
+    scored = checks._scored_replicates(
+        case.lss, case.validation, inputs=["x", "g"], responses=own[None, :]
+    )
+    fitted = case.lss._require_fitted()
+    residuals = compute_residuals(fitted, case.validation.X, own, seed=42)
+    sample = replication_sample(residuals, max_rows=50, seed=42)
+    assert len(sample) == 50 and sample.max() >= 3 * 64
+    # The family's distribution function over a block or over every row: equal within rounding.
+    np.testing.assert_allclose(scored.transforms[0], np.sort(residuals.pit[sample]), rtol=8 * _U)
+
+
+def test_a_capped_split_holds_the_transforms_of_its_sample_alone(calm, monkeypatch):
+    """40,000 held-out rows read through a cap of 1,000: the replicates keep a ``(99, 1000)``
+    block of transforms, not one for every row.
+
+    A ``(99, 40000)`` block alone is 32 MB; the envelope allows the split's own arrays and one
+    simulated block's temporaries, about 30 MB measured. Mutation check: keeping every row's
+    transforms and then copying the sample's breaks it.
+    """
+    monkeypatch.setattr(
+        checks, "replication_sample", functools.partial(replication_sample, max_rows=1000)
+    )
+    rng = np.random.default_rng(SEED + 1)
+    X, mean, cv = _rows(40_000, rng)
+    split = _validation(X, rng.gamma(1.0 / cv**2, mean * cv**2))
+    tracemalloc.start()
+    try:
+        replicates = null_replicates(calm.lss, split, inputs=["x", "g"])
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert replicates.n_draws == 99 and replicates.levels["check_qq"] is not None
+    assert peak < 45e6
 
 
 def test_a_split_beyond_the_cap_whose_total_overflows_still_simulates_qq_and_pit(
@@ -1008,20 +1117,17 @@ def test_a_correct_model_is_flagged_at_its_level_on_a_held_out_split(calm):
 # The /report route: each check for the model as edited and, after an edit, as fitted.
 
 FIXTURE = Path(__file__).parent / "editor_frontend" / "fixtures" / "assess_checks.json"
-#: The validation report's payload keys, read on master before the checks joined /report.
-VALIDATION_KEYS = {
-    "available",
-    "can_run_cv",
-    "compares_edit",
-    "cv_report",
-    "in_force",
-    "metric_labels",
-    "model_revision",
-    "note",
-    "report",
-    "request_sequence",
-    "splits",
-    "title",
+#: The four reports' payload keys, read on master (e9a4f842d) before the checks joined /report.
+_COMMON_KEYS = {"available", "in_force", "model_revision", "note", "report", "request_sequence"}
+REPORT_KEYS = {
+    "validation": _COMMON_KEYS
+    | {"can_run_cv", "compares_edit", "cv_report", "metric_labels", "splits", "title"},
+    "cv": _COMMON_KEYS
+    | {"final_fit", "header", "jobs", "metrics", "pending", "relativities", "results"}
+    | {"run_cv", "title"},
+    "final": _COMMON_KEYS
+    | {"can_run_cv", "compares_edit", "final_fit", "metric_labels", "splits", "title"},
+    "diagnose": _COMMON_KEYS | {"cost_label", "fits", "terms", "title"},
 }
 #: What the widget adds to ``check_report_payload``; the fixture holds the payload alone.
 _WIDGET_FIELDS = ("model_revision", "request_sequence", "in_force")
@@ -1129,13 +1235,54 @@ def test_the_four_checks_share_one_simulation(calm_session, monkeypatch):
         _average(calm_session, k)
         for report in CHECK_REPORTS:
             assert _ask(widget, report)["compares_edit"] is True
-    # One for each edited model; the fitted model's simulation from before the edits serves.
-    assert len(drawn) == 3 and sum(model is calm_session.reference_model for model in drawn) == 1
+    # Each hand edit reads the fitted model's simulation from before the edits.
+    assert drawn == [calm_session.reference_model]
     calm_session.undo()
     calm_session.undo()
     for report in CHECK_REPORTS:
         _ask(widget, report)
-    assert len(drawn) == 3
+    assert len(drawn) == 1
+
+
+def test_a_hand_edit_reads_its_checks_against_the_fitted_models_levels(
+    calm, calm_session, monkeypatch
+):
+    """A hand edit keeps the fit's covariance, so its checks read the fitted model's simulation
+    on the split: the same levels, and its own statistics against them. The Mean's curve made
+    flat leaves every check's band on the validation split, where the fit leaves none. A model
+    with a covariance of its own, as a refit has, is simulated on its own. Mutation checks:
+    simulating each edit again calls the simulation for the edited model; reading the fitted
+    model's simulation for every model gives the refit's none of its own.
+    """
+    drawn = []
+    real = checks.null_replicates
+
+    def counted(*a, **k):
+        drawn.append(a[0])
+        return real(*a, **k)
+
+    monkeypatch.setattr(widget_module, "null_replicates", counted)
+    monkeypatch.setattr(checks, "null_replicates", counted)
+    widget = calm_session.widget()
+    curve = calm_session.terms["mean:x"].edited_log_effect
+    calm_session.set_values("mean:x", np.arange(curve.size), np.full(curve.size, curve.mean()))
+    payloads = {report: _ask(widget, report) for report in CHECK_REPORTS}
+    reference = calm_session.reference_model
+    assert drawn == [reference]
+    split = calm_session._evaluation_data["validation"]
+    fitted = real(reference, split, inputs=["x", "g"])
+    edited, _ = widget._current_model_for_evidence(statistics=False)
+    for report, payload in payloads.items():
+        ours, theirs = payload["models"]["edited"], payload["models"]["original"]
+        level = "z" if report == "check_ae" else "local_level"
+        assert ours["level_source"] == "simulated" and ours[level] == theirs[level]
+        assert ours["flagged"] and ours["outside"] > 0 and not theirs["flagged"]
+        assert ours == check_body(report, edited, split, inputs=["x", "g"], replicates=fitted)
+    refit = copy.deepcopy(calm.lss)
+    refit._model = _with_covariance(refit, 9.0)
+    signature = widget_module._check_signature(reference)
+    own = widget._check_replicates_for(refit, reference, split, ("x", "g"), fitted=signature)
+    assert drawn == [reference, refit] and own.levels != fitted.levels
 
 
 def test_a_split_replaced_under_its_name_is_read_again(calm_session, calm):
@@ -1284,9 +1431,9 @@ def test_a_superglm_session_offers_no_checks_and_says_why(glm_session):
 def test_the_four_reports_answer_as_before(calm_session):
     """Pins that the report names validation, cv, final and diagnose keep their payload keys."""
     widget = calm_session.widget()
-    assert set(_ask(widget, "validation")) == VALIDATION_KEYS
-    for report in ("cv", "final", "diagnose"):
-        assert _ask(widget, report)["report"] == report
+    for report, keys in REPORT_KEYS.items():
+        answer = _ask(widget, report)
+        assert answer["report"] == report and set(answer) == keys, report
 
 
 def _reports(session: EditorSession) -> dict[str, Any]:
@@ -1301,10 +1448,12 @@ def _reports(session: EditorSession) -> dict[str, Any]:
     }
 
 
-def _assess_checks_fixture(calm: Case, wrong: Case) -> dict[str, Any]:
+def _assess_checks_fixture(calm: Case, wrong: Case, wrong_mean: Case) -> dict[str, Any]:
     """The four check payloads the editor's Assess graphs draw, by case.
 
-    ``calm`` and ``wrong`` read the validation split (simulated levels); ``edited`` is the calm
+    ``calm``, ``wrong`` and ``wrong_mean`` read the validation split (simulated levels), where
+    ``wrong`` flags the distribution and calibration checks and ``wrong_mean`` actual over
+    expected; ``edited`` is the calm
     fit with ``mean:x``'s curve scaled by half about its mean, an edit every check can see, with
     the fitted model beside it; ``train`` is the calm fit on the rows it was fitted on (known
     levels).
@@ -1325,6 +1474,7 @@ def _assess_checks_fixture(calm: Case, wrong: Case) -> dict[str, Any]:
     cases = {
         "calm": _reports(_session(calm)),
         "wrong": _reports(_session(wrong)),
+        "wrong_mean": _reports(_session(wrong_mean)),
         "edited": _reports(edited),
         "train": train,
     }
@@ -1354,9 +1504,9 @@ def _assert_close_json(stored: Any, fresh: Any, path: str = "$", scale: float | 
         assert type(stored) is type(fresh) and stored == fresh, (path, stored, fresh)
 
 
-def test_the_assess_checks_fixture_is_current(calm, wrong):
+def test_the_assess_checks_fixture_is_current(calm, wrong, wrong_mean):
     stored = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    fresh = _assess_checks_fixture(calm, wrong)
+    fresh = _assess_checks_fixture(calm, wrong, wrong_mean)
     assert {case["check_qq"]["models"]["edited"]["level_source"] for case in fresh.values()} == {
         "simulated",
         "known",
@@ -1388,7 +1538,7 @@ def test_the_assess_checks_fixture_is_current(calm, wrong):
 if __name__ == "__main__":
     FIXTURE.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(
-        _assess_checks_fixture(_calm_case(), _wrong_case()),
+        _assess_checks_fixture(_calm_case(), _wrong_case(), _wrong_mean_case()),
         indent=1,
         sort_keys=True,
         allow_nan=False,
