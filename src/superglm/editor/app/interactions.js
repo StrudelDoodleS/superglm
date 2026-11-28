@@ -379,24 +379,12 @@ export function bindInteractions(context) {
   };
 }
 
-// A scroll that passes over the chart moves the page and leaves the zoom, as in cooperative
-// gesture handling on a map. Ctrl or Cmd with the wheel always zooms, and so does a trackpad pinch,
-// which browsers send as a wheel with ctrlKey. A plain wheel zooms in the Zoom tool, and where the
-// page has nowhere to scroll.
+// A plain wheel zooms the chart once a press inside it, or focus, made it the chart the wheel
+// works on (views/chart_focus.js), and in the Zoom tool; otherwise a scroll that passes over the
+// chart moves the page and leaves the zoom. Ctrl or Cmd with the wheel always zooms, and so does
+// a trackpad pinch, which browsers send as a wheel with ctrlKey.
 function wheelZooms(context, event) {
-  if (event.ctrlKey || event.metaKey || context.mode() === "zoom") return true;
-  return !pageCanScroll(context.svg);
-}
-
-// A page in an iframe, a notebook's output among them, scrolls whatever holds it.
-function pageCanScroll(svg) {
-  if (window.parent !== window) return true;
-  for (let node = svg.parentElement; node; node = node.parentElement) {
-    if (node.scrollHeight > node.clientHeight && /auto|scroll/.test(getComputedStyle(node).overflowY)) {
-      return true;
-    }
-  }
-  return false;
+  return Boolean(event.ctrlKey || event.metaKey || context.mode() === "zoom" || context.wheelActive?.());
 }
 
 function hasActiveInteraction(interaction) {

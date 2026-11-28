@@ -759,3 +759,314 @@ def test_validation_still_opens_in_the_report_panel(checks_page):
         open_report(page, "validation")
         wait_for_report(page, "validation")
         assert page.locator("#checkPanel").is_hidden()
+
+
+# The check view's tick values, x then y, as numbers.
+_TICKS = """() => {
+  const read = (anchor) => [...document.querySelectorAll(`#checkFrame text.check-tick[text-anchor="${anchor}"]`)]
+    .map((t) => Number(t.textContent.replace(/[,%]/g, "")));
+  return [read("middle"), read("end")];
+}"""
+# A wheel over the middle of the check's plot, with Ctrl when asked; true when the page took it.
+_CHECK_WHEEL = """async ([ctrlKey, deltaY]) => {
+  const svg = document.querySelector('#checkFrame svg.check-plot');
+  const box = svg.getBoundingClientRect();
+  const taken = !svg.dispatchEvent(new WheelEvent('wheel', {
+    deltaY, ctrlKey, bubbles: true, cancelable: true,
+    clientX: box.left + box.width * 0.6, clientY: box.top + box.height * 0.4,
+  }));
+  await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+  return taken;
+}"""
+# What scrolls the page around an element: its nearest scrolling ancestor, else the document.
+_PAGE_SCROLLER = """(selector) => {
+  for (let node = document.querySelector(selector).parentElement; node; node = node.parentElement) {
+    if (node.scrollHeight > node.clientHeight && /auto|scroll/.test(getComputedStyle(node).overflowY)) return node;
+  }
+  return document.scrollingElement;
+}"""
+_ZOOM = "() => window.__superglmTest.checkZoom()"
+_ACTIVE = "() => [...document.querySelectorAll('.is-wheel-active')].map((node) => node.id)"
+
+
+def _span(values: list[float]) -> float:
+    return max(values) - min(values)
+
+
+def _plot_box(page) -> dict:
+    return page.locator("#checkFrame svg.check-plot").bounding_box()
+
+
+def _x_map(page):
+    """The Q-Q's x value at a client px, read from two of its drawn x ticks."""
+    ticks = page.locator('#checkFrame text.check-tick[text-anchor="middle"]').evaluate_all(
+        "ts => ts.map((t) => [Number(t.getAttribute('x')), Number(t.textContent.replace(/,/g, ''))])"
+    )
+    (p0, v0), (p1, v1) = ticks[0], ticks[-1]
+    left = _plot_box(page)["x"]
+    return lambda client: v0 + (client - left - p0) * (v1 - v0) / (p1 - p0)
+
+
+def _zoom_qq(page, steps: int = 3) -> None:
+    for _ in range(steps):
+        assert page.evaluate(_CHECK_WHEEL, [True, -100]) is True
+    page.wait_for_function("() => Boolean(window.__superglmTest.checkZoom().check_qq)")
+
+
+def test_ctrl_and_the_wheel_narrow_the_qq_axes_without_asking_python(checks_page):
+    with checks_page() as page:
+        _open_check(page, "check_qq")
+        before = page.evaluate(_TICKS)
+        asked = _report_requests(page)
+        _zoom_qq(page)
+        after = page.evaluate(_TICKS)
+        assert _span(after[0]) < _span(before[0]) and _span(after[1]) < _span(before[1])
+        zoom = page.evaluate(_ZOOM)["check_qq"]
+        # One range on both axes, so y = x stays the diagonal.
+        assert abs((zoom["x"][1] - zoom["x"][0]) - (zoom["y"][1] - zoom["y"][0])) < 1e-9
+        assert asked == []
+
+
+def test_shift_and_a_drag_zoom_to_the_box(checks_page):
+    with checks_page() as page:
+        _open_check(page, "check_qq")
+        box = _plot_box(page)
+        value = _x_map(page)
+        start = (box["x"] + box["width"] * 0.5, box["y"] + box["height"] * 0.45)
+        end = (box["x"] + box["width"] * 0.8, box["y"] + box["height"] * 0.3)
+        asked = _report_requests(page)
+        page.keyboard.down("Shift")
+        page.mouse.move(*start)
+        page.mouse.down()
+        page.mouse.move(*end, steps=4)
+        assert page.locator("#checkFrame rect.check-zoom-box").count() == 1
+        page.mouse.up()
+        page.keyboard.up("Shift")
+        page.wait_for_function("() => Boolean(window.__superglmTest.checkZoom().check_qq)")
+        zoom = page.evaluate(_ZOOM)["check_qq"]
+        # The box is wider than tall in values, so x is the box's and y takes its width.
+        expected = (value(start[0]), value(end[0]))
+        assert abs(zoom["x"][0] - expected[0]) < 0.01 * (expected[1] - expected[0])
+        assert abs(zoom["x"][1] - expected[1]) < 0.01 * (expected[1] - expected[0])
+        assert abs((zoom["y"][1] - zoom["y"][0]) - (zoom["x"][1] - zoom["x"][0])) < 1e-9
+        xs = page.evaluate(_TICKS)[0]
+        assert expected[0] - 1e-6 <= min(xs) and max(xs) <= expected[1] + 1e-6
+        assert page.locator("#checkFrame rect.check-zoom-box").count() == 0
+        assert asked == []
+
+
+def test_a_drag_pans_a_zoomed_check(checks_page):
+    with checks_page() as page:
+        _open_check(page, "check_qq")
+        _zoom_qq(page, steps=4)
+        before = page.evaluate(_ZOOM)["check_qq"]
+        box = _plot_box(page)
+        x, y = box["x"] + box["width"] * 0.5, box["y"] + box["height"] * 0.5
+        asked = _report_requests(page)
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x + 80, y - 40, steps=5)
+        page.mouse.up()
+        after = page.evaluate(_ZOOM)["check_qq"]
+        width = before["x"][1] - before["x"][0]
+        # Dragged right and up, the values move with the pointer: the view shows lower x and y.
+        assert after["x"][0] < before["x"][0] - 0.05 * width
+        assert after["y"][0] < before["y"][0] - 0.02 * width
+        assert abs((after["x"][1] - after["x"][0]) - width) < 1e-9
+        assert asked == []
+
+
+def test_home_and_a_double_click_show_the_check_whole(checks_page):
+    with checks_page() as page:
+        _open_check(page, "check_qq")
+        whole = page.evaluate(_TICKS)
+        home = page.locator("#checkHome")
+        assert home.get_attribute("aria-label") == "Home"
+        icon = (
+            "button => [...button.querySelectorAll('path')].map((path) => path.getAttribute('d'))"
+        )
+        assert home.evaluate(icon) == page.locator("#resetZoom").evaluate(icon)
+        _zoom_qq(page)
+        home.click()
+        page.wait_for_function("() => !window.__superglmTest.checkZoom().check_qq")
+        assert page.evaluate(_TICKS) == whole
+        _zoom_qq(page)
+        box = _plot_box(page)
+        page.mouse.dblclick(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        page.wait_for_function("() => !window.__superglmTest.checkZoom().check_qq")
+        assert page.evaluate(_TICKS) == whole
+
+
+def test_hover_after_a_zoom_reads_the_nearest_drawn_point(checks_page):
+    with checks_page() as page:
+        _open_check(page, "check_qq")
+        _zoom_qq(page, steps=5)
+        marks = page.evaluate(
+            """async (report) => {
+              const token = new URLSearchParams(location.search).get("token") || "";
+              const reply = await fetch("/report", { method: "POST",
+                headers: { "Content-Type": "application/json", "X-SuperGLM-Editor-Token": token },
+                body: JSON.stringify({ report }) });
+              const { checkScene } = await import("/assets/chart/check_plots.js");
+              const frame = document.getElementById("checkFrame");
+              const domain = window.__superglmTest.checkZoom()[report];
+              return checkScene(report, await reply.json(), { width: frame.clientWidth, height: frame.clientHeight },
+                { compare: false, highlight: false, domain }).marks;
+            }""",
+            "check_qq",
+        )
+        drawn = page.locator("#checkFrame path:is(.check-edited, .check-outside)").evaluate_all(
+            "paths => paths.reduce((sum, p) => sum + (p.getAttribute('d').match(/M/g) || []).length, 0)"
+        )
+        assert 0 < len(marks) == drawn < 1000
+        for mark in (marks[0], marks[len(marks) // 2], marks[-1]):
+            _hover_mark(page, mark, marks)
+            _assert_readout_in_view(page)
+
+
+def test_a_click_on_the_check_makes_the_wheel_zoom_it_and_a_click_outside_hands_it_back(
+    chromium_browser,
+):
+    """At 300 px high the page scrolls under the check view, whose shell keeps 401 px."""
+    widget = _wrong_session().widget()
+    try:
+        page = chromium_browser.new_page(viewport={"width": 1278, "height": 300})
+        try:
+            page.goto(widget.app_url + "&test=1", wait_until="domcontentloaded")
+            page.locator("#chart path.edited").first.wait_for(state="attached")
+            _open_check(page, "check_qq")
+            scroller = page.evaluate_handle(_PAGE_SCROLLER, "#checkFrame")
+            scroll_top = lambda: scroller.evaluate("node => node.scrollTop")  # noqa: E731
+            frame = page.locator("#checkFrame")
+            box = frame.bounding_box()
+            page.mouse.move(box["x"] + box["width"] / 2, box["y"] + 40)
+            page.mouse.wheel(0, 120)
+            page.wait_for_function("node => node.scrollTop > 0", arg=scroller)
+            assert page.evaluate(_ZOOM) == {}
+            assert page.evaluate(_ACTIVE) == []
+            scroller.evaluate("node => { node.scrollTop = 0; }")
+            box = frame.bounding_box()
+            page.mouse.click(box["x"] + box["width"] / 2, box["y"] + 40)
+            assert page.evaluate(_ACTIVE) == ["checkFrame"]
+            assert frame.evaluate("f => getComputedStyle(f).outlineWidth") == "1px"
+            page.mouse.wheel(0, -120)
+            page.wait_for_function("() => Boolean(window.__superglmTest.checkZoom().check_qq)")
+            assert scroll_top() == 0
+            page.locator("#checkTitle").click()
+            assert page.evaluate(_ACTIVE) == []
+            assert frame.evaluate("f => getComputedStyle(f).outlineStyle") == "none"
+            zoom = page.evaluate(_ZOOM)
+            page.mouse.move(box["x"] + box["width"] / 2, box["y"] + 40)
+            page.mouse.wheel(0, 120)
+            page.wait_for_function("node => node.scrollTop > 0", arg=scroller)
+            assert page.evaluate(_ZOOM) == zoom
+        finally:
+            page.close()
+    finally:
+        widget.close()
+
+
+def test_a_click_on_the_editor_chart_makes_the_wheel_zoom_it_and_a_click_outside_hands_it_back(
+    checks_page,
+):
+    with checks_page() as page:
+        column = page.locator(".plot-column")
+        chart = page.locator("#chart")
+        assert column.evaluate("c => c.scrollHeight > c.clientHeight")
+        span = (
+            "() => { const s = document.querySelector('#chart')._scale; return s.xMax - s.xMin; }"
+        )
+        whole = page.evaluate(span)
+        box = chart.bounding_box()
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        page.mouse.wheel(0, 120)
+        page.wait_for_function("() => document.querySelector('.plot-column').scrollTop > 0")
+        assert page.evaluate(span) == whole
+        assert page.evaluate(_ACTIVE) == []
+        column.evaluate("c => { c.scrollTop = 0; }")
+        chart.click(position={"x": 4, "y": 4})
+        assert page.evaluate(_ACTIVE) == ["chart"]
+        assert chart.evaluate("c => getComputedStyle(c).outlineWidth") == "1px"
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        page.mouse.wheel(0, -120)
+        page.wait_for_function(f"({span})() < {whole}")
+        assert column.evaluate("c => c.scrollTop") == 0
+        page.locator("#featureSearch").click()
+        assert page.evaluate(_ACTIVE) == []
+        zoomed = page.evaluate(span)
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        page.mouse.wheel(0, 120)
+        page.wait_for_function("() => document.querySelector('.plot-column').scrollTop > 0")
+        assert page.evaluate(span) == zoomed
+
+
+def test_escape_lets_the_check_go_and_only_one_chart_is_active(checks_page):
+    with checks_page() as page:
+        page.locator("#chart").click(position={"x": 4, "y": 4})
+        assert page.evaluate(_ACTIVE) == ["chart"]
+        # The chart leaves the page with the Editor tab; the check then takes the wheel.
+        _open_check(page, "check_qq")
+        assert page.evaluate(_ACTIVE) == []
+        assert page.evaluate(_CHECK_WHEEL, [False, -100]) is False
+        page.locator("#checkFrame").click()
+        assert page.evaluate(_ACTIVE) == ["checkFrame"]
+        assert page.evaluate(_CHECK_WHEEL, [False, -100]) is True
+        page.keyboard.press("Escape")
+        assert page.evaluate(_ACTIVE) == []
+        assert page.evaluate(_CHECK_WHEEL, [False, -100]) is False
+        # Focus reaching the plot activates it too.
+        page.locator("#checkFrame").evaluate("frame => frame.blur()")
+        page.locator("#checkFrame").focus()
+        assert page.evaluate(_ACTIVE) == ["checkFrame"]
+        page.locator("#editorTab").click()
+        page.locator("#chart").click(position={"x": 4, "y": 4})
+        assert page.evaluate(_ACTIVE) == ["chart"]
+
+
+def test_the_keys_zoom_a_focused_check_and_0_shows_it_whole(checks_page):
+    with checks_page() as page:
+        _open_check(page, "check_pit")
+        whole = page.evaluate(_TICKS)
+        page.locator("#checkFrame").focus()
+        page.keyboard.press("+")
+        page.wait_for_function("() => Boolean(window.__superglmTest.checkZoom().check_pit)")
+        assert _span(page.evaluate(_TICKS)[1]) < _span(whole[1])
+        # The arrow keys still step through the bars.
+        page.keyboard.press("ArrowRight")
+        assert _readout(page).is_visible()
+        page.keyboard.press("0")
+        page.wait_for_function("() => !window.__superglmTest.checkZoom().check_pit")
+        assert page.evaluate(_TICKS) == whole
+
+
+def test_a_tall_check_scrolls_its_frame_only_while_active(chromium_browser):
+    """At 640 px high six A/E panels scroll in their frame: a plain wheel scrolls the frame only
+    once it is clicked, and Ctrl with the wheel zooms it."""
+    widget = _many_inputs_session().widget()
+    try:
+        page = chromium_browser.new_page(viewport={"width": 1278, "height": 640})
+        try:
+            page.goto(widget.app_url + "&test=1", wait_until="domcontentloaded")
+            page.locator("#chart path.edited").first.wait_for(state="attached")
+            _open_check(page, "check_ae")
+            frame = page.locator("#checkFrame")
+            assert frame.evaluate("f => f.scrollHeight > f.clientHeight")
+            box = frame.bounding_box()
+            page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            page.mouse.wheel(0, 200)
+            page.evaluate(
+                "() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))"
+            )
+            assert frame.evaluate("f => f.scrollTop") == 0
+            page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            page.mouse.wheel(0, 200)
+            page.wait_for_function("() => document.getElementById('checkFrame').scrollTop > 0")
+            assert page.evaluate(_ZOOM) == {}
+            before = page.evaluate(_TICKS)[1]
+            assert page.evaluate(_CHECK_WHEEL, [True, -100]) is True
+            page.wait_for_function("() => Boolean(window.__superglmTest.checkZoom().check_ae)")
+            assert _span(page.evaluate(_TICKS)[1]) < _span(before)
+        finally:
+            page.close()
+    finally:
+        widget.close()

@@ -591,6 +591,9 @@
  *   beside the edited one; off until turned on
  * @property {boolean} highlightOutside Highlight outside the band: the checks colour what left
  *   its band; off until turned on, and it moves no count or flag
+ * @property {Partial<Record<CheckReport, import('../chart/check_plots.js').Domain>>} checkZoom
+ *   each zoomed check's domain, kept for the session and cleared when the checks' split changes;
+ *   a check not in it is drawn whole
  * @property {RiskProfiles} risks the Explain tab's risks (SuperLSS sessions)
  * @property {Record<string, UnsmoothedEntry>} unsmoothed each term's latest line
  *   or refusal, drawn while its fit is the one in force

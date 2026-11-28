@@ -375,6 +375,30 @@
 
 .check-frame > .check-plot {
   display: block;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* The check the wheel works on (views/chart_focus.js): the Editor chart's slight border. A
+   zoomed check pans with a drag, and Shift and drag draws the box it zooms to. */
+.check-frame.is-wheel-active {
+  outline: 1px solid color-mix(in srgb, var(--focus) 50%, transparent);
+  outline-offset: -1px;
+}
+
+.check-frame[data-zoomed="true"] {
+  cursor: grab;
+}
+
+.check-frame[data-panning="true"] {
+  cursor: grabbing;
+}
+
+.check-zoom-box {
+  fill: color-mix(in srgb, var(--focus) 10%, transparent);
+  stroke: var(--focus);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
 }
 
 .check-frame:focus-visible {

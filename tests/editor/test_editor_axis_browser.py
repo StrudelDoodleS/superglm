@@ -138,6 +138,8 @@ def test_a_narrow_chart_labels_and_measures_levels_one_whole_step_apart(open_edi
 
 def test_zoom_between_categories_does_not_draw_an_out_of_domain_tick(open_editor_page):
     with open_editor_page(selected_term="territory") as (page, _session):
+        # A click in the chart's corner makes it the chart a plain wheel zooms.
+        page.locator("#chart").click(position={"x": 4, "y": 4})
         zoom = page.locator("#chart").evaluate(
             """async svg => {
                 for (let index = 0; index < 24; index += 1) {
@@ -172,6 +174,7 @@ def test_the_ticks_of_one_frame_zoom_to_the_smallest_range_rather_than_being_ref
     open_editor_page,
 ):
     with open_editor_page(selected_term="territory") as (page, _session):
+        page.locator("#chart").click(position={"x": 4, "y": 4})
         ratio = page.locator("#chart").evaluate(
             """async svg => {
                 const box = svg.getBoundingClientRect();

@@ -117,7 +117,9 @@ test("the banned-word check finds each word whole, in any case or plural, and pa
 
 const SHARED_ENDING = "Orange marks a check with something outside its band. Checks read the validation rows, else the training rows. "
   + "On validation rows the band allows for the uncertainty in the fitted parameters, unless its split line says they are taken as exact; "
-  + "on the training rows it takes them as exact, so a validation split is the sharper test.";
+  + "on the training rows it takes them as exact, so a validation split is the sharper test. "
+  + "Click the chart and the wheel zooms it; click outside and the wheel scrolls the page. Ctrl or Cmd with the wheel, "
+  + "or a pinch, zooms at any time. Shift and drag: zoom to a box. Drag: pan. Double-click or Home: reset.";
 
 /** A check's or a control's Help entry, as the Help pane shows it. */
 const helpEntry = (id) => CHECK_HELP[id] ?? CONTROL_HELP[id];

@@ -24,7 +24,8 @@ export const TOOL_HELP = Object.freeze({
   }),
   zoom: Object.freeze({
     title: "Zoom",
-    body: "Drag a box or use the mouse wheel to zoom. In other tools, hold Ctrl or Cmd with the wheel, or pinch.",
+    body: "Drag a box or use the mouse wheel to zoom. In other tools, click a chart and the wheel zooms it; click "
+      + "outside and the wheel scrolls the page. Ctrl or Cmd with the wheel, or a pinch, zooms at any time.",
     shortcut: "Z",
   }),
   handles: Object.freeze({
@@ -187,6 +188,10 @@ const CHECKS_END = "Orange marks a check with something outside its band. Checks
   + "else the training rows. On validation rows the band allows for the uncertainty in the fitted parameters, "
   + "unless its split line says they are taken as exact; on the training rows it takes them as exact, so a "
   + "validation split is the sharper test.";
+// And how to zoom it, with the Editor chart's gestures.
+const CHECK_ZOOM = "Click the chart and the wheel zooms it; click outside and the wheel scrolls the page. Ctrl or "
+  + "Cmd with the wheel, or a pinch, zooms at any time. Shift and drag: zoom to a box. Drag: pan. Double-click or "
+  + "Home: reset.";
 
 /**
  * Each check's Help, under its list label.
@@ -199,26 +204,26 @@ export const CHECK_HELP = Object.freeze({
       + "distribution were right. The band holds for every point at once: a model that fits leaves it about 5% of "
       + "the time, so one point outside is evidence. A curve above the band at the top end means larger values "
       + "come more often than the model allows. Band: equal local levels (Aldor-Noiman et al. 2013; Weine, "
-      + `McPeek and Abney 2023). ${CHECKS_END}`,
+      + `McPeek and Abney 2023). ${CHECKS_END} ${CHECK_ZOOM}`,
   }),
   check_pit: Object.freeze({
     title: "PIT histogram",
     body: "Each observed value is placed at its own predicted distribution's cumulative probability, and the 20 "
       + "bars count them. A model that fits gives flat bars. A hump means its predicted distributions are too "
       + "wide, a U too narrow, a slope a shifted Mean, and one end alone a tail. The band holds for all 20 bars "
-      + `at once. ${CHECKS_END}`,
+      + `at once. ${CHECKS_END} ${CHECK_ZOOM}`,
   }),
   check_ae: Object.freeze({
     title: "Actual over expected",
     body: "Observed total over predicted total, for each band of predicted Mean and each group of every input. "
       + "1 is on target. Each interval comes from the predicted distribution's own variance, and all of them "
-      + `hold at once, so a group outside its interval is evidence. ${CHECKS_END}`,
+      + `hold at once, so a group outside its interval is evidence. ${CHECKS_END} ${CHECK_ZOOM}`,
   }),
   check_calibration: Object.freeze({
     title: "Quantile calibration",
     body: "For each predicted quantile, the share of rows above it against the share that should be. The 99% "
       + "quantile should be exceeded by 1% of rows. The band is exact binomial and holds for all 11 quantiles "
-      + `at once. ${CHECKS_END}`,
+      + `at once. ${CHECKS_END} ${CHECK_ZOOM}`,
   }),
 });
 
@@ -395,7 +400,7 @@ export const HELP_SECTIONS = Object.freeze([
     title: "Navigation",
     items: Object.freeze([
       "Ctrl or Cmd with the mouse wheel, or a pinch: zoom",
-      "Mouse wheel alone: scrolls when there is more below the chart, otherwise zooms",
+      "Click a chart and the wheel zooms it; click outside and the wheel scrolls the page",
       "Shift-drag or middle-drag: pan",
       "Home: reset zoom",
     ]),
@@ -443,7 +448,7 @@ export const HELP_SECTIONS = Object.freeze([
       "check_qq", "check_pit", "check_ae", "check_calibration", "compare_original", "highlight_outside",
     ]),
     items: Object.freeze([
-      "Hover over a check's plot to read out the nearest point. With the plot focused, the arrow keys step from point to point.",
+      "Hover over a check's plot to read out the nearest point. With the plot focused, the arrow keys step from point to point, + and - zoom about its middle, and 0 shows it whole.",
       "Hover over or focus the icon by a check's title to read its entry here.",
     ]),
   }),

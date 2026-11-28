@@ -230,19 +230,19 @@ export function splitLine(payload, fitDrawn) {
 /**
  * Draw a check large: its label and its Help icon, its split line, the legend when the fit is
  * drawn beside the edit, and the plot at `width` by `height` (a taller A/E grows past it, and the
- * frame scrolls). A check with no answer for this model says why in the frame. The svg is
- * written once per call.
+ * frame scrolls), at `domain` when it is zoomed. A check with no answer for this model says why in
+ * the frame. The svg is written once per call.
  * @param {CheckNodes} nodes @param {CheckReport} report @param {CheckPayload|null} payload
  * @param {SceneOptions & {width: number, height: number}} options
  * @returns {Scene|null} the scene drawn, whose marks the hover reads; null when none is
  */
-export function renderCheckView(nodes, report, payload, { compare, highlight, width, height }) {
+export function renderCheckView(nodes, report, payload, { compare, highlight, domain = null, width, height }) {
   const label = assessEntry(report)?.label ?? "";
   nodes.title.textContent = label;
   nodes.help.dataset.helpCheck = report;
   nodes.help.setAttribute("aria-label", `About the ${label}`);
   const scene = payload === null || answered(payload) === null ? null
-    : checkScene(report, payload, { width, height }, { compare, highlight });
+    : checkScene(report, payload, { width, height }, { compare, highlight, domain });
   // As the legend does, the split line counts the fit only when the scene draws a fitted series.
   const fitDrawn = scene !== null && scene.layers.some((layer) => layer.role === "original");
   const line = splitLine(payload, fitDrawn);
@@ -250,6 +250,7 @@ export function renderCheckView(nodes, report, payload, { compare, highlight, wi
     : ` · <span class="check-level" tabindex="0" data-popover-title="${LEVEL_TITLE}"`
       + ` data-popover-body="${escapeHTML(line.note)}">${line.level}</span>`);
   const { frame } = nodes;
+  frame.dataset.zoomed = String(scene !== null && domain !== null);
   if (payload === null || scene === null) {
     nodes.legend.hidden = true;
     for (const name of ["role", "tabindex", "aria-label"]) frame.removeAttribute(name);
@@ -332,11 +333,14 @@ const clamp = (value, lo, hi) => Math.max(lo, Math.min(hi, value));
 /**
  * Read out the point nearest the pointer on the check in `frame`, and step through the points
  * with the arrow keys while the frame has focus. A pointer move waits for the next frame, and
- * writes only the readout group: its transform, its text and whether it is hidden.
+ * writes only the readout group: its transform, its text and whether it is hidden. While `busy`
+ * (a drag that pans or draws a box) nothing is read out; `refresh` reads out again where the
+ * pointer is, after the check is drawn again.
  * @param {HTMLElement} frame @param {() => Scene|null} getScene the scene on screen
- * @returns {{destroy(): void}}
+ * @param {{busy?: () => boolean}} [options]
+ * @returns {{refresh(): void, destroy(): void}}
  */
-export function bindCheckHover(frame, getScene) {
+export function bindCheckHover(frame, getScene, { busy } = {}) {
   /** @type {{x: number, y: number}|null} */
   let pointer = null;
   let pending = 0;
@@ -435,6 +439,10 @@ export function bindCheckHover(frame, getScene) {
 
   /** @param {PointerEvent} event */
   function onPointerMove(event) {
+    if (busy?.()) {
+      hide();
+      return;
+    }
     pointer = { x: event.clientX, y: event.clientY };
     if (!pending) pending = requestAnimationFrame(onFrame);
   }
@@ -475,6 +483,9 @@ export function bindCheckHover(frame, getScene) {
   frame.addEventListener("keydown", onKeyDown);
   frame.addEventListener("blur", hide);
   return {
+    refresh() {
+      if (pointer && !busy?.()) onFrame();
+    },
     destroy() {
       if (pending) cancelAnimationFrame(pending);
       pending = 0;

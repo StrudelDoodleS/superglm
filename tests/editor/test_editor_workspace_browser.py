@@ -1303,6 +1303,8 @@ def test_a_zoom_leaves_out_the_hidden_points_until_the_wheel_rests(open_editor_p
         page.locator("#chart .point-layer[data-dense='true']").wait_for(state="attached")
         points = "document.querySelectorAll('#chart circle.point').length"
         drawn = page.evaluate(points)
+        # A click in the chart's corner makes it the chart a plain wheel zooms.
+        page.locator("#chart").click(position={"x": 4, "y": 4})
         chart = page.locator("#chart").bounding_box()
         page.mouse.move(chart["x"] + chart["width"] / 2, chart["y"] + chart["height"] / 2)
         page.mouse.wheel(0, -100)

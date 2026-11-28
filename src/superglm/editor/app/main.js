@@ -76,6 +76,9 @@ import { createRiskController } from "./views/risk_controller.js";
 import { defaultRiskLine, renderRiskPanel, riskPlotsHost } from "./views/risk_panel.js";
 import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
 import { bindAssessList, renderAssessList } from "./views/assess_list.js";
+import { bindChartFocus } from "./views/chart_focus.js";
+import { bindCheckZoom } from "./views/check_gestures.js";
+import { checkSplitKey, withCheckZoom } from "./chart/check_zoom.js";
 import { bindOverview, drawOverview, overviewGroups } from "./views/assess_overview.js";
 import {
   bindCheckHover,
@@ -208,6 +211,7 @@ const checkRetry = document.getElementById("checkRetry");
 const checkCompare = document.getElementById("checkCompare");
 const checkHighlight = document.getElementById("checkHighlight");
 const checkFrame = document.getElementById("checkFrame");
+const checkHome = document.getElementById("checkHome");
 const checkNodes = Object.freeze({
   title: document.getElementById("checkTitle"),
   help: document.getElementById("checkHelp"),
@@ -1186,6 +1190,7 @@ if (new URLSearchParams(window.location.search).get("test") === "1") {
   window.__superglmTest = Object.freeze({
     setAppBusy,
     mutationStatus: () => store.getState().request.mutation.status,
+    checkZoom: () => store.getState().view.checkZoom,
     currentImpact: () => selectCurrentTerm(store.getState())?.impact
   });
 }
@@ -1297,6 +1302,7 @@ function renderOverview() {
 // drawn at, so a resize redraws it and nothing else does twice.
 let checkView = null;
 let checkDrawnAt = "";
+let checkHover = null;
 
 function checkFrameSize() {
   return { width: checkFrame.clientWidth, height: checkFrame.clientHeight };
@@ -1314,6 +1320,7 @@ function renderCheckPanel() {
   renderCompareSwitch(checkCompare, compare, shown.length > 0);
   const highlight = state.view.highlightOutside;
   renderHighlightSwitch(checkHighlight, highlight, shown.length > 0);
+  checkHome.hidden = shown.length === 0;
   checkPanel.dataset.report = activeView;
   checkFrame.setAttribute("aria-busy", evidence.status === "updating" ? "true" : "false");
   checkFrame.dataset.freshness = evidence.status;
@@ -1321,7 +1328,8 @@ function renderCheckPanel() {
   const { width, height } = checkFrameSize();
   checkDrawnAt = `${width}x${height}`;
   checkView = renderCheckView(checkNodes, activeView, payload?.report === activeView ? payload : null,
-    { compare: compare.checked, highlight, width, height });
+    { compare: compare.checked, highlight, domain: state.view.checkZoom[activeView] ?? null, width, height });
+  checkHover?.refresh();
   renderEvidenceFreshness(evidence, {
     statusNode: checkFreshness,
     retryButton: checkRetry,
@@ -2619,9 +2627,16 @@ svg.addEventListener(
   true
 );
 
+// The wheel works on the chart pressed or focused last, and scrolls the page otherwise. Each
+// chart's Home button belongs to it.
+const chartFocus = bindChartFocus(document);
+chartFocus.register(svg, [resetZoom]);
+chartFocus.register(checkFrame, [checkHome]);
+
 const interactions = bindInteractions({
   svg,
   mode: interactionMode,
+  wheelActive: () => chartFocus.isActive(svg),
   selectedTerm,
   currentTerm,
   currentSelection,
@@ -2716,7 +2731,21 @@ for (const button of [overviewHighlight, checkHighlight]) {
     actions.patchView({ highlightOutside: !store.getState().view.highlightOutside });
   });
 }
-bindCheckHover(checkFrame, () => checkView);
+// A check's zoom is the page's alone: it is kept per check for the session, and nothing asks
+// Python.
+function setCheckZoom(domain) {
+  const { view } = store.getState();
+  if (!isCheckReport(view.activeView)) return;
+  const next = withCheckZoom(view.checkZoom, view.activeView, domain);
+  if (next !== view.checkZoom) actions.patchView({ checkZoom: next });
+}
+const checkZoom = bindCheckZoom(checkFrame, {
+  getScene: () => checkView,
+  isActive: () => chartFocus.isActive(checkFrame),
+  onZoom: setCheckZoom,
+});
+checkHome.addEventListener("click", () => setCheckZoom(null));
+checkHover = bindCheckHover(checkFrame, () => checkView, { busy: checkZoom.busy });
 // A new size redraws the open check at it, from the evidence the page holds.
 new ResizeObserver(() => {
   const { width, height } = checkFrameSize();
@@ -3051,10 +3080,26 @@ store.subscribe(
     state.view.highlightOutside,
     differsFromFit(state.remote.snapshot),
     selectOfferedChecks(state).join(),
-    isCheckReport(state.view.activeView) ? state.request.evidence[state.view.activeView] : null
+    isCheckReport(state.view.activeView) ? state.request.evidence[state.view.activeView] : null,
+    isCheckReport(state.view.activeView) ? state.view.checkZoom[state.view.activeView] ?? null : null
   ],
   renderCheckPanel,
   (next, previous) => next.length === previous.length && next.every((item, index) => item === previous[index])
+);
+// The checks' zoom is cleared when the rows they read change.
+let checkZoomSplit = "";
+store.subscribe(
+  (state) => checkSplitKey(state.request.evidence),
+  (split) => {
+    if (!split) return;
+    if (checkZoomSplit && split !== checkZoomSplit) actions.patchView({ checkZoom: {} });
+    checkZoomSplit = split;
+  }
+);
+// A chart hidden by a view or tab change lets the wheel go, once the page has drawn the change.
+store.subscribe(
+  (state) => `${state.view.activeView} ${state.view.termView}`,
+  () => queueMicrotask(chartFocus.sync)
 );
 // The list hides the checks the model does not offer and flags those that left their band.
 store.subscribe(

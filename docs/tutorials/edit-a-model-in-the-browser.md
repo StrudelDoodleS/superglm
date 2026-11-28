@@ -126,9 +126,10 @@ with each term's kind and effective degrees of freedom. The current term is high
   - Drag a box to select the points inside it. **Select all** selects the whole term.
 - **Move** drags selected relativities. The curve previews immediately and Python confirms the edit
   when the pointer is released.
-- **Zoom** drags a box, and the mouse wheel zooms around the pointer. In the other tools the wheel
-  scrolls the page when there is more below the chart, so hold Ctrl or Cmd with the wheel, or pinch,
-  to zoom there. Shift-drag or a middle-button drag pans, and Home restores the fitted extent.
+- **Zoom** drags a box, and the mouse wheel zooms around the pointer. In the other tools, click the
+  chart and the wheel zooms it, shown by a slight border; click outside it and the wheel scrolls the
+  page. Ctrl or Cmd with the wheel, or a pinch, zooms at any time. Shift-drag or a middle-button drag
+  pans, and Home restores the fitted extent.
 - **Handles** edits a spline through fixed-x control handles. In Handles mode, when the fitted
   term exposes its basis, **Contrib** shows each basis function's contribution and **Build**
   animates them into the spline. Settings sets how long Build takes.
