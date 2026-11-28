@@ -1514,6 +1514,154 @@ def test_closing_the_widget_closes_both_lanes(calm_session, monkeypatch):
     assert not [worker.name for worker in workers if worker.is_alive()]
 
 
+def _counted_submits(monkeypatch, lane):
+    """``lane.submit``, counted: a semaphore released once per submission, and the in-force
+    token of each key submitted, in order."""
+    submitted, tokens = threading.Semaphore(0), []
+    real = lane.submit
+
+    def counted(key, compute):
+        tokens.append(key.model)
+        future = real(key, compute)
+        submitted.release()
+        return future
+
+    monkeypatch.setattr(lane, "submit", counted)
+    return submitted, tokens
+
+
+def test_closing_the_widget_stops_a_simulation_at_its_next_block(calm_session, monkeypatch):
+    """``close`` returns while a check's simulation is held inside its first block, and the
+    check waiting behind it answers superseded at once. Released, the simulation stops at the
+    next block boundary: its worker thread ends after at most one more block, and nothing is
+    cached. Mutation check: without the cancel check at each block the simulation scores every
+    block and caches its levels.
+    """
+    monkeypatch.setattr(checks, "_SIMULATION_ROWS", 20)  # ten blocks of the 200 rows
+    entered, hold, blocks = threading.Event(), threading.Event(), []
+    real = checks._transforms
+
+    def held(*a, **k):
+        blocks.append(a[1])
+        entered.set()
+        hold.wait()  # only the cleanup below releases it
+        return real(*a, **k)
+
+    monkeypatch.setattr(checks, "_transforms", held)
+    widget = calm_session.widget()
+    submitted, _ = _counted_submits(monkeypatch, widget._check_evidence)
+    lane = f"superglm-checks-{id(widget):x}"
+    try:
+        check, checked, running = _in_thread(lambda: _ask(widget, "check_qq"))
+        assert entered.wait(_STUCK) and submitted.acquire(timeout=_STUCK)
+        with widget._lock:
+            _average(calm_session, 2)
+        _, dropped, waiting = _in_thread(lambda: _ask(widget, "check_qq"))
+        assert submitted.acquire(timeout=_STUCK)
+        _, closed, _ = _in_thread(widget.close)
+        assert closed.wait(_STUCK), "close waited for the simulation"
+        assert dropped.wait(_STUCK), "the check waiting on the lane was kept"
+        workers = [t for t in threading.enumerate() if t.name.rsplit("_", 1)[0] == lane]
+        assert workers and all(t.is_alive() for t in workers) and len(blocks) == 1
+        assert not checked.is_set()
+    finally:
+        hold.set()
+    for worker in workers:
+        worker.join(_STUCK)
+    assert not [worker.name for worker in workers if worker.is_alive()]
+    assert len(blocks) <= 2
+    assert widget._check_replicates == {}
+    check.join(_STUCK)
+    assert running["value"]["status"] == "superseded"
+    assert waiting["value"]["status"] == "superseded"
+
+
+def test_a_check_delayed_before_the_lane_never_displaces_a_newer_one(calm_session, monkeypatch):
+    """A check whose model stopped being in force while it was on its way to the check lane
+    answers superseded without taking the lane's waiting slot, so the newer check waiting there
+    still answers. The older one is held between its materialisation and the lane while a newer
+    edit's check reaches the lane first. Mutation check: without the check of the model in
+    force at admission, the older check replaces the newer one, which answers superseded.
+    """
+    started, release, drawn = _held_simulation(monkeypatch)
+    widget = calm_session.widget()
+    submitted, tokens = _counted_submits(monkeypatch, widget._check_evidence)
+    materialise = widget._current_model_for_evidence
+    paused, resume = threading.Event(), threading.Event()
+
+    def pause_once(**kwargs):
+        answer = materialise(**kwargs)
+        if not paused.is_set():
+            paused.set()
+            resume.wait()  # only the test releases it
+        return answer
+
+    try:
+        _, running_done, _ = _in_thread(lambda: _ask(widget, "check_qq"))
+        assert started.wait(_STUCK) and submitted.acquire(timeout=_STUCK)
+        monkeypatch.setattr(widget, "_current_model_for_evidence", pause_once)
+        with widget._lock:
+            _average(calm_session, 2)
+            older = InForce.of(calm_session).token
+        _, older_done, older_answer = _in_thread(lambda: _ask(widget, "check_qq"))
+        assert paused.wait(_STUCK)
+        with widget._lock:
+            _average(calm_session, 4)
+            newer = InForce.of(calm_session).token
+        _, newer_done, newer_answer = _in_thread(lambda: _ask(widget, "check_qq"))
+        assert submitted.acquire(timeout=_STUCK)
+    finally:
+        resume.set()
+        release.set()
+    assert older_done.wait(_STUCK) and newer_done.wait(_STUCK) and running_done.wait(_STUCK)
+    answer = newer_answer["value"]
+    assert "status" not in answer and answer["in_force"] == newer
+    assert answer["compares_edit"] is True
+    assert older_answer["value"]["status"] == "superseded"
+    assert older_answer["value"]["in_force"] == older and older not in tokens
+    assert drawn == [calm_session.reference_model]
+
+
+def test_a_fit_replaced_while_its_check_runs_is_never_cached_under_the_old_key(calm, monkeypatch):
+    """The check's simulation is keyed on the fit its request captured and runs on that same
+    fit, even when the model's fit is replaced in place between the hash and the simulation:
+    each simulation kept holds the levels of the fit its key names, and the fitted model's body
+    is kept only while the fit it was read from stands. Mutation checks: simulating the model
+    again, rather than the captured fit, keeps the new fit's levels under the old fit's key;
+    keeping the fitted body without that test keeps a body read from the new fit.
+    """
+    lss = copy.deepcopy(calm.lss)
+    session = _session(calm._replace(lss=lss))
+    opened = lss._require_fitted()
+    swapped = _with_covariance(lss, 9.0)
+    real = widget_module._check_signature
+    hashed = []
+
+    def swap_after_hashing(fit):
+        signature = real(fit)
+        if not hashed:
+            lss._model = swapped  # a refit in place, between the hash and the simulation
+        hashed.append(fit)
+        return signature
+
+    monkeypatch.setattr(widget_module, "_check_signature", swap_after_hashing)
+    try:
+        widget = session.widget()
+        _average(session, 6)
+        assert _ask(widget, "check_qq")["status"] == "superseded"
+        assert hashed and lss._require_fitted() is swapped
+        fits = {real(opened): opened, real(swapped): swapped}
+        assert widget._check_replicates
+        for (signature, inputs), dataset, replicates in widget._check_replicates.values():
+            kept = null_replicates(lss, dataset, inputs=inputs, fitted=fits[signature])
+            assert replicates.levels == kept.levels
+        other = null_replicates(lss, dataset, inputs=inputs, fitted=swapped)
+        assert other.levels != replicates.levels
+        assert widget._original_checks == {}
+    finally:
+        _close_widgets(session)
+
+
 def _with_covariance(lss, scale: float):
     """``lss``'s fit with its coefficients and ``scale`` times its covariance."""
     fitted = lss._require_fitted()

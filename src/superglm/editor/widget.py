@@ -29,6 +29,7 @@ from superglm.editor.apply import materialize_edit_request, model_for_split_scor
 from superglm.editor.checks import (
     CHECK_REPORTS,
     NullReplicates,
+    SimulationCancelled,
     check_body,
     check_inputs,
     check_report_payload,
@@ -42,6 +43,7 @@ from superglm.editor.cv import (
     CVRun,
     FinalFit,
     InForce,
+    _fit_in_force,
     capture_cv_run,
     capture_final_fit,
     headline_score,
@@ -73,7 +75,6 @@ from superglm.editor.lss.availability import (
 )
 from superglm.editor.lss.panel import NOT_SUPERLSS, distribution_panel_payload
 from superglm.editor.lss.risk import risk_payload, risk_row
-from superglm.editor.lss.view import LSSModelView
 from superglm.editor.metrics import metric_comparison_payload, metrics_payload
 from superglm.editor.native_dialogs import open_directory_path
 from superglm.editor.notebook import NotebookTransport, notebook_view_class
@@ -260,6 +261,9 @@ class EditorWidget:
         # split runs for seconds, and on its own lane the Editor never waits behind it.
         self._evidence = EvidenceCoordinator(f"editor-{id(self):x}")
         self._check_evidence = EvidenceCoordinator(f"checks-{id(self):x}")
+        # Set by ``close``: a running simulation reads it at each block of rows and stops, so
+        # closing never waits for one and its worker ends within a block.
+        self._closing = threading.Event()
         # The checks' evidence, read and written only by jobs on the check lane, which runs them
         # one at a time; it lives as long as the widget. Each entry keeps the split it was read
         # on, compared by identity, and its model's ``_check_signature`` and inputs: the fitted
@@ -313,6 +317,7 @@ class EditorWidget:
             return
         self._closed = True
         _LIVE_WIDGETS.discard(self)
+        self._closing.set()
         self._jobs.close()
         self._evidence.close()
         self._check_evidence.close()
@@ -902,6 +907,9 @@ class EditorWidget:
             asked = InForce.of(self.session)
             dataset = default_metrics_dataset(self.session)
             reference = self.session.reference_model
+            # The fits the simulations key on and run on, captured once: a refit in place
+            # replaces a model's fit, so reading the model again could read another.
+            reference_fit = _fit_in_force(reference)
             compares_edit = reference is not self.session.model or bool(asked.edits)
             inputs = tuple(check_inputs(self.session.model, self.session.terms))
             if not is_lss(asked.model):
@@ -928,18 +936,30 @@ class EditorWidget:
             return _superseded_payload(revision, request_sequence, source.token)
 
         def compute_bodies() -> dict[str, Any]:
-            replicates = self._check_replicates_for(asked.model, reference, dataset, inputs)
+            replicates = self._check_replicates_for(
+                asked.model, asked.fit, reference_fit, dataset, inputs
+            )
             bodies = {
                 "edited": check_body(report, edited, dataset, inputs=inputs, replicates=replicates),
                 "original": None,
             }
             if compares_edit:
-                fitted = _check_signature(reference)
-                bodies["original"] = self._fitted_check(report, reference, dataset, inputs, fitted)
+                bodies["original"] = self._fitted_check(
+                    report, reference, reference_fit, dataset, inputs
+                )
             return bodies
 
         key = EvidenceKey(source.token, "check", f"{report}:{dataset.name}")
-        outcome = self._check_evidence.submit(key, compute_bodies).result()
+        # Admitted only while its model is in force: a request that fell behind an edit on its
+        # way here would otherwise take the lane's one waiting place from the newer request.
+        with self._lock:
+            if not source.describes(self.session):
+                return _superseded_payload(revision, request_sequence, source.token)
+            work = self._check_evidence.submit(key, compute_bodies)
+        try:
+            outcome = work.result()
+        except SimulationCancelled:  # the widget closed during the simulation
+            return _superseded_payload(revision, request_sequence, source.token)
         if outcome.status == "superseded" or outcome.payload is None:
             return _superseded_payload(revision, request_sequence, source.token)
         with self._lock:
@@ -961,11 +981,12 @@ class EditorWidget:
         }
 
     def _check_replicates_for(
-        self, fit, reference, dataset, inputs: tuple[str, ...]
+        self, model, fit, reference_fit, dataset, inputs: tuple[str, ...]
     ) -> NullReplicates:
         """``fit``'s one simulation on ``dataset``, shared by its four checks and by every hand
-        edit made on it; ``fit`` is the fitted model in force as captured under the lock, and
-        ``reference`` the opened one. Run only inside a check job.
+        edit made on it. ``fit`` is the fit of ``model``, the fitted model in force, and
+        ``reference_fit`` the opened model's, both captured under the lock; the key and the
+        simulation read ``fit``, never ``model`` again. Run only inside a check job.
 
         A hand edit keeps its fit's covariance, and the levels rest on the split, the design and
         that covariance, so an edit reads its fit's levels. Its bodies still read their own
@@ -976,22 +997,31 @@ class EditorWidget:
         for held, held_dataset, replicates in self._check_replicates.values():
             if held == key and held_dataset is dataset:
                 return replicates
-        replicates = null_replicates(fit, dataset, inputs=inputs)
-        role = "original" if fit is reference else "in_force"
+        replicates = null_replicates(
+            model, dataset, inputs=inputs, fitted=fit, cancelled=self._closing.is_set
+        )
+        role = "original" if fit is reference_fit else "in_force"
         self._check_replicates[(role, dataset.name)] = (key, dataset, replicates)
         return replicates
 
     def _fitted_check(
-        self, report: str, reference, dataset, inputs: tuple[str, ...], fitted: tuple[Any, ...]
+        self, report: str, reference, reference_fit, dataset, inputs: tuple[str, ...]
     ) -> dict[str, Any]:
-        """The fitted model's body of ``report`` on ``dataset``, kept while that model, split and
-        inputs stand; ``fitted`` is its signature. Run only inside a check job."""
+        """The fitted model's body of ``report`` on ``dataset``, kept while that model's fit,
+        ``reference_fit`` as captured under the lock, the split and the inputs stand. Run only
+        inside a check job."""
+        fitted = _check_signature(reference_fit)
         held = self._original_checks.get((report, dataset.name))
         if held is not None and held[0] == (fitted, inputs) and held[1] is dataset:
             return held[2]
-        replicates = self._check_replicates_for(reference, reference, dataset, inputs)
+        replicates = self._check_replicates_for(
+            reference, reference_fit, reference_fit, dataset, inputs
+        )
         body = check_body(report, reference, dataset, inputs=inputs, replicates=replicates)
-        self._original_checks[(report, dataset.name)] = ((fitted, inputs), dataset, body)
+        # The body reads the model's statistics from its fit in force, kept under the captured
+        # fit's key only while that is the fit.
+        if _fit_in_force(reference) is reference_fit:
+            self._original_checks[(report, dataset.name)] = ((fitted, inputs), dataset, body)
         return body
 
     def _export_bytes(self, format: str, filename: str | None = None) -> ExportResult:
@@ -1707,14 +1737,16 @@ def _superseded_payload(
     }
 
 
-def _check_signature(model) -> tuple[Any, ...]:
-    """What a SuperLSS's checks read from its fit: its scoring signature and a digest of the
-    covariance the posterior draws read. A hand edit keeps the fit's covariance; a refit in
-    place may keep the coefficients and move the covariance."""
-    lss = model.lss if isinstance(model, LSSModelView) else model
-    covariance = np.ascontiguousarray(lss._require_fitted().inference.covariance, np.float64)
+def _check_signature(fit) -> tuple[Any, ...]:
+    """What a SuperLSS's checks read from ``fit``, its fitted model (``cv._fit_in_force``): the
+    family, the coefficients and a digest of the covariance the posterior draws read. A hand
+    edit keeps the fit's covariance; a refit in place may keep the coefficients and move the
+    covariance."""
+    coefficients = np.asarray(fit.coefficients, dtype=np.float64)
+    covariance = np.ascontiguousarray(fit.inference.covariance, np.float64)
     digest = hashlib.blake2b(covariance.tobytes(), digest_size=16).hexdigest()
-    return (model_metric_signature(model), covariance.shape, digest)
+    family = (type(fit.family).__qualname__, repr(fit.family.to_config()))
+    return (*family, coefficients.tobytes(), covariance.shape, digest)
 
 
 _NOTEBOOK_FALLBACK = (

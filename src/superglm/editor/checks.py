@@ -548,6 +548,24 @@ class _NotSampled(Exception):  # noqa: N818 - the level falls back, not a fault
         self.note = note
 
 
+class SimulationCancelled(Exception):  # noqa: N818 - the caller stopped it, not a fault
+    """A simulation stopped at a block boundary because its caller asked it to; it keeps
+    nothing."""
+
+
+def _unless_cancelled(
+    blocks: Iterator[tuple[slice, NDArray[np.float64]]], cancelled: Callable[[], bool]
+) -> Iterator[tuple[slice, NDArray[np.float64]]]:
+    """``blocks``, asking ``cancelled`` before each is drawn: once it answers true, the next
+    block raises :class:`SimulationCancelled` instead."""
+    while not cancelled():
+        block = next(blocks, None)
+        if block is None:
+            return
+        yield block
+    raise SimulationCancelled
+
+
 # Compared and hashed by identity: a cache holds it as a value, keyed by what it was drawn from.
 @dataclass(frozen=True, eq=False)
 class NullReplicates:
@@ -916,11 +934,12 @@ def _replicates(
     n_draws: int,
     seed: int,
     responses: NDArray[np.float64] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[_Split, _Scores, int]:
     """The split, what its replicates give and how many there are; ``_NotSampled`` when none.
 
     ``responses``, one row per replicate over the occurrences the replicates draw, stand in for
-    simulated ones.
+    simulated ones. ``cancelled`` is asked before each block is drawn (see ``null_replicates``).
     """
     y = np.asarray(dataset.y, dtype=np.float64).ravel()
     split = _split(fitted, dataset)
@@ -935,6 +954,8 @@ def _replicates(
     if responses is None:
         draws = _draws(fitted, n_draws, seed)
         count, blocks = draws.n_draws, _simulated_responses(split, draws, seed)
+        if cancelled is not None:
+            blocks = _unless_cancelled(blocks, cancelled)
     else:
         given = np.atleast_2d(np.asarray(responses, dtype=np.float64))
         spans = (
@@ -952,6 +973,8 @@ def null_replicates(
     inputs: Sequence[str],
     n_draws: int = CHECK_DRAWS,
     seed: int = CHECK_SEED,
+    fitted: Any = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> NullReplicates:
     """Simulate the null of ``dataset``'s checks once and read each check's level from it.
 
@@ -973,18 +996,24 @@ def null_replicates(
     sampler selects, the ones Q-Q, PIT and a randomised quantile calibration read; quantile
     calibration of the response and actual over expected read every occurrence, so they keep
     the known level and ``note`` says why.
+
+    ``fitted``, the fitted model ``model`` held when the caller captured it (``model``'s own
+    when omitted), is the fit simulated: a refit in place replaces ``model``'s, so a caller
+    that keys the result on a captured fit simulates that fit. ``cancelled`` is asked before
+    each block of rows is drawn, and once it answers true the simulation stops there with
+    :class:`SimulationCancelled`.
     """
     nothing = NullReplicates(levels={}, n_draws=0, seed=int(seed))
     lss = _lss(model)
     if lss is None or dataset.name == _FIT_ROWS or lss_split_reason(lss, dataset) is not None:
         return nothing
-    fitted = lss._require_fitted()
+    fitted = lss._require_fitted() if fitted is None else fitted
     family = fitted.family
     if not isinstance(family, DistributionFunctionFamily) or response_spec(family).shape:
         return NullReplicates(levels={}, n_draws=0, seed=int(seed), note=_UNSIMULATED_ROWS)
     try:
         split, scores, count = _replicates(
-            fitted, dataset, inputs, n_draws=int(n_draws), seed=int(seed)
+            fitted, dataset, inputs, n_draws=int(n_draws), seed=int(seed), cancelled=cancelled
         )
     except NoPredictedMeanError:
         return nothing
@@ -1066,6 +1095,7 @@ __all__ = [
     "QUANTILE_GRID",
     "CheckUnavailable",
     "NullReplicates",
+    "SimulationCancelled",
     "check_body",
     "check_inputs",
     "check_report_payload",
