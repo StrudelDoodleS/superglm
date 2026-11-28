@@ -881,6 +881,40 @@ def test_one_seed_draws_the_same_coefficients_whatever_basis_the_eigensolver_pic
     np.testing.assert_allclose(other, drawn, rtol=0, atol=bound)
 
 
+def _null_eigenvalue_rounded_to(monkeypatch, sign: float) -> None:
+    """Make ``np.linalg.eigh`` round the least eigenvalue to ``sign u ||G||_2``, as LAPACK builds
+    may round a null eigenvalue to either side of zero."""
+    solver = np.linalg.eigh
+
+    def rounded(matrix, *args, **kwargs):
+        values, vectors = solver(matrix, *args, **kwargs)
+        values = values.copy()
+        values[0] = sign * _U * np.max(np.abs(values))
+        return values, vectors
+
+    monkeypatch.setattr(np.linalg, "eigh", rounded)
+
+
+def test_a_null_eigenvalue_rounded_either_side_of_zero_moves_the_draws_by_about_root_u(
+    monkeypatch,
+) -> None:
+    """One build rounds a semidefinite covariance's null eigenvalue to ``+u ||G||`` and another,
+    with another eigenbasis, to ``-u ||G||``, which is clipped. The two roots differ by
+    ``sqrt(u ||G||) q q'``, ``q`` the null eigenvector, so the draws agree to about
+    ``sqrt(u ||G||)``, beyond rounding but far below the draws' own spread. Mutation check:
+    the parent's ``Q diag(sqrt(lambda))`` carries the basis and moves the draws by order one."""
+    covariance = _tied_covariance((0.0, 1.0, 1.0, 1.4))
+    with monkeypatch.context() as patch:
+        _null_eigenvalue_rounded_to(patch, 1.0)
+        drawn = posterior_draws(_covariance_shim(covariance), 64, seed=13).coefficients
+    with monkeypatch.context() as patch:
+        _another_eigensolver(patch)
+        _null_eigenvalue_rounded_to(patch, -1.0)
+        other = posterior_draws(_covariance_shim(covariance), 64, seed=13).coefficients
+    moved, scale = np.max(np.abs(other - drawn)), np.max(np.abs(drawn))
+    assert 64 * len(covariance) * _U * scale < moved <= 4.0 * np.sqrt(_U * 1.4) * scale
+
+
 @pytest.mark.pins_behaviour
 def test_a_small_positive_mode_keeps_the_prediction_variance_it_carries() -> None:
     """Pins that the draw factor keeps every positive mode, as the parent's factor did. On a

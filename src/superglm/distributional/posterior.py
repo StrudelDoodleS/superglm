@@ -717,11 +717,12 @@ def _posterior_covariance_factor(matrix: NDArray) -> NDArray:
     ``D`` is the exact power-of-two scaling of the variances. The PSD square root
     is unique (Higham, *Functions of Matrices*, 2008, Thm 1.29), so it ignores the
     eigenvectors' signs and bases that differ between LAPACK builds: one seed draws
-    alike on every platform. Every positive eigenvalue is kept, however small: a
-    mode near ``u ||G||`` can carry the whole variance of a prediction, as on a
-    nearly constant input. A negative mode is clipped only if the factor
-    reconstructs ``G`` within ``gamma_(6n+8)`` times
-    ``max(||G||_F, || |S| |S'| ||_F)``.
+    alike on every platform, to rounding where ``G`` is definite. A null eigenvalue's
+    rounding sign can still differ between builds, and the root turns that into about
+    ``sqrt(u ||G||)`` along its direction. Every positive eigenvalue is kept, however
+    small: a mode near ``u ||G||`` can carry the whole variance of a prediction, as on
+    a nearly constant input. A negative mode is clipped only if the factor reconstructs
+    ``G`` within ``gamma_(6n+8)`` times ``max(||G||_F, || |S| |S'| ||_F)``.
     """
     resolved = _posterior_symmetric_matrix(matrix)
     diagonal = np.diag(resolved)
@@ -828,9 +829,12 @@ def posterior_draws(
     mode is clipped only when a bounded reconstruction shows the covariance
     agrees at arithmetic resolution, otherwise it is an error. One
     ``default_rng(seed)`` stream serves every draw, so results never depend
-    on a later pushforward's row chunking. The square root is unique, so the
-    same seed draws the same coefficients on every platform, to rounding,
-    whatever basis its eigensolver returns.
+    on a later pushforward's row chunking. The square root is unique, so
+    whatever basis its eigensolver returns, one seed draws the same coefficients
+    on every platform: to rounding where ``V`` is definite, and to about
+    ``sqrt(u ||G||)`` of each coefficient's standard deviation along a null
+    direction, whose eigenvalue LAPACK builds may round to either side of zero.
+    ``G`` is ``V`` scaled to unit-order variances by powers of two.
     """
     count = _posterior_draw_count(n_draws)
     matrix, resolved = _resolved_posterior_covariance(fitted, covariance)
