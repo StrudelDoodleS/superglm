@@ -17,14 +17,17 @@ who want to reproduce a p-value by hand.
 
 A pointwise band at level $\alpha$ is crossed somewhere far more often than $\alpha$ once a plot has
 many points or cells. The helpers below build simultaneous bands that hold for the whole plot at
-once, so a well-specified model leaves its band anywhere with probability at most $\alpha$.
+once. A well-specified model leaves a binomial band anywhere with probability at most $\alpha$,
+and a Q-Q band with probability $\alpha$ below 250 points and up to 4.5% of $\alpha$ more from 250.
 
 - `equal_local_levels_band` builds a `UniformBand` for the $n$ sorted values of a Q-Q or P-P plot
   on the probability scale. Each order statistic is tested against its `Beta(i, n + 1 - i)` law at
-  one shared two-sided local level $\eta$, chosen so the global level is $\alpha$ (exact search for
-  $2 \le n < 250$, asymptotic formula for $n \ge 250$ at $\alpha \in \{0.01, 0.05, 0.1\}$). Map its
-  `lower`, `upper` and `median` arrays through a distribution's quantile function to draw the band
-  on that distribution's scale.
+  one shared two-sided local level $\eta$. For $2 \le n < 250$ an exact search sets $\eta$ so the
+  global level is $\alpha$. For $n \ge 250$ it is the asymptotic formula at
+  $\alpha \in \{0.01, 0.05, 0.1\}$, whose global level runs above $\alpha$: at 250 points it is
+  0.010451, 0.050778 and 0.101151 (4.5%, 1.6% and 1.2% high), falling toward $\alpha$ as $n$ grows
+  (0.050199 at 500 points with $\alpha = 0.05$). Map its `lower`, `upper` and `median` arrays
+  through a distribution's quantile function to draw the band on that distribution's scale.
 - `bonferroni_binomial_band` bounds the counts of $m$ cells, each `Binomial(trials, probability)`,
   at per-tail level $\alpha / (2 m)$ or at an explicit `cut`. By Bonferroni's inequality the global
   level holds under any dependence between cells, including multinomial histogram bins and quantile
