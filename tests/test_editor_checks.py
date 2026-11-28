@@ -1383,14 +1383,15 @@ _STUCK = 60.0
 
 def _held_simulation(monkeypatch):
     """The widget's simulation, made to wait for ``release`` once it has ``started``; ``drawn``
-    lists the models it was asked for."""
+    lists the models it was asked for. Only the test's cleanup sets ``release``, and the test
+    sees a failure through its own bounded wait on the caller, so no second deadline races it."""
     started, release, drawn = threading.Event(), threading.Event(), []
     real = checks.null_replicates
 
     def held(*a, **k):
         drawn.append(a[0])
         started.set()
-        assert release.wait(_STUCK)
+        release.wait()
         return real(*a, **k)
 
     monkeypatch.setattr(widget_module, "null_replicates", held)
