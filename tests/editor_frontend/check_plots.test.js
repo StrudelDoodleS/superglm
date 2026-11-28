@@ -389,3 +389,132 @@ test("axis titles and readouts use neutral words", () => {
     assert.deepEqual(neutralCopy([...scene.labels.map((l) => l.text), ...scene.marks.map((m) => m.text)].join(" ")), []);
   }
 });
+
+/** The middle part of each axis `whole` zooms, from `from` to `to` of its range. */
+const part = (whole, from, to) => ({
+  x: whole.x && [whole.x[0] + from * (whole.x[1] - whole.x[0]), whole.x[0] + to * (whole.x[1] - whole.x[0])],
+  y: [whole.y[0] + from * (whole.y[1] - whole.y[0]), whole.y[0] + to * (whole.y[1] - whole.y[0])],
+});
+/** The plot whose rect holds px (x, y). */
+const plotOf = (scene, x, y) => scene.zoom.plots.find(({ rect }) => rect.left - 0.02 <= x && x <= rect.right + 0.02
+  && rect.top - 0.02 <= y && y <= rect.bottom + 0.02);
+/** The value at px along `axis` of `plot`, drawn at the scene's domain. */
+const valueAt = (scene, plot, axis, px) => {
+  const [p0, p1] = plot[axis];
+  const [d0, d1] = scene.zoom.domain[axis];
+  return d0 + ((px - p0) * (d1 - d0)) / (p1 - p0);
+};
+/** A tick label's number: a plain number, or a percentage as a share. */
+const tickValue = (text) => (text.endsWith("%") ? Number(text.slice(0, -1).replaceAll(",", "")) / 100 : Number(text.replaceAll(",", "")));
+/** A large view's x and y tick labels (an x tick is centred under the plot, a y tick ends at it). */
+const ticksOf = (scene) => ({
+  x: scene.labels.filter((l) => !l.axis && l.anchor === "middle"),
+  y: scene.labels.filter((l) => !l.axis && l.anchor === "end"),
+});
+const ZOOMED = { check_qq: [0.55, 0.8], check_pit: [0.3, 0.6], check_ae: [0.35, 0.6], check_calibration: [0.2, 0.7] };
+
+test("with a domain, every drawn mark lies inside it, and the ticks cover it", () => {
+  for (const report of CHECK_REPORTS) {
+    const payload = FIXTURE.wrong[report];
+    const whole = checkScene(report, payload, BOX, { compare: false, highlight: true });
+    const domain = part(whole.zoom.base, ...ZOOMED[report]);
+    const scene = checkScene(report, payload, BOX, { compare: false, highlight: true, domain });
+    assert.deepEqual(scene.zoom.domain, domain, report);
+    assert.deepEqual(scene.zoom.base, whole.zoom.base, report);
+    assert.ok(scene.marks.length > 0 && scene.marks.length < whole.marks.length, `${report}: ${scene.marks.length}`);
+    for (const mark of scene.marks) assert.ok(plotOf(scene, mark.x, mark.y), `${report}: a mark outside every plot`);
+    for (const { d } of scene.layers.filter((l) => l.role !== "weight")) {
+      for (const [x, y] of absolutePoints(d)) {
+        const inside = scene.zoom.plots.some(({ rect }) => (x === null || (rect.left - 0.011 <= x && x <= rect.right + 0.011))
+          && (y === null || (rect.top - 0.011 <= y && y <= rect.bottom + 0.011)));
+        assert.ok(inside, `${report}: a path point (${x}, ${y}) outside every plot`);
+      }
+    }
+    const ticks = ticksOf(scene);
+    const plot = scene.zoom.plots[0];
+    // At least two ticks on each zoomed axis, every one inside the domain, and none more than a
+    // tick step from either end of it.
+    const ys = ticks.y.filter((l) => l.y - 4 >= plot.rect.top - 0.02 && l.y - 4 <= plot.rect.bottom + 0.02)
+      .map((l) => valueAt(scene, plot, "y", l.y - 4));
+    assert.ok(ys.length >= 2, `${report}: y ticks ${ys}`);
+    const [y0, y1] = domain.y;
+    for (const v of ys) assert.ok(v >= y0 - 1e-6 && v <= y1 + 1e-6, `${report}: y tick ${v} outside ${domain.y}`);
+    const step = Math.max(...ys.slice(1).map((v, i) => Math.abs(v - ys[i])));
+    assert.ok(Math.min(...ys) - y0 <= step + 1e-9 && y1 - Math.max(...ys) <= step + 1e-9, `${report}: y ticks ${ys} in ${domain.y}`);
+    if (report === "check_qq" || report === "check_pit") {
+      const xs = ticks.x.map((l) => tickValue(l.text));
+      assert.ok(xs.length >= 2, `${report}: x ticks ${xs}`);
+      for (const v of xs) assert.ok(v >= domain.x[0] - 1e-6 && v <= domain.x[1] + 1e-6, `${report}: x tick ${v} outside ${domain.x}`);
+      for (const l of ticks.x) near(valueAt(scene, plot, "x", l.x), tickValue(l.text), (domain.x[1] - domain.x[0]) * 0.01);
+    }
+  }
+});
+
+test("a zoomed Q-Q draws the points inside its domain and keeps y = x as the diagonal", () => {
+  const payload = FIXTURE.wrong.check_qq, body = payload.models.edited;
+  const whole = checkScene("check_qq", payload, BOX, { compare: false, highlight: true });
+  const domain = part(whole.zoom.base, 0.6, 0.9);
+  const scene = checkScene("check_qq", payload, BOX, { compare: false, highlight: true, domain });
+  const inside = body.index.filter((_, i) => body.theoretical[i] >= domain.x[0] && body.theoretical[i] <= domain.x[1]
+    && body.observed[i] >= domain.y[0] && body.observed[i] <= domain.y[1]);
+  assert.equal(scene.marks.length, inside.length);
+  const plot = scene.zoom.plots[0];
+  for (const [x, y] of subpaths(layer(scene, "reference").d)[0].reduce((pairs, v, i, all) => (i % 2 ? pairs : [...pairs, [v, all[i + 1]]]), [])) {
+    near(valueAt(scene, plot, "x", x), valueAt(scene, plot, "y", y), 0.01 * (domain.x[1] - domain.x[0]));
+  }
+  // Zoomed off the diagonal, there is none to draw.
+  const off = { x: [whole.zoom.base.x[0], whole.zoom.base.x[0] + 0.1], y: [whole.zoom.base.y[1] - 0.1, whole.zoom.base.y[1]] };
+  assert.equal(layer(checkScene("check_qq", payload, BOX, { compare: false, highlight: true, domain: off }), "reference"), undefined);
+});
+
+test("A/E's panels share one zoomed y domain", () => {
+  const payload = FIXTURE.wrong.check_ae;
+  const whole = checkScene("check_ae", payload, BOX, { compare: false, highlight: true });
+  assert.equal(whole.zoom.base.x, null);
+  assert.ok(whole.zoom.plots.length > 1);
+  const domain = part(whole.zoom.base, 0.4, 0.7);
+  const scene = checkScene("check_ae", payload, BOX, { compare: false, highlight: true, domain });
+  // Each panel's ticks read the same values at the same place in its own plot.
+  const perPanel = scene.zoom.plots.map((plot) => scene.labels
+    .filter((l) => !l.axis && l.anchor === "end" && l.x === plot.rect.left - 6
+      && l.y - 4 >= plot.rect.top - 0.02 && l.y - 4 <= plot.rect.bottom + 0.02)
+    .map((l) => [l.text, Math.round((l.y - 4 - plot.rect.top) * 100) / 100]));
+  for (const ticks of perPanel) assert.deepEqual(ticks, perPanel[0]);
+  assert.ok(perPanel[0].length >= 2);
+  // Every drawn ratio lies in the one domain, read through its own panel.
+  const drawn = payload.models.edited.tables.flatMap((t) => t.ratio.filter((r, i) => [r, t.lower[i], t.upper[i]].every(Number.isFinite)
+    && r >= domain.y[0] && r <= domain.y[1]));
+  assert.equal(scene.marks.length, drawn.length);
+  for (const mark of scene.marks) {
+    const ratio = Number(mark.text.split(" · ")[1]);
+    near(valueAt(scene, plotOf(scene, mark.x, mark.y), "y", mark.y), ratio, 0.006);
+  }
+});
+
+test("nearestMark in a zoomed scene finds the nearest drawn point", () => {
+  for (const report of ["check_qq", "check_ae"]) {
+    const whole = checkScene(report, FIXTURE.wrong[report], BOX, { compare: false, highlight: true });
+    const domain = part(whole.zoom.base, ...ZOOMED[report]);
+    const marks = checkScene(report, FIXTURE.wrong[report], BOX, { compare: false, highlight: true, domain }).marks;
+    for (let i = 1; i < marks.length; i++) assert.ok(marks[i - 1].x <= marks[i].x, "marks sorted by x");
+    let seed = 11; const random = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    const distance = (m, x, y) => Math.hypot(m.x - x, m.y - y);
+    for (let i = 0; i < 200; i++) {
+      const [x, y] = [random() * BOX.width, random() * BOX.height];
+      const brute = marks.reduce((best, m, k) => (distance(m, x, y) < distance(marks[best], x, y) ? k : best), 0);
+      assert.equal(distance(marks[nearestMark(marks, x, y)], x, y), distance(marks[brute], x, y));
+    }
+  }
+});
+
+test("a zoomed quantile calibration keeps its zero row at the foot", () => {
+  const payload = structuredClone(FIXTURE.wrong.check_calibration);
+  payload.models.edited.quantiles.realised_exceedance[0] = 0;
+  const whole = checkScene("check_calibration", payload, BOX, { compare: false, highlight: true });
+  const domain = part(whole.zoom.base, 0, 0.5);
+  domain.y = part(whole.zoom.base, 0.5, 0.9).y;
+  const scene = checkScene("check_calibration", payload, BOX, { compare: false, highlight: true, domain });
+  const { rect } = scene.zoom.plots[0];
+  assert.ok(scene.marks.some((m) => m.y === rect.bottom && m.text.includes("exceeded by 0%")));
+  assert.ok(scene.labels.some((l) => l.text === "0" && l.y - 4 === rect.bottom));
+});

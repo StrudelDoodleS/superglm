@@ -4,10 +4,14 @@
  * and hover targets of an SVG. Each role is one path, so the stylesheet alone colours a scene
  * (`check-{role}`), and a card's thumbnail and the large view are drawn by the same code. What
  * lies outside its band takes the `outside` role only while Highlight outside the band is on;
- * off, it is drawn as the rest of the edit is, and the band shows where it lies.
+ * off, it is drawn as the rest of the edit is, and the band shows where it lies. A large view
+ * draws at a domain, the part of each axis on screen: zooming draws the scene again at a narrower
+ * one, so its axes, ticks and band are drawn at the new range, and what lies outside it is
+ * neither drawn nor read out.
  */
 
 import { escapeHTML, fmt, fmtCount, fmtPercent } from "../format.js";
+import { fitDomain } from "./check_zoom.js";
 import { niceTicks } from "./fan.js";
 
 /** @typedef {import('../api/contracts.js').CheckReport} CheckReport */
@@ -26,14 +30,33 @@ import { niceTicks } from "./fan.js";
  * A tick label, or with `axis` an axis or panel title.
  * @typedef {{x:number, y:number, text:string, anchor:'start'|'middle'|'end', axis?:boolean}} Label
  */
-/** @typedef {{width:number, height:number, layers:Layer[], labels:Label[], marks:Mark[]}} Scene */
+/** @typedef {{left:number, top:number, right:number, bottom:number}} Rect */
+/**
+ * The part of each axis a scene draws, in the axis's own values: the Q-Q's residuals, the PIT's
+ * probability and count over expected, the quantile calibration's quantile index and log10
+ * share, and A/E's ratio. `x` is null where the scene does not zoom across: A/E's groups.
+ * @typedef {{x:[number, number]|null, y:[number, number]}} Domain
+ */
+/**
+ * One plot of a scene, and the px its domain's ends sit at along each axis, low end first.
+ * @typedef {{rect:Rect, x:[number, number]|null, y:[number, number]}} Plot
+ */
+/**
+ * What a zoom reads from a scene: its whole domain, the one drawn, its plots (one per A/E panel,
+ * all at the one domain), and whether its two axes keep one range (the Q-Q's, so y = x stays the
+ * diagonal).
+ * @typedef {{base:Domain, domain:Domain, plots:Plot[], square:boolean}} ZoomFrame
+ */
+/**
+ * @typedef {{width:number, height:number, layers:Layer[], labels:Label[], marks:Mark[],
+ *   zoom?:ZoomFrame|null}} Scene
+ */
 /** @typedef {{width:number, height:number, thumb?:boolean}} Box */
 /**
  * What a scene draws beside the edit: the fitted model when `compare`, and what lies outside its
- * band in its own role when `highlight`.
- * @typedef {{compare:boolean, highlight:boolean}} SceneOptions
+ * band in its own role when `highlight`; and at `domain`, when given, the part of each axis drawn.
+ * @typedef {{compare:boolean, highlight:boolean, domain?:Domain|null}} SceneOptions
  */
-/** @typedef {{left:number, top:number, right:number, bottom:number}} Rect */
 /** @typedef {Record<Role, string[]>} Parts */
 
 /**
@@ -144,11 +167,90 @@ function emptyParts() {
   };
 }
 
-/** @param {Box} box @param {Parts} parts @param {Label[]} labels @param {Mark[]} marks @returns {Scene} */
-function finish(box, parts, labels, marks) {
+/**
+ * @param {Box} box @param {Parts} parts @param {Label[]} labels @param {Mark[]} marks
+ * @param {ZoomFrame|null} zoom @returns {Scene}
+ */
+function finish(box, parts, labels, marks, zoom) {
   const layers = ROLES.filter((role) => parts[role].length > 0).map((role) => ({ role, d: parts[role].join(" ") }));
-  return { width: box.width, height: box.height, layers, labels: box.thumb ? [] : labels, marks };
+  return { width: box.width, height: box.height, layers, labels: box.thumb ? [] : labels, marks, zoom };
 }
+
+/** @param {Rect} rect @param {number} x @param {number} y whether px (x, y) lies in `rect` */
+const within = (rect, x, y) => x >= rect.left - 1e-6 && x <= rect.right + 1e-6 && y >= rect.top - 1e-6 && y <= rect.bottom + 1e-6;
+
+/** @param {number} lo @param {number} hi @returns {(v: number) => boolean} whether a value is in [lo, hi] */
+const between = (lo, hi) => (v) => v >= lo - 1e-9 * (hi - lo) && v <= hi + 1e-9 * (hi - lo);
+
+/**
+ * The part of the segment from `a` to `b` inside `rect`, or null (Liang and Barsky, "A new
+ * concept and method for line clipping", ACM Trans. Graph. 3(1), 1984).
+ * @param {[number, number]} a @param {[number, number]} b @param {Rect} rect
+ * @returns {[[number, number], [number, number]]|null}
+ */
+function clipSegment(a, b, rect) {
+  const [dx, dy] = [b[0] - a[0], b[1] - a[1]];
+  let [t0, t1] = [0, 1];
+  for (const [p, q] of [[-dx, a[0] - rect.left], [dx, rect.right - a[0]], [-dy, a[1] - rect.top], [dy, rect.bottom - a[1]]]) {
+    if (p === 0) {
+      if (q < 0) return null;
+      continue;
+    }
+    const r = q / p;
+    if (p < 0) t0 = Math.max(t0, r);
+    else t1 = Math.min(t1, r);
+    if (t0 > t1) return null;
+  }
+  return [[a[0] + t0 * dx, a[1] + t0 * dy], [a[0] + t1 * dx, a[1] + t1 * dy]];
+}
+
+/**
+ * The parts of a polyline inside `rect`, as one path; empty when none is.
+ * @param {Array<[number, number]>} points @param {Rect} rect @returns {string}
+ */
+function clipPolyline(points, rect) {
+  /** @type {string[]} */
+  const out = [];
+  /** @type {[number, number]|null} */
+  let end = null;
+  for (let i = 1; i < points.length; i++) {
+    const piece = clipSegment(points[i - 1], points[i], rect);
+    if (!piece) continue;
+    const [from, to] = piece;
+    if (!end || end[0] !== from[0] || end[1] !== from[1]) out.push(`M ${n(from[0])} ${n(from[1])}`);
+    out.push(`L ${n(to[0])} ${n(to[1])}`);
+    end = to;
+  }
+  return out.join(" ");
+}
+
+/**
+ * A bar cut to `rect`, or null when none of it is in it; a bar with no height at the foot stays.
+ * @param {number} left @param {number} right @param {number} base @param {number} top @param {Rect} rect
+ * @returns {{left:number, right:number, base:number, top:number}|null}
+ */
+function clipBar(left, right, base, top, rect) {
+  const cut = { left: Math.max(left, rect.left), right: Math.min(right, rect.right), base: Math.min(base, rect.bottom), top: Math.max(top, rect.top) };
+  return cut.right < cut.left || cut.top > cut.base ? null : cut;
+}
+
+/**
+ * Tick texts for `values`: as `fmt` writes them, unless that writes two alike, when each keeps
+ * the decimals the step between them needs.
+ * @param {number[]} values @param {(v: number) => string} [write] @returns {string[]}
+ */
+function tickTexts(values, write = fmt) {
+  const texts = values.map(write);
+  if (new Set(texts).size === texts.length || values.length < 2) return texts;
+  const step = Math.min(...values.slice(1).map((v, i) => Math.abs(v - values[i])));
+  const digits = Math.min(12, Math.max(0, Math.ceil(-Math.log10(step) + 1e-9)));
+  return values.map((v) => v.toFixed(digits));
+}
+
+/** @param {Rect} rect @param {Domain} base @param {Domain} domain @param {boolean} square @returns {ZoomFrame} */
+const zoomFrame = (rect, base, domain, square) => ({
+  base, domain, square, plots: [{ rect, x: [rect.left, rect.right], y: [rect.bottom, rect.top] }]
+});
 
 /**
  * A large view's grid lines, tick labels and axis titles around `rect`.
@@ -229,10 +331,16 @@ function qqShown(s, box, budget) {
 }
 
 /**
- * @param {CheckBody} editedBody @param {CheckBody|null} originalBody @param {Box} box
- * @param {boolean} highlight @returns {Scene}
+ * What a scene function reads from its options: whether to colour what left the band, and the
+ * domain asked for, which it fits inside its whole one.
+ * @typedef {{highlight:boolean, domain:Domain|null}} Draw
  */
-function qqScene(editedBody, originalBody, box, highlight) {
+
+/**
+ * @param {CheckBody} editedBody @param {CheckBody|null} originalBody @param {Box} box
+ * @param {Draw} draw @returns {Scene}
+ */
+function qqScene(editedBody, originalBody, box, { highlight, domain: asked }) {
   const edited = /** @type {QQStats} */ (/** @type {unknown} */ (editedBody));
   const original = originalBody && /** @type {QQStats} */ (/** @type {unknown} */ (originalBody));
   const budget = original ? THUMB_QQ_POINTS / 2 : THUMB_QQ_POINTS;
@@ -243,11 +351,15 @@ function qqScene(editedBody, originalBody, box, highlight) {
   for (const i of shown) values.push(edited.theoretical[i], edited.observed[i]);
   if (original) for (const i of shownOriginal) values.push(original.theoretical[i], original.observed[i]);
   // One range for both axes, so y = x is the plot's diagonal; the points fill it, and the
-  // band's flared ends are clipped to it.
+  // band's flared ends are clipped to it. A zoom keeps the two ranges alike.
   const [lo, hi] = span(values, QQ_PAD_SHARE);
   const rect = plotRect(box);
-  const sx = linear(lo, hi, rect.left, rect.right);
-  const sy = linear(lo, hi, rect.bottom, rect.top);
+  /** @type {Domain} */
+  const base = { x: [lo, hi], y: [lo, hi] };
+  const domain = fitDomain(asked, base);
+  const [x0, x1] = /** @type {[number, number]} */ (domain.x);
+  const sx = linear(x0, x1, rect.left, rect.right);
+  const sy = linear(domain.y[0], domain.y[1], rect.bottom, rect.top);
   const r = radius(box);
   const parts = emptyParts();
   /** @type {Mark[]} */
@@ -256,11 +368,16 @@ function qqScene(editedBody, originalBody, box, highlight) {
   const along = (bound) => (i) => [sx(edited.theoretical[i]), sy(bound[i])];
   const band = clipPolygon([...shown.map(along(edited.band_upper)), ...[...shown].reverse().map(along(edited.band_lower))], rect);
   if (band.length > 0) parts.band.push(`${polyline(band)} Z`);
-  parts.reference.push(polyline([[sx(lo), sy(lo)], [sx(hi), sy(hi)]]));
-  if (original) for (const i of shownOriginal) parts.original.push(dot(sx(original.theoretical[i]), sy(original.observed[i]), r));
+  const diagonal = clipPolyline([[sx(lo), sy(lo)], [sx(hi), sy(hi)]], rect);
+  if (diagonal) parts.reference.push(diagonal);
+  for (const i of shownOriginal) {
+    const [x, y] = [sx(original.theoretical[i]), sy(original.observed[i])];
+    if (within(rect, x, y)) parts.original.push(dot(x, y, r));
+  }
   for (const i of shown) {
     const x = sx(edited.theoretical[i]);
     const y = sy(edited.observed[i]);
+    if (!within(rect, x, y)) continue;
     parts[highlight && qqOutside(edited, i) ? "outside" : "edited"].push(dot(x, y, r));
     marks.push({
       x,
@@ -272,18 +389,20 @@ function qqScene(editedBody, originalBody, box, highlight) {
   /** @type {Label[]} */
   const labels = [];
   if (!box.thumb) {
-    const ticks = niceTicks(lo, hi, 6);
-    frame(parts, labels, rect, ticks.map((v) => [sx(v), fmt(v)]), ticks.map((v) => [sy(v), fmt(v)]),
+    const xs = niceTicks(x0, x1, 6);
+    const ys = niceTicks(domain.y[0], domain.y[1], 6);
+    const [xText, yText] = [tickTexts(xs), tickTexts(ys)];
+    frame(parts, labels, rect, xs.map((v, i) => [sx(v), xText[i]]), ys.map((v, i) => [sy(v), yText[i]]),
       { x: "Expected residual", y: "Observed residual", xGrid: true });
   }
-  return finish(box, parts, labels, marks);
+  return finish(box, parts, labels, marks, zoomFrame(rect, base, domain, true));
 }
 
 /**
  * @param {CheckBody} editedBody @param {CheckBody|null} originalBody @param {Box} box
- * @param {boolean} highlight @returns {Scene}
+ * @param {Draw} draw @returns {Scene}
  */
-function pitScene(editedBody, originalBody, box, highlight) {
+function pitScene(editedBody, originalBody, box, { highlight, domain: asked }) {
   const edited = /** @type {PITStats} */ (/** @type {unknown} */ (editedBody));
   const original = originalBody && /** @type {PITStats} */ (/** @type {unknown} */ (originalBody));
   const share = (/** @type {PITStats} */ s, /** @type {number} */ i) => s.counts[i] / s.expected;
@@ -294,13 +413,24 @@ function pitScene(editedBody, originalBody, box, highlight) {
   const [, top] = span([0, 1, upper, ...heights]);
   const rect = plotRect(box);
   const { edges } = edited;
-  const sx = linear(edges[0], edges[edges.length - 1], rect.left, rect.right);
-  const sy = linear(0, top, rect.bottom, rect.top);
+  /** @type {Domain} */
+  const base = { x: [edges[0], edges[edges.length - 1]], y: [0, top] };
+  const domain = fitDomain(asked, base);
+  const [x0, x1] = /** @type {[number, number]} */ (domain.x);
+  const sx = linear(x0, x1, rect.left, rect.right);
+  const sy = linear(domain.y[0], domain.y[1], rect.bottom, rect.top);
   const parts = emptyParts();
   /** @type {Mark[]} */
   const marks = [];
-  parts.band.push(`M ${n(rect.left)} ${n(sy(upper))} H ${n(rect.right)} V ${n(sy(lower))} H ${n(rect.left)} Z`);
-  parts.reference.push(hline(rect.left, rect.right, sy(1)));
+  const [bandTop, bandFoot] = [Math.max(rect.top, sy(upper)), Math.min(rect.bottom, sy(lower))];
+  if (bandTop <= bandFoot) parts.band.push(`M ${n(rect.left)} ${n(bandTop)} H ${n(rect.right)} V ${n(bandFoot)} H ${n(rect.left)} Z`);
+  if (between(...domain.y)(1)) parts.reference.push(hline(rect.left, rect.right, sy(1)));
+  /** @param {Role} role @param {number} left @param {number} right @param {number} height */
+  const draw = (role, left, right, height) => {
+    const cut = clipBar(left, right, sy(0), sy(height), rect);
+    if (cut) parts[role].push(bar(cut.left, cut.right, cut.base, cut.top));
+    return cut;
+  };
   for (const [i, count] of edited.counts.entries()) {
     const left = sx(edges[i]);
     const right = sx(edges[i + 1]);
@@ -309,15 +439,17 @@ function pitScene(editedBody, originalBody, box, highlight) {
     // The fitted model's bar takes the left half of its bin's.
     if (original) {
       const middle = (left + right) / 2;
-      parts.original.push(bar(start, middle, sy(0), sy(share(original, i))));
+      draw("original", start, middle, share(original, i));
       start = middle;
     }
-    const y = sy(share(edited, i));
     const outside = count < edited.band_lower || count > edited.band_upper;
-    parts[highlight && outside ? "outside" : "edited"].push(bar(start, right - gap, sy(0), y));
+    const cut = draw(highlight && outside ? "outside" : "edited", start, right - gap, share(edited, i));
+    // A bar is read out at the middle of the part of its bin in view, at its top or the plot's.
+    const [inLeft, inRight] = [Math.max(left, rect.left), Math.min(right, rect.right)];
+    if (!cut || inRight < inLeft) continue;
     marks.push({
-      x: (left + right) / 2,
-      y,
+      x: (inLeft + inRight) / 2,
+      y: cut.top,
       text: `${fmt(edges[i])} to ${fmt(edges[i + 1])} · ${fmtCount(count)} values`
         + ` · band ${fmtCount(edited.band_lower)} to ${fmtCount(edited.band_upper)}`
     });
@@ -325,12 +457,13 @@ function pitScene(editedBody, originalBody, box, highlight) {
   /** @type {Label[]} */
   const labels = [];
   if (!box.thumb) {
-    frame(parts, labels, rect,
-      niceTicks(edges[0], edges[edges.length - 1], 4).map((v) => [sx(v), fmt(v)]),
-      niceTicks(0, top, 4).map((v) => [sy(v), fmt(v)]),
+    const xs = niceTicks(x0, x1, 4);
+    const ys = niceTicks(domain.y[0], domain.y[1], 4);
+    const [xText, yText] = [tickTexts(xs), tickTexts(ys)];
+    frame(parts, labels, rect, xs.map((v, i) => [sx(v), xText[i]]), ys.map((v, i) => [sy(v), yText[i]]),
       { x: "Cumulative probability", y: "Count over expected", xGrid: false });
   }
-  return finish(box, parts, labels, marks);
+  return finish(box, parts, labels, marks, zoomFrame(rect, base, domain, false));
 }
 
 /** @param {AETable} table @param {number} i */
@@ -352,13 +485,20 @@ const aeDrawn = (table, i) => [table.ratio[i], table.lower[i], table.upper[i]].e
 
 /**
  * One A/E panel: the reference at 1, the weight bars along its foot, and each group's ratio
- * with its interval; the fitted model's beside it when compared.
+ * with its interval; the fitted model's beside it when compared. A ratio outside `domain` is not
+ * drawn, and an interval is cut to the panel.
  * @param {Parts} parts @param {Label[]} labels @param {Mark[]} marks @param {Rect} rect
  * @param {[number, number]} domain @param {AETable} table @param {AETable|null} original @param {Box} box
  * @param {boolean} highlight
  */
 function aePanel(parts, labels, marks, rect, domain, table, original, box, highlight) {
   const sy = linear(domain[0], domain[1], rect.bottom, rect.top);
+  const inDomain = between(...domain);
+  /** @param {number} x @param {number} lower @param {number} upper @returns {string|null} an interval cut to the panel */
+  const interval = (x, lower, upper) => {
+    const [foot, head] = [sy(lower), sy(upper)];
+    return foot < rect.top || head > rect.bottom ? null : vline(x, Math.min(foot, rect.bottom), Math.max(head, rect.top));
+  };
   const k = table.ratio.length;
   const slot = (rect.right - rect.left) / k;
   // Each model bins its own predicted Mean, so each series sits at its own groups' ordinals.
@@ -366,13 +506,14 @@ function aePanel(parts, labels, marks, rect, domain, table, original, box, highl
   const shift = (/** @type {AETable} */ t) => (original ? Math.min(COMPARE_SHIFT, ((rect.right - rect.left) / t.ratio.length) * 0.15) : 0);
   const heaviest = Math.max(0, ...table.weight.filter(Number.isFinite));
   const r = radius(box);
-  parts.reference.push(hline(rect.left, rect.right, sy(1)));
+  if (inDomain(1)) parts.reference.push(hline(rect.left, rect.right, sy(1)));
   if (original) {
     for (const i of original.ratio.keys()) {
       if (!aeDrawn(original, i)) continue;
       const x = at(original, i) - shift(original);
-      parts["original-interval"].push(vline(x, sy(original.lower[i]), sy(original.upper[i])));
-      parts.original.push(dot(x, sy(original.ratio[i]), r));
+      const line = interval(x, original.lower[i], original.upper[i]);
+      if (line) parts["original-interval"].push(line);
+      if (inDomain(original.ratio[i])) parts.original.push(dot(x, sy(original.ratio[i]), r));
     }
   }
   for (let i = 0; i < k; i++) {
@@ -385,7 +526,9 @@ function aePanel(parts, labels, marks, rect, domain, table, original, box, highl
     const x = centre + shift(table);
     const y = sy(table.ratio[i]);
     const outside = table.lower[i] > 1 || table.upper[i] < 1;
-    parts.interval.push(vline(x, sy(table.lower[i]), sy(table.upper[i])));
+    const line = interval(x, table.lower[i], table.upper[i]);
+    if (line) parts.interval.push(line);
+    if (!inDomain(table.ratio[i])) continue;
     parts[highlight && outside ? "outside" : "edited"].push(dot(x, y, r));
     const group = aeGroup(table, i);
     const values = ` · ${fmt(table.ratio[i])} · interval ${fmt(table.lower[i])} to ${fmt(table.upper[i])}`
@@ -395,9 +538,10 @@ function aePanel(parts, labels, marks, rect, domain, table, original, box, highl
     marks.push(shown === group ? mark : { ...mark, aria: `${table.covariate} ${group}${values}` });
   }
   if (box.thumb) return;
-  for (const v of niceTicks(domain[0], domain[1], 4)) {
-    parts.grid.push(hline(rect.left, rect.right, sy(v)));
-    labels.push({ x: rect.left - 6, y: sy(v) + 4, text: fmt(v), anchor: "end" });
+  const ticks = niceTicks(domain[0], domain[1], 4);
+  for (const [i, text] of tickTexts(ticks).entries()) {
+    parts.grid.push(hline(rect.left, rect.right, sy(ticks[i])));
+    labels.push({ x: rect.left - 6, y: sy(ticks[i]) + 4, text, anchor: "end" });
   }
   const names = Array.from({ length: k }, (_, i) => (table.levels ? String(table.levels[i]) : String(i + 1)));
   // Every `every`-th group is named, so the names do not run into each other.
@@ -411,9 +555,9 @@ function aePanel(parts, labels, marks, rect, domain, table, original, box, highl
 
 /**
  * @param {CheckBody} editedBody @param {CheckBody|null} originalBody @param {Box} box
- * @param {boolean} highlight @returns {Scene}
+ * @param {Draw} draw @returns {Scene}
  */
-function aeScene(editedBody, originalBody, box, highlight) {
+function aeScene(editedBody, originalBody, box, { highlight, domain: asked }) {
   const edited = /** @type {AEStats} */ (/** @type {unknown} */ (editedBody));
   const original = originalBody && /** @type {AEStats} */ (/** @type {unknown} */ (originalBody));
   // A thumbnail draws the predicted-Mean bands alone.
@@ -424,8 +568,10 @@ function aeScene(editedBody, originalBody, box, highlight) {
   for (const t of pairs.flatMap((pair) => (pair.original ? [pair.table, pair.original] : [pair.table]))) {
     for (const i of t.ratio.keys()) if (aeDrawn(t, i)) values.push(t.ratio[i], t.lower[i], t.upper[i]);
   }
-  // One scale for every panel, so their ratios read alike.
-  const domain = span(values);
+  // One scale for every panel, so their ratios read alike; a zoom moves it in every panel at once.
+  /** @type {Domain} */
+  const base = { x: null, y: span(values) };
+  const domain = fitDomain(asked, base);
   const cols = box.thumb ? 1 : Math.min(2, tables.length);
   const rows = Math.ceil(tables.length / cols);
   const outer = box.thumb
@@ -441,24 +587,40 @@ function aeScene(editedBody, originalBody, box, highlight) {
   const labels = [];
   /** @type {Mark[]} */
   const marks = [];
+  /** @type {Plot[]} */
+  const plots = [];
   for (const [k, { table, original: fitted }] of pairs.entries()) {
     const left = outer.left + (k % cols) * (cellW + PANEL_GAP.col);
     const top = outer.top + Math.floor(k / cols) * (cellH + PANEL_GAP.row);
     const rect = box.thumb
       ? outer
       : { left: left + PANEL_MARGIN.left, top: top + PANEL_MARGIN.top, right: left + cellW, bottom: top + cellH - PANEL_MARGIN.bottom };
-    aePanel(parts, labels, marks, rect, domain, table, fitted, box, highlight);
+    aePanel(parts, labels, marks, rect, domain.y, table, fitted, box, highlight);
+    plots.push({ rect, x: null, y: [rect.bottom, rect.top] });
   }
   labels.push({ x: 8, y: MARGIN.top - 14, text: "Actual over expected", anchor: "start", axis: true });
   marks.sort((a, b) => a.x - b.x);
-  return finish({ ...box, height }, parts, labels, marks);
+  return finish({ ...box, height }, parts, labels, marks, { base, domain, plots, square: false });
+}
+
+/**
+ * The ticks of a log10 share axis from `lo` to `hi`: its decades when it spans two, else round
+ * shares inside it.
+ * @param {number} lo @param {number} hi @returns {number[]} log10 shares
+ */
+function logTicks(lo, hi) {
+  /** @type {number[]} */
+  const decades = [];
+  for (let j = Math.ceil(lo); j <= Math.floor(hi); j++) decades.push(j);
+  if (decades.length >= 2) return decades;
+  return niceTicks(10 ** lo, 10 ** hi, 4).filter((v) => v > 0).map(Math.log10).filter(between(lo, hi));
 }
 
 /**
  * @param {CheckBody} editedBody @param {CheckBody|null} originalBody @param {Box} box
- * @param {boolean} highlight @returns {Scene}
+ * @param {Draw} draw @returns {Scene}
  */
-function calibrationScene(editedBody, originalBody, box, highlight) {
+function calibrationScene(editedBody, originalBody, box, { highlight, domain: asked }) {
   const edited = /** @type {CalibrationStats} */ (/** @type {unknown} */ (editedBody));
   const original = originalBody && /** @type {CalibrationStats} */ (/** @type {unknown} */ (originalBody));
   const q = edited.quantiles;
@@ -466,28 +628,45 @@ function calibrationScene(editedBody, originalBody, box, highlight) {
   if (original) shares.push(...original.quantiles.realised_exceedance);
   const [lo, hi] = span(shares.filter((v) => v > 0).map(Math.log10));
   const rect = plotRect(box);
-  // A share of zero has no log: it gets its own row at the foot, below the least positive share.
+  // x is the quantile's index, each in a slot of its own; y the log10 share.
+  /** @type {Domain} */
+  const base = { x: [-0.5, q.p.length - 0.5], y: [lo, hi] };
+  const domain = fitDomain(asked, base);
+  const [x0, x1] = /** @type {[number, number]} */ (domain.x);
+  // A share of zero has no log: it gets its own row at the foot, below the least positive share,
+  // and keeps it at any zoom.
   const zero = shares.includes(0);
-  const sy = linear(lo, hi, rect.bottom - (zero ? ZERO_ROW[box.thumb ? "thumb" : "view"] : 0), rect.top);
+  const shareFoot = rect.bottom - (zero ? ZERO_ROW[box.thumb ? "thumb" : "view"] : 0);
+  const sy = linear(domain.y[0], domain.y[1], shareFoot, rect.top);
   const y = (/** @type {number} */ v) => (v === 0 ? rect.bottom : sy(Math.log10(v)));
-  const slot = (rect.right - rect.left) / q.p.length;
-  const xAt = (/** @type {number} */ i) => rect.left + (i + 0.5) * slot;
+  const xAt = linear(x0, x1, rect.left, rect.right);
   const r = radius(box);
+  /** @param {number} x @param {number} v whether a share's point at x is in view */
+  const inView = (x, v) => x >= rect.left - 1e-6 && x <= rect.right + 1e-6
+    && (v === 0 || (y(v) >= rect.top - 1e-6 && y(v) <= shareFoot + 1e-6));
   const parts = emptyParts();
   /** @type {Mark[]} */
   const marks = [];
   const indices = [...q.p.keys()];
-  parts.band.push(`${polyline([
+  const band = clipPolygon([
     ...indices.map((i) => /** @type {[number, number]} */ ([xAt(i), y(edited.band_upper[i])])),
     ...[...indices].reverse().map((i) => /** @type {[number, number]} */ ([xAt(i), y(edited.band_lower[i])]))
-  ])} Z`);
-  parts.reference.push(polyline(indices.map((i) => [xAt(i), y(q.expected[i])])));
+  ], rect);
+  if (band.length > 0) parts.band.push(`${polyline(band)} Z`);
+  const reference = clipPolyline(indices.map((i) => [xAt(i), y(q.expected[i])]), rect);
+  if (reference) parts.reference.push(reference);
   // Both models' points sit at their quantile; the style alone tells them apart.
-  if (original) for (const i of indices) parts.original.push(dot(xAt(i), y(original.quantiles.realised_exceedance[i]), r));
+  if (original) {
+    for (const i of indices) {
+      const v = original.quantiles.realised_exceedance[i];
+      if (inView(xAt(i), v)) parts.original.push(dot(xAt(i), y(v), r));
+    }
+  }
   for (const i of indices) {
     const realised = q.realised_exceedance[i];
     const outside = realised < edited.band_lower[i] || realised > edited.band_upper[i];
     const x = xAt(i);
+    if (!inView(x, realised)) continue;
     parts[highlight && outside ? "outside" : "edited"].push(dot(x, y(realised), r));
     marks.push({
       x,
@@ -499,31 +678,34 @@ function calibrationScene(editedBody, originalBody, box, highlight) {
   /** @type {Label[]} */
   const labels = [];
   if (!box.thumb) {
+    const ticks = logTicks(domain.y[0], domain.y[1]);
     /** @type {Array<[number, string]>} */
-    const decades = [];
-    for (let j = Math.ceil(lo); j <= Math.floor(hi); j++) decades.push([sy(j), fmtPercent(10 ** j)]);
-    if (zero) decades.push([rect.bottom, "0"]);
-    frame(parts, labels, rect, indices.map((i) => [xAt(i), fmtPercent(q.p[i])]), decades,
+    const rows = tickTexts(ticks.map((t) => 10 ** t), fmtPercent).map((text, i) => [sy(ticks[i]), text]);
+    if (zero) rows.push([rect.bottom, "0"]);
+    const columns = indices.filter((i) => xAt(i) >= rect.left - 1e-6 && xAt(i) <= rect.right + 1e-6);
+    frame(parts, labels, rect, columns.map((i) => [xAt(i), fmtPercent(q.p[i])]), rows,
       { x: "Predicted quantile", y: "Share of rows above", xGrid: false });
   }
-  return finish(box, parts, labels, marks);
+  return finish(box, parts, labels, marks, zoomFrame(rect, base, domain, false));
 }
 
-/** @type {Record<CheckReport, (edited: CheckBody, original: CheckBody|null, box: Box, highlight: boolean) => Scene>} */
+/** @type {Record<CheckReport, (edited: CheckBody, original: CheckBody|null, box: Box, draw: Draw) => Scene>} */
 const SCENES = { check_qq: qqScene, check_pit: pitScene, check_ae: aeScene, check_calibration: calibrationScene };
 
 /**
  * A check's plot as a scene in `box`: the edited model, with `compare` the fitted model when the
- * payload carries it, and with `highlight` what lies outside its band in the `outside` role. An
- * unavailable check is an empty scene. A thumbnail has no labels.
+ * payload carries it, and with `highlight` what lies outside its band in the `outside` role, at
+ * `domain` when one is given and else whole. An unavailable check is an empty scene with no zoom.
+ * A thumbnail has no labels.
  * @param {CheckReport} report @param {CheckPayload} payload @param {Box} box
  * @param {SceneOptions} options
  * @returns {Scene}
  */
 export function checkScene(report, payload, box, options) {
   const { edited, original } = payload.models;
-  if (!payload.available || !edited.available) return finish(box, emptyParts(), [], []);
-  return SCENES[report](edited, options.compare && original?.available ? original : null, box, options.highlight);
+  if (!payload.available || !edited.available) return finish(box, emptyParts(), [], [], null);
+  return SCENES[report](edited, options.compare && original?.available ? original : null, box,
+    { highlight: options.highlight, domain: options.domain ?? null });
 }
 
 /**
