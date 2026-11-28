@@ -6,6 +6,7 @@ import copy
 import dataclasses
 import functools
 import json
+import math
 import threading
 import tracemalloc
 from pathlib import Path
@@ -34,7 +35,11 @@ from superglm.distributional.kernels.generalized_pareto import (
     GeneralizedParetoInitializationWarning,
 )
 from superglm.distributional.posterior import PosteriorDraws, posterior_parameters
-from superglm.distributional.residuals import compute_residuals, replication_sample
+from superglm.distributional.residuals import (
+    _PROBABILITY_CEILING,
+    compute_residuals,
+    replication_sample,
+)
 from superglm.editor import EditorSession, checks
 from superglm.editor import widget as widget_module
 from superglm.editor.checks import (
@@ -60,6 +65,7 @@ from superglm.stats import (
     monte_carlo_level,
     order_statistic_level,
 )
+from tests._beta_tail_oracle import log_beta_tail, mp
 
 SEED = 20261127
 #: ``.fit`` holds each smooth's penalty fixed, so each smooth names its own.
@@ -386,6 +392,120 @@ def test_a_band_that_lets_everything_in_flags_nothing(wrong, monkeypatch):
     # The open band's edges are infinite on the normal scale, and JSON has no infinity.
     assert body["band_lower"][0] is None and body["band_upper"][-1] is None
     json.dumps(body, allow_nan=False)
+
+
+def _far_misfit(rows: int) -> tuple[Any, EvaluationDataset]:
+    """An intercept-only GaussianLS fitted to twenty standard normals, read on ``rows``
+    responses of 100: every response lies far above every predicted quantile."""
+    family = GaussianLS()
+    y = np.random.default_rng(123).normal(size=20)
+    lss = SuperLSS(family, family.location(), family.scale()).fit(
+        pd.DataFrame({"x": np.zeros(20)}), y
+    )
+    return lss, _validation(pd.DataFrame({"x": np.zeros(rows)}), np.full(rows, 100.0))
+
+
+def test_levels_below_float64s_range_still_flag_a_far_misfit():
+    """Ten thousand responses of 100 against a fit to twenty normals: at 500 held-out rows per
+    fitted row the replicates' Q-Q and quantile calibration levels fall below float64's range.
+
+    Each level is read in logs, and each check leaves its band at exactly the cells and points
+    whose log tail is below it. Quantile calibration's tails have the closed form
+    ``n log(1 - p)``, since every response exceeds every quantile. Q-Q's are each order
+    statistic's upper tail at the clipped transform, read to 60 digits. The band each body draws
+    is the band it counts, and its extreme Q-Q edges are finite. Demonstration: at a71b72274
+    both levels were 0 and neither check flagged. Mutation checks: reading Q-Q's or quantile
+    calibration's level from the probabilities alone, dropping the continued fraction, or mapping the edges
+    to the normal scale through their probabilities, which underflow, each fails it.
+    """
+    lss, held = _far_misfit(10_000)
+    replicates = null_replicates(lss, held, inputs=[])
+    least_normal = math.log(np.finfo(np.float64).tiny)
+    bodies = {}
+    for report in ("check_qq", "check_calibration"):
+        body = check_body(report, lss, held, inputs=[], replicates=replicates)
+        level = replicates.log_levels[report]
+        assert replicates.levels[report] == 0.0 and level < least_normal
+        assert body["local_level"] is None and body["log_local_level"] == level
+        assert body["flagged"]
+        json.dumps(body, allow_nan=False)
+        bodies[report] = body
+
+    calibration = bodies["check_calibration"]
+    tails = len(held.y) * np.log1p(-np.asarray(QUANTILE_GRID))
+    beyond = tails < calibration["log_local_level"]
+    shares = np.asarray(calibration["quantiles"]["realised_exceedance"])
+    drawn = (shares < np.asarray(calibration["band_lower"])) | (
+        shares > np.asarray(calibration["band_upper"])
+    )
+    np.testing.assert_array_equal(drawn, beyond)
+    assert calibration["outside"] == np.count_nonzero(beyond) == 9
+
+    qq = bodies["check_qq"]
+    n, level = qq["n"], qq["log_local_level"]
+    assert np.all(np.asarray(qq["observed"]) == special.ndtri(_PROBABILITY_CEILING))
+    # Order statistic ``n + 1 - m`` leaves upward when ``log 2 + log P(Bin(n, 1 - u) >= m)`` is
+    # below the level; the tail falls with ``m``, so past ``m = 100`` every one leaves.
+    with mp.workdps(60):
+        above = 1 - mp.mpf(_PROBABILITY_CEILING)
+    tails = np.array([math.log(2.0) + log_beta_tail(m, n + 1 - m, above) for m in range(1, 101)])
+    assert tails[-1] < level
+    expected = n - 100 + int(np.count_nonzero(tails < level))
+    observed = np.asarray(qq["observed"])
+    low = np.array([-np.inf if v is None else v for v in qq["band_lower"]])
+    high = np.array([np.inf if v is None else v for v in qq["band_upper"]])
+    assert qq["outside"] == expected == np.count_nonzero((observed < low) | (observed > high))
+    # No edge is infinite. The extreme order statistics, ``Beta(1, n)`` and ``Beta(n, 1)``, have
+    # edges at ``x = 1 - (1 - p / 2)^(1 / n)`` from either end, ``p / (2 n)`` to float64 here.
+    edge = -special.ndtri_exp(level - math.log(2.0 * n))
+    assert np.all(np.isfinite(low)) and np.all(np.isfinite(high))
+    assert low[0] == pytest.approx(-edge, rel=1e-12) and high[-1] == pytest.approx(edge, rel=1e-12)
+
+
+def test_a_pit_level_below_float64s_range_is_read_and_drawn_in_logs():
+    """Barnard's rule reads PIT's level from its statistics' logs once five replicates' levels
+    underflow to 0, and the body draws its band at that log cut.
+
+    The band's counts are the least ``k`` with ``log P(X <= k) >= cut`` and the least with
+    ``log P(X > k) < cut``, each tail read to 60 digits, for twenty thousand rows of 100, every
+    one in the last bin. Mutation checks: reading the level from the probabilities alone draws
+    the band at 0, which holds every count; comparing SciPy's tails with ``exp(cut)`` does the
+    same.
+    """
+    rng = np.random.default_rng(3)
+    logs = np.r_[-rng.uniform(800.0, 3000.0, 5), np.log(rng.uniform(1e-30, 1.0, 94))]
+    probabilities = np.exp(logs)
+    scores = checks._Scores(
+        transforms=np.sort(rng.uniform(size=(99, 30)), axis=1),
+        statistics={"check_pit": probabilities, "check_calibration": None, "check_ae": None},
+        counts=np.zeros((99, 20), dtype=np.int64),
+        totals={},
+        log_statistics={"check_pit": logs, "check_calibration": None},
+    )
+    levels, log_levels, refused = scores.levels()
+    assert levels["check_pit"] == 0.0 and not refused
+    assert log_levels == {"check_pit": np.sort(logs)[4]}
+
+    lss, held = _far_misfit(20_000)
+    cut = -900.0
+    replicates = checks.NullReplicates(
+        levels={"check_pit": 0.0}, n_draws=99, seed=42, log_levels={"check_pit": cut}
+    )
+    body = check_body("check_pit", lss, held, inputs=[], replicates=replicates)
+    assert body["local_level"] is None and body["log_local_level"] == cut
+    trials, share = len(held.y), mp.mpf(1) / 20
+    lower, upper = int(body["band_lower"]), int(body["band_upper"])
+
+    def at_most(k):
+        return log_beta_tail(trials - k, k + 1, 1 - share)
+
+    def above(k):
+        return log_beta_tail(k + 1, trials - k, share)
+
+    assert at_most(lower) >= cut > at_most(lower - 1)
+    assert above(upper) < cut <= above(upper - 1)
+    counts = np.asarray(body["counts"])
+    assert body["outside"] == np.count_nonzero((counts < lower) | (counts > upper)) == 20
 
 
 def test_a_law_without_finite_variance_has_no_ae_interval(heavy_gpd):
@@ -946,7 +1066,7 @@ def test_a_held_out_split_reads_each_level_from_99_replicates(calm):
     replicates = null_replicates(calm.lss, calm.validation, inputs=["x", "g"])
     assert (replicates.n_draws, replicates.seed, replicates.note) == (99, 42, None)
     fields = [field.name for field in dataclasses.fields(replicates)]
-    assert fields == ["levels", "n_draws", "seed", "note"]
+    assert fields == ["levels", "n_draws", "seed", "note", "log_levels"]
     assert all(type(replicates.levels[report]) is float for report in CHECK_REPORTS)
     statistics = _replicate_statistics(
         checks._scored_replicates(calm.lss, calm.validation, inputs=["x", "g"])

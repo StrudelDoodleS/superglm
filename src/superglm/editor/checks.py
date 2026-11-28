@@ -44,7 +44,7 @@ import contextlib
 import functools
 import math
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, NamedTuple
 
@@ -89,8 +89,12 @@ from superglm.editor.lss.validation import lss_split_reason
 from superglm.editor.lss.view import LSSModelView, column_of, is_lss, lss_key
 from superglm.model.base import NoPredictedMeanError
 from superglm.stats.bands import (
+    _LOG_BELOW,
     _binomial_cell_levels,
+    _frozen,
+    _log_band_lower,
     _monte_carlo_order_statistic_level,
+    _stored_median,
     band_at_level,
     bonferroni_binomial_band,
     equal_local_levels_band,
@@ -243,7 +247,7 @@ def _answered(body: dict[str, Any], *, outside: int, cells: int) -> dict[str, An
 
 
 def qq_from_residuals(
-    quantile: NDArray[np.float64], *, local_level: float | None = None
+    quantile: NDArray[np.float64], *, local_level: float | None = None, log: bool = False
 ) -> dict[str, Any]:
     """The Q-Q body of the quantile residuals ``quantile``, in any order.
 
@@ -253,15 +257,27 @@ def qq_from_residuals(
     level of :func:`superglm.stats.equal_local_levels_band`. ``index`` names
     the order statistics the body sends: ``QQ_DISPLAY_POINTS`` evenly spaced,
     the ``10`` lowest and highest and every one outside the band.
+
+    With ``log``, ``local_level`` is the level's natural log. Below twice the
+    least normal float each edge is found in logs and mapped to the normal
+    scale from its log (``ndtri_exp``), so an edge float64 cannot place as a
+    probability is still drawn where it is. The body then sends that log as
+    ``log_local_level`` and ``local_level`` as ``None``.
     """
     z = np.sort(np.asarray(quantile, dtype=np.float64).ravel())
     n = len(z)
-    band = (
-        equal_local_levels_band(n, alpha=CHECK_ALPHA)
-        if local_level is None
-        else band_at_level(n, local_level, alpha=CHECK_ALPHA)
-    )
-    lower, upper = special.ndtri(band.lower), special.ndtri(band.upper)
+    if log and local_level < math.log(_LOG_BELOW):
+        lower = special.ndtri_exp(_log_band_lower(n, local_level))
+        upper, median = -lower[::-1], _frozen(_stored_median(n))
+        stated = _level_fields(local_level, log=True)
+    else:
+        band = (
+            equal_local_levels_band(n, alpha=CHECK_ALPHA)
+            if local_level is None
+            else band_at_level(n, math.exp(local_level) if log else local_level, alpha=CHECK_ALPHA)
+        )
+        lower, upper, median = special.ndtri(band.lower), special.ndtri(band.upper), band.median
+        stated = _level_fields(float(band.local_level), log=False)
     outside = (z < lower) | (z > upper)
     spaced = np.rint(np.linspace(0, n - 1, min(n, QQ_DISPLAY_POINTS))).astype(np.intp)
     ends = np.r_[np.arange(min(_QQ_ENDS, n)), np.arange(max(n - _QQ_ENDS, 0), n)]
@@ -269,9 +285,9 @@ def qq_from_residuals(
     body = {
         "n": n,
         "alpha": CHECK_ALPHA,
-        "local_level": float(band.local_level),
+        **stated,
         "index": index,
-        "theoretical": special.ndtri(band.median[index]),
+        "theoretical": special.ndtri(median[index]),
         "observed": z[index],
         "band_lower": lower[index],
         "band_upper": upper[index],
@@ -279,13 +295,19 @@ def qq_from_residuals(
     return _answered(body, outside=int(np.count_nonzero(outside)), cells=n)
 
 
+def _level_fields(level: float, *, log: bool) -> dict[str, float | None]:
+    """A body's level: ``local_level``, or below float64's range its natural log as
+    ``log_local_level``, with ``local_level`` ``None``."""
+    return {"local_level": None, "log_local_level": level} if log else {"local_level": level}
+
+
 def _pit_body(residuals: Any, level: _Level) -> dict[str, Any]:
     payload = pit_payload(residuals, n_bins=PIT_BINS, alpha=CHECK_ALPHA / PIT_BINS)
     body = {**payload.to_json(), "alpha": CHECK_ALPHA, "local_level": CHECK_ALPHA / (2 * PIT_BINS)}
-    cut = level.value
+    cut, log = level.band_level()
     if cut is not None:
-        lower, upper = bonferroni_binomial_band(payload.n_rows, 1.0 / PIT_BINS, cut=cut)
-        body.update(band_lower=float(lower), band_upper=float(upper), local_level=cut)
+        lower, upper = bonferroni_binomial_band(payload.n_rows, 1.0 / PIT_BINS, cut=cut, log=log)
+        body.update(band_lower=float(lower), band_upper=float(upper), **_level_fields(cut, log=log))
     counts = payload.counts
     outside = int(np.count_nonzero((counts < body["band_lower"]) | (counts > body["band_upper"])))
     return _answered({**body, **level.fields()}, outside=outside, cells=PIT_BINS)
@@ -309,12 +331,12 @@ def _calibration_body(
     table = payload.quantiles
     p = table["p"].to_numpy(dtype=np.float64)
     trials = np.rint(table["weight"].to_numpy(dtype=np.float64))
-    cut = level.value
+    cut, log = level.band_level()
     if cut is None:
         low, high = bonferroni_binomial_band(trials, 1.0 - p, alpha=CHECK_ALPHA)
         cut = CHECK_ALPHA / (2 * len(QUANTILE_GRID))
     else:
-        low, high = bonferroni_binomial_band(trials, 1.0 - p, cut=cut)
+        low, high = bonferroni_binomial_band(trials, 1.0 - p, cut=cut, log=log)
     with np.errstate(divide="ignore", invalid="ignore"):
         band_lower, band_upper = low / trials, high / trials
     shares = table["realised_exceedance"].to_numpy(dtype=np.float64)
@@ -326,7 +348,7 @@ def _calibration_body(
         },
         "band_lower": band_lower,
         "band_upper": band_upper,
-        "local_level": cut,
+        **_level_fields(cut, log=log),
         "calibration_law": payload.calibration_law,
         **level.fields(),
     }
@@ -451,11 +473,20 @@ class _Level(NamedTuple):
 
     ``value`` is the level the check's replicates give, or ``None`` for the known-parameter
     level; ``note`` is the page's sentence when a held-out split keeps that level.
+    ``log_value`` is the level's natural log where it lies below twice the least normal float,
+    and ``None`` elsewhere.
     """
 
     value: float | None
     n_draws: int
     note: str | None
+    log_value: float | None = None
+
+    def band_level(self) -> tuple[float | None, bool]:
+        """The level a band is drawn at, and whether it is a natural log."""
+        if self.log_value is not None:
+            return self.log_value, True
+        return self.value, False
 
     def fields(self) -> dict[str, Any]:
         simulated = self.value is not None
@@ -479,7 +510,12 @@ def _level(
         return _Level(None, 0, None)
     if replicates is None:
         replicates = null_replicates(model, dataset, inputs=inputs, fitted=fitted)
-    return _Level(replicates.levels.get(report), replicates.n_draws, replicates.note)
+    return _Level(
+        replicates.levels.get(report),
+        replicates.n_draws,
+        replicates.note,
+        replicates.log_levels.get(report),
+    )
 
 
 def _body(
@@ -514,7 +550,8 @@ def _body(
         if report == "check_qq":
             found = level()
             quantile = _sample_residuals(residuals, seed=CHECK_SEED).quantile
-            return {**qq_from_residuals(quantile, local_level=found.value), **found.fields()}
+            cut, log = found.band_level()
+            return {**qq_from_residuals(quantile, local_level=cut, log=log), **found.fields()}
         if report == "check_pit":
             return _pit_body(residuals, level())
         return _calibration_body(fitted, dataset, y, residuals, level())
@@ -603,19 +640,27 @@ class NullReplicates:
     reach, or for a check whose level could not be formed). It is ``None`` when every check
     that answers was simulated, when the known level is the right one (the rows the model was
     fitted on), or when no check can answer. Nothing simulated leaves ``n_draws`` 0.
+
+    ``log_levels`` maps Q-Q, PIT and quantile calibration to the natural log of their level
+    where it lies below twice the least normal float, read by Barnard's rule from the
+    statistics' logs. ``levels`` then holds float64's rounding of it, zero or a subnormal, and
+    the band is drawn at the log. Every other check maps to ``None``.
     """
 
     levels: Mapping[str, float | None]
     n_draws: int
     seed: int
     note: str | None = None
+    log_levels: Mapping[str, float | None] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        floats = {
-            report: None if (level := self.levels.get(report)) is None else float(level)
-            for report in CHECK_REPORTS
-        }
-        object.__setattr__(self, "levels", MappingProxyType(floats))
+        for name in ("levels", "log_levels"):
+            given = getattr(self, name)
+            floats = {
+                report: None if (level := given.get(report)) is None else float(level)
+                for report in CHECK_REPORTS
+            }
+            object.__setattr__(self, name, MappingProxyType(floats))
 
 
 class _Split(NamedTuple):
@@ -841,17 +886,20 @@ def _ae_statistics(tables: list[_AETable], totals: NDArray) -> NDArray[np.float6
 class _Scores(NamedTuple):
     """What the replicates give: each replicate's sorted transforms the Q-Q plot reads, a
     ``(replicates, n)`` block; each other check's statistic per replicate, or ``None`` where it
-    has none; each replicate's PIT histogram; and each actual-over-expected table's
-    ``(replicates, cells)`` actual totals by name."""
+    has none; each replicate's PIT histogram; each actual-over-expected table's
+    ``(replicates, cells)`` actual totals by name; and the natural logs of the PIT and quantile
+    calibration statistics."""
 
     transforms: NDArray[np.float64]
     statistics: dict[str, NDArray[np.float64] | None]
     counts: NDArray[np.int64]
     totals: dict[str, NDArray[np.float64]]
+    log_statistics: dict[str, NDArray[np.float64] | None]
 
-    def levels(self) -> tuple[dict[str, float | None], bool]:
-        """Each check's level by Barnard's rule at ``CHECK_ALPHA``, Q-Q's read exactly, and
-        whether some check's level could not be formed.
+    def levels(self) -> tuple[dict[str, float | None], dict[str, float], bool]:
+        """Each check's level by Barnard's rule at ``CHECK_ALPHA``, Q-Q's read exactly; the
+        natural log of each level below twice the least normal float, read by the same rule
+        from the statistics' logs; and whether some check's level could not be formed.
 
         Each level is selected on its own: a check whose replicate statistics give no finite
         level (one undefined, too few replicates) has none, and the others keep theirs.
@@ -870,13 +918,24 @@ class _Scores(NamedTuple):
                     alpha=CHECK_ALPHA,
                     larger_is_extreme=report == "check_ae",
                 )
+        in_logs = {
+            "check_qq": functools.partial(
+                _monte_carlo_order_statistic_level, self.transforms, alpha=CHECK_ALPHA, log=True
+            )
+        }
+        for report, values in self.log_statistics.items():
+            if values is not None:
+                in_logs[report] = functools.partial(monte_carlo_level, values, alpha=CHECK_ALPHA)
         levels: dict[str, float | None] = dict.fromkeys(self.statistics)
+        log_levels: dict[str, float] = {}
         for report, select in selections.items():
             with contextlib.suppress(ValueError):
                 level = select()
                 levels[report] = level if math.isfinite(level) else None
+                if report in in_logs and level < _LOG_BELOW:
+                    log_levels[report] = in_logs[report]()
         refused = any(levels.get(report) is None for report in selections)
-        return levels, refused
+        return levels, log_levels, refused
 
 
 def _scores(
@@ -925,16 +984,17 @@ def _scores(
 
     # Binned as ``pit_payload`` bins the split, one replicate at a time.
     pit = np.stack([np.histogram(row, bins=PIT_BINS, range=(0.0, 1.0))[0] for row in read])
-    calibration = None
+    calibration = log_calibration = None
     if randomised:
         # A family with an atom reads quantile calibration on the randomised transform.
         exceeded = np.column_stack([np.count_nonzero(read > p, axis=1) for p in grid])
-        calibration = _binomial_cell_levels(exceeded, read.shape[1], 1.0 - grid)
+        calibration, log_calibration = _cell_statistics(exceeded, read.shape[1], 1.0 - grid)
     elif thresholds is not None:
-        calibration = _binomial_cell_levels(exceeded, occurrences, 1.0 - grid)
+        calibration, log_calibration = _cell_statistics(exceeded, occurrences, 1.0 - grid)
     read.sort(axis=1)
+    pit_levels, log_pit_levels = _cell_statistics(pit, read.shape[1], 1.0 / PIT_BINS)
     statistics = {
-        "check_pit": _binomial_cell_levels(pit, read.shape[1], 1.0 / PIT_BINS),
+        "check_pit": pit_levels,
         "check_calibration": calibration,
         "check_ae": _ae_statistics(tables, totals) if tables else None,
     }
@@ -942,7 +1002,18 @@ def _scores(
         table.check.covariate: totals[:, start:end]
         for table, start, end in zip(tables, starts[:-1], starts[1:], strict=True)
     }
-    return _Scores(read, statistics, pit, by_table)
+    log_statistics = {"check_pit": log_pit_levels, "check_calibration": log_calibration}
+    return _Scores(read, statistics, pit, by_table, log_statistics)
+
+
+def _cell_statistics(
+    counts: NDArray, trials: Any, probability: NDArray[np.float64]
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Each replicate's binomial cell level and its natural log."""
+    return (
+        _binomial_cell_levels(counts, trials, probability),
+        _binomial_cell_levels(counts, trials, probability, log=True),
+    )
 
 
 def _replicates(
@@ -1038,12 +1109,13 @@ def null_replicates(
         return nothing
     except _NotSampled as unsampled:
         return NullReplicates(levels={}, n_draws=0, seed=int(seed), note=unsampled.note)
-    levels, refused = scores.levels()
+    levels, log_levels, refused = scores.levels()
     return NullReplicates(
         levels=levels,
         n_draws=count,
         seed=int(seed),
         note=_UNSIMULATED_ROWS if refused or not split.complete else None,
+        log_levels=log_levels,
     )
 
 
