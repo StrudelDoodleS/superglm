@@ -130,7 +130,7 @@ test("Help for every check is in neutral words", () => {
 test("each check has its Help entry ending the same way, and Compare with the fit its own two sentences", () => {
   const bodies = {
     check_qq: "Each point is a sorted quantile residual against the value it would have if each row's predicted distribution were right. "
-      + "The band holds for every point at once: a model that fits leaves it only 5% of the time, so one point outside is evidence. "
+      + "The band holds for every point at once: a model that fits leaves it about 5% of the time, so one point outside is evidence. "
       + "A curve above the band at the top end means larger values come more often than the model allows. "
       + "Band: equal local levels (Aldor-Noiman et al. 2013; Weine, McPeek and Abney 2023).",
     check_pit: "Each observed value is placed at its own predicted distribution's cumulative probability, and the 20 bars count them. "

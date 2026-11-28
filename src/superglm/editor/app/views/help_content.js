@@ -196,7 +196,7 @@ export const CHECK_HELP = Object.freeze({
   check_qq: Object.freeze({
     title: "Q-Q plot",
     body: "Each point is a sorted quantile residual against the value it would have if each row's predicted "
-      + "distribution were right. The band holds for every point at once: a model that fits leaves it only 5% of "
+      + "distribution were right. The band holds for every point at once: a model that fits leaves it about 5% of "
       + "the time, so one point outside is evidence. A curve above the band at the top end means larger values "
       + "come more often than the model allows. Band: equal local levels (Aldor-Noiman et al. 2013; Weine, "
       + `McPeek and Abney 2023). ${CHECKS_END}`,
