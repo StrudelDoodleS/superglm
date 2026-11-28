@@ -24,7 +24,8 @@ weights replicate rows.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import functools
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Literal, NamedTuple
@@ -41,7 +42,7 @@ from superglm.distributional.checks._aggregate import grouped_ratio
 # One binning rule for the whole suite: an actual-versus-expected table and a
 # binned residual check must cut a covariate the same way or they cannot be read
 # side by side.
-from superglm.distributional.checks.binned import _covariate_bins
+from superglm.distributional.checks.binned import _Binning, _covariate_bins
 from superglm.distributional.family import (
     AtomFamily,
     DefaultPredictionFamily,
@@ -83,6 +84,8 @@ _LOG_SCORE_FLOOR = 1.0e-15
 _QUANTILE_GRID = (0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99)
 #: Default interval levels for coverage.
 _LEVELS = (0.5, 0.8, 0.9, 0.95, 0.99)
+#: Default responses drawn per row where a predictive variance is simulated.
+_VARIANCE_DRAWS = 200
 
 #: Which law interval coverage and quantile calibration were read on.
 CalibrationLaw = Literal["response", "randomised_pit"]
@@ -486,7 +489,7 @@ def actual_expected_check(
     sample_weight: NDArray | None = None,
     n_bins: int = 20,
     offsets: Mapping[str, NDArray] | None = None,
-    n_draws: int = 200,
+    n_draws: int = _VARIANCE_DRAWS,
     seed: int = 42,
 ) -> ActualExpected:
     """Return realised against predicted totals per bin or level of ``covariate``.
@@ -509,16 +512,33 @@ def actual_expected_check(
         raise ValueError("covariate must give one value per row of X")
 
     rows = _retained_rows(fitted, X, y, sample_weight=sample_weight, offsets=offsets)
-    grouped = grouped[rows.positions]
-    binning = _covariate_bins(grouped, n_bins)
-    width = binning.n_groups
-
+    binning = _covariate_bins(grouped[rows.positions], n_bins)
     # A row with no value of a parameter is refused by name: its bin's ratio would read it.
     theta = np.asarray(
         fitted.parameters_from_eta(fitted.predict_eta(rows.frame, offsets=rows.offsets)),
         dtype=np.float64,
     )
-    mean = np.asarray(family.default_prediction(theta), dtype=np.float64)
+    variance = functools.partial(
+        _row_variance, fitted, rows, theta, n_draws=int(n_draws), seed=int(seed)
+    )
+    return _actual_expected(fitted, rows, theta, binning, name=name, variance=variance)
+
+
+def _actual_expected(
+    fitted: Any,
+    rows: _Rows,
+    theta: NDArray[np.float64],
+    binning: _Binning,
+    *,
+    name: str,
+    variance: Callable[[], tuple[NDArray[np.float64], str]],
+) -> ActualExpected:
+    """:func:`actual_expected_check` of the retained ``rows`` at their parameters ``theta``,
+    grouped by ``binning``. ``variance`` returns each row's predictive variance and its law, as
+    :func:`_row_variance` does; it is asked once the group sums are formed, so a caller building
+    several tables of the same rows can compute it once."""
+    width = binning.n_groups
+    mean = np.asarray(fitted.family.default_prediction(theta), dtype=np.float64)
     weights = rows.weights
 
     actual, exposure, _ = grouped_ratio(
@@ -528,15 +548,13 @@ def actual_expected_check(
         weights * rows.response, weights * mean, binning.codes, n_groups=width
     )
 
-    variance, variance_law = _row_variance(
-        fitted, rows, theta, n_draws=int(n_draws), seed=int(seed)
-    )
-    if not np.all(np.isfinite(variance) & (variance >= 0.0)):
+    row_variance, variance_law = variance()
+    if not np.all(np.isfinite(row_variance) & (row_variance >= 0.0)):
         raise ValueError(
             "actual-versus-expected standard errors require finite nonnegative predictive variance"
         )
     with np.errstate(over="ignore", invalid="ignore"):
-        weighted_variance = weights * variance
+        weighted_variance = weights * row_variance
         if rows.semantics == "prior":
             weighted_variance = weights * weighted_variance
         total_variance = np.bincount(binning.codes, weights=weighted_variance, minlength=width)

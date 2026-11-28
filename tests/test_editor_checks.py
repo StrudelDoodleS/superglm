@@ -29,11 +29,13 @@ from superglm import (
     SuperGLM,
     SuperLSS,
     TweedieLSS,
+    TwoPieceNormalLSS,
     bind_predictor,
     cat,
     s,
     ti,
 )
+from superglm.distributional.checks import calibration
 from superglm.distributional.kernels.generalized_pareto import (
     GeneralizedParetoInitializationWarning,
 )
@@ -47,6 +49,7 @@ from superglm.editor import EditorSession, checks
 from superglm.editor import widget as widget_module
 from superglm.editor.checks import (
     CHECK_REPORTS,
+    CHECK_SEED,
     QUANTILE_GRID,
     check_body,
     check_inputs,
@@ -580,6 +583,62 @@ def test_text_backed_numbers_are_grouped_as_numbers():
     assert text["tables"] == numbers["tables"]
 
 
+def test_a_value_in_a_row_the_split_ignores_is_never_read_as_a_number():
+    """A zero-weight row holds text in a numeric input. Actual over expected reads only the rows
+    the split keeps, as the other three checks and the replicates do, so every check answers as
+    on the kept rows alone. Mutation check: converting the whole column raises ``ValueError``
+    on the text."""
+    family = GaussianLS()
+    x = np.linspace(-1.0, 1.0, 100)
+    y = 10.0 + np.random.default_rng(123).normal(size=100)
+    lss = SuperLSS(family, family.location(s("x", k=5)), family.scale()).fit(
+        pd.DataFrame({"x": x}), y, lambdas={"location:x#wiggle": 1.0}
+    )
+    held = _validation(
+        pd.DataFrame({"x": [0, 0.5, "unused"]}), np.full(3, 10.0), np.array([1.0, 1.0, 0.0])
+    )
+    kept = _validation(pd.DataFrame({"x": [0.0, 0.5]}), np.full(2, 10.0))
+    for report in CHECK_REPORTS:
+        body = check_body(report, lss, held, inputs=["x"])
+        assert body["available"] and body == check_body(report, lss, kept, inputs=["x"]), report
+
+
+def test_each_rows_variance_is_simulated_once_for_every_table(monkeypatch):
+    """A two-piece normal has a quantile function but no closed-form variance, so actual over
+    expected simulates each row's predictive variance. Every table reads the same rows at the
+    same seed, so the body draws them once for its band table and its two input tables, and each
+    table's interval is the library's own. Mutation check: drawing per table draws three times."""
+    family = TwoPieceNormalLSS()
+    rng = np.random.default_rng(SEED)
+    X = pd.DataFrame({"x": rng.uniform(0.0, 1.0, 300), "g": rng.choice(GROUPS, 300)})
+    y = rng.normal(size=300)
+    lss = SuperLSS(
+        family, family.location(s("x", k=5), cat("g")), family.scale(), family.skew()
+    ).fit(X.iloc[:200], y[:200], lambdas={"location:x#wiggle": LAMBDA})
+    held = EvaluationDataset(
+        name="train", label="Train", X=X.iloc[200:].reset_index(drop=True), y=y[200:]
+    )
+    drawn = []
+    library = calibration.posterior_predictive
+
+    def counted(*args, **kwargs):
+        drawn.append(args[2])
+        return library(*args, **kwargs)
+
+    monkeypatch.setattr(calibration, "posterior_predictive", counted)
+    body = check_body("check_ae", lss, held, inputs=["x", "g"])
+    assert body["available"] and [t["covariate"] for t in body["tables"]] == [
+        "predicted Mean",
+        "x",
+        "g",
+    ]
+    assert drawn == [200]
+    for table in body["tables"][1:]:
+        name = table["covariate"]
+        alone = lss.actual_expected(held.X, held.y, name, n_bins=10, seed=CHECK_SEED)
+        assert table["ratio_se"] == alone.to_json()["ratio_se"]
+
+
 def test_an_infinite_predicted_mean_has_no_expected_total():
     """An intercept-only Lomax fit whose shape is below one predicts an infinite Mean on every
     row, so actual over expected has no expected total: it answers unavailable with the page's
@@ -690,7 +749,7 @@ def test_an_error_that_is_not_about_variance_still_raises(calm, monkeypatch):
     def broken(*args, **kwargs):
         raise ValueError("covariate must give one value per row of X")
 
-    monkeypatch.setattr(checks, "actual_expected_check", broken)
+    monkeypatch.setattr(checks, "_actual_expected", broken)
     with pytest.raises(ValueError, match="one value per row"):
         check_body("check_ae", calm.lss, calm.validation, inputs=[])
 
@@ -700,7 +759,7 @@ def test_a_cell_without_spread_is_read_by_neither_the_count_nor_the_replicates(c
     it nor draws its interval, and the replicates' maximum skips it alike. Mutation check:
     counting every cell with a finite SE in the body counts it, and flags it outside.
     """
-    library = checks.actual_expected_check
+    library = checks._actual_expected
 
     def spreadless(*args, **kwargs):
         table = library(*args, **kwargs)
@@ -710,7 +769,7 @@ def test_a_cell_without_spread_is_read_by_neither_the_count_nor_the_replicates(c
         ratio[0], se[0] = 3.0, 0.0
         return dataclasses.replace(table, ratio=ratio, ratio_se=se)
 
-    monkeypatch.setattr(checks, "actual_expected_check", spreadless)
+    monkeypatch.setattr(checks, "_actual_expected", spreadless)
     body = check_body("check_ae", calm.lss, calm.validation, inputs=["x", "g"])
     by_g = body["tables"][2]
     assert by_g["ratio"][0] == 3.0 and by_g["lower"][0] is None and by_g["upper"][0] is None
@@ -923,13 +982,13 @@ def test_a_split_beyond_the_cap_whose_total_overflows_still_simulates_qq_and_pit
     split = dataclasses.replace(weighted.validation, y=y, sample_weight=counts)
     assert np.sum(counts) == 104_000_000
     built = []
-    library = checks.actual_expected_check
+    library = checks._actual_expected
 
     def counted(*args, **kwargs):
         built.append(kwargs["name"])
         return library(*args, **kwargs)
 
-    monkeypatch.setattr(checks, "actual_expected_check", counted)
+    monkeypatch.setattr(checks, "_actual_expected", counted)
     replicates = null_replicates(weighted.lss, split, inputs=["x", "g"], n_draws=19)
     assert built == []
     for report in ("check_qq", "check_pit"):
@@ -1011,6 +1070,7 @@ def test_the_qq_body_keeps_every_point_outside_the_band():
     )
     assert body["outside"] == len(outside) >= 40
     assert set(outside.tolist()) <= set(body["index"])
+
 
 
 def test_a_held_out_qq_band_left_open_counts_its_edge_as_infinite():

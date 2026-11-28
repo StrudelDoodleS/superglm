@@ -58,10 +58,12 @@ from superglm._frame import EagerFrame, as_eager_frame
 from superglm.distributional.api import SuperLSS
 from superglm.distributional.checks.binned import _covariate_bins
 from superglm.distributional.checks.calibration import (
+    _VARIANCE_DRAWS,
     ActualExpected,
+    _actual_expected,
     _retained_rows,
     _row_law,
-    actual_expected_check,
+    _row_variance,
     calibration_payload,
 )
 from superglm.distributional.checks.pit import pit_payload
@@ -369,21 +371,22 @@ def _calibration_body(
 
 
 def _ae_covariate(column: NDArray, levelled: bool) -> NDArray:
-    """``column`` as actual over expected groups it, read as the fit reads it: by level, as
-    objects, so integer labels sort as numbers and are never cut into ranges; otherwise as
-    numbers, so text-backed numbers are cut into ranges and never read as levels."""
+    """``column``'s retained values as actual over expected groups them, read as the fit reads
+    them: by level, as objects, so integer labels sort as numbers and are never cut into
+    ranges; otherwise as numbers, so text-backed numbers are cut into ranges and never read as
+    levels."""
     return np.asarray(column, dtype=object if levelled else np.float64)
 
 
-def _ae_bins(values: NDArray, positions: NDArray[np.intp]) -> int:
-    """``AE_BINS``, or fewer for a numeric covariate with fewer distinct retained values.
+def _ae_bins(values: NDArray) -> int:
+    """``AE_BINS``, or fewer for a numeric covariate with fewer distinct values.
 
     Equal-count edges interpolated between fewer values than bins would leave bins empty.
     """
     array = np.asarray(values)
     if not np.issubdtype(array.dtype, np.number) or array.dtype.kind == "b":
         return AE_BINS
-    return max(1, min(AE_BINS, np.unique(array[positions]).size))
+    return max(1, min(AE_BINS, np.unique(array).size))
 
 
 class _AETable(NamedTuple):
@@ -394,20 +397,11 @@ class _AETable(NamedTuple):
     by: str
 
 
-def _ae_table(fitted, dataset, y, covariate, positions, name: str, by: str) -> _AETable:
-    n_bins = _ae_bins(covariate, positions)
+def _ae_table(fitted, rows, theta, covariate, name: str, by: str, variance) -> _AETable:
+    """The table of the retained ``rows`` by ``covariate``, one value per retained row."""
+    binning = _covariate_bins(covariate, _ae_bins(covariate))
     try:
-        table = actual_expected_check(
-            fitted,
-            dataset.X,
-            y,
-            covariate,
-            name=name,
-            sample_weight=dataset.sample_weight,
-            n_bins=n_bins,
-            offsets=dataset.offset,
-            seed=CHECK_SEED,
-        )
+        table = _actual_expected(fitted, rows, theta, binning, name=name, variance=variance)
     except NoPredictedMeanError:
         raise
     except ValueError as exc:
@@ -419,9 +413,7 @@ def _ae_table(fitted, dataset, y, covariate, positions, name: str, by: str) -> _
         if str(exc) in _OVERFLOWED_SUMS:
             raise CheckUnavailable(_TOTAL_TOO_LARGE) from None
         raise
-    # The cells ``actual_expected_check`` cut, by the same rule on the same retained values.
-    codes = _covariate_bins(np.asarray(covariate)[positions], n_bins).codes
-    return _AETable(table, codes, by)
+    return _AETable(table, binning.codes, by)
 
 
 def _ae_tables(fitted, dataset: EvaluationDataset, y, inputs: Sequence[str]) -> list[_AETable]:
@@ -429,10 +421,12 @@ def _ae_tables(fitted, dataset: EvaluationDataset, y, inputs: Sequence[str]) -> 
     rows = _retained_rows(
         fitted, dataset.X, y, sample_weight=dataset.sample_weight, offsets=dataset.offset
     )
-    theta = fitted.parameters_from_eta(fitted.predict_eta(rows.frame, offsets=rows.offsets))
-    band = np.full(len(y), np.nan)
-    band[rows.positions] = fitted.family.default_prediction(theta)
-    if not np.all(np.isfinite(band[rows.positions])):
+    theta = np.asarray(
+        fitted.parameters_from_eta(fitted.predict_eta(rows.frame, offsets=rows.offsets)),
+        dtype=np.float64,
+    )
+    band = np.asarray(fitted.family.default_prediction(theta), dtype=np.float64)
+    if not np.all(np.isfinite(band)):
         raise CheckUnavailable(_NO_FINITE_MEAN)
     # Each input is grouped as the fit reads it, by level or as a number, whatever its dtype.
     levelled = {
@@ -441,14 +435,22 @@ def _ae_tables(fitted, dataset: EvaluationDataset, y, inputs: Sequence[str]) -> 
         for name, spec in predictor.compiled.specs.items()
         if isinstance(spec, Categorical | OrderedCategorical | RandomEffect)
     }
-    frame = as_eager_frame(dataset.X)
+    # Only the retained rows are read, so a value in a row the split ignores is never parsed.
     covariates = [(band, "predicted Mean", "band")] + [
-        (_ae_covariate(frame.column_array(name), name in levelled), name, "input")
+        (_ae_covariate(rows.frame.column_array(name), name in levelled), name, "input")
         for name in inputs
-        if name in frame.columns
+        if name in rows.frame.columns
     ]
+    # Every table reads the same rows at the same seed, so each row's variance is the same for
+    # all of them: computed once, by the first table once its sums are formed, and kept for
+    # this call alone.
+    variance = functools.cache(
+        functools.partial(
+            _row_variance, fitted, rows, theta, n_draws=_VARIANCE_DRAWS, seed=CHECK_SEED
+        )
+    )
     return [
-        _ae_table(fitted, dataset, y, covariate, rows.positions, name, by)
+        _ae_table(fitted, rows, theta, covariate, name, by, variance)
         for covariate, name, by in covariates
     ]
 
