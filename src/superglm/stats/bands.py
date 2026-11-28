@@ -470,7 +470,10 @@ def _order_statistic_levels(
     An unread point's tail then exceeds ``t``, so each row whose level is at most ``t`` is
     exact, and every other row returns the next float above ``t``, at most its own level. A
     target below the least normal float, where SciPy's tails carry an absolute error, reads
-    every point.
+    every point. With ``log`` the screen, the target and the read are all in logs, and such a
+    target reads the points outside the band at ``2 t`` found in logs: the edges come from
+    Newton's method to about ``1e-10`` of their tail, which the factor two leaves no point to
+    miss.
     """
     count, n = u_sorted.shape
     i = np.arange(1, n + 1, dtype=np.float64)
@@ -487,25 +490,37 @@ def _order_statistic_levels(
         ends = np.broadcast_to([0, n - 1], (len(block), 2))
         points = np.concatenate([ends, largest], axis=1)
         values = np.take_along_axis(block, points, axis=1)
-        bounds[start : start + len(block)] = np.min(_beta_tail_levels(values, i[points], n), axis=1)
+        bounds[start : start + len(block)] = np.min(tails(values, i[points], n), axis=1)
     target = float(np.partition(bounds, min(resolve, count) - 1)[min(resolve, count) - 1])
-    if not target >= _LEAST_NORMAL:
+    if not (target > -math.inf if log else target >= _LEAST_NORMAL):
         return np.concatenate(
             [
                 np.min(tails(u_sorted[start : start + _SCREEN_BLOCK], i, n), axis=1)
                 for start in range(0, count, _SCREEN_BLOCK)
             ]
         )
-    lower, upper = _bounds(n, min(1.0, 2.0 * target))
-    trusted = _edge_levels(lower, upper, i, n) >= _EDGE_MARGIN * target
-    floor = np.nextafter(target, np.inf)
-    levels = np.full(count, math.log(floor) if log else floor)
+    if log and target < math.log(_LEAST_NORMAL):
+        log_lower = _log_band_lower(n, target + math.log(2.0))
+
+        def inside(block: NDArray[np.float64]) -> NDArray[np.bool_]:
+            with np.errstate(divide="ignore"):
+                return (np.log(block) >= log_lower) & (np.log1p(-block) >= log_lower[::-1])
+
+    else:
+        cut = math.exp(target) if log else target
+        lower, upper = _bounds(n, min(1.0, 2.0 * cut))
+        trusted = _edge_levels(lower, upper, i, n) >= _EDGE_MARGIN * cut
+
+        def inside(block: NDArray[np.float64]) -> NDArray[np.bool_]:
+            return (block >= lower) & (block <= upper) & trusted
+
+    levels = np.full(count, np.nextafter(target, np.inf))
     for start in range(0, count, _SCREEN_BLOCK):
         block = u_sorted[start : start + _SCREEN_BLOCK]
-        rows, columns = np.nonzero(~((block >= lower) & (block <= upper) & trusted))
+        rows, columns = np.nonzero(~inside(block))
         least = np.full(len(block), np.inf)
         np.minimum.at(least, rows, tails(block[rows, columns], i[columns], n))
-        exact = least <= (math.log(target) if log else target)
+        exact = least <= target
         levels[start : start + len(block)][exact] = least[exact]
     return levels
 

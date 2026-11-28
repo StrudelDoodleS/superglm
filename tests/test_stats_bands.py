@@ -584,6 +584,27 @@ def test_a_band_at_a_cut_below_float64s_range_holds_the_counts_whose_log_tails_r
     assert above(upper) < log_tail <= above(upper - 1)
 
 
+def test_a_screen_below_float64s_range_resolves_its_rank_in_logs():
+    """Rows far from uniform toward 0 and toward 1, with levels far below float64's range,
+    screened in logs.
+
+    The ``resolve`` smallest log levels are those read from every point, to the bit, and any
+    other is at most its own and above every exact one. Mutation check: upper edges read
+    without reversing the lower ones fail it.
+    """
+    rng = np.random.default_rng(17)
+    power = rng.uniform(4.0, 6.0, size=(20, 1))
+    power[10:] = 1.0 / power[10:]
+    u = np.sort(rng.uniform(size=(20, 2000)) ** power, axis=1)
+    i = np.arange(1, 2001, dtype=np.float64)
+    direct = np.min(bands._log_beta_tail_levels(u, i, 2000), axis=1)
+    assert np.all(direct < math.log(np.finfo(np.float64).tiny))
+    levels = bands._order_statistic_levels(u, resolve=3, log=True)
+    order = np.argsort(direct)
+    np.testing.assert_array_equal(levels[order[:3]], direct[order[:3]])
+    assert np.all(levels <= direct) and np.all(levels[order[3:]] > direct[order[2]])
+
+
 def test_a_level_of_minus_infinity_holds_every_value():
     """A statistic exactly zero has log ``-inf``. Barnard's rule reads ``-inf`` when that many
     replicates tie there, no observed statistic lies below it, and the bands hold everything:
