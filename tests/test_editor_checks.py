@@ -560,6 +560,26 @@ def test_integer_category_labels_are_grouped_by_level():
     assert [t["levels"] for t in integer["tables"]] == [t["levels"] for t in string["tables"]]
 
 
+def test_text_backed_numbers_are_grouped_as_numbers():
+    """A numeric input held as text is fitted as the same numbers, so actual over expected cuts
+    it into the same ranges: groups held out below and above their prediction on either side of
+    zero are flagged alike in both forms. Mutation check: grouping the text column by its dtype
+    makes each of its 200 values a group of one and flags none."""
+    family = GaussianLS()
+    x = np.linspace(-1.0, 1.0, 400)
+    y = 10.0 + np.random.default_rng(123).normal(size=400)
+    lss = SuperLSS(family, family.location(), family.scale(s("x", k=5))).fit(
+        pd.DataFrame({"x": x}), y, lambdas={"scale:x#wiggle": 1.0}
+    )
+    held_x = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 200)})
+    held_y = lss.predict(held_x) + np.where(held_x["x"] < 0.0, -0.8, 0.8)
+    numbers = check_body("check_ae", lss, _validation(held_x, held_y), inputs=["x"])
+    text = check_body("check_ae", lss, _validation(held_x.astype(str), held_y), inputs=["x"])
+    assert numbers["flagged"] and numbers["outside"] > 0
+    assert text["outside"] == numbers["outside"] and text["cells"] == numbers["cells"]
+    assert text["tables"] == numbers["tables"]
+
+
 def test_an_infinite_predicted_mean_has_no_expected_total():
     """An intercept-only Lomax fit whose shape is below one predicts an infinite Mean on every
     row, so actual over expected has no expected total: it answers unavailable with the page's

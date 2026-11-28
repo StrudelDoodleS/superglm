@@ -369,9 +369,10 @@ def _calibration_body(
 
 
 def _ae_covariate(column: NDArray, levelled: bool) -> NDArray:
-    """``column`` as actual over expected groups it: by level, as objects, where the fit reads
-    it as levels, so integer labels sort as numbers and are never cut into ranges."""
-    return np.asarray(column, dtype=object) if levelled else column
+    """``column`` as actual over expected groups it, read as the fit reads it: by level, as
+    objects, so integer labels sort as numbers and are never cut into ranges; otherwise as
+    numbers, so text-backed numbers are cut into ranges and never read as levels."""
+    return np.asarray(column, dtype=object if levelled else np.float64)
 
 
 def _ae_bins(values: NDArray, positions: NDArray[np.intp]) -> int:
@@ -433,7 +434,7 @@ def _ae_tables(fitted, dataset: EvaluationDataset, y, inputs: Sequence[str]) -> 
     band[rows.positions] = fitted.family.default_prediction(theta)
     if not np.all(np.isfinite(band[rows.positions])):
         raise CheckUnavailable(_NO_FINITE_MEAN)
-    # A column the fit reads as levels is grouped by level, whatever its dtype.
+    # Each input is grouped as the fit reads it, by level or as a number, whatever its dtype.
     levelled = {
         name
         for predictor in fitted.compiled_predictors
