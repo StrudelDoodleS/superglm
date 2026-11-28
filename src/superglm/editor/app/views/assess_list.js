@@ -3,6 +3,7 @@
 import { isCheckReport } from "../api/contracts.js";
 import { escapeHTML } from "../format.js";
 import { ASSESS_GROUPS, OVERVIEW_ENTRY, assessEntry } from "../state/assess.js";
+import { defineMachine } from "../state/machine.js";
 
 /** @typedef {import('../api/contracts.js').AppView} AppView */
 /** @typedef {import('../state/assess.js').AssessEntry} AssessEntry */
@@ -17,6 +18,23 @@ import { ASSESS_GROUPS, OVERVIEW_ENTRY, assessEntry } from "../state/assess.js";
 const NO_CHECKS = Object.freeze({ offered: Object.freeze([]), flagged: Object.freeze([]) });
 
 const STEP_KEYS = new Set(["ArrowUp", "ArrowDown", "Home", "End"]);
+
+/**
+ * The list's single tab stop: on the open entry (`current`), or on the row the arrow keys moved
+ * it to (`roving`), which keeps it until an entry is opened, or an offer hides that row.
+ */
+export const LIST_STOP = defineMachine({
+  name: "assess list tab stop",
+  initial: "current",
+  moves: {
+    current: { step: "roving" },
+    roving: { step: "roving", open: "current", hide: "current" },
+  },
+});
+
+/** @typedef {{state: 'current'} | {state: 'roving', id: string}} ListStop */
+/** @type {Readonly<ListStop>} */
+const AT_CURRENT = Object.freeze({ state: "current" });
 
 /**
  * The entry that holds the list's tab stop: the open one, else the Overview.
@@ -90,18 +108,26 @@ function rowsOf(root) {
 }
 
 /**
+ * The entry that holds the tab stop at the open entry: an open check the model does not offer
+ * has no row to hold it, and the Overview does.
+ * @param {AppView} view @param {ListChecks} checks
+ */
+function currentStop(view, checks) {
+  const current = currentEntry(view);
+  return rowHidden(current, checks) ? OVERVIEW_ENTRY.id : current;
+}
+
+/**
  * Draw the list once, then show the checks the model offers, flag those flagged, and mark the
- * entry of `view` current with the single tab stop. The rows stay in place, so focus on one
- * survives.
+ * entry of `view` current. The rows stay in place, so focus on one survives; the tab stop is
+ * the list owner's (`bindAssessList`).
  * @param {HTMLElement} root
  * @param {AppView} view
- * @param {ListChecks} [checks]
+ * @param {ListChecks} checks
  */
-export function renderAssessList(root, view, checks = NO_CHECKS) {
+function renderAssessList(root, view, checks) {
   if (!root.querySelector("[data-assess-entry]")) root.innerHTML = assessListMarkup(view, checks);
   const current = currentEntry(view);
-  // An open check the model does not offer has no row to hold the tab stop; the Overview holds it.
-  const stop = rowHidden(current, checks) ? OVERVIEW_ENTRY.id : current;
   for (const row of root.querySelectorAll("[data-assess-entry]")) {
     if (!(row instanceof HTMLElement)) continue;
     const id = row.dataset.assessEntry ?? "";
@@ -112,7 +138,6 @@ export function renderAssessList(root, view, checks = NO_CHECKS) {
     if (entry) row.setAttribute("aria-label", rowName(entry.label, flagged));
     if (id === current) row.setAttribute("aria-current", "true");
     else row.removeAttribute("aria-current");
-    row.tabIndex = id === stop ? 0 : -1;
   }
   for (const group of root.querySelectorAll("[data-assess-group]")) {
     if (group instanceof HTMLElement) group.hidden = !group.querySelector("[data-assess-entry]:not([hidden])");
@@ -137,13 +162,46 @@ export function stepEntry(ids, from, key) {
 }
 
 /**
- * Wire the list once. An entry is a button, so a click, Enter or Space opens
- * it; the arrows, Home and End move focus and the tab stop with it.
+ * Wire the list once, and own it: `render` draws the rows for the view on screen and the checks
+ * it offers and flags, and the list's tab stop is this owner's alone (`LIST_STOP`). An entry is a
+ * button, so a click, Enter or Space opens it; the arrows, Home and End move focus and the tab
+ * stop with it.
  * @param {HTMLElement} root
  * @param {{onOpen: (view: AppView) => unknown}} handlers
- * @returns {{destroy(): void}}
+ * @returns {{render(view: AppView, checks?: ListChecks): void, stop(): Readonly<ListStop>, destroy(): void}}
  */
 export function bindAssessList(root, { onOpen }) {
+  /** @type {Readonly<ListStop>} */
+  let stop = AT_CURRENT;
+  /** @type {AppView|null} */
+  let view = null;
+  let checks = NO_CHECKS;
+
+  /**
+   * The one writer of the tab stop: `event` moves it to `value`, when the table takes `event` to
+   * `value`'s state, and every row's `tabIndex` is written from it.
+   * @param {'step'|'open'|'hide'|null} event null writes the stop as it is @param {Readonly<ListStop>} value
+   */
+  function move(event, value) {
+    if (event !== null && LIST_STOP.next(stop.state, event) === value.state) stop = value;
+    if (view === null) return;
+    const id = stop.state === "roving" ? stop.id : currentStop(view, checks);
+    for (const row of root.querySelectorAll("[data-assess-entry]")) {
+      if (row instanceof HTMLElement) row.tabIndex = !row.hidden && row.dataset.assessEntry === id ? 0 : -1;
+    }
+  }
+
+  /** @param {AppView} next @param {ListChecks} [offer] */
+  function render(next, offer = NO_CHECKS) {
+    const opened = view !== null && next !== view;
+    view = next;
+    checks = offer;
+    renderAssessList(root, view, checks);
+    if (opened) move("open", AT_CURRENT);
+    else if (stop.state === "roving" && rowHidden(stop.id, checks)) move("hide", AT_CURRENT);
+    else move(null, stop);
+  }
+
   /** @param {EventTarget|null} target */
   const rowOf = (target) => {
     const row = target instanceof Element ? target.closest("[data-assess-entry]") : null;
@@ -165,13 +223,15 @@ export function bindAssessList(root, { onOpen }) {
     const next = stepEntry(rows.map((each) => each.dataset.assessEntry ?? ""), row.dataset.assessEntry ?? "", event.key);
     if (next === null) return;
     event.preventDefault();
-    for (const each of rows) each.tabIndex = each.dataset.assessEntry === next ? 0 : -1;
+    move("step", { state: "roving", id: next });
     rows.find((each) => each.dataset.assessEntry === next)?.focus();
   }
 
   root.addEventListener("click", onClick);
   root.addEventListener("keydown", onKeyDown);
   return Object.freeze({
+    render,
+    stop: () => stop,
     destroy() {
       root.removeEventListener("click", onClick);
       root.removeEventListener("keydown", onKeyDown);

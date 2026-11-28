@@ -272,6 +272,33 @@ def test_a_flagged_check_is_orange_on_its_card_and_in_the_list(checks_page, buil
                 assert dot == orange
 
 
+def test_a_row_the_arrows_reached_keeps_the_tab_stop_when_a_flag_lands(checks_page):
+    """Open Q-Q while its first answer waits, step up the list with an arrow, and let the answer
+    flag Q-Q: the row the arrow reached keeps focus and the single tab stop, and Q-Q is flagged
+    and current. Fails on the unfixed page, where the flag put the tab stop back on Q-Q."""
+    with checks_page() as page:
+        held = hold_requests(page, "**/report")
+        page.locator("#assessTab").click()
+        held.wait(1)
+        page.locator('#assessList [data-assess-entry="check_qq"]').click()
+        page.locator('#checkPanel[data-report="check_qq"]').wait_for(state="visible")
+        page.keyboard.press("ArrowUp")
+        page.unroute("**/report")
+        for route in held:
+            route.continue_()
+        page.locator('#assessList [data-assess-entry="check_qq"][data-flagged="true"]').wait_for(
+            state="attached"
+        )
+        stops = page.evaluate(
+            """() => ({ focused: document.activeElement?.dataset.assessEntry ?? null,
+              stops: [...document.querySelectorAll('#assessList [tabindex="0"]')].map(
+                (row) => row.dataset.assessEntry) })"""
+        )
+        assert stops == {"focused": "diagnose", "stops": ["diagnose"]}
+        current = page.locator('#assessList [aria-current="true"]')
+        assert current.get_attribute("data-assess-entry") == "check_qq"
+
+
 def test_a_flagged_check_stays_orange_while_its_earlier_result_is_kept(checks_page, choose_feature):
     """An edit keeps each check's earlier number on its card while it is asked again, and
     after the update fails; a flagged one keeps its flag and its orange through both."""

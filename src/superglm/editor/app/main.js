@@ -75,7 +75,7 @@ import {
 import { createRiskController } from "./views/risk_controller.js";
 import { defaultRiskLine, renderRiskPanel, riskPlotsHost } from "./views/risk_panel.js";
 import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
-import { bindAssessList, renderAssessList } from "./views/assess_list.js";
+import { bindAssessList } from "./views/assess_list.js";
 import { bindChartFocus } from "./views/chart_focus.js";
 import { bindCheckDrawing } from "./views/check_drawing.js";
 import { moveViewport, splitOf, viewportDomain } from "./chart/check_zoom.js";
@@ -1282,7 +1282,7 @@ function renderAppView(activeView) {
   assessView.dataset.view = activeView;
   // Cross-validation and Smoothing search lay the panel out their own way (cv.css).
   reportPanel.dataset.report = activeView;
-  renderAssessList(assessRows, activeView, assessListChecks(store.getState()));
+  assessList.render(activeView, assessListChecks(store.getState()));
 }
 
 // The checks the model offers, and those of them flagged, as the Assess list shows them.
@@ -2704,7 +2704,8 @@ bindFeatureList(featureListNodes, {
 });
 renderFeatureListState();
 
-bindAssessList(assessRows, { onOpen: showView });
+// The Assess list, and its tab stop, have one owner.
+const assessList = bindAssessList(assessRows, { onOpen: showView });
 // Open in new window shows the open Assess view in one second window; a click
 // again moves that window to the view now open. A notebook cell cannot offer
 // it, and the second window does not offer it again.
@@ -2770,7 +2771,7 @@ new ResizeObserver(() => {
   const { width, height } = checkFrameSize();
   if (`${width}x${height}` !== checkDrawing.size()) renderCheckPanel();
 }).observe(checkFrame);
-renderAssessList(assessRows, store.getState().view.activeView, assessListChecks(store.getState()));
+assessList.render(store.getState().view.activeView, assessListChecks(store.getState()));
 renderOverview();
 
 bindSummarySearch(summarySearch, (query) => {
@@ -3132,7 +3133,7 @@ store.subscribe(
 // The list hides the checks the model does not offer and flags those that left their band.
 store.subscribe(
   (state) => JSON.stringify(assessListChecks(state)),
-  () => renderAssessList(assessRows, store.getState().view.activeView, assessListChecks(store.getState()))
+  () => assessList.render(store.getState().view.activeView, assessListChecks(store.getState()))
 );
 for (const name of REPORT_NAMES) {
   store.subscribe(
