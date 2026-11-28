@@ -148,6 +148,8 @@ _TOTAL_TOO_LARGE = (
     "A group's observed or predicted total is too large to represent, so actual over expected "
     "has no ratio. Rescale the response and refit."
 )
+#: What the library's grouped ratio says when a row's weighted sum term is not finite.
+_OVERFLOWED_SUMS = frozenset({"numerator must be finite", "denominator must be finite"})
 _NO_FINITE_MEAN = (
     "The predicted distribution has no finite Mean at these parameters, "
     "so actual over expected has no expected total."
@@ -408,9 +410,13 @@ def _ae_table(fitted, dataset, y, covariate, positions, name: str, by: str) -> _
     except NoPredictedMeanError:
         raise
     except ValueError as exc:
-        # Only a law without finite variance is a reason; any other error is a fault.
+        # A law without finite variance is a reason, and so is a row's weighted response or
+        # Mean past float64's range: both are finite, so only their product can overflow.
+        # Any other error is a fault.
         if "finite" in str(exc) and "variance" in str(exc):
             raise CheckUnavailable(_NO_VARIANCE) from None
+        if str(exc) in _OVERFLOWED_SUMS:
+            raise CheckUnavailable(_TOTAL_TOO_LARGE) from None
         raise
     # The cells ``actual_expected_check`` cut, by the same rule on the same retained values.
     codes = _covariate_bins(np.asarray(covariate)[positions], n_bins).codes

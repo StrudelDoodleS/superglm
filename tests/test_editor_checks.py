@@ -585,15 +585,18 @@ def test_an_infinite_predicted_mean_has_no_expected_total():
 
 def test_a_total_too_large_to_represent_has_no_ratio():
     """Four held-out responses of 1e308 are each finite, but their total is not, so actual over
-    expected has no ratio and answers unavailable with the page's sentence. Mutation check:
-    without that answer the body reads its null total as available; summing the serialised
-    totals, as before, raised ``TypeError``."""
+    expected has no ratio and answers unavailable with the page's sentence, as it does when a
+    weight takes one row's own term past the range. Mutation check: without that answer the body
+    reads its null total as available, and the weighted row raises ``ValueError``."""
     family = GaussianLS()
     y = np.random.default_rng(123).normal(size=30)
     lss = SuperLSS(family, family.location(), family.scale()).fit(
         pd.DataFrame({"x": np.zeros(30)}), y
     )
     X, held = pd.DataFrame({"x": np.zeros(4)}), np.full(4, 1e308)
+    weighted = SuperLSS(
+        family, family.location(), family.scale(), weight_semantics="frequency"
+    ).fit(pd.DataFrame({"x": np.zeros(40)}), 10.0 + np.random.default_rng(123).normal(size=40))
     unavailable = {
         "available": False,
         "reason": "A group's observed or predicted total is too large to represent, so actual "
@@ -603,6 +606,9 @@ def test_a_total_too_large_to_represent_has_no_ratio():
         "cells": 0,
     }
     assert check_body("check_ae", lss, _validation(X, held), inputs=[]) == unavailable
+    # A weight of two takes one row's own term past the range before any total is summed.
+    doubled = _validation(X, held, sample_weight=np.array([2.0, 1.0, 1.0, 1.0]))
+    assert check_body("check_ae", weighted, doubled, inputs=[]) == unavailable
 
 
 def test_a_family_without_a_predicted_variance_offers_no_ae():
