@@ -4,14 +4,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CHECK_VIEWPORT,
   ZOOM_IN,
   ZOOM_OUT,
-  checkSplitKey,
   fitDomain,
   isWhole,
+  moveViewport,
   panBy,
+  splitOf,
   stepZoom,
-  withCheckZoom,
+  viewportDomain,
   zoomAbout,
   zoomToBox,
 } from "../../src/superglm/editor/app/chart/check_zoom.js";
@@ -119,26 +121,53 @@ test("a held domain is fitted inside a scene's whole one, moved rather than cut"
   assert.ok(!isWhole({ x: [0, 9], y: [-1, 1] }, base));
 });
 
-test("the zoom state's moves: set, replace, clear, and a no-op keeps the map", () => {
-  const empty = {};
-  const one = withCheckZoom(empty, "check_qq", { x: [0, 1], y: [0, 1] });
-  assert.deepEqual(one, { check_qq: { x: [0, 1], y: [0, 1] } });
-  assert.equal(empty.check_qq, undefined);
-  assert.equal(withCheckZoom(one, "check_qq", { x: [0, 1], y: [0, 1] }), one);
-  const two = withCheckZoom(one, "check_ae", { x: null, y: [1, 2] });
-  assert.deepEqual(Object.keys(two).sort(), ["check_ae", "check_qq"]);
-  assert.deepEqual(withCheckZoom(two, "check_qq", null), { check_ae: { x: null, y: [1, 2] } });
-  assert.equal(withCheckZoom(empty, "check_pit", null), empty);
+// The viewport's events, each made on the Q-Q check.
+const ON_TRAIN = { x: [0, 1], y: [0, 1] };
+const VIEWPORT_EVENTS = {
+  zoom: { type: "zoom", split: "train#1", domain: ON_TRAIN },
+  home: { type: "home" },
+  replace: { type: "replace", split: "train#2" },
+};
+
+test("the viewport table: every state and event, each move landing where it says", () => {
+  assert.deepEqual([...CHECK_VIEWPORT.states], ["whole", "zoomed"]);
+  assert.deepEqual([...CHECK_VIEWPORT.events].sort(), Object.keys(VIEWPORT_EVENTS).sort());
+  const held = { whole: {}, zoomed: { check_qq: { state: "zoomed", split: "train#1", domain: { x: [0, 2], y: [0, 2] } } } };
+  for (const state of CHECK_VIEWPORT.states) {
+    for (const type of CHECK_VIEWPORT.events) {
+      const before = held[state];
+      const after = moveViewport(before, "check_qq", VIEWPORT_EVENTS[type]);
+      const target = CHECK_VIEWPORT.next(state, type);
+      if (target === null) assert.strictEqual(after, before, `${state} takes no ${type}`);
+      else assert.equal(after.check_qq?.state ?? "whole", target, `${state} --${type}--> ${target}`);
+    }
+  }
 });
 
-test("the split key names the rows the landed checks read", () => {
-  const evidence = {
-    check_qq: { payload: { split: { name: "validation" } } },
-    check_pit: { payload: null },
-    check_ae: { payload: { split: { name: "validation" } } },
-    check_calibration: { payload: { split: null } },
-  };
-  assert.equal(checkSplitKey(evidence), "validation");
-  assert.equal(checkSplitKey({ ...evidence, check_pit: { payload: { split: { name: "test" } } } }), "test validation");
-  assert.equal(checkSplitKey({}), "");
+test("a zoom, Home and the rows replaced move one check's viewport, and a no-op keeps the map", () => {
+  const one = moveViewport({}, "check_qq", VIEWPORT_EVENTS.zoom);
+  assert.deepEqual(one, { check_qq: { state: "zoomed", split: "train#1", domain: ON_TRAIN } });
+  assert.equal(moveViewport(one, "check_qq", VIEWPORT_EVENTS.zoom), one);
+  // The rows the zoom was made on, read again, replace nothing.
+  assert.equal(moveViewport(one, "check_qq", { type: "replace", split: "train#1" }), one);
+  assert.deepEqual(moveViewport(one, "check_qq", VIEWPORT_EVENTS.replace), {});
+  assert.deepEqual(moveViewport(one, "check_qq", VIEWPORT_EVENTS.home), {});
+  const two = moveViewport(one, "check_ae", { type: "zoom", split: "train#2", domain: { x: null, y: [1, 2] } });
+  // Another check's rows are its own.
+  assert.deepEqual(Object.keys(moveViewport(two, "check_ae", { type: "replace", split: "train#3" })), ["check_qq"]);
+  assert.equal(moveViewport(two, "check_qq", { type: "replace", split: "train#1" }), two);
+});
+
+test("a zoom is drawn only on the rows it was made on, other rows of the same name and size included", () => {
+  const split = (rows_id) => ({ split: { name: "train", label: "Train", n_obs: 200, rows_id } });
+  const before = split(3);
+  const after = split(4);
+  assert.notEqual(splitOf(before), splitOf(after));
+  assert.equal(splitOf(split(3)), splitOf(before));
+  const viewport = { state: "zoomed", split: splitOf(before), domain: ON_TRAIN };
+  assert.equal(viewportDomain(viewport, splitOf(before)), ON_TRAIN);
+  assert.equal(viewportDomain(viewport, splitOf(after)), null);
+  assert.equal(viewportDomain(undefined, splitOf(before)), null);
+  assert.equal(splitOf(null), "");
+  assert.equal(splitOf({ split: null }), "");
 });

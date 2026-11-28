@@ -7,7 +7,7 @@
  * narrower than a 200th of it, as on the Editor chart.
  */
 
-import { CHECK_REPORTS } from "../api/contracts.js";
+import { defineMachine } from "../state/machine.js";
 
 /** @typedef {import('./check_plots.js').Domain} Domain */
 /** @typedef {import('./check_plots.js').Plot} Plot */
@@ -191,32 +191,68 @@ export function panBy(zoom, from, to) {
 }
 
 /**
- * The checks' zoom map with `report` at `domain`, or without it when `domain` is null; the
- * same map when that changes nothing.
- * @param {Readonly<Partial<Record<CheckReport, Domain>>>} map @param {CheckReport} report
- * @param {Domain|null} domain @returns {Readonly<Partial<Record<CheckReport, Domain>>>}
+ * A check's viewport: the whole plot, or zoomed to `domain` on the rows `split` names
+ * (`splitOf`). A zoom holds on those rows alone: a check whose evidence reads other rows is
+ * drawn whole.
+ * @typedef {{state: 'whole'} | {state: 'zoomed', split: string, domain: Domain}} Viewport
  */
-export function withCheckZoom(map, report, domain) {
-  if (domain === null) {
-    if (!(report in map)) return map;
+/**
+ * What moves a viewport: a zoom to `domain` on the rows `split`, the whole plot again (`home`,
+ * which a zoom that settles whole is too), or the rows under its check replaced by `split`.
+ * @typedef {{type: 'zoom', split: string, domain: Domain} | {type: 'home'}
+ *   | {type: 'replace', split: string}} ViewportEvent
+ */
+
+/** A check's viewport's lifecycle; a check the page's map does not hold is whole. */
+export const CHECK_VIEWPORT = defineMachine({
+  name: "check viewport",
+  initial: "whole",
+  moves: {
+    whole: { zoom: "zoomed" },
+    zoomed: { zoom: "zoomed", home: "whole", replace: "whole" },
+  },
+});
+
+/** @type {Readonly<Viewport>} */
+const WHOLE = Object.freeze({ state: "whole" });
+
+/**
+ * The checks' viewports after `event` on `report`'s; the same map where the table takes no such
+ * move, or the move changes nothing. Rows replaced by the very rows a zoom was made on replace
+ * nothing.
+ * @param {Readonly<Partial<Record<CheckReport, Viewport>>>} map @param {CheckReport} report
+ * @param {ViewportEvent} event @returns {Readonly<Partial<Record<CheckReport, Viewport>>>}
+ */
+export function moveViewport(map, report, event) {
+  const viewport = map[report] ?? WHOLE;
+  if (CHECK_VIEWPORT.next(viewport.state, event.type) === null) return map;
+  const zoomedOn = viewport.state === "zoomed" ? viewport.split : null;
+  if (event.type === "replace" && event.split === zoomedOn) return map;
+  if (event.type !== "zoom") {
     const next = { ...map };
     delete next[report];
     return next;
   }
-  const held = map[report];
-  if (held && JSON.stringify(held) === JSON.stringify(domain)) return map;
-  return { ...map, [report]: domain };
+  if (viewport.state === "zoomed" && zoomedOn === event.split
+    && JSON.stringify(viewport.domain) === JSON.stringify(event.domain)) return map;
+  return { ...map, [report]: { state: "zoomed", split: event.split, domain: event.domain } };
 }
 
 /**
- * The splits the checks' payloads read, as one key; empty while none has landed.
- * @param {Readonly<Record<string, {payload: unknown}>>} evidence @returns {string}
+ * The domain a check is drawn at: its viewport's zoom when made on `split`, the rows its evidence
+ * reads, else null, the whole plot.
+ * @param {Viewport|undefined} viewport @param {string} split @returns {Domain|null}
  */
-export function checkSplitKey(evidence) {
-  const names = new Set();
-  for (const report of CHECK_REPORTS) {
-    const payload = /** @type {{split?: {name?: string}|null}|null} */ (evidence[report]?.payload ?? null);
-    if (payload?.split?.name) names.add(payload.split.name);
-  }
-  return [...names].sort().join(" ");
+export function viewportDomain(viewport, split) {
+  return viewport?.state === "zoomed" && viewport.split === split ? viewport.domain : null;
+}
+
+/**
+ * The rows a check's payload reads, as one key: its split's name and the identity of its rows,
+ * so other rows under the same name and size are another key; empty where it reads none.
+ * @param {{split?: {name: string, rows_id?: number}|null}|null} payload @returns {string}
+ */
+export function splitOf(payload) {
+  const split = payload?.split;
+  return split ? `${split.name}#${split.rows_id ?? ""}` : "";
 }

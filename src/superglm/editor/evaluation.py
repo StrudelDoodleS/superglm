@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -18,9 +19,17 @@ _SPLIT_LABELS = {
 }
 
 
+_ROWS_IDS = itertools.count(1)
+
+
 @dataclass(frozen=True)
 class EvaluationDataset:
-    """A user-supplied or retained-data evaluation split."""
+    """A user-supplied or retained-data evaluation split.
+
+    ``rows_id`` names its set of rows: each dataset made takes a new one, and one made again on
+    the same rows passes the old one on (``follow_training_rows``), so a split replaced by other
+    rows under its name, the same size included, reads as another.
+    """
 
     name: str
     label: str
@@ -29,6 +38,7 @@ class EvaluationDataset:
     sample_weight: Any = None
     offset: Any = None
     source: str = "supplied"
+    rows_id: int = field(default_factory=lambda: next(_ROWS_IDS), compare=False, repr=False)
 
     @property
     def n_obs(self) -> int:

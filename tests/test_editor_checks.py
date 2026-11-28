@@ -1206,7 +1206,12 @@ def test_the_report_payload_carries_both_bodies(calm):
         "report": "check_pit",
         "available": True,
         "reason": None,
-        "split": {"name": "validation", "label": "Validation", "n_obs": 200},
+        "split": {
+            "name": "validation",
+            "label": "Validation",
+            "n_obs": 200,
+            "rows_id": calm.validation.rows_id,
+        },
         "compares_edit": False,
         "models": {"edited": edited, "original": None},
     }
@@ -1545,7 +1550,9 @@ def test_each_check_report_answers_with_the_model_as_edited(calm_session):
     for report in CHECK_REPORTS:
         payload = _ask(widget, report)
         assert payload["report"] == report and payload["request_sequence"] == 5
-        assert payload["split"] == {"name": "validation", "label": "Validation", "n_obs": 200}
+        rows_id = calm_session._evaluation_data["validation"].rows_id
+        split = {"name": "validation", "label": "Validation", "n_obs": 200, "rows_id": rows_id}
+        assert payload["split"] == split
         assert payload["compares_edit"] is False and payload["models"]["original"] is None
         assert payload["in_force"] == InForce.of(calm_session).token
         assert payload["models"]["edited"] == check_body(
@@ -1699,6 +1706,37 @@ def test_undo_returns_to_no_comparison(calm_session):
     calm_session.undo()
     payload = _ask(widget, "check_qq")
     assert payload["compares_edit"] is False and payload["models"]["original"] is None
+
+
+def test_a_split_replaced_by_other_rows_of_its_size_names_other_rows(calm):
+    """A train-only session's checks read the training split, which a refit in place on other
+    rows of the same size replaces under the same name and size. The split's ``rows_id`` names
+    the rows, so it moves then and holds through a refit on the same rows: the page keeps a
+    check's zoom on the rows it was made on alone. Fails on the unfixed code, whose split had
+    only its name, label and size, the same before and after.
+    """
+    lss = copy.deepcopy(calm.lss)
+    X, y = calm.train.X, calm.train.y
+    session = EditorSession.from_model(lss, train_data=(X, y))
+    widget = session.widget()
+
+    def refit_and_ask(response) -> dict[str, Any]:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            lss.fit(X, response, lambdas={"mean:x#wiggle": LAMBDA})
+            widget._state()  # the session follows the refit
+        return _ask(widget, "check_pit")["split"]
+
+    try:
+        opened = _ask(widget, "check_pit")["split"]
+        same = refit_and_ask(y)
+        other = refit_and_ask(y[::-1].copy())
+    finally:
+        _close_widgets(session)
+    assert opened["name"] == same["name"] == other["name"] == "train"
+    assert opened["n_obs"] == other["n_obs"] == 600
+    assert same["rows_id"] == opened["rows_id"]
+    assert other["rows_id"] != opened["rows_id"]
 
 
 @pytest.mark.pins_behaviour
@@ -2479,7 +2517,11 @@ def _assess_checks_fixture(calm: Case, wrong: Case, wrong_mean: Case) -> dict[st
         "edited": _reports(edited),
         "train": train,
     }
-    return json.loads(json.dumps(cases, allow_nan=False))
+    fixture = json.loads(json.dumps(cases, allow_nan=False))
+    for payloads in fixture.values():
+        for payload in payloads.values():
+            del payload["split"]["rows_id"]  # an identity within one process, not data
+    return fixture
 
 
 def _assert_close_json(stored: Any, fresh: Any, path: str = "$", scale: float | None = None):

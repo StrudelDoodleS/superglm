@@ -1213,12 +1213,18 @@ def check_report_payload(
 ) -> dict[str, Any]:
     """The ``/report`` payload of ``report``: the edited model's body and the fitted one's.
 
-    ``split`` is ``None`` for a session with no rows to read, whose bodies are unavailable.
+    ``split`` is ``None`` for a session with no rows to read, whose bodies are unavailable; its
+    ``rows_id`` names the rows (``EvaluationDataset.rows_id``), which the page's zoom is kept on.
     """
     split = (
         None
         if dataset is None
-        else {"name": dataset.name, "label": dataset.label, "n_obs": dataset.n_obs}
+        else {
+            "name": dataset.name,
+            "label": dataset.label,
+            "n_obs": dataset.n_obs,
+            "rows_id": dataset.rows_id,
+        }
     )
     return {
         "report": report,

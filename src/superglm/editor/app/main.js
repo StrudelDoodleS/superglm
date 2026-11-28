@@ -1,6 +1,6 @@
 import { canShowContributions, showsRelativity } from "./chart/display.js";
 import { EditorAPIError, editorClient } from "./api/client.js";
-import { REPORT_NAMES, isCheckReport, isReportName, isReportView } from "./api/contracts.js";
+import { CHECK_REPORTS, REPORT_NAMES, isCheckReport, isReportName, isReportView } from "./api/contracts.js";
 import {
   bindPointLens,
   bindPointTooltip,
@@ -78,7 +78,7 @@ import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
 import { bindAssessList, renderAssessList } from "./views/assess_list.js";
 import { bindChartFocus } from "./views/chart_focus.js";
 import { bindCheckDrawing } from "./views/check_drawing.js";
-import { checkSplitKey, withCheckZoom } from "./chart/check_zoom.js";
+import { moveViewport, splitOf, viewportDomain } from "./chart/check_zoom.js";
 import { bindOverview, drawOverview, overviewGroups } from "./views/assess_overview.js";
 import {
   checkPayload,
@@ -1189,7 +1189,11 @@ if (new URLSearchParams(window.location.search).get("test") === "1") {
   window.__superglmTest = Object.freeze({
     setAppBusy,
     mutationStatus: () => store.getState().request.mutation.status,
-    checkZoom: () => store.getState().view.checkZoom,
+    // Each zoomed check's domain as drawn, on the rows its evidence reads.
+    checkZoom: () => Object.fromEntries(CHECK_REPORTS.flatMap((report) => {
+      const domain = checkDomain(store.getState(), report);
+      return domain ? [[report, domain]] : [];
+    })),
     currentImpact: () => selectCurrentTerm(store.getState())?.impact
   });
 }
@@ -1301,6 +1305,11 @@ function checkFrameSize() {
   return { width: checkFrame.clientWidth, height: checkFrame.clientHeight };
 }
 
+// The domain `report` is drawn at: its viewport, on the rows its evidence reads.
+function checkDomain(state, report) {
+  return viewportDomain(state.view.checkViewport[report], splitOf(checkPayload(state.request.evidence[report])));
+}
+
 // Draw the open check from the evidence the page holds; it asks Python for nothing. The check
 // drawing (views/check_drawing.js, bound below) holds what is drawn, and closes when no check is
 // open.
@@ -1325,7 +1334,7 @@ function renderCheckPanel() {
   const payload = checkPayload(evidence);
   const { width, height } = checkFrameSize();
   const drawn = payload?.report === activeView ? payload : null;
-  const domain = state.view.checkZoom[activeView] ?? null;
+  const domain = checkDomain(state, activeView);
   checkDrawing.draw(activeView, drawn, { compare: compare.checked, highlight, width, height, domain });
   renderEvidenceFreshness(evidence, {
     statusNode: checkFreshness,
@@ -2728,13 +2737,25 @@ for (const button of [overviewHighlight, checkHighlight]) {
     actions.patchView({ highlightOutside: !store.getState().view.highlightOutside });
   });
 }
-// A check's zoom is the page's alone: it is kept per check for the session, and nothing asks
-// Python.
-function setCheckZoom(domain) {
+// A check's viewport is the page's alone: it is kept per check for the session, and nothing
+// asks Python. This is its one setter, for a zoom or pan, Home, and the rows under a check
+// replaced.
+function moveCheckViewport(report, event) {
   const { view } = store.getState();
-  if (!isCheckReport(view.activeView)) return;
-  const next = withCheckZoom(view.checkZoom, view.activeView, domain);
-  if (next !== view.checkZoom) actions.patchView({ checkZoom: next });
+  const next = moveViewport(view.checkViewport, report, event);
+  if (next !== view.checkViewport) actions.patchView({ checkViewport: next });
+}
+// The open check's gestures zoom it on the rows its plot is drawn from, and Home shows it whole.
+function setCheckZoom(domain) {
+  const report = store.getState().view.activeView;
+  if (!isCheckReport(report)) return;
+  if (domain === null) {
+    moveCheckViewport(report, { type: "home" });
+    return;
+  }
+  const drawing = checkDrawing.current();
+  if (drawing.state !== "plot" || drawing.report !== report) return;
+  moveCheckViewport(report, { type: "zoom", split: splitOf(drawing.payload), domain });
 }
 // The open check as drawn, with its hover readout, zoom and pan.
 const checkDrawing = bindCheckDrawing(checkNodes, { focus: chartFocus, onZoom: setCheckZoom });
@@ -3082,22 +3103,20 @@ store.subscribe(
 // A zoom draws the open check's plot alone again, from what it was drawn from; with no plot of
 // it drawn, the check is drawn afresh.
 store.subscribe(
-  (state) => (isCheckReport(state.view.activeView) ? state.view.checkZoom[state.view.activeView] ?? null : null),
+  (state) => (isCheckReport(state.view.activeView) ? checkDomain(state, state.view.activeView) : null),
   (domain) => {
     if (!checkDrawing.zoom(store.getState().view.activeView, domain)) renderCheckPanel();
   }
 );
-// The checks' zoom is cleared when the rows they read change.
-let checkZoomSplit = "";
+// A check whose evidence reads other rows than its zoom was made on, a refit on other rows under
+// the split's name included, is shown whole; its full redraw for that evidence ended its gestures.
 store.subscribe(
-  (state) => checkSplitKey(state.request.evidence),
-  (split) => {
-    if (!split) return;
-    if (checkZoomSplit && split !== checkZoomSplit) {
-      checkDrawing.cancel();
-      actions.patchView({ checkZoom: {} });
+  (state) => CHECK_REPORTS.map((report) => splitOf(checkPayload(state.request.evidence[report]))).join(" "),
+  () => {
+    for (const report of CHECK_REPORTS) {
+      const split = splitOf(checkPayload(store.getState().request.evidence[report]));
+      if (split) moveCheckViewport(report, { type: "replace", split });
     }
-    checkZoomSplit = split;
   }
 );
 // A chart hidden by a view or tab change lets the wheel go, once the page has drawn the change.

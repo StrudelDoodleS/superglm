@@ -29,7 +29,7 @@ export function createInitialEditorState(snapshot = null) {
       showUnsmoothed: false,
       compareOriginal: false,
       highlightOutside: false,
-      checkZoom: {},
+      checkViewport: {},
       risks: createRiskProfiles(),
       unsmoothed: {},
       summaryLevelDisplay: "expanded",

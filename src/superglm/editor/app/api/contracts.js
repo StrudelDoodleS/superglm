@@ -497,7 +497,8 @@
  * @property {boolean} available
  * @property {string|null} reason
  * @property {boolean} compares_edit
- * @property {{name:string, label:string, n_obs:number}|null} split
+ * @property {{name:string, label:string, n_obs:number, rows_id:number}|null} split `rows_id` names
+ *   its rows, which another set under the same name and size does not share
  * @property {{edited:CheckBody, original:CheckBody|null}} models
  * @property {number} [model_revision]
  * @property {number|null} [request_sequence]
@@ -594,9 +595,9 @@
  *   beside the edited one; off until turned on
  * @property {boolean} highlightOutside Highlight outside the band: the checks colour what left
  *   its band; off until turned on, and it moves no count or flag
- * @property {Partial<Record<CheckReport, import('../chart/check_plots.js').Domain>>} checkZoom
- *   each zoomed check's domain, kept for the session and cleared when the checks' split changes;
- *   a check not in it is drawn whole
+ * @property {Partial<Record<CheckReport, import('../chart/check_zoom.js').Viewport>>} checkViewport
+ *   each zoomed check's viewport, kept for the session and drawn only on the rows it was made
+ *   on (chart/check_zoom.js); a check not in it is drawn whole
  * @property {RiskProfiles} risks the Explain tab's risks (SuperLSS sessions)
  * @property {Record<string, UnsmoothedEntry>} unsmoothed each term's latest line
  *   or refusal, drawn while its fit is the one in force
