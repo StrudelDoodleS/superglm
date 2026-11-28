@@ -82,8 +82,8 @@ test("a flagged Q-Q draws its outside points in their own role", () => {
   const scene = checkScene("check_qq", FIXTURE.wrong.check_qq, BOX, { compare: false, highlight: true });
   const outside = layer(scene, "outside");
   assert.equal((outside.d.match(/M/g) ?? []).length, FIXTURE.wrong.check_qq.models.edited.outside);
-  // 912 points drawn, 556 of them outside the band.
-  assert.equal((layer(scene, "edited").d.match(/M/g) ?? []).length, 912 - 556);
+  // 918 points drawn, 591 of them outside the band.
+  assert.equal((layer(scene, "edited").d.match(/M/g) ?? []).length, 918 - 591);
 });
 
 test("a wrong Mean flags actual over expected, its groups outside drawn in their own role", () => {
@@ -129,7 +129,7 @@ test("compare draws the model as fitted only when the payload has it", () => {
 });
 
 test("PIT bars read count over expected against the band", () => {
-  // The wrong case: 1000 rows in 20 bins, 50 expected in each, and a band of 28 to 76 values.
+  // The wrong case: 1000 rows in 20 bins, 50 expected in each, and a band of 29 to 75 values.
   const payload = FIXTURE.wrong.check_pit, body = payload.models.edited;
   assert.equal(body.expected, 1000 / 20);
   const scene = checkScene("check_pit", payload, BOX, { compare: false, highlight: true });
@@ -142,16 +142,16 @@ test("PIT bars read count over expected against the band", () => {
     near(base, y(0));
   }
   const [, upper, , lower] = subpaths(layer(scene, "band").d)[0];
-  near(upper, y(76 / 50)); // 1.52
-  near(lower, y(28 / 50)); // 0.56
+  near(upper, y(75 / 50)); // 1.5
+  near(lower, y(29 / 50)); // 0.58
   near(subpaths(layer(scene, "reference").d)[0][1], y(1));
-  // 9 and 23 lie below 28, 84 and 85 above 76: four bars outside.
+  // 9 and 23 lie below 29, 84 and 85 above 75: four bars outside.
   assert.equal(subpaths(layer(scene, "outside").d).length, 4);
 });
 
 test("A/E draws a panel per table with its interval around each ratio", () => {
   const payload = FIXTURE.edited.check_ae, tables = payload.models.edited.tables;
-  // Band 1 of predicted Mean: 36.36 actual over 34.49 expected is 1.054, interval 0.714 to 1.394.
+  // Band 1 of predicted Mean: 36.36 actual over 34.49 expected is 1.054, interval 0.715 to 1.394.
   assert.ok(Math.abs(tables[0].actual[0] / tables[0].expected[0] - tables[0].ratio[0]) < 1e-12);
   const scene = checkScene("check_ae", payload, BOX, { compare: false, highlight: true });
   const references = subpaths(layer(scene, "reference").d);
@@ -310,12 +310,12 @@ test("compare keeps both models' quantile points at their quantile, inside the b
 test("each readout says what its point is, in the stated form", () => {
   const calm = FIXTURE.calm;
   const first = (report) => checkScene(report, calm[report], BOX, { compare: false, highlight: true }).marks;
-  assert.equal(first("check_qq")[0].text, "Rank 1 of 200 · expected -2.7 · observed -2.91 · band -4.84 to -1.71");
-  assert.equal(first("check_pit")[0].text, "0 to 0.05 · 10 values · band 2 to 21");
+  assert.equal(first("check_qq")[0].text, "Rank 1 of 200 · expected -2.7 · observed -2.91 · band -4.63 to -1.76");
+  assert.equal(first("check_pit")[0].text, "0 to 0.05 · 10 values · band 2 to 20");
   const ae = first("check_ae").map((m) => m.text);
-  assert.ok(ae.includes("predicted Mean band 1 · 1.05 · interval 0.714 to 1.39 · 20 rows"), ae.join("\n"));
-  assert.ok(ae.includes("g a · 1.15 · interval 0.94 to 1.36 · 53 rows"), ae.join("\n"));
-  assert.equal(first("check_calibration")[0].text, "Quantile 1% · exceeded by 99% · band 96% to 100%");
+  assert.ok(ae.includes("predicted Mean band 1 · 1.05 · interval 0.715 to 1.39 · 20 rows"), ae.join("\n"));
+  assert.ok(ae.includes("g a · 1.15 · interval 0.94 to 1.35 · 53 rows"), ae.join("\n"));
+  assert.equal(first("check_calibration")[0].text, "Quantile 1% · exceeded by 99% · band 96.5% to 100%");
 });
 
 test("a band edge sent as null is open: the band reaches the plot's edge and no point leaves it there", () => {
@@ -341,7 +341,7 @@ test("a band edge sent as null is open: the band reaches the plot's edge and no 
   assert.equal(body.outside, 0);
   assert.equal(layer(scene, "outside"), undefined);
   assert.equal(layer(scene, "edited").d.match(/M/g).length, body.index.length);
-  assert.equal(scene.marks[0].text, "Rank 1 of 200 · expected -2.7 · observed -2.91 · band −∞ to -1.71");
+  assert.equal(scene.marks[0].text, "Rank 1 of 200 · expected -2.7 · observed -2.91 · band −∞ to -1.76");
   assert.match(scene.marks[last].text, / · band \d\.\d+ to ∞$/);
   assert.equal(layer(checkScene("check_qq", qq, THUMB, options), "outside"), undefined);
 
@@ -353,7 +353,7 @@ test("a band edge sent as null is open: the band reaches the plot's edge and no 
   assert.equal(layer(cal, "outside"), undefined);
   assert.ok(reaches(layer(cal, "band"), cal.marks[0].x, top), "open upper edge at the first quantile");
   assert.ok(reaches(layer(cal, "band"), cal.marks[end].x, bottom), "open lower edge at the last quantile");
-  assert.equal(cal.marks[0].text, "Quantile 1% · exceeded by 99% · band 96% to ∞");
+  assert.equal(cal.marks[0].text, "Quantile 1% · exceeded by 99% · band 96.5% to ∞");
 
   const pit = structuredClone(FIXTURE.calm.check_pit);
   pit.models.edited.band_upper = null;
