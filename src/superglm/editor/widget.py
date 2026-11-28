@@ -949,7 +949,11 @@ class EditorWidget:
                 )
             return bodies
 
-        key = EvidenceKey(source.token, "check", f"{report}:{dataset.name}")
+        # Keyed on the opened model's captured fit too: a request made after a refit in place
+        # names the same edited model, yet compares it with another fit.
+        fitted = repr(_check_signature(reference_fit)).encode()
+        fitted = hashlib.blake2b(fitted, digest_size=16).hexdigest()
+        key = EvidenceKey(source.token, "check", f"{report}:{dataset.name}:{fitted}")
         # Admitted only while its model is in force: a request that fell behind an edit on its
         # way here would otherwise take the lane's one waiting place from the newer request.
         with self._lock:

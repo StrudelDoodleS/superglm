@@ -1715,9 +1715,13 @@ def test_a_fit_replaced_while_its_check_runs_is_never_cached_under_the_old_key(c
 
     def swap_after_hashing(fit):
         signature = real(fit)
-        if not hashed:
+        # The first hash on the check lane, the replicate cache's: the job's key was hashed
+        # from the same captured fit before the job was admitted.
+        on_the_lane = threading.current_thread().name.startswith("superglm-checks")
+        if on_the_lane and not hashed:
             lss._model = swapped  # a refit in place, between the hash and the simulation
-        hashed.append(fit)
+        if on_the_lane:
+            hashed.append(fit)
         return signature
 
     monkeypatch.setattr(widget_module, "_check_signature", swap_after_hashing)
@@ -1833,6 +1837,70 @@ def test_a_comparison_never_mixes_two_fits_of_the_opened_model(refit, calm, monk
         mixed = real_body("check_qq", reference, split, inputs=inputs, replicates=band)
         assert mixed != clean  # the refit's statistics differ, so a mixed body is seen
     finally:
+        lss._model = opened
+        _close_widgets(session)
+
+
+def test_a_request_after_a_refit_of_the_opened_model_shares_no_earlier_work(calm, monkeypatch):
+    """After a structural edit a first check is held in its simulation, the opened model is
+    refitted in place, and a second check arrives for the same edited model. The first answers
+    superseded; the second answers with the opened model's body read from the refit, as a
+    clean calculation on that fit gives. Mutation check: a check job keyed without the opened
+    model's fit lets the second request share the first job and return its body, read from the
+    fit that was replaced.
+    """
+    lss = copy.deepcopy(calm.lss)
+    session = _session(calm._replace(lss=lss))
+    opened = lss._require_fitted()
+    refitted = (
+        _gamma_spec()
+        .fit(calm.train.X.iloc[:400], calm.train.y[:400], lambdas={"mean:x#wiggle": LAMBDA})
+        ._require_fitted()
+    )
+    real_draw, real_body = checks.null_replicates, checks.check_body
+    first = second = None
+    try:
+        widget = session.widget()
+        session.replace_with_knots("mean:x", {"count": 5, "strategy": "uniform"})
+        reference = session.reference_model
+        assert session.model is not reference
+        started, release, _ = _held_simulation(monkeypatch)
+        coordinator = widget._check_evidence
+        real_submit, submitted = coordinator.submit, []
+        second_submitted = threading.Event()
+
+        def submit(key, compute):
+            work = real_submit(key, compute)
+            submitted.append(key)
+            if len(submitted) == 2:
+                second_submitted.set()
+            return work
+
+        monkeypatch.setattr(coordinator, "submit", submit)
+        first = _in_thread(lambda: _ask(widget, "check_qq"))
+        assert started.wait(_STUCK), "the first check never reached its simulation"
+        lss._model = refitted  # a refit in place while the first check is simulated
+        second = _in_thread(lambda: _ask(widget, "check_qq"))
+        assert second_submitted.wait(_STUCK), "the second check never reached the lane"
+        release.set()
+        assert first[1].wait(_STUCK) and second[1].wait(_STUCK), "a check never answered"
+        assert first[2]["value"]["status"] == "superseded"
+        answer = second[2]["value"]
+        assert "status" not in answer and answer["compares_edit"] is True
+        split, inputs = session._evaluation_data["validation"], ["x", "g"]
+        band = real_draw(reference, split, inputs=inputs, fitted=refitted)
+        clean = real_body(
+            "check_qq", reference, split, inputs=inputs, replicates=band, fitted=refitted
+        )
+        assert answer["models"]["original"] == clean
+        band = real_draw(reference, split, inputs=inputs, fitted=opened)
+        stale = real_body(
+            "check_qq", reference, split, inputs=inputs, replicates=band, fitted=opened
+        )
+        assert stale != clean  # the replaced fit's body differs, so a shared job is seen
+    finally:
+        if first is not None or second is not None:
+            release.set()
         lss._model = opened
         _close_widgets(session)
 
