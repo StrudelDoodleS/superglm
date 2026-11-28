@@ -970,7 +970,12 @@ class EditorWidget:
         except SimulationCancelled:  # the widget closed during the simulation
             return _superseded_payload(revision, request_sequence, source.token)
         if outcome.status == "superseded" or outcome.payload is None:
-            return _superseded_payload(revision, request_sequence, source.token)
+            # Another check took the lane's waiting place: while this one's model is in force,
+            # the page asks it again rather than show it failed.
+            with self._lock:
+                given_away = source.describes(self.session) and not self._closing.is_set()
+            answer = _superseded_payload(revision, request_sequence, source.token)
+            return {**answer, "status": "displaced"} if given_away else answer
         with self._lock:
             # The comparison stands only while both of its fits are in force: the edited
             # model's, which ``source`` names, and the opened model's, captured with it.

@@ -382,6 +382,7 @@ const EVIDENCE_EVENTS = /** @type {Record<string, EvidenceEvent>} */ ({
   answer: { type: "answer", revision: 3, inForce: "fit-a", sequence: 1, payload: { value: "new" } },
   fail: { type: "fail", revision: 3, sequence: 1, error: "offline" },
   fail_kept: { type: "fail", revision: 3, sequence: 1, error: "offline" },
+  defer: { type: "defer", revision: 3, sequence: 1 },
   lapse: { type: "lapse", revision: 4 },
   install: { type: "install", revision: 3, inForce: "fit-a", payload: { value: "installed" } }
 });
@@ -438,6 +439,9 @@ test("an evidence answer or failure about another request, model or revision mov
   // A failure lands only at the revision it was asked at, even with its model back in force.
   assert.strictEqual(moveEvidence(updating, failure, undone), updating);
   assert.strictEqual(moveEvidence(updating, { ...failure, sequence: 0 }, snapshot(3)), updating);
+  // So does a request the check lane gave away.
+  assert.strictEqual(moveEvidence(updating, { type: "defer", revision: 3, sequence: 0 }, snapshot(3)), updating);
+  assert.strictEqual(moveEvidence(updating, { type: "defer", revision: 3, sequence: 1 }, later), updating);
   assert.equal(moveEvidence(updating, failure, snapshot(3)).status, "stale");
   // A panel already at the new revision does not lapse.
   assert.strictEqual(moveEvidence(updating, { type: "lapse", revision: 3 }, snapshot(3)), updating);
@@ -855,6 +859,7 @@ test("state modules expose only their requested public symbols", () => {
     "completeEvidence",
     "createEditorStore",
     "createInitialEditorState",
+    "deferEvidence",
     "failEvidence",
     "jobResultsKey",
     "jobResultsMoved",

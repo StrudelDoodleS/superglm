@@ -1865,6 +1865,36 @@ def test_a_newer_check_replaces_the_one_waiting_on_the_check_lane(calm_session, 
     assert drawn == [calm_session.reference_model]
 
 
+def test_a_check_another_window_displaced_from_the_lane_says_so(calm_session, monkeypatch):
+    """While one check runs, a check for another report asked for the same model takes the
+    lane's waiting place from the one waiting there, which answers ``displaced`` for its model
+    still in force, so the page asks it again rather than show it failed. Mutation check: the
+    answer of the old lane, ``superseded``, is the one a model no longer in force gets.
+    """
+    started, release, _ = _held_simulation(monkeypatch)
+    widget = calm_session.widget()
+    submitted, _ = _counted_submits(monkeypatch, widget._check_evidence)
+    token = InForce.of(calm_session).token
+    try:
+        _, running_done, _ = _in_thread(lambda: _ask(widget, "check_qq"))
+        assert started.wait(_STUCK) and submitted.acquire(timeout=_STUCK)
+        _, waiting_done, waiting_answer = _in_thread(lambda: _ask(widget, "check_pit"))
+        assert submitted.acquire(timeout=_STUCK)
+        _, newer_done, newer_answer = _in_thread(lambda: _ask(widget, "check_ae"))
+        assert waiting_done.wait(_STUCK), "the displaced check never answered"
+        assert not running_done.is_set()
+    finally:
+        release.set()
+    assert running_done.wait(_STUCK) and newer_done.wait(_STUCK)
+    assert waiting_answer["value"] == {
+        "status": "displaced",
+        "model_revision": 0,
+        "request_sequence": 5,
+        "in_force": token,
+    }
+    assert newer_answer["value"]["report"] == "check_ae"
+
+
 def test_closing_the_widget_closes_both_lanes(calm_session, monkeypatch):
     """Closed while a check is held, the widget takes no more evidence work, and once the held
     job ends no worker of either lane is left running. Mutation check: a check lane left open

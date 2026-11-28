@@ -6,6 +6,7 @@ import {
   commitRemote,
   commitStructuralTransition,
   completeEvidence,
+  deferEvidence,
   failEvidence,
   lapseReports as lapseReportEvidence,
   normalizeSelectionIndices,
@@ -33,6 +34,11 @@ import {
 /** @typedef {import('../api/contracts.js').EvidencePanel} EvidencePanel */
 /** @typedef {import('../api/contracts.js').MutationDescriptor} MutationDescriptor */
 /** @typedef {import('../api/contracts.js').ReportName} ReportName */
+/**
+ * A report's turn in the queue: who waits for it to end, and how many times the check lane
+ * gave its request away to another window's check.
+ * @typedef {{waiters: ((current:boolean)=>void)[], displaced: number}} ReportTurn
+ */
 /** @typedef {import('./mutation.js').MutationEvent} MutationEvent */
 /** @typedef {import('../api/contracts.js').SummaryPayload} SummaryPayload */
 /** @typedef {import('../api/contracts.js').StructuralActionResult} StructuralActionResult */
@@ -175,6 +181,13 @@ const STRUCTURAL_OUTCOME_UNCERTAIN =
 const STRUCTURAL_REFRESH_INCOMPLETE =
   "The model change completed, but browser refresh was incomplete.";
 const EVIDENCE_DEBOUNCE_MS = 150;
+/** @param {'accepted'|'refused'|'displaced'} outcome whether the answer is the panel's now */
+const accepted = (outcome) => outcome === "accepted";
+// A check the lane gave away to another window's is asked again after a wait that doubles from
+// the debounce up to this, at most this many times, and then waits for Retry.
+const DISPLACED_WAIT_MAX_MS = 4800;
+const DISPLACED_ASKS = 10;
+const DISPLACED_GAVE_UP = "Checks asked by other windows kept this check waiting. Retry to ask again.";
 const NOTE_PATH = "/note";
 const NOTE_NOT_SAVED = "A History note did not save, so the next action did not run.";
 const VIEW_SEND_DELAY_MS = 250;
@@ -209,14 +222,14 @@ export function createEditorActions({
   clearTimer = globalThis.clearTimeout.bind(globalThis)
 }) {
   const evidenceTimers = new Map();
-  // Reports wait here in the order asked, and Python answers them one at a time.
-  /** @type {Set<ReportName>} */
-  const reportQueue = new Set();
+  // Reports wait here in the order asked, and Python answers them one at a time. Each queued
+  // turn holds who waits for it to end; a turn taken from the queue is in flight, and a report
+  // asked again meanwhile queues a turn of its own.
+  /** @type {Map<ReportName, ReportTurn>} */
+  const reportQueue = new Map();
   /** @type {any} */
   let reportTimer = null;
   let reportsDraining = false;
-  /** Who waits for each queued report's turn to end. @type {Map<ReportName, ((current:boolean)=>void)[]>} */
-  const reportWaiters = new Map();
   /** The session key each report was last asked at. @type {Map<ReportName, string>} */
   const reportAskedAt = new Map();
 
@@ -706,16 +719,18 @@ export function createEditorActions({
    * @returns {Promise<boolean>}
    */
   function refreshEvidence(panel, path, payload) {
-    return isCheckReport(panel) ? queueReport(panel) : askEvidence(panel, path, payload);
+    return isCheckReport(panel) ? queueReport(panel) : askEvidence(panel, path, payload).then(accepted);
   }
 
   /**
-   * Send one evidence request now and settle its answer; every panel's request ends here.
+   * Send one evidence request now and settle its answer; every panel's request ends here. A
+   * check the lane gave away to another window's check (`displaced`) is left waiting, for the
+   * queue to ask again.
    *
    * @param {EvidencePanel} panel
    * @param {string} path
    * @param {Record<string, unknown>} payload
-   * @returns {Promise<boolean>}
+   * @returns {Promise<'accepted'|'refused'|'displaced'>}
    */
   async function askEvidence(panel, path, payload) {
     const requestPayload = snapshotPayload(payload);
@@ -759,6 +774,12 @@ export function createEditorActions({
           : response.in_force !== inForce
       );
       if (
+        isCheckReport(panel) && isRecord(response) && response.status === "displaced" &&
+        !forAnotherModel && Number(response.request_sequence) === sequence
+      ) {
+        return "displaced";
+      }
+      if (
         !isRecord(response) ||
         response.status === "superseded" ||
         forAnotherModel ||
@@ -768,7 +789,7 @@ export function createEditorActions({
           ? "Evidence request was superseded. Retry to refresh this panel."
           : "Evidence response did not match the current request. Retry to refresh this panel.";
         store.update((state) => failEvidence(state, panel, revision, sequence, message));
-        return false;
+        return "refused";
       }
       let accepted = false;
       store.update((state) => {
@@ -782,11 +803,11 @@ export function createEditorActions({
         }
         return completed;
       });
-      return accepted;
+      return accepted ? "accepted" : "refused";
     } catch (value) {
       const error = normalizeError(value);
       store.update((state) => failEvidence(state, panel, revision, sequence, error.message));
-      return false;
+      return "refused";
     }
   }
 
@@ -821,26 +842,32 @@ export function createEditorActions({
   }
 
   /**
-   * Ask each queued report in turn, skipping one the page already holds by its turn. Before
-   * the first snapshot the queue waits, and `initialize` resumes it; every caller waiting on a
-   * turn the drain cannot serve is answered false, as a direct request that cannot ask is.
+   * Ask each queued report in turn, skipping one the page already holds by its turn; a turn the
+   * lane displaced asks again for the request it still waits on. Before the first snapshot the
+   * queue waits, and `initialize` resumes it; every caller waiting on a turn the drain cannot
+   * serve is answered false, as a direct request that cannot ask is.
    */
   async function drainReports() {
     if (reportsDraining) return;
     reportsDraining = true;
     try {
       while (reportQueue.size > 0 && store.getState().remote.snapshot !== null) {
-        const [panel] = reportQueue;
+        const [[panel, turn]] = reportQueue;
         reportQueue.delete(panel);
-        if (selectReportNeedsAsk(store.getState(), panel)) {
-          reportAskedAt.set(panel, sessionKey(store.getState().remote.snapshot));
-          await askEvidence(panel, "/report", { report: panel });
+        const state = store.getState();
+        const waiting = turn.displaced > 0 && state.request.evidence[panel].status === "updating";
+        if (!waiting && !selectReportNeedsAsk(state, panel)) {
+          settleTurn(panel, turn);
+          continue;
         }
-        settleReportWaiters(panel);
+        const key = sessionKey(state.remote.snapshot);
+        reportAskedAt.set(panel, key);
+        const outcome = await askEvidence(panel, "/report", { report: panel });
+        if (outcome === "displaced") deferTurn(panel, turn, key);
+        else settleTurn(panel, turn);
       }
       if (store.getState().remote.snapshot === null) {
-        for (const resolve of [...reportWaiters.values()].flat()) resolve(false);
-        reportWaiters.clear();
+        for (const turn of reportQueue.values()) turn.waiters.splice(0).forEach((resolve) => resolve(false));
       }
     } finally {
       reportsDraining = false;
@@ -848,15 +875,60 @@ export function createEditorActions({
   }
 
   /**
-   * Answer each caller waiting on `panel` once its turn is over: whether it is now current.
-   * @param {ReportName} panel
+   * Answer each caller waiting on `panel`'s `turn` once it is over: whether it is now current.
+   * @param {ReportName} panel @param {ReportTurn} turn
    */
-  function settleReportWaiters(panel) {
-    const waiting = reportWaiters.get(panel);
-    if (!waiting) return;
-    reportWaiters.delete(panel);
+  function settleTurn(panel, turn) {
     const current = store.getState().request.evidence[panel].status === "current";
-    for (const resolve of waiting) resolve(current);
+    for (const resolve of turn.waiters.splice(0)) resolve(current);
+  }
+
+  /**
+   * Whether `panel`, whose request the check lane gave away, is still to be asked: the page shows
+   * it, for the model asked at `key`, and nothing else has ended its request.
+   * @param {ReportName} panel @param {string} key
+   */
+  function stillWaiting(panel, key) {
+    const state = store.getState();
+    return sessionKey(state.remote.snapshot) === key && state.request.evidence[panel].status === "updating"
+      && selectVisibleEvidencePanels(state).includes(panel);
+  }
+
+  /**
+   * The check lane gave `panel`'s request, asked at `key`, to another window's check: its turn is
+   * queued again after a wait that doubles each time, while the page still shows the check for
+   * that model, and after `DISPLACED_ASKS` waits the check waits for Retry. A check the page no
+   * longer shows is deferred, to be asked once it is shown; one whose model moved on is the new
+   * model's to ask.
+   * @param {ReportName} panel @param {ReportTurn} turn @param {string} key
+   */
+  function deferTurn(panel, turn, key) {
+    const leave = () => {
+      if (sessionKey(store.getState().remote.snapshot) === key) {
+        const { revision, sequence } = store.getState().request.evidence[panel];
+        store.update((state) => deferEvidence(state, panel, revision ?? -1, sequence));
+      }
+      settleTurn(panel, turn);
+    };
+    if (!stillWaiting(panel, key)) return leave();
+    if (turn.displaced >= DISPLACED_ASKS) {
+      const { revision, sequence } = store.getState().request.evidence[panel];
+      store.update((state) => failEvidence(state, panel, revision ?? -1, sequence, DISPLACED_GAVE_UP));
+      return settleTurn(panel, turn);
+    }
+    const wait = Math.min(EVIDENCE_DEBOUNCE_MS * 2 ** turn.displaced, DISPLACED_WAIT_MAX_MS);
+    setTimer(() => {
+      if (!stillWaiting(panel, key)) return leave();
+      const queued = reportQueue.get(panel);
+      const displaced = turn.displaced + 1;
+      if (queued) {
+        queued.waiters.push(...turn.waiters);
+        queued.displaced = displaced;
+      } else {
+        reportQueue.set(panel, { waiters: turn.waiters, displaced });
+      }
+      void drainReports();
+    }, wait);
   }
 
   /**
@@ -867,7 +939,7 @@ export function createEditorActions({
    * @param {{immediate?:boolean}} [options]
    */
   function scheduleReports(panels, { immediate = false } = {}) {
-    for (const panel of panels) reportQueue.add(panel);
+    for (const panel of panels) queuedTurn(panel);
     if (reportTimer !== null) {
       clearTimer(reportTimer);
       reportTimer = null;
@@ -884,12 +956,25 @@ export function createEditorActions({
   }
 
   /**
-   * Queue `panel` at once and answer, when its turn is over, whether it is current.
+   * `panel`'s queued turn, queued now when it has none.
+   * @param {ReportName} panel @returns {ReportTurn}
+   */
+  function queuedTurn(panel) {
+    const held = reportQueue.get(panel);
+    if (held) return held;
+    /** @type {ReportTurn} */
+    const turn = { waiters: [], displaced: 0 };
+    reportQueue.set(panel, turn);
+    return turn;
+  }
+
+  /**
+   * Queue `panel` at once and answer, when its queued turn is over, whether it is current.
    * @param {ReportName} panel @returns {Promise<boolean>}
    */
   function queueReport(panel) {
     return new Promise((resolve) => {
-      reportWaiters.set(panel, [...(reportWaiters.get(panel) ?? []), resolve]);
+      queuedTurn(panel).waiters.push(resolve);
       scheduleReports([panel], { immediate: true });
     });
   }
@@ -969,7 +1054,7 @@ export function createEditorActions({
   function retryEvidence(panel) {
     const retry = store.getState().request.evidence[panel].retry;
     if (!retry) return Promise.resolve(false);
-    return isReportName(panel) ? queueReport(panel) : askEvidence(panel, retry.path, retry.payload);
+    return isReportName(panel) ? queueReport(panel) : askEvidence(panel, retry.path, retry.payload).then(accepted);
   }
 
   /** @returns {void} */

@@ -489,6 +489,9 @@
 /**
  * A check's /report payload: the model in force (`edited`) and, when it differs from the fit,
  * the fitted model (`original`), both on `split`, which is null for a session with no rows to read.
+ * A request the check lane gave away to another check while its model is still in force is
+ * answered `{status:"displaced", model_revision, request_sequence, in_force}`, which the page asks
+ * again (state/actions.js).
  * @typedef {Object} CheckPayload
  * @property {CheckReport} report
  * @property {boolean} available
