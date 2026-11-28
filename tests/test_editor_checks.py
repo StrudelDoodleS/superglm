@@ -1841,14 +1841,10 @@ def test_a_refit_that_moves_only_the_covariance_is_drawn_again(calm):
         _close_widgets(session)
 
 
-def test_a_fit_with_the_same_arrays_and_another_design_is_drawn_again():
-    """Two Gaussian fits whose training labels and reference levels are swapped have the same
-    design on their training rows, so the same coefficients and covariance, and other designs
-    on the held-out rows. With the caches warm on the first, the second put in force answers
-    each check as a fresh widget does, and so does the opened model refitted in place to a copy
-    of the second's fit. Mutation checks: a simulation read on the signature alone, without the
-    captured fit's identity, serves the first fit's levels; a fitted body read so serves the
-    first fit's body."""
+def _swapped_design_session():
+    """Two Gaussian fits whose training labels and reference levels are swapped, so their
+    training designs, coefficients and covariances are identical and their held-out designs
+    are not, and a session opened on the first."""
     rng = np.random.default_rng(SEED)
     X = pd.DataFrame({"g": rng.choice(["a", "b"], 300)})
     y = np.where(X["g"] == "b", 1.0, 0.0) + rng.standard_normal(300)
@@ -1865,6 +1861,18 @@ def test_a_fit_with_the_same_arrays_and_another_design_is_drawn_again():
         train_data=(fit, y[:200]),
         validation_data=(X.iloc[200:].reset_index(drop=True), y[200:]),
     )
+    return first, second, session
+
+
+def test_a_fit_with_the_same_arrays_and_another_design_is_drawn_again():
+    """Two Gaussian fits whose training labels and reference levels are swapped have the same
+    design on their training rows, so the same coefficients and covariance, and other designs
+    on the held-out rows. With the caches warm on the first, the second put in force answers
+    each check as a fresh widget does, and so does the opened model refitted in place to a copy
+    of the second's fit. Mutation checks: a simulation read on the signature alone, without the
+    captured fit's identity, serves the first fit's levels; a fitted body read so serves the
+    first fit's body."""
+    first, second, session = _swapped_design_session()
     try:
         widget = session.widget()
         before = {report: _ask(widget, report) for report in CHECK_REPORTS}
@@ -2008,6 +2016,51 @@ def test_a_request_after_a_refit_of_the_opened_model_shares_no_earlier_work(calm
         if first is not None or second is not None:
             release.set()
         lss._model = opened
+        _close_widgets(session)
+
+
+def test_a_check_after_a_refit_to_the_same_arrays_and_another_design_shares_no_job(monkeypatch):
+    """The second fit put in force, a first check is held in its simulation, the opened model
+    is refitted in place to a copy of the second's fit, whose arrays equal the first's, and a
+    second check arrives for the same edited model. The two land on separate jobs: the first
+    answers superseded, the second as a fresh widget does. Mutation check: a job key that names
+    the opened model's fit by its signature alone lets the second request share the first job
+    and return the body read from the replaced fit."""
+    first, second, session = _swapped_design_session()
+    opened = first._require_fitted()
+    one = two = None
+    try:
+        widget = session.widget()
+        session.replace_in_force_model(second)
+        started, release, _ = _held_simulation(monkeypatch)
+        coordinator = widget._check_evidence
+        real_submit, submitted = coordinator.submit, []
+        second_submitted = threading.Event()
+
+        def submit(key, compute):
+            work = real_submit(key, compute)
+            submitted.append(key)
+            if len(submitted) == 2:
+                second_submitted.set()
+            return work
+
+        monkeypatch.setattr(coordinator, "submit", submit)
+        one = _in_thread(lambda: _ask(widget, "check_qq"))
+        assert started.wait(_STUCK), "the first check never reached its simulation"
+        first._model = dataclasses.replace(second._require_fitted())  # a refit in place
+        two = _in_thread(lambda: _ask(widget, "check_qq"))
+        assert second_submitted.wait(_STUCK), "the second check never reached the lane"
+        release.set()
+        assert one[1].wait(_STUCK) and two[1].wait(_STUCK), "a check never answered"
+        assert one[2]["value"]["status"] == "superseded"
+        answer = two[2]["value"]
+        assert "status" not in answer and answer["compares_edit"] is True
+        assert answer == _ask(session.widget(), "check_qq")
+        assert submitted[0] != submitted[1]
+    finally:
+        if one is not None or two is not None:
+            release.set()
+        first._model = opened
         _close_widgets(session)
 
 

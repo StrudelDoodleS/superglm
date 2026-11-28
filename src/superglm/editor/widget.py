@@ -44,6 +44,7 @@ from superglm.editor.cv import (
     FinalFit,
     InForce,
     _fit_in_force,
+    _fit_serial,
     capture_cv_run,
     capture_final_fit,
     headline_score,
@@ -952,9 +953,11 @@ class EditorWidget:
             return bodies
 
         # Keyed on the opened model's captured fit too: a request made after a refit in place
-        # names the same edited model, yet compares it with another fit.
+        # names the same edited model, yet compares it with another fit. The fit's identity
+        # joins its signature, which two fits with the same arrays and other designs share.
         fitted = repr(_check_signature(reference_fit)).encode()
         fitted = hashlib.blake2b(fitted, digest_size=16).hexdigest()
+        fitted = f"{_fit_serial(reference_fit)}-{fitted}"
         key = EvidenceKey(source.token, "check", f"{report}:{dataset.name}:{fitted}")
         # Admitted only while its model is in force: a request that fell behind an edit on its
         # way here would otherwise take the lane's one waiting place from the newer request.
