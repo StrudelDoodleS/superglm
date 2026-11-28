@@ -2,9 +2,10 @@
 /**
  * Which chart the mouse wheel works on, as in a notebook's cell outputs: none, until a press
  * inside a chart, or focus reaching it, makes it the active one. A press anywhere else, Escape,
- * or the chart leaving the page lets it go, and the wheel scrolls the page again. At most one
- * chart is active, and it carries `is-wheel-active`, which draws its slight border. The press
- * itself is left to the chart, so selecting and hovering work as before.
+ * the page's window losing focus (a press in the notebook around the editor's frame), the chart
+ * leaving the page, or another chart drawn in its place lets it go, and the wheel scrolls the
+ * page again. At most one chart is active, and it carries `is-wheel-active`, which draws its
+ * slight border. The press itself is left to the chart, so selecting and hovering work as before.
  */
 
 import { defineMachine } from "../state/machine.js";
@@ -27,6 +28,9 @@ export const CHART_FOCUS = defineMachine({
  * @property {(chart: Element, parts?: Element[]) => () => void} register a chart, and the
  *   controls outside it that belong to it (its Home button), which a press on activates it too
  * @property {(chart: Element) => boolean} isActive whether the wheel works on `chart`
+ * @property {(chart: Element, id: string|null) => void} drawn the chart now drawn in `chart` is
+ *   `id`, or none: another chart than the one there before lets the wheel go, and the same one
+ *   drawn again keeps it
  * @property {() => void} sync let go of an active chart that has left the page
  * @property {() => void} destroy
  */
@@ -35,8 +39,9 @@ export const CHART_FOCUS = defineMachine({
 const onPage = (chart) => chart.isConnected && chart.getClientRects().length > 0;
 
 /**
- * Watch `doc` for the presses, focus and Escape that move the wheel focus.
- * @param {Pick<Document, 'addEventListener'|'removeEventListener'>} doc
+ * Watch `doc` for the presses, focus and Escape that move the wheel focus, and its window for
+ * losing focus.
+ * @param {Pick<Document, 'addEventListener'|'removeEventListener'> & {defaultView?: Window|null}} doc
  * @returns {ChartFocus}
  */
 export function bindChartFocus(doc) {
@@ -44,8 +49,9 @@ export function bindChartFocus(doc) {
   let state = CHART_FOCUS.initial;
   /** @type {Element|null} */
   let active = null;
-  /** @type {Map<Element, Element[]>} */
+  /** Each chart's own controls, and which chart it draws, where it says. @type {Map<Element, {parts: Element[], id: string|null}>} */
   const charts = new Map();
+  const view = doc.defaultView ?? null;
 
   /**
    * The one writer of the wheel focus.
@@ -65,7 +71,7 @@ export function bindChartFocus(doc) {
   function chartOf(target, withParts) {
     const node = /** @type {Node|null} */ (target);
     if (!node) return null;
-    for (const [chart, parts] of charts) {
+    for (const [chart, { parts }] of charts) {
       if (chart.contains(node) || (withParts && parts.some((part) => part.contains(node)))) return chart;
     }
     return null;
@@ -88,6 +94,12 @@ export function bindChartFocus(doc) {
     if (/** @type {KeyboardEvent} */ (event).key === "Escape") move("deactivate", null);
   }
 
+  // The window's own blur, not an element's inside it.
+  /** @param {Event} event */
+  function onBlur(event) {
+    if (event.target === view) move("deactivate", null);
+  }
+
   function sync() {
     if (active && !onPage(active)) move("deactivate", null);
   }
@@ -95,9 +107,10 @@ export function bindChartFocus(doc) {
   doc.addEventListener("pointerdown", onPointerDown, true);
   doc.addEventListener("focusin", onFocusIn);
   doc.addEventListener("keydown", onKeyDown);
+  view?.addEventListener("blur", onBlur);
   return {
     register(chart, parts = []) {
-      charts.set(chart, parts);
+      charts.set(chart, { parts, id: null });
       return () => {
         if (active === chart) move("deactivate", null);
         charts.delete(chart);
@@ -107,12 +120,19 @@ export function bindChartFocus(doc) {
       sync();
       return active === chart;
     },
+    drawn(chart, id) {
+      const entry = charts.get(chart);
+      if (!entry || entry.id === id) return;
+      charts.set(chart, { parts: entry.parts, id });
+      if (active === chart) move("deactivate", null);
+    },
     sync,
     destroy() {
       move("deactivate", null);
       doc.removeEventListener("pointerdown", onPointerDown, true);
       doc.removeEventListener("focusin", onFocusIn);
       doc.removeEventListener("keydown", onKeyDown);
+      view?.removeEventListener("blur", onBlur);
     },
   };
 }
