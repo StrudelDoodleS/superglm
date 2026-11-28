@@ -928,15 +928,13 @@ class EditorWidget:
             return _superseded_payload(revision, request_sequence, source.token)
 
         def compute_bodies() -> dict[str, Any]:
-            fitted = _check_signature(reference)
-            replicates = self._check_replicates_for(
-                edited, reference, dataset, inputs, fitted=fitted
-            )
+            replicates = self._check_replicates_for(asked.model, reference, dataset, inputs)
             bodies = {
                 "edited": check_body(report, edited, dataset, inputs=inputs, replicates=replicates),
                 "original": None,
             }
             if compares_edit:
+                fitted = _check_signature(reference)
                 bodies["original"] = self._fitted_check(report, reference, dataset, inputs, fitted)
             return bodies
 
@@ -963,25 +961,23 @@ class EditorWidget:
         }
 
     def _check_replicates_for(
-        self, model, reference, dataset, inputs: tuple[str, ...], *, fitted: tuple[Any, ...]
+        self, fit, reference, dataset, inputs: tuple[str, ...]
     ) -> NullReplicates:
-        """``model``'s one simulation on ``dataset``, shared by its four checks; ``reference`` is
-        the fitted model and ``fitted`` its signature. Run only inside a check job.
+        """``fit``'s one simulation on ``dataset``, shared by its four checks and by every hand
+        edit made on it; ``fit`` is the fitted model in force as captured under the lock, and
+        ``reference`` the opened one. Run only inside a check job.
 
-        A model with the fit's covariance, a hand edit of it, reads the fitted model's
-        simulation: the levels rest on the split, the design and that covariance, and an edit
-        moves none of them. Its bodies still read their own statistics against those levels. A
-        refit has a covariance of its own, and so a simulation of its own.
+        A hand edit keeps its fit's covariance, and the levels rest on the split, the design and
+        that covariance, so an edit reads its fit's levels. Its bodies still read their own
+        statistics against them. A refit has a covariance of its own, and so a simulation of
+        its own, which the hand edits made on it read.
         """
-        signature = _check_signature(model)
-        if signature[1:] == fitted[1:]:
-            model, signature = reference, fitted
-        key = (signature, inputs)
+        key = (_check_signature(fit), inputs)
         for held, held_dataset, replicates in self._check_replicates.values():
             if held == key and held_dataset is dataset:
                 return replicates
-        replicates = null_replicates(model, dataset, inputs=inputs)
-        role = "original" if key[0] == fitted else "edited"
+        replicates = null_replicates(fit, dataset, inputs=inputs)
+        role = "original" if fit is reference else "in_force"
         self._check_replicates[(role, dataset.name)] = (key, dataset, replicates)
         return replicates
 
@@ -993,9 +989,7 @@ class EditorWidget:
         held = self._original_checks.get((report, dataset.name))
         if held is not None and held[0] == (fitted, inputs) and held[1] is dataset:
             return held[2]
-        replicates = self._check_replicates_for(
-            reference, reference, dataset, inputs, fitted=fitted
-        )
+        replicates = self._check_replicates_for(reference, reference, dataset, inputs)
         body = check_body(report, reference, dataset, inputs=inputs, replicates=replicates)
         self._original_checks[(report, dataset.name)] = ((fitted, inputs), dataset, body)
         return body

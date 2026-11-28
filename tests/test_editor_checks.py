@@ -1238,10 +1238,8 @@ def test_a_hand_edit_reads_its_checks_against_the_fitted_models_levels(
 ):
     """A hand edit keeps the fit's covariance, so its checks read the fitted model's simulation
     on the split: the same levels, and its own statistics against them. The Mean's curve made
-    flat leaves every check's band on the validation split, where the fit leaves none. A model
-    with a covariance of its own, as a refit has, is simulated on its own. Mutation checks:
-    simulating each edit again calls the simulation for the edited model; reading the fitted
-    model's simulation for every model gives the refit's none of its own.
+    flat leaves every check's band on the validation split, where the fit leaves none. Mutation
+    check: simulating each edit again calls the simulation for the edited model.
     """
     drawn = []
     real = checks.null_replicates
@@ -1267,11 +1265,35 @@ def test_a_hand_edit_reads_its_checks_against_the_fitted_models_levels(
         assert ours["level_source"] == "simulated" and ours[level] == theirs[level]
         assert ours["flagged"] and ours["outside"] > 0 and not theirs["flagged"]
         assert ours == check_body(report, edited, split, inputs=["x", "g"], replicates=fitted)
-    refit = copy.deepcopy(calm.lss)
-    refit._model = _with_covariance(refit, 9.0)
-    signature = widget_module._check_signature(reference)
-    own = widget._check_replicates_for(refit, reference, split, ("x", "g"), fitted=signature)
-    assert drawn == [reference, refit] and own.levels != fitted.levels
+
+
+def test_a_hand_edit_after_a_refit_reads_the_refits_levels(calm_session, monkeypatch):
+    """A structural refit has a covariance of its own, so one simulation of its own; the hand
+    edits made on it then read that simulation, as edits of the opened fit read the opened
+    fit's. Mutation check: keying the edit's simulation on the opened reference simulates the
+    refit again for every hand edit, with other levels.
+    """
+    drawn = []
+    real = checks.null_replicates
+
+    def counted(*a, **k):
+        drawn.append(a[0])
+        return real(*a, **k)
+
+    monkeypatch.setattr(widget_module, "null_replicates", counted)
+    monkeypatch.setattr(checks, "null_replicates", counted)
+    widget = calm_session.widget()
+    calm_session.replace_with_knots("mean:x", {"count": 5, "strategy": "uniform"})
+    refit, reference = calm_session.model, calm_session.reference_model
+    assert refit is not reference
+    refitted = {report: _ask(widget, report)["models"]["edited"] for report in CHECK_REPORTS}
+    assert sorted(map(id, drawn)) == sorted([id(refit), id(reference)])
+    _average(calm_session, 6)
+    for report in CHECK_REPORTS:
+        ours = _ask(widget, report)["models"]["edited"]
+        level = "z" if report == "check_ae" else "local_level"
+        assert ours["level_source"] == "simulated" and ours[level] == refitted[report][level]
+    assert sorted(map(id, drawn)) == sorted([id(refit), id(reference)])
 
 
 def test_a_split_replaced_under_its_name_is_read_again(calm_session, calm):
