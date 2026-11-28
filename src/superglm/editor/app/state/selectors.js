@@ -61,7 +61,8 @@ const NO_CHECKS = Object.freeze([]);
  * @returns {readonly CheckReport[]}
  */
 export function selectOfferedChecks(state) {
-  const checks = selectSnapshot(state)?.checks;
+  // The snapshot is the server's word, so its list is read as unknown until each name is checked.
+  const checks = /** @type {unknown} */ (selectSnapshot(state)?.checks);
   if (!Array.isArray(checks) || checks.length === 0) return NO_CHECKS;
   return checks.every(isCheckReport) ? checks : checks.filter(isCheckReport);
 }
