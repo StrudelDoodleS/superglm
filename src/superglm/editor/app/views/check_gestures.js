@@ -7,7 +7,8 @@
  * zooms to a box, a drag on a zoomed check pans it, and a double-click, Home or the 0 key shows
  * it whole; + and - zoom about the middle while it has focus. Every gesture asks for one
  * animation frame, which hands the new domain to `onZoom` once; the view draws the check again
- * at it, and nothing asks Python.
+ * at it, and nothing asks Python. While the wheel turns, and through a drag, the gesture is busy
+ * and the hover readout waits; `onRest` says when the wheel has come to rest.
  */
 
 import { ZOOM_IN, ZOOM_OUT, isWhole, panBy, stepZoom, zoomAbout, zoomToBox } from "../chart/check_zoom.js";
@@ -21,6 +22,7 @@ import { ZOOM_IN, ZOOM_OUT, isWhole, panBy, stepZoom, zoomAbout, zoomToBox } fro
  * @property {() => Scene|null} getScene the scene on screen
  * @property {() => boolean} isActive whether the wheel works on this frame
  * @property {(domain: Domain|null) => void} onZoom draw the check at `domain`, or whole for null
+ * @property {() => void} [onRest] the wheel has come to rest
  */
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -28,6 +30,8 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 const KEY_ZOOM = Object.freeze({ "+": ZOOM_IN, "=": ZOOM_IN, "-": ZOOM_OUT, _: ZOOM_OUT });
 // A wheel's lines and pages, in px, for a frame that passes a plain wheel to the page.
 const WHEEL_LINE = 16;
+// How long after its last tick a wheel counts as at rest, as on the Editor chart.
+const WHEEL_REST_MS = 160;
 
 /** @param {WheelEvent} event @param {Element} page @returns {number} the wheel's travel in px */
 const wheelPx = (event, page) => event.deltaY * (event.deltaMode === 1 ? WHEEL_LINE : event.deltaMode === 2 ? page.clientHeight : 1);
@@ -49,8 +53,10 @@ function scrollerAbove(node) {
  * @param {HTMLElement} frame @param {CheckZoomOptions} options
  * @returns {{busy(): boolean, destroy(): void}} `busy` while a drag pans or draws a box
  */
-export function bindCheckZoom(frame, { getScene, isActive, onZoom }) {
+export function bindCheckZoom(frame, { getScene, isActive, onZoom, onRest }) {
   let pending = 0;
+  /** @type {ReturnType<typeof setTimeout>|0} */
+  let turning = 0;
   let factor = 1;
   /** @type {Point} */
   let wheelAt = { x: 0, y: 0 };
@@ -110,6 +116,11 @@ export function bindCheckZoom(frame, { getScene, isActive, onZoom }) {
     event.preventDefault();
     factor *= event.deltaY < 0 ? ZOOM_IN : ZOOM_OUT;
     wheelAt = point;
+    clearTimeout(turning);
+    turning = setTimeout(() => {
+      turning = 0;
+      onRest?.();
+    }, WHEEL_REST_MS);
     schedule();
   }
 
@@ -158,10 +169,12 @@ export function bindCheckZoom(frame, { getScene, isActive, onZoom }) {
   }
 
   function endDrag() {
+    const dragged = Boolean(box || pan);
     box?.node?.remove();
     box = null;
     pan = null;
     delete frame.dataset.panning;
+    if (dragged) onRest?.();
   }
 
   /** @param {PointerEvent} event */
@@ -209,10 +222,12 @@ export function bindCheckZoom(frame, { getScene, isActive, onZoom }) {
   frame.addEventListener("dblclick", onDoubleClick);
   frame.addEventListener("keydown", onKeyDown);
   return {
-    busy: () => Boolean(box || pan),
+    busy: () => Boolean(box || pan || turning),
     destroy() {
       if (pending) cancelAnimationFrame(pending);
       pending = 0;
+      clearTimeout(turning);
+      turning = 0;
       endDrag();
       frame.removeEventListener("wheel", onWheel, wheelOptions);
       frame.removeEventListener("pointerdown", onPointerDown);

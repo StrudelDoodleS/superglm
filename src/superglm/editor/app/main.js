@@ -86,6 +86,7 @@ import {
   compareSwitch,
   differsFromFit,
   flaggedChecks,
+  redrawCheckPlot,
   renderCheckView,
   renderCompareSwitch,
   renderHighlightSwitch
@@ -1302,6 +1303,8 @@ function renderOverview() {
 // drawn at, so a resize redraws it and nothing else does twice.
 let checkView = null;
 let checkDrawnAt = "";
+// What the open check was drawn from, so a zoom draws its plot alone again.
+let checkDrawn = null;
 let checkHover = null;
 
 function checkFrameSize() {
@@ -1327,8 +1330,11 @@ function renderCheckPanel() {
   const payload = checkPayload(evidence);
   const { width, height } = checkFrameSize();
   checkDrawnAt = `${width}x${height}`;
-  checkView = renderCheckView(checkNodes, activeView, payload?.report === activeView ? payload : null,
-    { compare: compare.checked, highlight, domain: state.view.checkZoom[activeView] ?? null, width, height });
+  const drawn = payload?.report === activeView ? payload : null;
+  const options = { compare: compare.checked, highlight, width, height };
+  const domain = state.view.checkZoom[activeView] ?? null;
+  checkView = renderCheckView(checkNodes, activeView, drawn, { ...options, domain });
+  checkDrawn = checkView && drawn ? { report: activeView, payload: drawn, options, domain } : null;
   checkHover?.refresh();
   renderEvidenceFreshness(evidence, {
     statusNode: checkFreshness,
@@ -2743,6 +2749,7 @@ const checkZoom = bindCheckZoom(checkFrame, {
   getScene: () => checkView,
   isActive: () => chartFocus.isActive(checkFrame),
   onZoom: setCheckZoom,
+  onRest: () => checkHover?.refresh(),
 });
 checkHome.addEventListener("click", () => setCheckZoom(null));
 checkHover = bindCheckHover(checkFrame, () => checkView, { busy: checkZoom.busy });
@@ -3080,11 +3087,25 @@ store.subscribe(
     state.view.highlightOutside,
     differsFromFit(state.remote.snapshot),
     selectOfferedChecks(state).join(),
-    isCheckReport(state.view.activeView) ? state.request.evidence[state.view.activeView] : null,
-    isCheckReport(state.view.activeView) ? state.view.checkZoom[state.view.activeView] ?? null : null
+    isCheckReport(state.view.activeView) ? state.request.evidence[state.view.activeView] : null
   ],
   renderCheckPanel,
   (next, previous) => next.length === previous.length && next.every((item, index) => item === previous[index])
+);
+// A zoom draws the open check's plot alone again, from what it was drawn from.
+store.subscribe(
+  (state) => (isCheckReport(state.view.activeView) ? state.view.checkZoom[state.view.activeView] ?? null : null),
+  (domain) => {
+    const report = store.getState().view.activeView;
+    if (checkDrawn?.report === report && checkDrawn.domain === domain) return;
+    if (!checkDrawn || checkDrawn.report !== report) {
+      renderCheckPanel();
+      return;
+    }
+    checkDrawn = { ...checkDrawn, domain };
+    checkView = redrawCheckPlot(checkFrame, report, checkDrawn.payload, { ...checkDrawn.options, domain });
+    checkHover?.refresh();
+  }
 );
 // The checks' zoom is cleared when the rows they read change.
 let checkZoomSplit = "";

@@ -267,6 +267,20 @@ export function renderCheckView(nodes, report, payload, { compare, highlight, do
 }
 
 /**
+ * Draw the plot renderCheckView drew again at another domain, and nothing else: a zoom's
+ * redraw, which leaves the heading, split line, legend and switches as they are.
+ * @param {HTMLElement} frame @param {CheckReport} report @param {CheckPayload} payload
+ * @param {SceneOptions & {width: number, height: number}} options
+ * @returns {Scene}
+ */
+export function redrawCheckPlot(frame, report, payload, { compare, highlight, domain = null, width, height }) {
+  const scene = checkScene(report, payload, { width, height }, { compare, highlight, domain });
+  frame.dataset.zoomed = String(domain !== null);
+  frame.innerHTML = sceneMarkup(scene);
+  return scene;
+}
+
+/**
  * The readout's ring and text, made the first time it shows.
  * @param {Element} group @returns {Element} the text
  */
@@ -352,8 +366,9 @@ export function bindCheckHover(frame, getScene, { busy } = {}) {
 
   const readout = () => frame.querySelector(".check-readout");
 
-  function hide() {
-    pointer = null;
+  // The readout hidden; with `keep`, the pointer kept, to read out again where it is.
+  function hide(keep = false) {
+    if (!keep) pointer = null;
     current = -1;
     const group = readout();
     if (group && !group.hasAttribute("hidden")) group.setAttribute("hidden", "");
@@ -439,11 +454,11 @@ export function bindCheckHover(frame, getScene, { busy } = {}) {
 
   /** @param {PointerEvent} event */
   function onPointerMove(event) {
+    pointer = { x: event.clientX, y: event.clientY };
     if (busy?.()) {
-      hide();
+      hide(true);
       return;
     }
-    pointer = { x: event.clientX, y: event.clientY };
     if (!pending) pending = requestAnimationFrame(onFrame);
   }
 
@@ -479,9 +494,10 @@ export function bindCheckHover(frame, getScene, { busy } = {}) {
   }
 
   frame.addEventListener("pointermove", onPointerMove);
-  frame.addEventListener("pointerleave", hide);
+  const leave = () => hide();
+  frame.addEventListener("pointerleave", leave);
   frame.addEventListener("keydown", onKeyDown);
-  frame.addEventListener("blur", hide);
+  frame.addEventListener("blur", leave);
   return {
     refresh() {
       if (pointer && !busy?.()) onFrame();
@@ -490,9 +506,9 @@ export function bindCheckHover(frame, getScene, { busy } = {}) {
       if (pending) cancelAnimationFrame(pending);
       pending = 0;
       frame.removeEventListener("pointermove", onPointerMove);
-      frame.removeEventListener("pointerleave", hide);
+      frame.removeEventListener("pointerleave", leave);
       frame.removeEventListener("keydown", onKeyDown);
-      frame.removeEventListener("blur", hide);
+      frame.removeEventListener("blur", leave);
     },
   };
 }

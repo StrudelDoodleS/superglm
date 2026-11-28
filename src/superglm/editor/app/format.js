@@ -33,8 +33,12 @@ export function fmtAdded(value) {
 export function fmtCount(value) {
   if (!Number.isFinite(value)) return "";
   if (Math.abs(value) < 100) return fmt(value);
-  return value.toLocaleString("en-US", { maximumFractionDigits: 0 });
+  return COUNT_FORMATTER.format(value);
 }
+
+// `toLocaleString` with options builds a formatter on every call; a check plot names a count in
+// every point's readout, each time it is drawn.
+const COUNT_FORMATTER = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 
 /** @type {Map<number, Intl.NumberFormat>} */
 const PLAIN_FORMATTERS = new Map();

@@ -192,8 +192,14 @@ def test_selection_noop_empty_box_preserves_chart_without_posting(open_editor_pa
         assert selection_dom_is_unchanged(page)
         assert {mutation["type"] for mutation in mutations} >= {"added", "removed"}
         # Only the brush comes and goes; the lens that shows the points near
-        # the pointer toggles a class on circles that are already drawn.
-        assert {mutation["className"] for mutation in mutations} <= {"brush", "point", "point near"}
+        # the pointer toggles a class on circles that are already drawn, and the
+        # press makes the chart the one the wheel works on, which marks the chart.
+        assert {mutation["className"] for mutation in mutations} <= {
+            "brush",
+            "point",
+            "point near",
+            "is-wheel-active",
+        }
         assert {
             mutation["className"] for mutation in mutations if mutation["type"] != "attribute"
         } == {"brush"}
