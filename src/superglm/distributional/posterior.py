@@ -712,12 +712,24 @@ def _posterior_symmetric_matrix(matrix: NDArray) -> NDArray:
 
 
 def _posterior_covariance_factor(matrix: NDArray) -> NDArray:
-    """A PSD root checked in diagonal power-of-two coordinates.
+    """The draw factor ``D S``: ``S`` the principal square root of ``G = D^-1 V D^-1``.
 
-    Positive eigenvalues are kept; a negative mode is clipped only if the
-    factor reconstructs the covariance within ``gamma_(4n+8)`` times
-    ``max(||G||_F, || |F| |F.T| ||_F)`` (two length-n products plus root and
-    bound formation), an admission check rather than an eigensolver guarantee.
+    ``D`` is the exact power-of-two scaling the variances' exponents fix. A
+    positive-semidefinite matrix has exactly one positive-semidefinite square
+    root (Higham, *Functions of Matrices*, 2008, Theorem 1.29), so
+    ``S = Q diag(sqrt(lambda)) Q'`` follows ``G`` alone, not the eigenvectors'
+    signs or the basis an eigensolver picks inside a repeated eigenvalue, which
+    differ between LAPACK builds; one seed draws the same coefficients on every
+    platform, to rounding. An eigenvalue within ``2 n u ||G||_2`` of zero, about
+    the eigensolver's resolution (LAPACK Users' Guide, 3rd ed., section 4.7), is
+    a null direction, as ``inference._term_covariance._principal_root`` reads
+    it: the root is only Hoelder-1/2 there, so its rounding would otherwise put
+    about ``sqrt(u)`` of noise into every draw.
+
+    A negative mode is clipped only if the factor reconstructs the covariance
+    within ``gamma_(6n+8)`` times ``max(||G||_F, || |S| |S'| ||_F)`` (three
+    length-n products plus root and bound formation), an admission check rather
+    than an eigensolver guarantee.
     """
     resolved = _posterior_symmetric_matrix(matrix)
     diagonal = np.diag(resolved)
@@ -732,7 +744,8 @@ def _posterior_covariance_factor(matrix: NDArray) -> NDArray:
     try:
         scaled, scaling_error, powers = _binary_congruence(resolved[np.ix_(active, active)])
         values, vectors = np.linalg.eigh(scaled)
-        root = vectors * np.sqrt(np.maximum(values, 0.0))
+        resolution = 2 * len(active) * _UNIT_ROUNDOFF * np.max(np.abs(values))
+        root = (vectors * np.sqrt(np.where(values > resolution, values, 0.0))) @ vectors.T
         with np.errstate(over="ignore", under="ignore", invalid="ignore"):
             original_root = np.ldexp(root, powers[:, None])
             restored = np.ldexp(original_root, -powers[:, None])
@@ -750,7 +763,7 @@ def _posterior_covariance_factor(matrix: NDArray) -> NDArray:
             _norm_upper(scaled),
             _norm_upper(_positive_product(np.abs(root), np.abs(root.T))),
         )
-        target = _gamma(4 * len(active) + 8) * operation_scale
+        target = _gamma(6 * len(active) + 8) * operation_scale
         if not error <= target:
             raise ValueError(
                 "the posterior covariance is not positive semidefinite at arithmetic resolution; "
@@ -815,7 +828,7 @@ def posterior_draws(
     covariance: CovarianceKind = "fixed",
     seed: int = 42,
 ) -> PosteriorDraws:
-    """Draw coefficients from ``N(beta_hat, V)`` with a checked eigen square root.
+    """Draw coefficients from ``N(beta_hat, V)`` with a checked principal square root.
 
     ``beta_hat`` is what the model predicts with; after a hand edit that is the
     edit, with the fit's ``V``.
@@ -824,7 +837,9 @@ def posterior_draws(
     mode is clipped only when a bounded reconstruction shows the covariance
     agrees at arithmetic resolution, otherwise it is an error. One
     ``default_rng(seed)`` stream serves every draw, so results never depend
-    on a later pushforward's row chunking.
+    on a later pushforward's row chunking. The square root is unique, so the
+    same seed draws the same coefficients on every platform, to rounding,
+    whatever basis its eigensolver returns.
     """
     count = _posterior_draw_count(n_draws)
     matrix, resolved = _resolved_posterior_covariance(fitted, covariance)

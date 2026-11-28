@@ -8,12 +8,13 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import pytest
-from scipy import special, stats
+from scipy import linalg, special, stats
 
 from superglm import Categorical, Spline
 from superglm._frame import as_eager_frame
 from superglm.diagnostics.convergence import ConvergenceWarning
 from superglm.distributional import Predictor
+from superglm.distributional import posterior as posterior_module
 from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.model import DenseDistributionalModel
@@ -825,6 +826,90 @@ def test_a_negative_eigenvalue_is_an_error_and_a_null_direction_is_a_clip() -> N
         4 * epsilon * np.max(np.abs(round_off.coefficients))
     )
     assert float(round_off.coefficients[:, 0].std()) > 0.0
+
+
+_U = 2.0**-53
+
+
+def _tied_covariance(spectrum: tuple[float, ...]) -> np.ndarray:
+    """``R diag(spectrum) R'`` with a repeated eigenvalue at positions 1 and 2.
+
+    Every variance lies in ``[0.5, 2)``, so the factor's power-of-two scaling is the identity
+    and the tie reaches the eigensolver.
+    """
+    rotation, _ = np.linalg.qr(np.random.default_rng(91).standard_normal((len(spectrum),) * 2))
+    covariance = (rotation * np.asarray(spectrum)) @ rotation.T
+    covariance = 0.5 * (covariance + covariance.T)
+    assert np.all((np.diag(covariance) >= 0.5) & (np.diag(covariance) < 2.0))
+    return covariance
+
+
+def _another_eigensolver(monkeypatch, *, basis: bool = True, null: float | None = None) -> None:
+    """Make ``np.linalg.eigh`` answer as another LAPACK may: with ``basis``, every other
+    vector's sign flipped and the tied pair at positions 1 and 2 rotated inside its eigenspace;
+    given ``null``, the smallest eigenvalue rounded to ``null`` times ``u lambda_max``."""
+    real = np.linalg.eigh
+    turn = np.array([[np.cos(0.7), -np.sin(0.7)], [np.sin(0.7), np.cos(0.7)]])
+
+    def other(matrix, *args, **kwargs):
+        values, vectors = real(matrix, *args, **kwargs)
+        values, vectors = values.copy(), vectors.copy()
+        if basis:
+            vectors[:, ::2] = -vectors[:, ::2]
+            vectors[:, 1:3] = vectors[:, 1:3] @ turn
+        if null is not None:
+            values[0] = null * _U * values[-1]
+        return values, vectors
+
+    monkeypatch.setattr(np.linalg, "eigh", other)
+
+
+@pytest.mark.parametrize(
+    "spectrum", [(0.6, 1.0, 1.0, 1.4), (0.0, 1.0, 1.0, 1.4)], ids=["definite", "semidefinite"]
+)
+def test_one_seed_draws_the_same_coefficients_whatever_basis_the_eigensolver_picks(
+    monkeypatch, spectrum
+) -> None:
+    """Another valid eigenbasis (flipped signs, another basis of a repeated eigenvalue) draws
+    the same coefficients to rounding.
+
+    The parent's factor ``Q diag(sqrt(lambda))`` carried the basis into every draw, so macOS
+    (Accelerate) and Linux (OpenBLAS) drew different coefficients from one seed, and the
+    editor's simulated check levels moved by Monte Carlo noise between them.
+    """
+    covariance = _tied_covariance(spectrum)
+    drawn = posterior_draws(_covariance_shim(covariance), 64, seed=13).coefficients
+    _another_eigensolver(monkeypatch)
+    other = posterior_draws(_covariance_shim(covariance), 64, seed=13).coefficients
+    bound = 64 * len(spectrum) * _U * np.max(np.abs(drawn))
+    np.testing.assert_allclose(other, drawn, rtol=0, atol=bound)
+
+
+def test_a_null_directions_rounded_eigenvalue_does_not_reach_the_draws(monkeypatch) -> None:
+    """A null direction's eigenvalue rounded to either side of zero, within LAPACK's resolution,
+    draws the same coefficients: kept, its square root would put about ``sqrt(u)`` of noise into
+    every draw. The parent kept a positive rounding and clipped a negative one."""
+    covariance = _tied_covariance((0.0, 1.0, 1.0, 1.4))
+    drawn = []
+    for null in (-2.0, 2.0):
+        with monkeypatch.context() as patch:
+            _another_eigensolver(patch, basis=False, null=null)
+            drawn.append(posterior_draws(_covariance_shim(covariance), 64, seed=13).coefficients)
+    np.testing.assert_allclose(drawn[1], drawn[0], rtol=0, atol=256 * _U * np.max(np.abs(drawn[0])))
+
+
+def test_the_draw_factor_is_the_covariances_unique_symmetric_square_root() -> None:
+    """With no power-of-two scaling the factor is the principal square root of ``V``: symmetric,
+    squaring to ``V``, and equal to an independent (Schur-method) square root. The parent's
+    ``Q diag(sqrt(lambda))`` is neither symmetric nor that root."""
+    covariance = _tied_covariance((0.6, 1.0, 1.0, 1.4))
+    factor = posterior_module._posterior_covariance_factor(covariance)
+    n, scale = len(covariance), np.max(np.abs(factor))
+    np.testing.assert_allclose(factor, factor.T, rtol=0, atol=16 * n * _U * scale)
+    gram = np.abs(factor) @ np.abs(factor).T
+    assert np.all(np.abs(factor @ factor.T - covariance) <= 32 * n * _U * gram)
+    root = linalg.sqrtm(covariance)
+    np.testing.assert_allclose(factor, np.real(root), rtol=0, atol=64 * n * _U * scale)
 
 
 def _corrected_shim(*, lambdas, gradient, hessian, penalties=()) -> SimpleNamespace:
