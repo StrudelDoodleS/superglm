@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 from scipy import linalg, special, stats
 
-from superglm import Categorical, Spline
+from superglm import Categorical, Numeric, Spline
 from superglm._frame import as_eager_frame
 from superglm.diagnostics.convergence import ConvergenceWarning
 from superglm.distributional import Predictor
@@ -844,21 +844,17 @@ def _tied_covariance(spectrum: tuple[float, ...]) -> np.ndarray:
     return covariance
 
 
-def _another_eigensolver(monkeypatch, *, basis: bool = True, null: float | None = None) -> None:
-    """Make ``np.linalg.eigh`` answer as another LAPACK may: with ``basis``, every other
-    vector's sign flipped and the tied pair at positions 1 and 2 rotated inside its eigenspace;
-    given ``null``, the smallest eigenvalue rounded to ``null`` times ``u lambda_max``."""
+def _another_eigensolver(monkeypatch) -> None:
+    """Make ``np.linalg.eigh`` answer as another LAPACK may: every other vector's sign flipped
+    and the tied pair at positions 1 and 2 rotated inside its eigenspace."""
     real = np.linalg.eigh
     turn = np.array([[np.cos(0.7), -np.sin(0.7)], [np.sin(0.7), np.cos(0.7)]])
 
     def other(matrix, *args, **kwargs):
         values, vectors = real(matrix, *args, **kwargs)
         values, vectors = values.copy(), vectors.copy()
-        if basis:
-            vectors[:, ::2] = -vectors[:, ::2]
-            vectors[:, 1:3] = vectors[:, 1:3] @ turn
-        if null is not None:
-            values[0] = null * _U * values[-1]
+        vectors[:, ::2] = -vectors[:, ::2]
+        vectors[:, 1:3] = vectors[:, 1:3] @ turn
         return values, vectors
 
     monkeypatch.setattr(np.linalg, "eigh", other)
@@ -885,17 +881,34 @@ def test_one_seed_draws_the_same_coefficients_whatever_basis_the_eigensolver_pic
     np.testing.assert_allclose(other, drawn, rtol=0, atol=bound)
 
 
-def test_a_null_directions_rounded_eigenvalue_does_not_reach_the_draws(monkeypatch) -> None:
-    """A null direction's eigenvalue rounded to either side of zero, within LAPACK's resolution,
-    draws the same coefficients: kept, its square root would put about ``sqrt(u)`` of noise into
-    every draw. The parent kept a positive rounding and clipped a negative one."""
-    covariance = _tied_covariance((0.0, 1.0, 1.0, 1.4))
-    drawn = []
-    for null in (-2.0, 2.0):
-        with monkeypatch.context() as patch:
-            _another_eigensolver(patch, basis=False, null=null)
-            drawn.append(posterior_draws(_covariance_shim(covariance), 64, seed=13).coefficients)
-    np.testing.assert_allclose(drawn[1], drawn[0], rtol=0, atol=256 * _U * np.max(np.abs(drawn[0])))
+def test_a_small_positive_mode_keeps_the_prediction_variance_it_carries() -> None:
+    """On a nearly constant input the location's two coefficients are tied, and the covariance's
+    smallest scaled mode, a few ``u ||G||``, is all the variance of the location at the data.
+    A Gaussian location and scale are orthogonal at the fit, so that variance is
+    ``sigma_hat^2 / n`` at the input's mean, with ``sigma_hat^2`` the mean squared residual.
+    Mutation check: zeroing modes within ``2 n u ||G||`` of zero leaves a spread of 4e-9."""
+    X = pd.DataFrame({"x": 1.0 + 9e-8 * np.linspace(-1.0, 1.0, 100)})
+    y = np.random.default_rng(123).normal(size=100)
+    fitted = (
+        model_from_templates(
+            family=GaussianLS(),
+            predictors=[Predictor("location", {"x": Numeric()}), Predictor("scale", {})],
+        )
+        .fit(X, y)
+        ._require_fitted()
+    )
+    location = np.asarray(fitted.predict_parameters(X))[:, 0]
+    expected = np.sqrt(np.mean((y - location) ** 2) / len(y))
+    centre = pd.DataFrame({"x": [1.0]})
+    row = build_joint_prediction_design(
+        as_eager_frame(centre), fitted.compiled_predictors, fitted.layout
+    ).local["location"][0]
+    state = next(state for state in fitted.layout.predictors if state.name == "location")
+    drawn = posterior_draws(fitted, 20_000, seed=42).coefficients[:, state.coefficient_slice]
+    # The mode is about 3.6 u ||G||, and the float64 covariance's entries and eigensolver each
+    # err by about u ||G||, so the covariance holds it only to tens of percent (0.070 here, the
+    # parent's factor's value too). The check is that the variance is kept, not lost.
+    assert 0.5 * expected < np.std(drawn @ row) < 2.0 * expected
 
 
 def test_the_draw_factor_is_the_covariances_unique_symmetric_square_root() -> None:

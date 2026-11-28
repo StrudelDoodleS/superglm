@@ -717,11 +717,11 @@ def _posterior_covariance_factor(matrix: NDArray) -> NDArray:
     ``D`` is the exact power-of-two scaling of the variances. The PSD square root
     is unique (Higham, *Functions of Matrices*, 2008, Thm 1.29), so it ignores the
     eigenvectors' signs and bases that differ between LAPACK builds: one seed draws
-    alike on every platform. An eigenvalue within ``2 n u ||G||_2`` of zero (LAPACK
-    Users' Guide, section 4.7) is a null direction, as ``_principal_root`` reads it,
-    since the root's rounding there would add about ``sqrt(u)`` of noise per draw.
-    A negative mode is clipped only if the factor reconstructs ``G`` within
-    ``gamma_(6n+8)`` times ``max(||G||_F, || |S| |S'| ||_F)``.
+    alike on every platform. Every positive eigenvalue is kept, however small: a
+    mode near ``u ||G||`` can carry the whole variance of a prediction, as on a
+    nearly constant input. A negative mode is clipped only if the factor
+    reconstructs ``G`` within ``gamma_(6n+8)`` times
+    ``max(||G||_F, || |S| |S'| ||_F)``.
     """
     resolved = _posterior_symmetric_matrix(matrix)
     diagonal = np.diag(resolved)
@@ -736,8 +736,7 @@ def _posterior_covariance_factor(matrix: NDArray) -> NDArray:
     try:
         scaled, scaling_error, powers = _binary_congruence(resolved[np.ix_(active, active)])
         values, vectors = np.linalg.eigh(scaled)
-        resolution = 2 * len(active) * _UNIT_ROUNDOFF * np.max(np.abs(values))
-        root = (vectors * np.sqrt(np.where(values > resolution, values, 0.0))) @ vectors.T
+        root = (vectors * np.sqrt(np.maximum(values, 0.0))) @ vectors.T
         with np.errstate(over="ignore", under="ignore", invalid="ignore"):
             original_root = np.ldexp(root, powers[:, None])
             restored = np.ldexp(original_root, -powers[:, None])
