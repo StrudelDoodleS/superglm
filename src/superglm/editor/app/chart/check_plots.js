@@ -48,9 +48,11 @@ import { niceTicks } from "./fan.js";
  */
 /**
  * A scene, and whether it draws the fitted model beside the edit: `fitted` says the fit is
- * compared and has something to draw on the whole plot, whatever part of it a zoom shows.
+ * compared and has something to draw on the whole plot, whatever part of it a zoom shows. Its
+ * marks are sorted by x, for the hover's search; `steps`, where the reading order differs, lists
+ * their indices in it, as the keys step through them.
  * @typedef {{width:number, height:number, layers:Layer[], labels:Label[], marks:Mark[],
- *   zoom?:ZoomFrame|null, fitted?:boolean}} Scene
+ *   zoom?:ZoomFrame|null, fitted?:boolean, steps?:number[]}} Scene
  */
 /** @typedef {{width:number, height:number, thumb?:boolean}} Box */
 /**
@@ -635,9 +637,13 @@ function aeScene(editedBody, originalBody, box, { highlight, domain: asked }) {
     plots.push({ rect, x: null, y: [rect.bottom, rect.top] });
   }
   labels.push({ x: 8, y: MARGIN.top - 14, text: "Actual over expected", anchor: "start", axis: true });
+  // The marks were made panel by panel, each panel's groups left to right: the order read.
+  const read = new Map(marks.map((mark, i) => [mark, i]));
   marks.sort((a, b) => a.x - b.x);
+  const steps = new Array(marks.length);
+  for (const [i, mark] of marks.entries()) steps[/** @type {number} */ (read.get(mark))] = i;
   const fitted = pairs.some(({ original: t }) => t !== null && t.ratio.some((_, i) => aeDrawn(t, i)));
-  return finish({ ...box, height }, parts, labels, marks, { base, domain, plots }, fitted);
+  return { ...finish({ ...box, height }, parts, labels, marks, { base, domain, plots }, fitted), steps };
 }
 
 /**

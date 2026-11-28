@@ -9,6 +9,7 @@ import { fmt, fmtCount } from "../../src/superglm/editor/app/format.js";
 import { createInitialEditorState } from "../../src/superglm/editor/app/state/store.js";
 import { checkScene, nearestMark } from "../../src/superglm/editor/app/chart/check_plots.js";
 import {
+  CHECK_READOUT,
   bindCheckHover,
   checkFace,
   compareSwitch,
@@ -18,6 +19,7 @@ import {
   splitLine
 } from "../../src/superglm/editor/app/views/assess_check.js";
 import { CHECK_FIXTURE as FIXTURE, withCurrentChecks } from "./check_evidence.js";
+import { ASCENT_PX, CHAR_PX, LINE_PX, fakeFrame, textLines } from "./check_frame.js";
 import { neutralCopy } from "./neutral_copy.js";
 
 function snapshot() {
@@ -131,117 +133,6 @@ test("after Undo, Compare is off while the checks still hold the edited model's 
   assert.equal(compareSwitch(kept, CHECK_REPORTS, true, null).live, false);
 });
 
-const CHAR_PX = 7;
-const LINE_PX = 16;
-const ASCENT_PX = 12;
-/** A text node's lines: its tspans, or its own text. */
-const textLines = (node) => (node.children.length ? node.children.map((child) => child.textContent) : [node.text]);
-
-// The large view and its hover, on a minimal element tree that records every attribute, text and
-// markup write, so a test can say which nodes a gesture touched.
-class FakeNode {
-  constructor(tag, log, attrs = {}) {
-    this.tag = tag; this.log = log; this.attrs = new Map(Object.entries(attrs));
-    this.children = []; this.parent = null; this.text = ""; this.html = ""; this.listeners = new Map();
-    this.dataset = {}; this.rect = { left: 0, top: 0, width: 0, height: 0 };
-    this.scrollTop = 0; this.scrollLeft = 0; this.clientWidth = 0; this.clientHeight = 0;
-    this.ownerDocument = { createElementNS: (_ns, name) => new FakeNode(name, log) };
-  }
-  write(what) { this.log.push({ node: this, what }); }
-  setAttribute(name, value) { this.write(name); this.attrs.set(name, String(value)); }
-  getAttribute(name) { return this.attrs.has(name) ? this.attrs.get(name) : null; }
-  hasAttribute(name) { return this.attrs.has(name); }
-  removeAttribute(name) { this.write(name); this.attrs.delete(name); }
-  toggleAttribute(name, force) {
-    const on = force ?? !this.attrs.has(name);
-    if (on) this.setAttribute(name, ""); else this.removeAttribute(name);
-    return on;
-  }
-  get hidden() { return this.attrs.has("hidden"); }
-  set hidden(value) { this.toggleAttribute("hidden", Boolean(value)); }
-  get textContent() { return this.text + this.children.map((child) => child.textContent).join(""); }
-  set textContent(value) { this.write("text"); this.text = String(value); this.children = []; }
-  get innerHTML() { return this.html; }
-  set innerHTML(markup) {
-    this.write("html"); this.html = markup; this.text = ""; this.children = [];
-    const size = /<svg class="check-plot" viewBox="[^"]*" width="([\d.]+)" height="([\d.]+)"/.exec(markup);
-    if (!size) return;
-    const svg = new FakeNode("svg", this.log, { class: "check-plot" });
-    svg.rect = { left: this.rect.left - this.scrollLeft, top: this.rect.top - this.scrollTop, width: Number(size[1]), height: Number(size[2]) };
-    const readout = new FakeNode("g", this.log, { class: "check-readout", hidden: "" });
-    svg.adopt(readout); this.adopt(svg);
-  }
-  get localName() { return this.tag; }
-  adopt(child) { child.parent = this; this.children.push(child); }
-  append(...nodes) { this.write("children"); for (const node of nodes) this.adopt(node); }
-  insertBefore(node, ref) {
-    this.write("children");
-    node.parent = this;
-    const at = ref ? this.children.indexOf(ref) : -1;
-    this.children.splice(at < 0 ? this.children.length : at, 0, node);
-    return node;
-  }
-  remove() {
-    this.parent?.write("children");
-    if (this.parent) this.parent.children = this.parent.children.filter((child) => child !== this);
-    this.parent = null;
-  }
-  matches(selector) {
-    if (selector.startsWith(".")) return (this.attrs.get("class") ?? "").split(/\s+/).includes(selector.slice(1));
-    return this.tag === selector;
-  }
-  closest(selector) {
-    for (let node = this; node; node = node.parent) if (node.matches(selector)) return node;
-    return null;
-  }
-  querySelector(selector) {
-    for (const child of this.children) {
-      if (child.matches(selector)) return child;
-      const found = child.querySelector(selector);
-      if (found) return found;
-    }
-    return null;
-  }
-  getBoundingClientRect() { return this.rect; }
-  // Text is 7 px a character, its lines 16 px apart with the first baseline 12 px down.
-  getComputedTextLength() { return this.textContent.length * CHAR_PX; }
-  getBBox() {
-    const lines = textLines(this);
-    return { x: 0, y: -ASCENT_PX, width: Math.max(...lines.map((line) => line.length)) * CHAR_PX, height: lines.length * LINE_PX };
-  }
-  addEventListener(type, listener) { this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]); }
-  removeEventListener(type, listener) { this.listeners.set(type, (this.listeners.get(type) ?? []).filter((l) => l !== listener)); }
-  dispatch(type, event = {}) {
-    const full = { preventDefault() { this.defaultPrevented = true; }, ...event };
-    for (const listener of this.listeners.get(type) ?? []) listener(full);
-    return full;
-  }
-}
-
-function fakeFrame({ width = 820, height = 520 } = {}) {
-  const log = [];
-  const node = (tag) => new FakeNode(tag, log);
-  const nodes = { title: node("h2"), help: node("span"), split: node("span"), legend: node("div"), frame: node("div") };
-  nodes.frame.clientWidth = width; nodes.frame.clientHeight = height;
-  nodes.frame.rect = { left: 0, top: 0, width, height };
-  const frames = [];
-  globalThis.requestAnimationFrame = (callback) => frames.push(callback);
-  globalThis.cancelAnimationFrame = () => {};
-  const readout = () => nodes.frame.querySelector(".check-readout");
-  return {
-    nodes,
-    recordWrites() { const from = log.length; return () => log.slice(from); },
-    pointerMove(x, y) { nodes.frame.dispatch("pointermove", { clientX: x, clientY: y }); },
-    pointerLeave() { nodes.frame.dispatch("pointerleave"); },
-    key(key) { return nodes.frame.dispatch("keydown", { key }); },
-    flushFrame() { for (const callback of frames.splice(0)) callback(0); },
-    pendingFrames: () => frames.length,
-    readout,
-    readoutShown: () => !readout().hidden,
-    readoutText: () => readout().querySelector("text")?.textContent ?? "",
-  };
-}
-
 const VIEW = { compare: false, highlight: true, width: 820, height: 520 };
 
 test("hover moves only the readout", () => {
@@ -296,7 +187,6 @@ test("the arrow keys step through the points while the plot has focus", () => {
   const dom = fakeFrame();
   const scene = renderCheckView(dom.nodes, "check_pit", FIXTURE.calm.check_pit, VIEW);
   assert.equal(dom.nodes.frame.getAttribute("tabindex"), "0");
-  assert.equal(dom.nodes.frame.getAttribute("role"), "img");
   assert.equal(dom.nodes.frame.getAttribute("aria-label"), "PIT histogram");
   bindCheckHover(dom.nodes.frame, () => scene);
   assert.ok(dom.key("ArrowRight").defaultPrevented);
@@ -310,6 +200,124 @@ test("the arrow keys step through the points while the plot has focus", () => {
   dom.key("Escape");
   assert.ok(!dom.readoutShown());
   assert.equal(dom.key("a").defaultPrevented, undefined);
+});
+
+test("the readout table: hidden, pointed, stepped by the keys, or suspended through a gesture", () => {
+  assert.deepEqual([...CHECK_READOUT.states], ["hidden", "pointed", "keyboard", "suspended"]);
+  assert.equal(CHECK_READOUT.initial, "hidden");
+  const moves = Object.fromEntries(CHECK_READOUT.states.map((state) => [state,
+    Object.fromEntries(CHECK_READOUT.events.flatMap((event) => {
+      const next = CHECK_READOUT.next(state, event);
+      return next === null ? [] : [[event, next]];
+    }))]));
+  assert.deepEqual(moves, {
+    hidden: { point: "pointed", key: "keyboard", suspend: "suspended" },
+    pointed: { point: "pointed", key: "keyboard", leave: "hidden", suspend: "suspended", redraw: "pointed", scroll: "pointed", close: "hidden" },
+    keyboard: { point: "pointed", key: "keyboard", leave: "hidden", suspend: "suspended", redraw: "hidden", scroll: "keyboard", close: "hidden" },
+    suspended: { point: "suspended", leave: "suspended", redraw: "suspended", rest: "hidden", resume: "pointed", close: "hidden" },
+  });
+});
+
+test("the readout waits through a gesture: a read queued before it, one shown, and the keys", () => {
+  const dom = fakeFrame();
+  const scene = renderCheckView(dom.nodes, "check_qq", FIXTURE.calm.check_qq, VIEW);
+  const hover = bindCheckHover(dom.nodes.frame, () => scene);
+  dom.pointerMove(300, 200);
+  hover.suspend();
+  dom.flushFrame();
+  assert.ok(!dom.readoutShown(), "a read queued before the gesture began is dropped");
+  dom.pointerMove(320, 210); dom.flushFrame();
+  assert.ok(!dom.readoutShown());
+  assert.ok(dom.key("ArrowRight").defaultPrevented);
+  assert.ok(!dom.readoutShown(), "the keys read out nothing while a gesture runs");
+  // At rest it reads out where the pointer is.
+  hover.rest(); dom.flushFrame();
+  assert.equal(dom.readoutText(), scene.marks[nearestMark(scene.marks, 320, 210)].text);
+  // One shown is hidden at once when a gesture starts, and stays hidden at rest once the pointer left.
+  hover.suspend();
+  assert.ok(!dom.readoutShown());
+  dom.pointerLeave();
+  hover.rest(); dom.flushFrame();
+  assert.ok(!dom.readoutShown());
+  // Closed, the check's readout forgets the pointer: nothing reads out until it moves again.
+  dom.pointerMove(300, 200); dom.flushFrame();
+  hover.close();
+  hover.redraw(); dom.flushFrame();
+  assert.ok(!dom.readoutShown());
+});
+
+test("a scroll of the frame reads out again where the pointer is, in the next frame", () => {
+  const dom = fakeFrame({ height: 200 });
+  const scene = renderCheckView(dom.nodes, "check_ae", FIXTURE.wrong.check_ae, { ...VIEW, height: 200 });
+  bindCheckHover(dom.nodes.frame, () => scene);
+  // A point in view whose nearest point, once the frame scrolls 80 px under the pointer, is another.
+  const index = scene.marks.findIndex((m) => m.y > 20 && m.y < 180 && nearestMark(scene.marks, m.x, m.y + 80) !== nearestMark(scene.marks, m.x, m.y));
+  assert.ok(index >= 0, "no point changes under the pointer with an 80 px scroll");
+  const { x, y } = scene.marks[index];
+  dom.pointerMove(x, y); dom.flushFrame();
+  assert.equal(dom.readoutText(), scene.marks[nearestMark(scene.marks, x, y)].text);
+  dom.scrollTo(80);
+  assert.equal(dom.pendingFrames(), 1);
+  dom.flushFrame();
+  assert.equal(dom.readoutText(), scene.marks[nearestMark(scene.marks, x, y + 80)].text);
+});
+
+test("a scroll keeps a stepped point's readout in the view, and lets it go once its point leaves", () => {
+  const dom = fakeFrame({ height: 200 });
+  const scene = renderCheckView(dom.nodes, "check_ae", FIXTURE.wrong.check_ae, { ...VIEW, height: 200 });
+  bindCheckHover(dom.nodes.frame, () => scene);
+  dom.key("Home");
+  const mark = scene.marks[scene.steps[0]];
+  assert.ok(mark.y < 120, "the first point read sits near the top");
+  dom.scrollTo(Math.max(0, mark.y - 150));
+  dom.flushFrame();
+  assert.equal(dom.readoutText(), mark.text);
+  dom.scrollTo(mark.y + 20);
+  dom.flushFrame();
+  assert.ok(!dom.readoutShown(), "its point left the view");
+});
+
+test("the arrow keys step through one A/E panel's groups, left to right, before the next panel's", () => {
+  const dom = fakeFrame();
+  const payload = FIXTURE.wrong.check_ae;
+  const scene = renderCheckView(dom.nodes, "check_ae", payload, VIEW);
+  bindCheckHover(dom.nodes.frame, () => scene);
+  const read = [];
+  for (const _ of scene.marks) {
+    dom.key("ArrowRight");
+    read.push(scene.marks.find((m) => m.text === dom.readoutText()));
+  }
+  assert.equal(new Set(read).size, scene.marks.length, "every point is read once");
+  const tables = payload.models.edited.tables;
+  const panel = (mark) => tables.findIndex((t) => mark.text.startsWith(`${t.covariate} `));
+  for (const [i, mark] of read.entries()) {
+    if (i === 0) continue;
+    const [was, now] = [panel(read[i - 1]), panel(mark)];
+    assert.ok(now > was || (now === was && mark.x > read[i - 1].x), `${read[i - 1].text} then ${mark.text}`);
+  }
+});
+
+test("a step by the keys is said in full to a screen reader, which the plot's role lets reach its readout", () => {
+  const name = "q".repeat(60);
+  const dom = fakeFrame();
+  const scene = renderCheckView(dom.nodes, "check_ae", namedGroup(name), VIEW);
+  // An img's children are presentational; the plot takes its own keys.
+  assert.equal(dom.nodes.frame.getAttribute("role"), "application");
+  assert.equal(dom.nodes.frame.getAttribute("aria-roledescription"), "chart");
+  bindCheckHover(dom.nodes.frame, () => scene, { live: dom.nodes.live });
+  const long = scene.steps.findIndex((i) => scene.marks[i].aria?.includes(name));
+  assert.ok(long > 0, "no readout shortens the long name");
+  dom.key("Home");
+  assert.equal(dom.nodes.live.textContent, scene.marks[scene.steps[0]].text);
+  for (let i = 0; i < long; i++) dom.key("ArrowRight");
+  assert.equal(dom.nodes.live.textContent, scene.marks[scene.steps[long]].aria);
+  // A hover is not said; leaving the keys' point clears what was.
+  dom.pointerMove(10, 10); dom.flushFrame();
+  assert.equal(dom.nodes.live.textContent, "");
+  // A frame with no plot has no role.
+  renderCheckView(dom.nodes, "check_ae", null, VIEW);
+  assert.equal(dom.nodes.frame.getAttribute("role"), null);
+  assert.equal(dom.nodes.frame.getAttribute("aria-roledescription"), null);
 });
 
 test("the view is headed by the check's label, with its split and rows beside it", () => {

@@ -455,7 +455,9 @@ def test_opening_a_check_draws_its_title_split_and_points(checks_page):
         assert page.locator("#checkSplit").inner_text() == "Validation, 200 rows"
         assert page.locator('[data-assess-entry="check_qq"][aria-current="true"]').count() == 1
         frame = page.locator("#checkFrame")
-        assert frame.get_attribute("role") == "img"
+        # A plot that takes its own keys: an img's children, its readout, would be presentational.
+        assert frame.get_attribute("role") == "application"
+        assert frame.get_attribute("aria-roledescription") == "chart"
         assert frame.get_attribute("tabindex") == "0"
         assert frame.get_attribute("aria-label") == "Q-Q plot"
         points = page.locator("#checkFrame path:is(.check-edited, .check-outside)").evaluate_all(

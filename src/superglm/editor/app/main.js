@@ -77,17 +77,14 @@ import { defaultRiskLine, renderRiskPanel, riskPlotsHost } from "./views/risk_pa
 import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
 import { bindAssessList, renderAssessList } from "./views/assess_list.js";
 import { bindChartFocus } from "./views/chart_focus.js";
-import { bindCheckZoom } from "./views/check_gestures.js";
+import { bindCheckDrawing } from "./views/check_drawing.js";
 import { checkSplitKey, withCheckZoom } from "./chart/check_zoom.js";
 import { bindOverview, drawOverview, overviewGroups } from "./views/assess_overview.js";
 import {
-  bindCheckHover,
   checkPayload,
   compareSwitch,
   differsFromFit,
   flaggedChecks,
-  redrawCheckPlot,
-  renderCheckView,
   renderCompareSwitch,
   renderHighlightSwitch
 } from "./views/assess_check.js";
@@ -218,7 +215,8 @@ const checkNodes = Object.freeze({
   help: document.getElementById("checkHelp"),
   split: document.getElementById("checkSplit"),
   legend: document.getElementById("checkLegend"),
-  frame: checkFrame
+  frame: checkFrame,
+  live: document.getElementById("checkReadoutLive")
 });
 const reportPanel = document.getElementById("reportPanel");
 const reportTitle = document.getElementById("reportTitle");
@@ -1299,23 +1297,20 @@ function renderOverview() {
   drawOverview(assessCards, overviewGroups(evidence, { offered, compare: compare.checked, highlight }));
 }
 
-// The check open large, as drawn: its scene, which the hover reads, and the frame size it was
-// drawn at, so a resize redraws it and nothing else does twice.
-let checkView = null;
-let checkDrawnAt = "";
-// What the open check was drawn from, so a zoom draws its plot alone again.
-let checkDrawn = null;
-let checkHover = null;
-
 function checkFrameSize() {
   return { width: checkFrame.clientWidth, height: checkFrame.clientHeight };
 }
 
-// Draw the open check from the evidence the page holds; it asks Python for nothing.
+// Draw the open check from the evidence the page holds; it asks Python for nothing. The check
+// drawing (views/check_drawing.js, bound below) holds what is drawn, and closes when no check is
+// open.
 function renderCheckPanel() {
   const state = store.getState();
   const activeView = state.view.activeView;
-  if (!isCheckReport(activeView) || checkPanel.hidden) return;
+  if (!isCheckReport(activeView) || checkPanel.hidden) {
+    checkDrawing.close();
+    return;
+  }
   // The switch reads the check on screen: only it is asked again after an edit or an Undo here.
   const shown = selectOfferedChecks(state).includes(activeView) ? [activeView] : [];
   const evidence = state.request.evidence[activeView];
@@ -1329,13 +1324,9 @@ function renderCheckPanel() {
   checkFrame.dataset.freshness = evidence.status;
   const payload = checkPayload(evidence);
   const { width, height } = checkFrameSize();
-  checkDrawnAt = `${width}x${height}`;
   const drawn = payload?.report === activeView ? payload : null;
-  const options = { compare: compare.checked, highlight, width, height };
   const domain = state.view.checkZoom[activeView] ?? null;
-  checkView = renderCheckView(checkNodes, activeView, drawn, { ...options, domain });
-  checkDrawn = checkView && drawn ? { report: activeView, payload: drawn, options, domain } : null;
-  checkHover?.refresh();
+  checkDrawing.draw(activeView, drawn, { compare: compare.checked, highlight, width, height, domain });
   renderEvidenceFreshness(evidence, {
     statusNode: checkFreshness,
     retryButton: checkRetry,
@@ -2745,19 +2736,14 @@ function setCheckZoom(domain) {
   const next = withCheckZoom(view.checkZoom, view.activeView, domain);
   if (next !== view.checkZoom) actions.patchView({ checkZoom: next });
 }
-const checkZoom = bindCheckZoom(checkFrame, {
-  getScene: () => checkView,
-  isActive: () => chartFocus.isActive(checkFrame),
-  onZoom: setCheckZoom,
-  onRest: () => checkHover?.refresh(),
-});
+// The open check as drawn, with its hover readout, zoom and pan.
+const checkDrawing = bindCheckDrawing(checkNodes, { focus: chartFocus, onZoom: setCheckZoom });
 // Home shows the check whole, and drops a gesture still waiting for its frame.
-checkHome.addEventListener("click", () => checkZoom.reset());
-checkHover = bindCheckHover(checkFrame, () => checkView, { busy: checkZoom.busy });
+checkHome.addEventListener("click", () => checkDrawing.reset());
 // A new size redraws the open check at it, from the evidence the page holds.
 new ResizeObserver(() => {
   const { width, height } = checkFrameSize();
-  if (`${width}x${height}` !== checkDrawnAt) renderCheckPanel();
+  if (`${width}x${height}` !== checkDrawing.size()) renderCheckPanel();
 }).observe(checkFrame);
 renderAssessList(assessRows, store.getState().view.activeView, assessListChecks(store.getState()));
 renderOverview();
@@ -3093,19 +3079,12 @@ store.subscribe(
   renderCheckPanel,
   (next, previous) => next.length === previous.length && next.every((item, index) => item === previous[index])
 );
-// A zoom draws the open check's plot alone again, from what it was drawn from.
+// A zoom draws the open check's plot alone again, from what it was drawn from; with no plot of
+// it drawn, the check is drawn afresh.
 store.subscribe(
   (state) => (isCheckReport(state.view.activeView) ? state.view.checkZoom[state.view.activeView] ?? null : null),
   (domain) => {
-    const report = store.getState().view.activeView;
-    if (checkDrawn?.report === report && checkDrawn.domain === domain) return;
-    if (!checkDrawn || checkDrawn.report !== report) {
-      renderCheckPanel();
-      return;
-    }
-    checkDrawn = { ...checkDrawn, domain };
-    checkView = redrawCheckPlot(checkFrame, report, checkDrawn.payload, { ...checkDrawn.options, domain });
-    checkHover?.refresh();
+    if (!checkDrawing.zoom(store.getState().view.activeView, domain)) renderCheckPanel();
   }
 );
 // The checks' zoom is cleared when the rows they read change.
@@ -3115,20 +3094,17 @@ store.subscribe(
   (split) => {
     if (!split) return;
     if (checkZoomSplit && split !== checkZoomSplit) {
-      checkZoom.cancel();
+      checkDrawing.cancel();
       actions.patchView({ checkZoom: {} });
     }
     checkZoomSplit = split;
   }
 );
-// A chart hidden by a view or tab change lets the wheel go, once the page has drawn the change,
-// and a check gesture still waiting for its frame is dropped with the check it was made on.
+// A chart hidden by a view or tab change lets the wheel go, once the page has drawn the change.
+// The open check's gestures end with the check (views/check_drawing.js).
 store.subscribe(
   (state) => `${state.view.activeView} ${state.view.termView}`,
-  () => {
-    checkZoom.cancel();
-    queueMicrotask(chartFocus.sync);
-  }
+  () => queueMicrotask(chartFocus.sync)
 );
 // The list hides the checks the model does not offer and flags those that left their band.
 store.subscribe(

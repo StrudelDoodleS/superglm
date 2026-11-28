@@ -380,6 +380,17 @@
   overflow-y: auto;
 }
 
+/* The point the keys stepped to, said to a screen reader alone (views/assess_check.js). */
+.check-readout-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .check-frame > .check-plot {
   display: block;
   user-select: none;
